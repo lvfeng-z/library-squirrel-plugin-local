@@ -1,0 +1,50 @@
+package main
+
+import (
+	"encoding/json"
+
+	pluginsdk "github.com/lvfeng-z/library-squirrel-plugin-sdk"
+)
+
+// Activate 插件激活回调，注册扩展点和 URL 监听器
+func Activate(ctx pluginsdk.PluginContext, handler *LocalImportTaskHandler) {
+	// 注册任务处理器
+	if err := ctx.RegisterTaskHandler("main", "本地导入", "从本地路径导入文件", handler); err != nil {
+		ctx.Errorf("注册任务处理器失败: %v", err)
+		return
+	}
+
+	// 注册 URL 监听器
+	// local:// 自定义协议 + Windows 本地路径（C:\...、D:\...、\\server\share\...）
+	listeners := []string{
+		`^local://.*`,
+		`^[A-Za-z]:\\.*`,
+		`^\\\\[^\]+\\.*`,
+	}
+	if err := ctx.RegisterUrlListener("main", listeners); err != nil {
+		ctx.Errorf("注册URL监听器失败: %v", err)
+		return
+	}
+
+	// 订阅前端分类响应
+	handler.ctx = ctx
+	handler.classifier = NewPathClassifier(ctx)
+
+	ch, err := ctx.SubscribeFrontend("plugin:local-import:classify:response")
+	if err != nil {
+		ctx.Errorf("订阅前端事件失败: %v", err)
+		return
+	}
+
+	go func() {
+		for data := range ch {
+			var resp ClassifyResponse
+			if err := json.Unmarshal(data, &resp); err != nil {
+				continue
+			}
+			handler.classifier.HandleResponse(&resp)
+		}
+	}()
+
+	ctx.Infof("本地文件导入插件已激活")
+}

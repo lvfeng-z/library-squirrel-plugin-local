@@ -1,0 +1,258 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+
+	pluginsdk "github.com/lvfeng-z/library-squirrel-plugin-sdk"
+)
+
+const siteName = "local"
+
+// FilePluginData 文件级 PluginData
+type FilePluginData struct {
+	FullPath string `json:"fullPath"`
+	RelPath  string `json:"relPath"`
+	Hash     string `json:"hash"`
+	Size     int64  `json:"size"`
+}
+
+// DirPluginData 目录级 PluginData（用于 parent task）
+type DirPluginData struct {
+	DirRelPath string             `json:"dirRelPath"`
+	Levels     map[int]string     `json:"levels"` // level → type
+	Metadata   map[string]string  `json:"metadata"` // type → value
+}
+
+// LocalImportTaskHandler 本地文件导入任务处理器
+type LocalImportTaskHandler struct {
+	ctx        pluginsdk.PluginContext
+	classifier *PathClassifier
+	readers    sync.Map // taskID → *os.File
+}
+
+// Create 扫描本地路径，流式产出任务
+func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult, error) {
+	// 解析路径：url 格式为 local://path
+	path := url
+	if len(path) >= 8 && path[:8] == "local://" {
+		path = path[8:]
+	}
+
+	scanner := NewScanner(path)
+	scanResult, err := scanner.Scan()
+	if err != nil {
+		return nil, fmt.Errorf("扫描路径失败: %w", err)
+	}
+
+	if len(scanResult.Files) == 0 {
+		return pluginsdk.BatchResult(nil), nil
+	}
+
+	// 创建流式 channel
+	ch := make(chan *pluginsdk.TaskCreateResponse, 16)
+
+	go func() {
+		defer close(ch)
+
+		// 按父目录分组
+		groups := GroupFilesByParentDir(scanResult.Files)
+
+		for dirRelPath, files := range groups {
+			// 对目录层级进行分类
+			metadata := make(map[string]string)
+			levels := make(map[int]string)
+
+			if len(files) > 0 {
+				levelsSlice := ExtractDirLevels(files[0].RelPath)
+				for i, dirName := range levelsSlice {
+					pt, err := h.classifier.ClassifyDir(i, dirName)
+					if err != nil {
+						// 用户取消或错误，停止扫描
+						return
+					}
+					levels[i] = string(pt)
+					metadata[string(pt)] = dirName
+				}
+			}
+
+			// 构建 parent task
+			taskName := deriveTaskName(files, metadata, path)
+
+			// 构建 children
+			children := make([]*pluginsdk.TaskCreateChildResponse, 0, len(files))
+			for _, f := range files {
+				fi, err := os.Stat(f.FullPath)
+				if err != nil {
+					continue
+				}
+
+				fp := &FilePluginData{
+					FullPath: f.FullPath,
+					RelPath:  f.RelPath,
+					Hash:     f.Hash,
+					Size:     fi.Size(),
+				}
+				fpJSON, _ := json.Marshal(fp)
+
+				children = append(children, &pluginsdk.TaskCreateChildResponse{
+					TaskName:   filepath.Base(f.FullPath),
+					SiteWorkID: f.Hash,
+					URL:        "local://" + f.FullPath,
+					PluginData: string(fpJSON),
+					SiteName:   siteName,
+				})
+			}
+
+			dp := &DirPluginData{
+				DirRelPath: dirRelPath,
+				Levels:     levels,
+				Metadata:   metadata,
+			}
+			dpJSON, _ := json.Marshal(dp)
+
+			// 如果只有一个 child，不需要 parent task
+			if len(children) == 1 {
+				ch <- &pluginsdk.TaskCreateResponse{
+					PluginTaskID: children[0].SiteWorkID,
+					TaskName:     children[0].TaskName,
+					SiteWorkID:   children[0].SiteWorkID,
+					URL:          children[0].URL,
+					PluginData:   children[0].PluginData,
+					SiteName:     siteName,
+				}
+			} else {
+				ch <- &pluginsdk.TaskCreateResponse{
+					PluginTaskID: fmt.Sprintf("local-dir-%s", dirRelPath),
+					TaskName:     taskName,
+					SiteWorkID:   fmt.Sprintf("local-dir-%s", dirRelPath),
+					URL:          "local://" + filepath.Join(path, dirRelPath),
+					PluginData:   string(dpJSON),
+					SiteName:     siteName,
+					Children:     children,
+				}
+			}
+		}
+	}()
+
+	return pluginsdk.StreamResult(ch), nil
+}
+
+// CreateWorkInfo 从 PluginData 反序列化路径元数据，构建 WorkResponse
+func (h *LocalImportTaskHandler) CreateWorkInfo(task *pluginsdk.Task) (*pluginsdk.WorkResponse, error) {
+	if task.PluginData == nil {
+		return nil, fmt.Errorf("pluginData 为空")
+	}
+
+	var fp FilePluginData
+	if err := json.Unmarshal([]byte(*task.PluginData), &fp); err != nil {
+		return nil, fmt.Errorf("解析 pluginData 失败: %w", err)
+	}
+
+	workName := filepath.Base(fp.FullPath)
+	return &pluginsdk.WorkResponse{
+		Work: &pluginsdk.Work{
+			SiteWorkID:   &fp.Hash,
+			SiteWorkName: &workName,
+		},
+	}, nil
+}
+
+// Start 打开文件并返回 ReadCloser + WorkResponse
+func (h *LocalImportTaskHandler) Start(task *pluginsdk.Task) (io.ReadCloser, *pluginsdk.WorkResponse, error) {
+	if task.PluginData == nil {
+		return nil, nil, fmt.Errorf("pluginData 为空")
+	}
+
+	var fp FilePluginData
+	if err := json.Unmarshal([]byte(*task.PluginData), &fp); err != nil {
+		return nil, nil, fmt.Errorf("解析 pluginData 失败: %w", err)
+	}
+
+	f, err := os.Open(fp.FullPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("打开文件失败: %w", err)
+	}
+
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, fmt.Errorf("获取文件信息失败: %w", err)
+	}
+
+	taskID := fmt.Sprintf("%d", task.ID)
+	h.readers.Store(taskID, f)
+
+	workName := filepath.Base(fp.FullPath)
+	format := filepath.Ext(fp.FullPath)
+	if len(format) > 0 {
+		format = format[1:] // 去掉点号
+	}
+
+	resp := &pluginsdk.WorkResponse{
+		Work: &pluginsdk.Work{
+			SiteWorkName: &workName,
+		},
+		Resource: &pluginsdk.TaskResourceDTO{
+			URL:       "local://" + fp.FullPath,
+			LocalPath: fp.RelPath,
+			Size:      fi.Size(),
+			Format:    format,
+		},
+	}
+
+	return f, resp, nil
+}
+
+// Retry 委托到 Start
+func (h *LocalImportTaskHandler) Retry(task *pluginsdk.Task) (*pluginsdk.WorkResponse, error) {
+	return nil, fmt.Errorf("retry 不支持，请使用 start")
+}
+
+// Pause 关闭文件句柄
+func (h *LocalImportTaskHandler) Pause(param *pluginsdk.TaskResParam) error {
+	return h.closeReader(param)
+}
+
+// Stop 关闭文件句柄
+func (h *LocalImportTaskHandler) Stop(param *pluginsdk.TaskResParam) error {
+	return h.closeReader(param)
+}
+
+// Resume 重新打开文件（从偏移量继续）
+func (h *LocalImportTaskHandler) Resume(param *pluginsdk.TaskResParam) (*pluginsdk.WorkResponse, error) {
+	return nil, fmt.Errorf("resume 暂不支持")
+}
+
+func (h *LocalImportTaskHandler) closeReader(param *pluginsdk.TaskResParam) error {
+	if param.Task == nil {
+		return nil
+	}
+	taskID := fmt.Sprintf("%d", param.Task.ID)
+	if v, ok := h.readers.LoadAndDelete(taskID); ok {
+		return v.(*os.File).Close()
+	}
+	return nil
+}
+
+// deriveTaskName 从文件列表和元数据推导任务名称
+func deriveTaskName(files []FileEntry, metadata map[string]string, inputPath string) string {
+	if name, ok := metadata["workName"]; ok {
+		return name
+	}
+	if name, ok := metadata["workSet"]; ok {
+		return name
+	}
+	if len(files) > 0 {
+		dir := filepath.Dir(files[0].RelPath)
+		if dir != "." {
+			return filepath.Base(dir)
+		}
+	}
+	// 兜底：使用输入路径的目录名或文件名
+	return filepath.Base(inputPath)
+}
