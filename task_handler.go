@@ -59,29 +59,52 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 	go func() {
 		defer close(ch)
 
+		// 对根目录名进行分类（仅目录输入）
+		pathInfo, _ := os.Stat(path)
+		isDir := pathInfo != nil && pathInfo.IsDir()
+		var rootMeanings []PathMeaning
+		rootDirName := filepath.Base(path)
+		if isDir {
+			var err error
+			rootMeanings, err = h.classifier.ClassifyDir(0, rootDirName)
+			if err != nil {
+				return
+			}
+		}
+
 		// 按父目录分组
 		groups := GroupFilesByParentDir(scanResult.Files)
 
 		for dirRelPath, files := range groups {
-			// 对目录层级进行分类
 			metadata := make(map[string]string)
-			levels := make(map[int]string)
 
+			// 包含根目录分类结果
+			if isDir {
+				for _, m := range rootMeanings {
+					metadata[m.Type] = m.Name
+				}
+			}
+
+			// 对子目录层级进行分类（level 偏移）
 			if len(files) > 0 {
 				levelsSlice := ExtractDirLevels(files[0].RelPath)
+				levelOffset := 0
+				if isDir {
+					levelOffset = 1
+				}
 				for i, dirName := range levelsSlice {
-					pt, err := h.classifier.ClassifyDir(i, dirName)
+					meanings, err := h.classifier.ClassifyDir(i+levelOffset, dirName)
 					if err != nil {
-						// 用户取消或错误，停止扫描
 						return
 					}
-					levels[i] = string(pt)
-					metadata[string(pt)] = dirName
+					for _, m := range meanings {
+						metadata[m.Type] = m.Name
+					}
 				}
 			}
 
 			// 构建 parent task
-			taskName := deriveTaskName(files, metadata, path)
+			taskName := fmt.Sprintf("导入【%s】", path)
 
 			// 构建 children
 			children := make([]*pluginsdk.TaskCreateChildResponse, 0, len(files))
@@ -110,7 +133,6 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 
 			dp := &DirPluginData{
 				DirRelPath: dirRelPath,
-				Levels:     levels,
 				Metadata:   metadata,
 			}
 			dpJSON, _ := json.Marshal(dp)
@@ -239,20 +261,3 @@ func (h *LocalImportTaskHandler) closeReader(param *pluginsdk.TaskResParam) erro
 	return nil
 }
 
-// deriveTaskName 从文件列表和元数据推导任务名称
-func deriveTaskName(files []FileEntry, metadata map[string]string, inputPath string) string {
-	if name, ok := metadata["workName"]; ok {
-		return name
-	}
-	if name, ok := metadata["workSet"]; ok {
-		return name
-	}
-	if len(files) > 0 {
-		dir := filepath.Dir(files[0].RelPath)
-		if dir != "." {
-			return filepath.Base(dir)
-		}
-	}
-	// 兜底：使用输入路径的目录名或文件名
-	return filepath.Base(inputPath)
-}

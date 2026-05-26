@@ -2,8 +2,28 @@ $ErrorActionPreference = "Stop"
 
 $projectName = "local_import"
 $distDir = "dist"
+$frontendDir = "frontend"
 
-Write-Host "Building $projectName plugin..."
+Write-Host "Building frontend..." -ForegroundColor Cyan
+
+Push-Location $frontendDir
+if (-not (Test-Path "node_modules")) {
+    yarn install
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Frontend install failed!" -ForegroundColor Red
+        Pop-Location
+        exit 1
+    }
+}
+yarn build
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Frontend build failed!" -ForegroundColor Red
+    Pop-Location
+    exit 1
+}
+Pop-Location
+
+Write-Host "Building $projectName plugin..." -ForegroundColor Cyan
 
 go build -o "$projectName.exe" .
 

@@ -37,13 +37,17 @@ func Activate(ctx pluginsdk.PluginContext, handler *LocalImportTaskHandler) {
 	}
 
 	go func() {
+		ctx.Infof("开始监听前端分类响应事件")
 		for data := range ch {
+			ctx.Infof("收到前端分类响应: %s", string(data))
 			var resp ClassifyResponse
 			if err := json.Unmarshal(data, &resp); err != nil {
+				ctx.Warnf("解析分类响应失败: %v", err)
 				continue
 			}
 			handler.classifier.HandleResponse(&resp)
 		}
+		ctx.Infof("前端分类响应事件通道已关闭")
 	}()
 
 	ctx.Infof("本地文件导入插件已激活")

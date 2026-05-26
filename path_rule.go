@@ -21,6 +21,12 @@ const (
 	PathTypeUnknown  PathType = "unknown"
 )
 
+// PathMeaning 单个路径段的含义
+type PathMeaning struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
+}
+
 // ClassifyQuestion 发送给前端的分类问题
 type ClassifyQuestion struct {
 	Level   int      `json:"level"`
@@ -30,16 +36,16 @@ type ClassifyQuestion struct {
 
 // ClassifyResponse 前端返回的分类响应
 type ClassifyResponse struct {
-	Level   int    `json:"level"`
-	DirName string `json:"dirName"`
-	Type    string `json:"type"`
-	Cancel  bool   `json:"cancel,omitempty"`
+	Level    int           `json:"level"`
+	DirName  string        `json:"dirName"`
+	Meanings []PathMeaning `json:"meanings"`
+	Cancel   bool          `json:"cancel,omitempty"`
 }
 
 // PathClassifier 路径分类器，管理已学规则并与前端交互
 type PathClassifier struct {
 	ctx          pluginsdk.PluginContext
-	learnedRules map[int]PathType // level → type
+	learnedRules map[int][]string // level → 已学的类型列表
 	pendingCh    chan *ClassifyResponse
 	mu           sync.Mutex
 }
@@ -48,7 +54,7 @@ type PathClassifier struct {
 func NewPathClassifier(ctx pluginsdk.PluginContext) *PathClassifier {
 	return &PathClassifier{
 		ctx:          ctx,
-		learnedRules: make(map[int]PathType),
+		learnedRules: make(map[int][]string),
 		pendingCh:    make(chan *ClassifyResponse, 1),
 	}
 }
@@ -61,44 +67,58 @@ func (c *PathClassifier) HandleResponse(resp *ClassifyResponse) {
 	}
 }
 
-// ClassifyDir 对目录名进行分类
-func (c *PathClassifier) ClassifyDir(level int, dirName string) (PathType, error) {
+// ClassifyDir 对目录名进行分类，返回该目录的所有含义
+func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, error) {
 	c.mu.Lock()
-	if rule, ok := c.learnedRules[level]; ok {
+	if types, ok := c.learnedRules[level]; ok {
 		c.mu.Unlock()
-		return rule, nil
+		c.ctx.Infof("目录分类命中已学规则: level=%d, dirName=%s, types=%v", level, dirName, types)
+		meanings := make([]PathMeaning, len(types))
+		for i, t := range types {
+			meanings[i] = PathMeaning{Type: t, Name: dirName}
+		}
+		return meanings, nil
 	}
 	c.mu.Unlock()
 
-	// 询问前端 Slot
+	c.ctx.Infof("开始目录分类询问: level=%d, dirName=%s", level, dirName)
+
 	question := &ClassifyQuestion{
 		Level:   level,
 		DirName: dirName,
-		Options: []string{string(PathTypeAuthor), string(PathTypeTag), string(PathTypeWorkName), string(PathTypeWorkSet)},
+		Options: []string{
+			string(PathTypeAuthor), string(PathTypeTag), string(PathTypeWorkName),
+			string(PathTypeWorkSet), string(PathTypeSite), string(PathTypeUnknown),
+		},
 	}
 	data, err := json.Marshal(question)
 	if err != nil {
-		return PathTypeUnknown, err
+		return nil, err
 	}
 
 	if err := c.ctx.PublishToFrontend("plugin:local-import:classify:request", data); err != nil {
 		c.ctx.Warnf("发送分类请求失败: %v，使用默认规则", err)
-		return PathTypeWorkName, nil
+		return []PathMeaning{{Type: string(PathTypeWorkName), Name: dirName}}, nil
 	}
+	c.ctx.Infof("分类请求已发送到前端，等待响应...")
 
-	// 等待用户响应
 	select {
 	case resp := <-c.pendingCh:
 		if resp.Cancel {
-			return PathTypeUnknown, fmt.Errorf("用户取消分类")
+			return nil, fmt.Errorf("用户取消分类")
 		}
-		pt := PathType(resp.Type)
+		// 缓存类型列表
+		types := make([]string, len(resp.Meanings))
+		for i, m := range resp.Meanings {
+			types[i] = m.Type
+		}
 		c.mu.Lock()
-		c.learnedRules[level] = pt
+		c.learnedRules[level] = types
 		c.mu.Unlock()
-		return pt, nil
+		c.ctx.Infof("收到分类响应: level=%d, dirName=%s, meanings=%+v", level, dirName, resp.Meanings)
+		return resp.Meanings, nil
 	case <-time.After(5 * time.Minute):
 		c.ctx.Warnf("分类超时（5分钟），使用默认规则")
-		return PathTypeWorkName, nil
+		return []PathMeaning{{Type: string(PathTypeWorkName), Name: dirName}}, nil
 	}
 }
