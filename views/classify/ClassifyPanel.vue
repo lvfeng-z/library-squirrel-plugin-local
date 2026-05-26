@@ -2,28 +2,42 @@
   <teleport to="#dialog-mount-point">
     <el-dialog
       v-model="visible"
-      title="解释路径含义"
+      style="height: fit-content;"
       width="520px"
       :close-on-click-modal="false"
       :close-on-press-escape="false"
       :show-close="false"
     >
+      <template #header>
+        <div class="explain-header">
+          <el-tooltip content="本地导入插件请求解释路径段的含义，以便为作品填充作者、标签等信息" placement="bottom">
+            <span>解释路径含义</span>
+          </el-tooltip>
+          <div class="explain-actions">
+            <el-button type="success" icon="CirclePlus" @click="addMeaning">新增</el-button>
+            <el-button type="primary" @click="confirm">确定</el-button>
+            <el-button @click="cancel">取消</el-button>
+          </div>
+        </div>
+      </template>
       <div class="explain-panel">
         <el-text class="explain-path-text">{{ question?.dirName }}</el-text>
         <el-scrollbar class="explain-scroll">
+          <div class="explain-scroll-inner">
           <div v-for="(meaning, index) in meanings" :key="index" class="explain-row">
             <el-select v-model="meaning.type" class="explain-type-select" @change="onTypeChange(meaning, index)">
               <el-option v-for="opt in meaningTypes" :key="opt.value" :value="opt.value" :label="opt.label" />
             </el-select>
             <el-select
               v-if="isSelectType(meaning.type)"
+              v-el-select-bottomed="() => loadPage(index)"
               v-model="meaning.id"
               class="explain-name-input"
               filterable
               remote
               clearable
               :remote-method="(q: string) => search(index, q)"
-              :loading="getState(index).loading"
+              :loading="getState(index).searchLoading"
               @change="onItemSelect(meaning, index)"
               @visible-change="(v: boolean) => onDropdownOpen(index, v)"
             >
@@ -33,25 +47,13 @@
                 :value="item.value"
                 :label="item.label"
               />
-              <el-option
-                v-if="getState(index).hasMore"
-                key="__more__"
-                value=""
-                :label="getState(index).loading ? '加载中...' : '滚动至此加载更多'"
-                disabled
-                @mouseenter="loadPage(index)"
-              />
             </el-select>
             <el-input v-else v-model="meaning.name" class="explain-name-input" clearable />
             <el-button icon="Remove" @click="removeMeaning(index)" />
           </div>
+          </div>
         </el-scrollbar>
       </div>
-      <template #footer>
-        <el-button type="success" icon="CirclePlus" @click="addMeaning">新增</el-button>
-        <el-button type="primary" @click="confirm">确定</el-button>
-        <el-button @click="cancel">取消</el-button>
-      </template>
     </el-dialog>
   </teleport>
 </template>
@@ -80,6 +82,7 @@ interface SelectState {
   options: SelectOption[]
   pageNumber: number
   loading: boolean
+  searchLoading: boolean
   hasMore: boolean
   currentQuery: string
 }
@@ -98,6 +101,38 @@ const meaningTypes = [
 const SELECT_TYPES = new Set(['localAuthor', 'localTag', 'site'])
 const PAGE_SIZE = 10
 
+// el-select 触底加载指令
+const vElSelectBottomed = {
+  mounted(el: any, binding: any) {
+    const handleScroll = function (event: any) {
+      const domTarget = event.target
+      const scrollTop = domTarget.scrollTop
+      const clientHeight = domTarget.clientHeight
+      const scrollHeight = domTarget.scrollHeight
+      if (scrollHeight <= clientHeight) return
+      if (scrollHeight - scrollTop <= clientHeight + 0.5) {
+        binding.value(el.querySelector('.el-select__input')?.value || '')
+      }
+    }
+    const child = el.querySelector('.el-select__input')
+    const id = child?.getAttribute('aria-controls')
+    const popper = id ? document.getElementById(id) : null
+    if (popper) {
+      const selectWrapper = popper.parentElement
+      if (selectWrapper) {
+        selectWrapper.addEventListener('scroll', handleScroll)
+        el.__ls_handleScroll = handleScroll
+        el.__ls_scrollDom = selectWrapper
+      }
+    }
+  },
+  unmounted(el: any) {
+    if (el.__ls_scrollDom) {
+      el.__ls_scrollDom.removeEventListener('scroll', el.__ls_handleScroll)
+    }
+  }
+}
+
 const visible = ref(false)
 const question = ref<ClassifyQuestion | null>(null)
 const meanings = ref<PathMeaning[]>([])
@@ -113,6 +148,7 @@ function getState(index: number): SelectState {
       options: [],
       pageNumber: 1,
       loading: false,
+      searchLoading: false,
       hasMore: true,
       currentQuery: ''
     }
@@ -161,7 +197,8 @@ function search(index: number, query: string) {
   state.pageNumber = 1
   state.options = []
   state.hasMore = true
-  loadPage(index)
+  state.searchLoading = true
+  loadPage(index).finally(() => { state.searchLoading = false })
 }
 
 function onDropdownOpen(index: number, visible: boolean) {
@@ -240,6 +277,15 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.explain-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.explain-actions {
+  display: flex;
+  gap: 8px;
+}
 .explain-panel {
   display: flex;
   flex-direction: column;
@@ -250,14 +296,18 @@ onUnmounted(() => {
   color: #606266;
   word-break: break-all;
 }
-.explain-scroll {
+.explain-scroll :deep(.el-scrollbar__wrap) {
   max-height: 300px;
+}
+.explain-scroll-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .explain-row {
   display: flex;
   gap: 8px;
   align-items: center;
-  margin-bottom: 8px;
 }
 .explain-type-select {
   width: 140px;
