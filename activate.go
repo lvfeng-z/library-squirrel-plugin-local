@@ -8,6 +8,15 @@ import (
 
 // Activate 插件激活回调，注册扩展点和 URL 监听器
 func Activate(ctx pluginsdk.PluginContext, handler *LocalImportTaskHandler) {
+	// 注册 local site
+	localName := "local"
+	localDesc := "本地文件导入"
+	if err := ctx.AddSite([]*pluginsdk.Site{
+		{SiteName: &localName, SiteDescription: &localDesc},
+	}); err != nil {
+		ctx.Warnf("注册 local site 失败（可能已存在）: %v", err)
+	}
+
 	// 注册任务处理器
 	if err := ctx.RegisterTaskHandler("main", "本地导入", "从本地路径导入文件", handler); err != nil {
 		ctx.Errorf("注册任务处理器失败: %v", err)

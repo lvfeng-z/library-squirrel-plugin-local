@@ -15,17 +15,17 @@ const siteName = "local"
 
 // FilePluginData 文件级 PluginData
 type FilePluginData struct {
-	FullPath string `json:"fullPath"`
-	RelPath  string `json:"relPath"`
-	Hash     string `json:"hash"`
-	Size     int64  `json:"size"`
+	FullPath string        `json:"fullPath"`
+	RelPath  string        `json:"relPath"`
+	Hash     string        `json:"hash"`
+	Size     int64         `json:"size"`
+	Metadata []PathMeaning `json:"metadata,omitempty"`
 }
 
 // DirPluginData 目录级 PluginData（用于 parent task）
 type DirPluginData struct {
-	DirRelPath string             `json:"dirRelPath"`
-	Levels     map[int]string     `json:"levels"` // level → type
-	Metadata   map[string]string  `json:"metadata"` // type → value
+	DirRelPath string        `json:"dirRelPath"`
+	Metadata   []PathMeaning `json:"metadata"`
 }
 
 // LocalImportTaskHandler 本地文件导入任务处理器
@@ -37,7 +37,6 @@ type LocalImportTaskHandler struct {
 
 // Create 扫描本地路径，流式产出任务
 func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult, error) {
-	// 解析路径：url 格式为 local://path
 	path := url
 	if len(path) >= 8 && path[:8] == "local://" {
 		path = path[8:]
@@ -53,13 +52,11 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 		return pluginsdk.BatchResult(nil), nil
 	}
 
-	// 创建流式 channel
 	ch := make(chan *pluginsdk.TaskCreateResponse, 16)
 
 	go func() {
 		defer close(ch)
 
-		// 对根目录名进行分类（仅目录输入）
 		pathInfo, _ := os.Stat(path)
 		isDir := pathInfo != nil && pathInfo.IsDir()
 		var rootMeanings []PathMeaning
@@ -72,20 +69,15 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 			}
 		}
 
-		// 按父目录分组
 		groups := GroupFilesByParentDir(scanResult.Files)
 
 		for dirRelPath, files := range groups {
-			metadata := make(map[string]string)
+			var metadata []PathMeaning
 
-			// 包含根目录分类结果
 			if isDir {
-				for _, m := range rootMeanings {
-					metadata[m.Type] = m.Name
-				}
+				metadata = append(metadata, rootMeanings...)
 			}
 
-			// 对子目录层级进行分类（level 偏移）
 			if len(files) > 0 {
 				levelsSlice := ExtractDirLevels(files[0].RelPath)
 				levelOffset := 0
@@ -97,16 +89,12 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 					if err != nil {
 						return
 					}
-					for _, m := range meanings {
-						metadata[m.Type] = m.Name
-					}
+					metadata = append(metadata, meanings...)
 				}
 			}
 
-			// 构建 parent task
 			taskName := fmt.Sprintf("导入【%s】", path)
 
-			// 构建 children
 			children := make([]*pluginsdk.TaskCreateChildResponse, 0, len(files))
 			for _, f := range files {
 				fi, err := os.Stat(f.FullPath)
@@ -119,6 +107,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 					RelPath:  f.RelPath,
 					Hash:     f.Hash,
 					Size:     fi.Size(),
+					Metadata: metadata,
 				}
 				fpJSON, _ := json.Marshal(fp)
 
@@ -137,7 +126,6 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 			}
 			dpJSON, _ := json.Marshal(dp)
 
-			// 如果只有一个 child，不需要 parent task
 			if len(children) == 1 {
 				ch <- &pluginsdk.TaskCreateResponse{
 					PluginTaskID: children[0].SiteWorkID,
@@ -176,12 +164,36 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *pluginsdk.Task) (*pluginsd
 	}
 
 	workName := filepath.Base(fp.FullPath)
-	return &pluginsdk.WorkResponse{
+	resp := &pluginsdk.WorkResponse{
 		Work: &pluginsdk.Work{
 			SiteWorkID:   &fp.Hash,
 			SiteWorkName: &workName,
 		},
-	}, nil
+	}
+
+	for _, m := range fp.Metadata {
+		switch m.Type {
+		case "localAuthor", "siteAuthor":
+			siteAuthorID := m.Type + ":" + m.Name
+			resp.SiteAuthors = append(resp.SiteAuthors, &pluginsdk.TaskSiteAuthorDTO{
+				SiteAuthorID: siteAuthorID,
+				AuthorName:   m.Name,
+			})
+		case "localTag", "siteTag":
+			siteTagID := m.Type + ":" + m.Name
+			resp.SiteTags = append(resp.SiteTags, &pluginsdk.TaskSiteTagDTO{
+				SiteTagID: siteTagID,
+				TagName:   m.Name,
+			})
+		case "workSet":
+			resp.WorkSets = append(resp.WorkSets, &pluginsdk.TaskWorkSetDTO{
+				SiteWorkSetID: "workSet:" + m.Name,
+				WorkSetName:   m.Name,
+			})
+		}
+	}
+
+	return resp, nil
 }
 
 // Start 打开文件并返回 ReadCloser + WorkResponse
@@ -212,7 +224,7 @@ func (h *LocalImportTaskHandler) Start(task *pluginsdk.Task) (io.ReadCloser, *pl
 	workName := filepath.Base(fp.FullPath)
 	format := filepath.Ext(fp.FullPath)
 	if len(format) > 0 {
-		format = format[1:] // 去掉点号
+		format = format[1:]
 	}
 
 	resp := &pluginsdk.WorkResponse{
@@ -260,4 +272,3 @@ func (h *LocalImportTaskHandler) closeReader(param *pluginsdk.TaskResParam) erro
 	}
 	return nil
 }
-

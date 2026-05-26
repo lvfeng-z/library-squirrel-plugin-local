@@ -13,17 +13,20 @@ import (
 type PathType string
 
 const (
-	PathTypeAuthor   PathType = "author"
-	PathTypeTag      PathType = "tag"
-	PathTypeWorkName PathType = "workName"
-	PathTypeWorkSet  PathType = "workSet"
-	PathTypeSite     PathType = "site"
-	PathTypeUnknown  PathType = "unknown"
+	PathTypeLocalAuthor PathType = "localAuthor"
+	PathTypeSiteAuthor  PathType = "siteAuthor"
+	PathTypeLocalTag    PathType = "localTag"
+	PathTypeSiteTag     PathType = "siteTag"
+	PathTypeWorkName    PathType = "workName"
+	PathTypeWorkSet     PathType = "workSet"
+	PathTypeSite        PathType = "site"
+	PathTypeUnknown     PathType = "unknown"
 )
 
 // PathMeaning 单个路径段的含义
 type PathMeaning struct {
 	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
 }
 
@@ -87,8 +90,10 @@ func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, 
 		Level:   level,
 		DirName: dirName,
 		Options: []string{
-			string(PathTypeAuthor), string(PathTypeTag), string(PathTypeWorkName),
-			string(PathTypeWorkSet), string(PathTypeSite), string(PathTypeUnknown),
+			string(PathTypeLocalAuthor), string(PathTypeSiteAuthor),
+			string(PathTypeLocalTag), string(PathTypeSiteTag),
+			string(PathTypeWorkName), string(PathTypeWorkSet),
+			string(PathTypeSite), string(PathTypeUnknown),
 		},
 	}
 	data, err := json.Marshal(question)
@@ -107,7 +112,6 @@ func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, 
 		if resp.Cancel {
 			return nil, fmt.Errorf("用户取消分类")
 		}
-		// 缓存类型列表
 		types := make([]string, len(resp.Meanings))
 		for i, m := range resp.Meanings {
 			types[i] = m.Type
