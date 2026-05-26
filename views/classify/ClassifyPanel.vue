@@ -207,7 +207,7 @@ function confirm() {
   Events.Emit('plugin:local-import:classify:response', {
     level: question.value.level,
     dirName: question.value.dirName,
-    meanings: meanings.value
+    meanings: meanings.value.map(m => ({ ...m, id: m.id != null ? String(m.id) : '' }))
   })
   visible.value = false
   question.value = null
