@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	pluginsdk "github.com/lvfeng-z/library-squirrel-plugin-sdk"
@@ -173,14 +174,24 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *pluginsdk.Task) (*pluginsd
 
 	for _, m := range fp.Metadata {
 		switch m.Type {
-		case "localAuthor", "siteAuthor":
-			siteAuthorID := m.Type + ":" + m.Name
+		case "localAuthor":
+			id, _ := strconv.ParseInt(m.ID, 10, 64)
+			if id > 0 {
+				resp.LocalAuthors = append(resp.LocalAuthors, &pluginsdk.LocalAuthorDTO{ID: id})
+			}
+		case "siteAuthor":
+			siteAuthorID := "siteAuthor:" + m.Name
 			resp.SiteAuthors = append(resp.SiteAuthors, &pluginsdk.TaskSiteAuthorDTO{
 				SiteAuthorID: siteAuthorID,
 				AuthorName:   m.Name,
 			})
-		case "localTag", "siteTag":
-			siteTagID := m.Type + ":" + m.Name
+		case "localTag":
+			id, _ := strconv.ParseInt(m.ID, 10, 64)
+			if id > 0 {
+				resp.LocalTags = append(resp.LocalTags, &pluginsdk.LocalTagDTO{ID: id})
+			}
+		case "siteTag":
+			siteTagID := "siteTag:" + m.Name
 			resp.SiteTags = append(resp.SiteTags, &pluginsdk.TaskSiteTagDTO{
 				SiteTagID: siteTagID,
 				TagName:   m.Name,
