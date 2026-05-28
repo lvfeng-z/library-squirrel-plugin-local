@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync"
 
-	pluginsdk "github.com/lvfeng-z/library-squirrel-plugin-sdk"
+	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
 )
 
 const siteName = "local"
@@ -31,13 +31,13 @@ type DirPluginData struct {
 
 // LocalImportTaskHandler 本地文件导入任务处理器
 type LocalImportTaskHandler struct {
-	ctx        pluginsdk.PluginContext
+	ctx        sdkdto.PluginContext
 	classifier *PathClassifier
 	readers    sync.Map // taskID → *os.File
 }
 
 // Create 扫描本地路径，流式产出任务
-func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult, error) {
+func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, error) {
 	path := url
 	if len(path) >= 8 && path[:8] == "local://" {
 		path = path[8:]
@@ -50,10 +50,10 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 	}
 
 	if len(scanResult.Files) == 0 {
-		return pluginsdk.BatchResult(nil), nil
+		return sdkdto.BatchResult(nil), nil
 	}
 
-	ch := make(chan *pluginsdk.TaskCreateResponse, 16)
+	ch := make(chan *sdkdto.TaskCreateResponse, 16)
 
 	go func() {
 		defer close(ch)
@@ -96,7 +96,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 
 			taskName := fmt.Sprintf("导入【%s】", path)
 
-			children := make([]*pluginsdk.TaskCreateChildResponse, 0, len(files))
+			children := make([]*sdkdto.TaskCreateChildResponse, 0, len(files))
 			for _, f := range files {
 				fi, err := os.Stat(f.FullPath)
 				if err != nil {
@@ -112,7 +112,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 				}
 				fpJSON, _ := json.Marshal(fp)
 
-				children = append(children, &pluginsdk.TaskCreateChildResponse{
+				children = append(children, &sdkdto.TaskCreateChildResponse{
 					TaskName:   filepath.Base(f.FullPath),
 					SiteWorkID: f.Hash,
 					URL:        "local://" + f.FullPath,
@@ -128,7 +128,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 			dpJSON, _ := json.Marshal(dp)
 
 			if len(children) == 1 {
-				ch <- &pluginsdk.TaskCreateResponse{
+				ch <- &sdkdto.TaskCreateResponse{
 					PluginTaskID: children[0].SiteWorkID,
 					TaskName:     children[0].TaskName,
 					SiteWorkID:   children[0].SiteWorkID,
@@ -137,7 +137,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 					SiteName:     siteName,
 				}
 			} else {
-				ch <- &pluginsdk.TaskCreateResponse{
+				ch <- &sdkdto.TaskCreateResponse{
 					PluginTaskID: fmt.Sprintf("local-dir-%s", dirRelPath),
 					TaskName:     taskName,
 					SiteWorkID:   fmt.Sprintf("local-dir-%s", dirRelPath),
@@ -150,11 +150,11 @@ func (h *LocalImportTaskHandler) Create(url string) (*pluginsdk.TaskCreateResult
 		}
 	}()
 
-	return pluginsdk.StreamResult(ch), nil
+	return sdkdto.StreamResult(ch), nil
 }
 
 // CreateWorkInfo 从 PluginData 反序列化路径元数据，构建 WorkResponse
-func (h *LocalImportTaskHandler) CreateWorkInfo(task *pluginsdk.Task) (*pluginsdk.WorkResponse, error) {
+func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, fmt.Errorf("pluginData 为空")
 	}
@@ -165,8 +165,8 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *pluginsdk.Task) (*pluginsd
 	}
 
 	workName := filepath.Base(fp.FullPath)
-	resp := &pluginsdk.WorkResponse{
-		Work: &pluginsdk.Work{
+	resp := &sdkdto.WorkResponse{
+		Work: &sdkdto.WorkDTO{
 			SiteWorkID:   &fp.Hash,
 			SiteWorkName: &workName,
 		},
@@ -177,27 +177,27 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *pluginsdk.Task) (*pluginsd
 		case "localAuthor":
 			id, _ := strconv.ParseInt(m.ID, 10, 64)
 			if id > 0 {
-				resp.LocalAuthors = append(resp.LocalAuthors, &pluginsdk.LocalAuthorDTO{ID: id})
+				resp.LocalAuthors = append(resp.LocalAuthors, &sdkdto.LocalAuthorDTO{ID: id})
 			}
 		case "siteAuthor":
 			siteAuthorID := "siteAuthor:" + m.Name
-			resp.SiteAuthors = append(resp.SiteAuthors, &pluginsdk.TaskSiteAuthorDTO{
+			resp.SiteAuthors = append(resp.SiteAuthors, &sdkdto.TaskSiteAuthorDTO{
 				SiteAuthorID: siteAuthorID,
 				AuthorName:   m.Name,
 			})
 		case "localTag":
 			id, _ := strconv.ParseInt(m.ID, 10, 64)
 			if id > 0 {
-				resp.LocalTags = append(resp.LocalTags, &pluginsdk.LocalTagDTO{ID: id})
+				resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{ID: id})
 			}
 		case "siteTag":
 			siteTagID := "siteTag:" + m.Name
-			resp.SiteTags = append(resp.SiteTags, &pluginsdk.TaskSiteTagDTO{
+			resp.SiteTags = append(resp.SiteTags, &sdkdto.TaskSiteTagDTO{
 				SiteTagID: siteTagID,
 				TagName:   m.Name,
 			})
 		case "workSet":
-			resp.WorkSets = append(resp.WorkSets, &pluginsdk.TaskWorkSetDTO{
+			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
 				SiteWorkSetID: "workSet:" + m.Name,
 				WorkSetName:   m.Name,
 			})
@@ -208,7 +208,7 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *pluginsdk.Task) (*pluginsd
 }
 
 // Start 打开文件并返回 ReadCloser + WorkResponse
-func (h *LocalImportTaskHandler) Start(task *pluginsdk.Task) (io.ReadCloser, *pluginsdk.WorkResponse, error) {
+func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO) (io.ReadCloser, *sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, nil, fmt.Errorf("pluginData 为空")
 	}
@@ -238,11 +238,11 @@ func (h *LocalImportTaskHandler) Start(task *pluginsdk.Task) (io.ReadCloser, *pl
 		format = format[1:]
 	}
 
-	resp := &pluginsdk.WorkResponse{
-		Work: &pluginsdk.Work{
+	resp := &sdkdto.WorkResponse{
+		Work: &sdkdto.WorkDTO{
 			SiteWorkName: &workName,
 		},
-		Resource: &pluginsdk.TaskResourceDTO{
+		Resource: &sdkdto.TaskResourceDTO{
 			URL:       "local://" + fp.FullPath,
 			LocalPath: fp.RelPath,
 			Size:      fi.Size(),
@@ -254,26 +254,26 @@ func (h *LocalImportTaskHandler) Start(task *pluginsdk.Task) (io.ReadCloser, *pl
 }
 
 // Retry 委托到 Start
-func (h *LocalImportTaskHandler) Retry(task *pluginsdk.Task) (*pluginsdk.WorkResponse, error) {
+func (h *LocalImportTaskHandler) Retry(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
 	return nil, fmt.Errorf("retry 不支持，请使用 start")
 }
 
 // Pause 关闭文件句柄
-func (h *LocalImportTaskHandler) Pause(param *pluginsdk.TaskResParam) error {
+func (h *LocalImportTaskHandler) Pause(param *sdkdto.TaskResParam) error {
 	return h.closeReader(param)
 }
 
 // Stop 关闭文件句柄
-func (h *LocalImportTaskHandler) Stop(param *pluginsdk.TaskResParam) error {
+func (h *LocalImportTaskHandler) Stop(param *sdkdto.TaskResParam) error {
 	return h.closeReader(param)
 }
 
 // Resume 重新打开文件（从偏移量继续）
-func (h *LocalImportTaskHandler) Resume(param *pluginsdk.TaskResParam) (*pluginsdk.WorkResponse, error) {
+func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (*sdkdto.WorkResponse, error) {
 	return nil, fmt.Errorf("resume 暂不支持")
 }
 
-func (h *LocalImportTaskHandler) closeReader(param *pluginsdk.TaskResParam) error {
+func (h *LocalImportTaskHandler) closeReader(param *sdkdto.TaskResParam) error {
 	if param.Task == nil {
 		return nil
 	}

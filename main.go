@@ -1,14 +1,15 @@
 package main
 
 import (
-	pluginsdk "github.com/lvfeng-z/library-squirrel-plugin-sdk"
+	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
+	sdkplugin "github.com/lvfeng-z/library-squirrel-plugin-sdk/plugin"
 )
 
 func main() {
 	handler := &LocalImportTaskHandler{}
 
-	pluginsdk.Serve(handler,
-		pluginsdk.WithActivate(func(ctx pluginsdk.PluginContext) {
+	sdkplugin.Serve(handler,
+		sdkplugin.WithActivate(func(ctx sdkdto.PluginContext) {
 			Activate(ctx, handler)
 		}),
 	)

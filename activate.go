@@ -3,15 +3,15 @@ package main
 import (
 	"encoding/json"
 
-	pluginsdk "github.com/lvfeng-z/library-squirrel-plugin-sdk"
+	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
 )
 
 // Activate 插件激活回调，注册扩展点和 URL 监听器
-func Activate(ctx pluginsdk.PluginContext, handler *LocalImportTaskHandler) {
+func Activate(ctx sdkdto.PluginContext, handler *LocalImportTaskHandler) {
 	// 注册 local site
 	localName := "local"
 	localDesc := "本地文件导入"
-	if err := ctx.AddSite([]*pluginsdk.Site{
+	if err := ctx.AddSite([]*sdkdto.SiteDTO{
 		{SiteName: &localName, SiteDescription: &localDesc},
 	}); err != nil {
 		ctx.Warnf("注册 local site 失败（可能已存在）: %v", err)

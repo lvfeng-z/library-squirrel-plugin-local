@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	pluginsdk "github.com/lvfeng-z/library-squirrel-plugin-sdk"
+	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
 )
 
 // PathType 路径语义类型
@@ -47,14 +47,14 @@ type ClassifyResponse struct {
 
 // PathClassifier 路径分类器，管理已学规则并与前端交互
 type PathClassifier struct {
-	ctx          pluginsdk.PluginContext
+	ctx          sdkdto.PluginContext
 	learnedRules map[int][]string // level → 已学的类型列表
 	pendingCh    chan *ClassifyResponse
 	mu           sync.Mutex
 }
 
 // NewPathClassifier 创建路径分类器
-func NewPathClassifier(ctx pluginsdk.PluginContext) *PathClassifier {
+func NewPathClassifier(ctx sdkdto.PluginContext) *PathClassifier {
 	return &PathClassifier{
 		ctx:          ctx,
 		learnedRules: make(map[int][]string),
