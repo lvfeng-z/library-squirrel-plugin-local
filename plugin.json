@@ -14,10 +14,12 @@
         "name": "目录分类",
         "description": "扫描时交互式目录分类面板",
         "slotType": "embed",
-        "contentType": "precompiled",
-        "content": {"js": "views/classify/classify-panel.js", "css": "views/classify/style.css"},
-        "position": "dialog",
-        "contributionId": "main"
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/classify/classify-panel.js", "css": "views/classify/style.css"},
+          "position": "dialog",
+          "contributionId": "main"
+        }
       }
     ],
     "staticResources": {
