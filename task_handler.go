@@ -165,6 +165,10 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	}
 
 	workName := filepath.Base(fp.FullPath)
+	// 去除扩展名，扩展名由 Resource.Format 单独提供
+	if ext := filepath.Ext(workName); ext != "" {
+		workName = workName[:len(workName)-len(ext)]
+	}
 	resp := &sdkdto.WorkResponse{
 		Work: &sdkdto.WorkDTO{
 			SiteWorkID:   &fp.Hash,
@@ -233,8 +237,10 @@ func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO) (io.ReadCloser, *sd
 	h.readers.Store(taskID, f)
 
 	workName := filepath.Base(fp.FullPath)
-	format := filepath.Ext(fp.FullPath)
+	format := filepath.Ext(workName)
 	if len(format) > 0 {
+		// 去除扩展名，扩展名由 Format 单独提供
+		workName = workName[:len(workName)-len(format)]
 		format = format[1:]
 	}
 
@@ -268,9 +274,54 @@ func (h *LocalImportTaskHandler) Stop(param *sdkdto.TaskResParam) error {
 	return h.closeReader(param)
 }
 
-// Resume 重新打开文件（从偏移量继续）
-func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (*sdkdto.WorkResponse, error) {
-	return nil, fmt.Errorf("resume 暂不支持")
+// Resume 重新打开文件并从已下载位置继续
+func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (io.ReadCloser, *sdkdto.WorkResponse, error) {
+	if param.Task == nil || param.Task.PluginData == nil {
+		return nil, nil, fmt.Errorf("task 或 pluginData 为空")
+	}
+
+	var fp FilePluginData
+	if err := json.Unmarshal([]byte(*param.Task.PluginData), &fp); err != nil {
+		return nil, nil, fmt.Errorf("解析 pluginData 失败: %w", err)
+	}
+
+	f, err := os.Open(fp.FullPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("打开文件失败: %w", err)
+	}
+
+	// 从已下载位置继续
+	if param.DownloadedBytes > 0 {
+		if _, err := f.Seek(param.DownloadedBytes, io.SeekStart); err != nil {
+			f.Close()
+			return nil, nil, fmt.Errorf("seek 到偏移量 %d 失败: %w", param.DownloadedBytes, err)
+		}
+	}
+
+	taskID := fmt.Sprintf("%d", param.Task.ID)
+	h.readers.Store(taskID, f)
+
+	workName := filepath.Base(fp.FullPath)
+	format := filepath.Ext(workName)
+	if len(format) > 0 {
+		// 去除扩展名，扩展名由 Format 单独提供
+		workName = workName[:len(workName)-len(format)]
+		format = format[1:]
+	}
+
+	resp := &sdkdto.WorkResponse{
+		Work: &sdkdto.WorkDTO{
+			SiteWorkName: &workName,
+		},
+		Resource: &sdkdto.TaskResourceDTO{
+			URL:       "local://" + fp.FullPath,
+			LocalPath: fp.RelPath,
+			Size:      fp.Size,
+			Format:    format,
+		},
+	}
+
+	return f, resp, nil
 }
 
 func (h *LocalImportTaskHandler) closeReader(param *sdkdto.TaskResParam) error {
