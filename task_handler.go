@@ -237,11 +237,10 @@ func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO) (io.ReadCloser, *sd
 	h.readers.Store(taskID, f)
 
 	workName := filepath.Base(fp.FullPath)
-	format := filepath.Ext(workName)
-	if len(format) > 0 {
-		// 去除扩展名，扩展名由 Format 单独提供
-		workName = workName[:len(workName)-len(format)]
-		format = format[1:]
+	// 去除扩展名，扩展名由 Format 单独提供
+	ext := filepath.Ext(workName)
+	if ext != "" {
+		workName = workName[:len(workName)-len(ext)]
 	}
 
 	resp := &sdkdto.WorkResponse{
@@ -252,7 +251,7 @@ func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO) (io.ReadCloser, *sd
 			URL:       "local://" + fp.FullPath,
 			LocalPath: fp.RelPath,
 			Size:      fi.Size(),
-			Format:    format,
+			Format:    ext,
 		},
 	}
 
@@ -302,11 +301,10 @@ func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (io.ReadClos
 	h.readers.Store(taskID, f)
 
 	workName := filepath.Base(fp.FullPath)
-	format := filepath.Ext(workName)
-	if len(format) > 0 {
-		// 去除扩展名，扩展名由 Format 单独提供
-		workName = workName[:len(workName)-len(format)]
-		format = format[1:]
+	// 去除扩展名，扩展名由 Format 单独提供
+	ext := filepath.Ext(workName)
+	if ext != "" {
+		workName = workName[:len(workName)-len(ext)]
 	}
 
 	resp := &sdkdto.WorkResponse{
@@ -317,7 +315,7 @@ func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (io.ReadClos
 			URL:       "local://" + fp.FullPath,
 			LocalPath: fp.RelPath,
 			Size:      fp.Size,
-			Format:    format,
+			Format:    ext,
 		},
 	}
 
