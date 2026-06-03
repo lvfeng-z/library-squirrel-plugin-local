@@ -312,10 +312,11 @@ func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (io.ReadClos
 			SiteWorkName: &workName,
 		},
 		Resource: &sdkdto.TaskResourceDTO{
-			URL:       "local://" + fp.FullPath,
-			LocalPath: fp.RelPath,
-			Size:      fp.Size,
-			Format:    ext,
+			URL:         "local://" + fp.FullPath,
+			LocalPath:   fp.RelPath,
+			Size:        fp.Size,
+			Format:      ext,
+			Continuable: new(true),
 		},
 	}
 
