@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 
-	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
+	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
 // Activate 插件激活回调，注册扩展点和 URL 监听器

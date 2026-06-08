@@ -7,15 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 
-	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
+	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
 // thumbnailGenerator 缩略图生成器接口
 // 不同资源类型（视频、动图、文章等）实现此接口以支持缩略图生成。
 // 扩展步骤：
-//   1. 实现此接口（参考 videoThumbnailGenerator）
-//   2. 定义该类型的扩展名集合
-//   3. 在 init() 中注册到 extensionGenerators
+//  1. 实现此接口（参考 videoThumbnailGenerator）
+//  2. 定义该类型的扩展名集合
+//  3. 在 init() 中注册到 extensionGenerators
 type thumbnailGenerator interface {
 	// generate 从指定文件生成缩略图
 	// 返回 nil 表示该文件不需要或无法生成缩略图

@@ -1,8 +1,8 @@
 package main
 
 import (
-	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
-	sdkplugin "github.com/lvfeng-z/library-squirrel-plugin-sdk/plugin"
+	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
+	sdkplugin "github.com/lvfeng-z/library-squirrel-sdk/plugin"
 )
 
 func main() {

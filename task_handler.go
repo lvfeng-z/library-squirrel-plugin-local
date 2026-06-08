@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync"
 
-	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
+	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
 const siteName = "local"

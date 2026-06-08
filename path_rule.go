@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	sdkdto "github.com/lvfeng-z/library-squirrel-plugin-sdk/dto"
+	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
 // PathType 路径语义类型
