@@ -248,10 +248,8 @@ func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO) (io.ReadCloser, *sd
 			SiteWorkName: &workName,
 		},
 		Resource: &sdkdto.TaskResourceDTO{
-			URL:       "local://" + fp.FullPath,
-			LocalPath: fp.RelPath,
-			Size:      fi.Size(),
-			Format:    ext,
+			Format: ext,
+			Size:   fi.Size(),
 		},
 	}
 
@@ -312,10 +310,8 @@ func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (io.ReadClos
 			SiteWorkName: &workName,
 		},
 		Resource: &sdkdto.TaskResourceDTO{
-			URL:         "local://" + fp.FullPath,
-			LocalPath:   fp.RelPath,
-			Size:        fp.Size,
 			Format:      ext,
+			Size:        fp.Size,
 			Continuable: new(true),
 		},
 	}
@@ -332,4 +328,19 @@ func (h *LocalImportTaskHandler) closeReader(param *sdkdto.TaskResParam) error {
 		return v.(*os.File).Close()
 	}
 	return nil
+}
+
+// GetThumbnail 获取缩略图
+// 解析任务数据中的文件路径，根据文件扩展名分派到对应的缩略图生成器
+func (h *LocalImportTaskHandler) GetThumbnail(taskData string) (*sdkdto.ThumbnailResponse, error) {
+	var fp FilePluginData
+	if err := json.Unmarshal([]byte(taskData), &fp); err != nil {
+		return nil, fmt.Errorf("解析任务数据失败: %w", err)
+	}
+
+	if fp.FullPath == "" {
+		return nil, nil
+	}
+
+	return generateThumbnail(fp.FullPath)
 }
