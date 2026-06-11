@@ -12,5 +12,8 @@ func main() {
 		sdkplugin.WithActivate(func(ctx sdkdto.PluginContext) {
 			Activate(ctx, handler)
 		}),
+		sdkplugin.WithShutdown(func() {
+			Shutdown(handler)
+		}),
 	)
 }
