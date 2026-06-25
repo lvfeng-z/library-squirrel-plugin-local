@@ -13,12 +13,10 @@
         "id": "classify-panel",
         "name": "目录分类",
         "description": "扫描时交互式目录分类面板",
-        "slotType": "embed",
+        "slotType": "dialog",
         "content": {
           "contentType": "precompiled",
-          "source": {"js": "views/classify/classify-panel.js", "css": "views/classify/style.css"},
-          "position": "dialog",
-          "extensionId": "main"
+          "source": {"js": "views/classify/classify-panel.js", "css": "views/classify/style.css"}
         }
       }
     ],
