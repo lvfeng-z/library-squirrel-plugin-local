@@ -18,7 +18,7 @@
           "contentType": "precompiled",
           "source": {"js": "views/classify/classify-panel.js", "css": "views/classify/style.css"},
           "position": "dialog",
-          "contributionId": "main"
+          "extensionId": "main"
         }
       }
     ],
