@@ -6,8 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
 // thumbnailGenerator 缩略图生成器接口
@@ -18,8 +16,8 @@ import (
 //  3. 在 init() 中注册到 extensionGenerators
 type thumbnailGenerator interface {
 	// generate 从指定文件生成缩略图
-	// 返回 nil 表示该文件不需要或无法生成缩略图
-	generate(filePath string) (*sdkdto.ThumbnailResponse, error)
+	// 返回 (data, format)；data 为空表示该文件不需要或无法生成缩略图
+	generate(filePath string) (data []byte, format string, err error)
 }
 
 // ---- 缩略图分派 ----
@@ -34,11 +32,12 @@ func init() {
 }
 
 // generateThumbnail 根据文件扩展名分派到对应的缩略图生成器
-func generateThumbnail(filePath string) (*sdkdto.ThumbnailResponse, error) {
+// 返回 (data, format)；无生成器时 data 为空
+func generateThumbnail(filePath string) ([]byte, string, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	gen, ok := extensionGenerators[ext]
 	if !ok {
-		return nil, nil
+		return nil, "", nil
 	}
 	return gen.generate(filePath)
 }
@@ -87,9 +86,9 @@ func checkFFmpegAvailable() bool {
 	return ffmpegAvailable
 }
 
-func (g *videoThumbnailGenerator) generate(filePath string) (*sdkdto.ThumbnailResponse, error) {
+func (g *videoThumbnailGenerator) generate(filePath string) ([]byte, string, error) {
 	if !checkFFmpegAvailable() {
-		return nil, nil
+		return nil, "", nil
 	}
 
 	// 从视频第一帧提取 JPEG 缩略图
@@ -108,15 +107,12 @@ func (g *videoThumbnailGenerator) generate(filePath string) (*sdkdto.ThumbnailRe
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg 提取视频帧失败: %w", err)
+		return nil, "", fmt.Errorf("ffmpeg 提取视频帧失败: %w", err)
 	}
 
 	if stdout.Len() == 0 {
-		return nil, nil
+		return nil, "", nil
 	}
 
-	return &sdkdto.ThumbnailResponse{
-		Data:   stdout.Bytes(),
-		Format: "jpg",
-	}, nil
+	return stdout.Bytes(), "jpg", nil
 }

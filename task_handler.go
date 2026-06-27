@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
@@ -211,8 +213,8 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	return resp, nil
 }
 
-// Start 打开文件并返回 ReadCloser + WorkResponse
-func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO) (io.ReadCloser, *sdkdto.WorkResponse, error) {
+// Start 打开文件,按 storeRoles 选择性返回 StoreSpec 流集合(主资源 downloaded + 缩略图 derived)与作品信息
+func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO, storeRoles []string) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, nil, fmt.Errorf("pluginData 为空")
 	}
@@ -222,38 +224,75 @@ func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO) (io.ReadCloser, *sd
 		return nil, nil, fmt.Errorf("解析 pluginData 失败: %w", err)
 	}
 
-	f, err := os.Open(fp.FullPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("打开文件失败: %w", err)
-	}
-
-	fi, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, nil, fmt.Errorf("获取文件信息失败: %w", err)
-	}
-
+	ext := filepath.Ext(fp.FullPath)
+	workName := stripExt(filepath.Base(fp.FullPath))
 	taskID := fmt.Sprintf("%d", task.ID)
-	h.readers.Store(taskID, f)
 
-	workName := filepath.Base(fp.FullPath)
-	// 去除扩展名，扩展名由 Format 单独提供
-	ext := filepath.Ext(workName)
-	if ext != "" {
-		workName = workName[:len(workName)-len(ext)]
+	var specs []*sdkdto.StoreSpec
+
+	// 主资源(downloaded):本地文件流,可断点续传
+	if wantsRole(storeRoles, sdkdto.StoreRoleMain) {
+		f, err := os.Open(fp.FullPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("打开文件失败: %w", err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, nil, fmt.Errorf("获取文件信息失败: %w", err)
+		}
+		h.readers.Store(taskID, f)
+		specs = append(specs, &sdkdto.StoreSpec{
+			Role:        sdkdto.StoreRoleMain,
+			Generation:  sdkdto.GenerationDownloaded,
+			ReadCloser:  f,
+			Format:      ext,
+			Size:        fi.Size(),
+			Continuable: boolPtr(true),
+		})
+	}
+
+	// 缩略图(derived):按扩展名生成;无生成器或不适用则不产出该轨
+	if wantsRole(storeRoles, sdkdto.StoreRoleThumbnail) {
+		if thumbData, thumbFormat, _ := generateThumbnail(fp.FullPath); len(thumbData) > 0 {
+			if thumbFormat == "" {
+				thumbFormat = "jpg"
+			}
+			specs = append(specs, &sdkdto.StoreSpec{
+				Role:        sdkdto.StoreRoleThumbnail,
+				Generation:  sdkdto.GenerationDerived,
+				ReadCloser:  io.NopCloser(bytes.NewReader(thumbData)),
+				Format:      thumbFormat,
+				Size:        int64(len(thumbData)),
+				Continuable: boolPtr(false),
+			})
+		}
+	}
+
+	if len(specs) == 0 {
+		return nil, nil, fmt.Errorf("所选资源角色 %v 均无可产出 store", storeRoles)
 	}
 
 	resp := &sdkdto.WorkResponse{
 		Work: &sdkdto.WorkDTO{
 			SiteWorkName: &workName,
 		},
-		Resource: &sdkdto.TaskResourceDTO{
-			Format: ext,
-			Size:   fi.Size(),
-		},
 	}
 
-	return f, resp, nil
+	return specs, resp, nil
+}
+
+// wantsRole storeRoles 为空(全量)或包含 role 时返回 true
+func wantsRole(storeRoles []string, role string) bool {
+	if len(storeRoles) == 0 {
+		return true
+	}
+	for _, r := range storeRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 // Retry 委托到 Start
@@ -271,10 +310,17 @@ func (h *LocalImportTaskHandler) Stop(param *sdkdto.TaskResParam) error {
 	return h.closeReader(param)
 }
 
-// Resume 重新打开文件并从已下载位置继续
-func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (io.ReadCloser, *sdkdto.WorkResponse, error) {
+// Resume 恢复下载:按 TaskResumeParam.StreamOffsets 续传未完成的主资源轨
+// 缩略图(derived)为一次性产物,暂停的任务意味着其已完成,故 Resume 不再产出
+func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResumeParam) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if param.Task == nil || param.Task.PluginData == nil {
 		return nil, nil, fmt.Errorf("task 或 pluginData 为空")
+	}
+
+	offset, hasMain := param.StreamOffsets[sdkdto.StoreRoleMain]
+	// main 已完成或未选:无需续传
+	if !hasMain {
+		return nil, nil, nil
 	}
 
 	var fp FilePluginData
@@ -288,35 +334,35 @@ func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResParam) (io.ReadClos
 	}
 
 	// 从已下载位置继续
-	if param.DownloadedBytes > 0 {
-		if _, err := f.Seek(param.DownloadedBytes, io.SeekStart); err != nil {
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			f.Close()
-			return nil, nil, fmt.Errorf("seek 到偏移量 %d 失败: %w", param.DownloadedBytes, err)
+			return nil, nil, fmt.Errorf("seek 到偏移量 %d 失败: %w", offset, err)
 		}
 	}
 
 	taskID := fmt.Sprintf("%d", param.Task.ID)
 	h.readers.Store(taskID, f)
 
-	workName := filepath.Base(fp.FullPath)
-	// 去除扩展名，扩展名由 Format 单独提供
-	ext := filepath.Ext(workName)
-	if ext != "" {
-		workName = workName[:len(workName)-len(ext)]
+	ext := filepath.Ext(fp.FullPath)
+	workName := stripExt(filepath.Base(fp.FullPath))
+
+	spec := &sdkdto.StoreSpec{
+		Role:        sdkdto.StoreRoleMain,
+		Generation:  sdkdto.GenerationDownloaded,
+		ReadCloser:  f,
+		Format:      ext,
+		Size:        fp.Size,
+		Continuable: boolPtr(true),
 	}
 
 	resp := &sdkdto.WorkResponse{
 		Work: &sdkdto.WorkDTO{
 			SiteWorkName: &workName,
 		},
-		Resource: &sdkdto.TaskResourceDTO{
-			Format:      ext,
-			Size:        fp.Size,
-			Continuable: new(true),
-		},
 	}
 
-	return f, resp, nil
+	return []*sdkdto.StoreSpec{spec}, resp, nil
 }
 
 func (h *LocalImportTaskHandler) closeReader(param *sdkdto.TaskResParam) error {
@@ -330,17 +376,13 @@ func (h *LocalImportTaskHandler) closeReader(param *sdkdto.TaskResParam) error {
 	return nil
 }
 
-// GetThumbnail 获取缩略图
-// 解析任务数据中的文件路径，根据文件扩展名分派到对应的缩略图生成器
-func (h *LocalImportTaskHandler) GetThumbnail(taskData string) (*sdkdto.ThumbnailResponse, error) {
-	var fp FilePluginData
-	if err := json.Unmarshal([]byte(taskData), &fp); err != nil {
-		return nil, fmt.Errorf("解析任务数据失败: %w", err)
-	}
+// boolPtr 返回 bool 值的指针
+func boolPtr(b bool) *bool { return &b }
 
-	if fp.FullPath == "" {
-		return nil, nil
+// stripExt 去除文件名扩展名(扩展名由 StoreSpec.Format 单独提供)
+func stripExt(name string) string {
+	if ext := filepath.Ext(name); ext != "" {
+		return strings.TrimSuffix(name, ext)
 	}
-
-	return generateThumbnail(fp.FullPath)
+	return name
 }
