@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -214,7 +215,7 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 }
 
 // Start 打开文件,按 storeRoles 选择性返回 StoreSpec 流集合(主资源 downloaded + 缩略图 derived)与作品信息
-func (h *LocalImportTaskHandler) Start(task *sdkdto.TaskDTO, storeRoles []string) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
+func (h *LocalImportTaskHandler) Start(ctx context.Context, task *sdkdto.TaskDTO, storeRoles []string) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, nil, fmt.Errorf("pluginData 为空")
 	}
@@ -312,7 +313,7 @@ func (h *LocalImportTaskHandler) Stop(param *sdkdto.TaskResParam) error {
 
 // Resume 恢复下载:按 TaskResumeParam.StreamOffsets 续传未完成的主资源轨
 // 缩略图(derived)为一次性产物,暂停的任务意味着其已完成,故 Resume 不再产出
-func (h *LocalImportTaskHandler) Resume(param *sdkdto.TaskResumeParam) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
+func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskResumeParam) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if param.Task == nil || param.Task.PluginData == nil {
 		return nil, nil, fmt.Errorf("task 或 pluginData 为空")
 	}
