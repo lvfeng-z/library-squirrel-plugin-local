@@ -116,11 +116,12 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 				fpJSON, _ := json.Marshal(fp)
 
 				children = append(children, &sdkdto.TaskCreateChildResponse{
-					TaskName:   filepath.Base(f.FullPath),
-					SiteWorkID: f.Hash,
-					URL:        "local://" + f.FullPath,
-					PluginData: string(fpJSON),
-					SiteName:   siteName,
+					TaskName:     filepath.Base(f.FullPath),
+					SiteWorkID:   f.Hash,
+					URL:          "local://" + f.FullPath,
+					PluginData:   string(fpJSON),
+					SiteName:     siteName,
+					ResourceType: sdkdto.ResourceTypeImage,
 				})
 			}
 
@@ -138,6 +139,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 					URL:          children[0].URL,
 					PluginData:   children[0].PluginData,
 					SiteName:     siteName,
+					ResourceType: sdkdto.ResourceTypeImage,
 				}
 			} else {
 				ch <- &sdkdto.TaskCreateResponse{
@@ -147,6 +149,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 					URL:          "local://" + filepath.Join(path, dirRelPath),
 					PluginData:   string(dpJSON),
 					SiteName:     siteName,
+					ResourceType: sdkdto.ResourceTypeImage,
 					Children:     children,
 				}
 			}
@@ -232,7 +235,7 @@ func (h *LocalImportTaskHandler) Start(ctx context.Context, task *sdkdto.TaskDTO
 	var specs []*sdkdto.StoreSpec
 
 	// 主资源(downloaded):本地文件流,可断点续传
-	if wantsRole(storeRoles, sdkdto.StoreRoleMain) {
+	if wantsRole(storeRoles, sdkdto.StoreRoleImage) {
 		f, err := os.Open(fp.FullPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("打开文件失败: %w", err)
@@ -244,7 +247,7 @@ func (h *LocalImportTaskHandler) Start(ctx context.Context, task *sdkdto.TaskDTO
 		}
 		h.readers.Store(taskID, f)
 		specs = append(specs, &sdkdto.StoreSpec{
-			Role:        sdkdto.StoreRoleMain,
+			Role:        sdkdto.StoreRoleImage,
 			Generation:  sdkdto.GenerationDownloaded,
 			ReadCloser:  f,
 			Format:      ext,
@@ -318,7 +321,7 @@ func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskR
 		return nil, nil, fmt.Errorf("task 或 pluginData 为空")
 	}
 
-	offset, hasMain := param.StreamOffsets[sdkdto.StoreRoleMain]
+	offset, hasMain := param.StreamOffsets[sdkdto.StoreRoleImage]
 	// main 已完成或未选:无需续传
 	if !hasMain {
 		return nil, nil, nil
@@ -349,7 +352,7 @@ func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskR
 	workName := stripExt(filepath.Base(fp.FullPath))
 
 	spec := &sdkdto.StoreSpec{
-		Role:        sdkdto.StoreRoleMain,
+		Role:        sdkdto.StoreRoleImage,
 		Generation:  sdkdto.GenerationDownloaded,
 		ReadCloser:  f,
 		Format:      ext,
