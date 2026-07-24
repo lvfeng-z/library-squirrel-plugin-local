@@ -321,7 +321,7 @@ func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskR
 		return nil, nil, fmt.Errorf("task 或 pluginData 为空")
 	}
 
-	offset, hasMain := param.StreamOffsets[sdkdto.StoreRoleImage]
+	offset, hasMain := param.OffsetForRole(sdkdto.StoreRoleImage)
 	// main 已完成或未选:无需续传
 	if !hasMain {
 		return nil, nil, nil
