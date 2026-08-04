@@ -117,8 +117,8 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 
 				children = append(children, &sdkdto.TaskCreateChildResponse{
 					TaskName:     filepath.Base(f.FullPath),
-					SiteWorkID:   f.Hash,
-					URL:          "local://" + f.FullPath,
+					SiteWorkId:   f.Hash,
+					Url:          "local://" + f.FullPath,
 					PluginData:   string(fpJSON),
 					SiteName:     siteName,
 					ResourceType: classifyResourceType(f.FullPath),
@@ -133,20 +133,20 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 
 			if len(children) == 1 {
 				ch <- &sdkdto.TaskCreateResponse{
-					PluginTaskID: children[0].SiteWorkID,
+					PluginTaskId: children[0].SiteWorkId,
 					TaskName:     children[0].TaskName,
-					SiteWorkID:   children[0].SiteWorkID,
-					URL:          children[0].URL,
+					SiteWorkId:   children[0].SiteWorkId,
+					Url:          children[0].Url,
 					PluginData:   children[0].PluginData,
 					SiteName:     siteName,
 					ResourceType: children[0].ResourceType,
 				}
 			} else {
 				ch <- &sdkdto.TaskCreateResponse{
-					PluginTaskID: fmt.Sprintf("local-dir-%s", dirRelPath),
+					PluginTaskId: fmt.Sprintf("local-dir-%s", dirRelPath),
 					TaskName:     taskName,
-					SiteWorkID:   fmt.Sprintf("local-dir-%s", dirRelPath),
-					URL:          "local://" + filepath.Join(path, dirRelPath),
+					SiteWorkId:   fmt.Sprintf("local-dir-%s", dirRelPath),
+					Url:          "local://" + filepath.Join(path, dirRelPath),
 					PluginData:   string(dpJSON),
 					SiteName:     siteName,
 					ResourceType: "", // 有 children 时由各 child 声明(parent 不声明)
@@ -177,7 +177,7 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	}
 	resp := &sdkdto.WorkResponse{
 		Work: &sdkdto.WorkDTO{
-			SiteWorkID:   &fp.Hash,
+			SiteWorkId:   &fp.Hash,
 			SiteWorkName: &workName,
 		},
 	}
@@ -187,28 +187,28 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 		case "localAuthor":
 			id, _ := strconv.ParseInt(m.ID, 10, 64)
 			if id > 0 {
-				resp.LocalAuthors = append(resp.LocalAuthors, &sdkdto.LocalAuthorDTO{ID: id})
+				resp.LocalAuthors = append(resp.LocalAuthors, &sdkdto.LocalAuthorDTO{Id: id})
 			}
 		case "siteAuthor":
 			siteAuthorID := "siteAuthor:" + m.Name
 			resp.SiteAuthors = append(resp.SiteAuthors, &sdkdto.TaskSiteAuthorDTO{
-				SiteAuthorID: siteAuthorID,
+				SiteAuthorId: siteAuthorID,
 				AuthorName:   m.Name,
 			})
 		case "localTag":
 			id, _ := strconv.ParseInt(m.ID, 10, 64)
 			if id > 0 {
-				resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{ID: id})
+				resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{Id: id})
 			}
 		case "siteTag":
 			siteTagID := "siteTag:" + m.Name
 			resp.SiteTags = append(resp.SiteTags, &sdkdto.TaskSiteTagDTO{
-				SiteTagID: siteTagID,
+				SiteTagId: siteTagID,
 				TagName:   m.Name,
 			})
 		case "workSet":
 			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
-				SiteWorkSetID: "workSet:" + m.Name,
+				SiteWorkSetId: "workSet:" + m.Name,
 				WorkSetName:   m.Name,
 			})
 		}
@@ -230,7 +230,7 @@ func (h *LocalImportTaskHandler) Start(ctx context.Context, task *sdkdto.TaskDTO
 
 	ext := filepath.Ext(fp.FullPath)
 	workName := stripExt(filepath.Base(fp.FullPath))
-	taskID := fmt.Sprintf("%d", task.ID)
+	taskID := fmt.Sprintf("%d", task.Id)
 
 	// 主资源 role 按文件类型派生:video→videoMain(可播放主体,downloaded);image/document 对应;unknown→image 兜底
 	mainRole := mainStoreRole(classifyResourceType(fp.FullPath))
@@ -351,7 +351,7 @@ func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskR
 		}
 	}
 
-	taskID := fmt.Sprintf("%d", param.Task.ID)
+	taskID := fmt.Sprintf("%d", param.Task.Id)
 	h.readers.Store(taskID, f)
 
 	ext := filepath.Ext(fp.FullPath)
@@ -379,7 +379,7 @@ func (h *LocalImportTaskHandler) closeReader(param *sdkdto.TaskResParam) error {
 	if param.Task == nil {
 		return nil
 	}
-	taskID := fmt.Sprintf("%d", param.Task.ID)
+	taskID := fmt.Sprintf("%d", param.Task.Id)
 	if v, ok := h.readers.LoadAndDelete(taskID); ok {
 		return v.(*os.File).Close()
 	}
