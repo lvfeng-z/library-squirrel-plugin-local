@@ -2,7 +2,7 @@
   "id": "com.lvfeng.localImport_7a3b2c1d-4e5f-6789-abcd-ef0123456789",
   "name": "localImport",
   "version": "1.0.0",
-  "contractVersion": 1,
+  "contractVersion": 2,
   "author": "lvfeng",
   "description": "从本地路径导入文件到资源库",
   "entryFile": "local_import.exe",
