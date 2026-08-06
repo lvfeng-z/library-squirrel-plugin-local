@@ -23,6 +23,10 @@ func TestClassifyResourceType(t *testing.T) {
 		{"doc.pdf", sdkdto.ResourceTypeDocument},
 		{"doc.docx", sdkdto.ResourceTypeDocument},
 		{"notes.txt", sdkdto.ResourceTypeDocument},
+		{"song.mp3", sdkdto.ResourceTypeAudio},
+		{"audio.M4A", sdkdto.ResourceTypeAudio},
+		{"track.flac", sdkdto.ResourceTypeAudio},
+		{"clip.wav", sdkdto.ResourceTypeAudio},
 		{"archive.zip", sdkdto.ResourceTypeUnknown},
 		{"noext", sdkdto.ResourceTypeUnknown},
 	}
@@ -41,6 +45,7 @@ func TestMainStoreRole(t *testing.T) {
 	}{
 		{sdkdto.ResourceTypeImage, sdkdto.StoreRoleImage},
 		{sdkdto.ResourceTypeVideo, sdkdto.StoreRoleVideoMain},
+		{sdkdto.ResourceTypeAudio, sdkdto.StoreRoleAudioMain},
 		{sdkdto.ResourceTypeDocument, sdkdto.StoreRoleDocument},
 		{sdkdto.ResourceTypeUnknown, sdkdto.StoreRoleImage},
 	}
