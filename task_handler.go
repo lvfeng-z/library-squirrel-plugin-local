@@ -17,19 +17,34 @@ import (
 
 const siteName = "local"
 
+// currentPluginDataVersion 当前插件支持的 task PluginData 格式版本
+const currentPluginDataVersion = 1
+
+// checkPluginDataVersion 校验 task PluginData 格式版本：
+// 0(旧数据，引入版本约定前写入)与当前支持版本走现有逻辑；高于当前=由更新版本插件写入，拒绝执行防静默数据损坏。
+// 主程序不解析 PluginData 内容，版本兼容性由插件自负（见 doc/plugin-dev-guide.md「plugin_data 格式版本约定」）。
+func checkPluginDataVersion(v int) error {
+	if v > currentPluginDataVersion {
+		return fmt.Errorf("任务 PluginData 由更高版本插件创建(schemaVersion=%d，当前支持 %d)，请升级插件或重建任务", v, currentPluginDataVersion)
+	}
+	return nil
+}
+
 // FilePluginData 文件级 PluginData
 type FilePluginData struct {
-	FullPath string        `json:"fullPath"`
-	RelPath  string        `json:"relPath"`
-	Hash     string        `json:"hash"`
-	Size     int64         `json:"size"`
-	Metadata []PathMeaning `json:"metadata,omitempty"`
+	SchemaVersion int           `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=当前
+	FullPath      string        `json:"fullPath"`
+	RelPath       string        `json:"relPath"`
+	Hash          string        `json:"hash"`
+	Size          int64         `json:"size"`
+	Metadata      []PathMeaning `json:"metadata,omitempty"`
 }
 
 // DirPluginData 目录级 PluginData（用于 parent task）
 type DirPluginData struct {
-	DirRelPath string        `json:"dirRelPath"`
-	Metadata   []PathMeaning `json:"metadata"`
+	SchemaVersion int           `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=当前
+	DirRelPath    string        `json:"dirRelPath"`
+	Metadata      []PathMeaning `json:"metadata"`
 }
 
 // LocalImportTaskHandler 本地文件导入任务处理器
@@ -107,11 +122,12 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 				}
 
 				fp := &FilePluginData{
-					FullPath: f.FullPath,
-					RelPath:  f.RelPath,
-					Hash:     f.Hash,
-					Size:     fi.Size(),
-					Metadata: metadata,
+					SchemaVersion: currentPluginDataVersion,
+					FullPath:      f.FullPath,
+					RelPath:       f.RelPath,
+					Hash:          f.Hash,
+					Size:          fi.Size(),
+					Metadata:      metadata,
 				}
 				fpJSON, _ := json.Marshal(fp)
 
@@ -126,8 +142,9 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 			}
 
 			dp := &DirPluginData{
-				DirRelPath: dirRelPath,
-				Metadata:   metadata,
+				SchemaVersion: currentPluginDataVersion,
+				DirRelPath:    dirRelPath,
+				Metadata:      metadata,
 			}
 			dpJSON, _ := json.Marshal(dp)
 
@@ -168,6 +185,9 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	var fp FilePluginData
 	if err := json.Unmarshal([]byte(*task.PluginData), &fp); err != nil {
 		return nil, fmt.Errorf("解析 pluginData 失败: %w", err)
+	}
+	if err := checkPluginDataVersion(fp.SchemaVersion); err != nil {
+		return nil, err
 	}
 
 	workName := filepath.Base(fp.FullPath)
@@ -226,6 +246,9 @@ func (h *LocalImportTaskHandler) Start(ctx context.Context, task *sdkdto.TaskDTO
 	var fp FilePluginData
 	if err := json.Unmarshal([]byte(*task.PluginData), &fp); err != nil {
 		return nil, nil, fmt.Errorf("解析 pluginData 失败: %w", err)
+	}
+	if err := checkPluginDataVersion(fp.SchemaVersion); err != nil {
+		return nil, nil, err
 	}
 
 	ext := filepath.Ext(fp.FullPath)
@@ -327,6 +350,9 @@ func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskR
 	var fp FilePluginData
 	if err := json.Unmarshal([]byte(*param.Task.PluginData), &fp); err != nil {
 		return nil, nil, fmt.Errorf("解析 pluginData 失败: %w", err)
+	}
+	if err := checkPluginDataVersion(fp.SchemaVersion); err != nil {
+		return nil, nil, err
 	}
 
 	// 主资源 role 按文件类型派生(与 Start 一致)
