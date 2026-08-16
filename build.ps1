@@ -43,6 +43,21 @@ if (Test-Path "views") {
     Copy-Item -Recurse "views" "$distDir/"
 }
 
+# Build identity stamping: inject git describe (source-state id) into dist plugin.json as "buildId".
+# The main app compares buildId to detect same-build installs; same source state always yields the same value.
+# Keep this block ASCII-only: powershell -File decodes no-BOM scripts as GBK, and CJK comments can swallow the next line.
+# Text insertion instead of ConvertTo-Json round-trip (avoids PS5.1 depth/escape mangling); write UTF-8 without BOM (Go json rejects BOM).
+$buildId = git describe --tags --always --dirty
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($buildId)) {
+    Write-Host "Build failed! git describe failed (not a git repo?), buildId is required." -ForegroundColor Red
+    exit 1
+}
+$manifestPath = Join-Path $distDir 'plugin.json'
+$manifestText = [System.IO.File]::ReadAllText($manifestPath)
+$stamped = $manifestText -replace '^\s*\{', ('{"buildId": "' + $buildId.Trim() + '",')
+[System.IO.File]::WriteAllText($manifestPath, $stamped, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "  buildId: $($buildId.Trim())"
+
 $zipPath = "$distDir/local-plugin.zip"
 if (Test-Path $zipPath) {
     Remove-Item -Force $zipPath
