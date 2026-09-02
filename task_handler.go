@@ -13,9 +13,8 @@ import (
 	"sync"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
+	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
-
-const siteName = "local"
 
 // currentPluginDataVersion 当前插件支持的 task PluginData 格式版本
 const currentPluginDataVersion = 1
@@ -136,7 +135,6 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 					SiteWorkId:   f.Hash,
 					Url:          "local://" + f.FullPath,
 					PluginData:   string(fpJSON),
-					SiteName:     siteName,
 					ResourceType: classifyResourceType(f.FullPath),
 				})
 			}
@@ -155,7 +153,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 					SiteWorkId:   children[0].SiteWorkId,
 					Url:          children[0].Url,
 					PluginData:   children[0].PluginData,
-					SiteName:     siteName,
+					SiteKey:      identity.Local.Key,
 					ResourceType: children[0].ResourceType,
 				}
 			} else {
@@ -165,7 +163,7 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 					SiteWorkId:   fmt.Sprintf("local-dir-%s", dirRelPath),
 					Url:          "local://" + filepath.Join(path, dirRelPath),
 					PluginData:   string(dpJSON),
-					SiteName:     siteName,
+					SiteKey:      identity.Local.Key,
 					ResourceType: "", // 有 children 时由各 child 声明(parent 不声明)
 					Children:     children,
 				}

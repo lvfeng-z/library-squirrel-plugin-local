@@ -1,4 +1,4 @@
-local-import.exe
+*.exe
 dist/
 .idea
 views/classify/classify-panel.js
