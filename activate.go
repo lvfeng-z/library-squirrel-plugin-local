@@ -4,19 +4,10 @@ import (
 	"encoding/json"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
-	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
 
 // Activate 插件激活回调，注册扩展点和 URL 监听器
 func Activate(ctx sdkdto.PluginContext, handler *LocalImportTaskHandler) {
-	// 注册 local site（本地导入虚拟站点；站点名/描述由 identity 注册表权威给定，
-	// 按键查重，重复注册静默跳过）
-	if err := ctx.AddSite([]*sdkdto.SiteDTO{
-		{SiteKey: identity.Local.Key},
-	}); err != nil {
-		ctx.Warnf("注册 local site 失败: %v", err)
-	}
-
 	// 注册任务处理器
 	if err := ctx.RegisterTaskHandler("main", "本地导入", "从本地路径导入文件", handler); err != nil {
 		ctx.Errorf("注册任务处理器失败: %v", err)
