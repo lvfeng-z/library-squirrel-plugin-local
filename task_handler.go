@@ -67,7 +67,11 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 	}
 
 	if len(scanResult.Files) == 0 {
-		return sdkdto.BatchResult(nil), nil
+		// 扫描器不按扩展名过滤（不识别的类型归 unknown 照常导入），
+		// 零文件只可能是目录下无常规文件、或文件均因不可访问被跳过，SetReason 按此语义向用户说明
+		result := sdkdto.BatchResult(nil)
+		result.SetReason("未发现可导入的文件（目录为空或文件均不可读取）")
+		return result, nil
 	}
 
 	ch := make(chan *sdkdto.TaskCreateResponse, 16)
