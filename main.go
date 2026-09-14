@@ -8,7 +8,8 @@ import (
 func main() {
 	handler := &LocalImportTaskHandler{}
 
-	sdkplugin.Serve(handler,
+	sdkplugin.Serve(
+		sdkplugin.WithTaskHandler(handler),
 		sdkplugin.WithActivate(func(ctx sdkdto.PluginContext) {
 			Activate(ctx, handler)
 		}),
