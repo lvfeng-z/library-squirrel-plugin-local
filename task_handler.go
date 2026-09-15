@@ -13,11 +13,12 @@ import (
 	"sync"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
-	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
 
 // currentPluginDataVersion 当前插件支持的 task PluginData 格式版本
-const currentPluginDataVersion = 1
+// v2：FilePluginData 增加可选归属字段（siteKey/siteWorkId，扫描期归属裁决结果）；
+// v0/v1 旧数据无归属字段，读侧按零值走 local 回退路径（作品身份=内容哈希）
+const currentPluginDataVersion = 2
 
 // checkPluginDataVersion 校验 task PluginData 格式版本：
 // 0(旧数据，引入版本约定前写入)与当前支持版本走现有逻辑；高于当前=由更新版本插件写入，拒绝执行防静默数据损坏。
@@ -31,12 +32,21 @@ func checkPluginDataVersion(v int) error {
 
 // FilePluginData 文件级 PluginData
 type FilePluginData struct {
-	SchemaVersion int           `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=当前
+	SchemaVersion int           `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=引入版本约定，2=增加归属字段
 	FullPath      string        `json:"fullPath"`
 	RelPath       string        `json:"relPath"`
 	Hash          string        `json:"hash"`
 	Size          int64         `json:"size"`
 	Metadata      []PathMeaning `json:"metadata,omitempty"`
+	// SiteKey/SiteWorkId 真实域归属（扫描期站点分类与文件名形态解析的裁决结果）：
+	// SiteKey=归属站点键、SiteWorkId=页级作品 ID。两字段空=local 回退，作品身份=Hash
+	SiteKey    string `json:"siteKey,omitempty"`
+	SiteWorkId string `json:"siteWorkId,omitempty"`
+}
+
+// hasRealAttribution PluginData 是否携带真实域归属（裁决出真实站点与页级作品 ID）
+func (fp *FilePluginData) hasRealAttribution() bool {
+	return fp.SiteKey != "" && fp.SiteWorkId != ""
 }
 
 // DirPluginData 目录级 PluginData（用于 parent task）
@@ -51,6 +61,39 @@ type LocalImportTaskHandler struct {
 	ctx        sdkdto.PluginContext
 	classifier *PathClassifier
 	readers    sync.Map // taskID → *os.File
+
+	siteKeyMu   sync.Mutex
+	siteKeyByID map[int64]string // 站点 DB 行 id → 站点键（ListSites 注册表投影一次拉取的缓存）
+}
+
+// resolveSiteKeyByID 站点 DB 行 id → 站点键。面板站点下拉选择项的 value 是站点 DB 行 id，
+// 而跨库身份是站点键，经 ListSites 注册表投影解析；不可解析（空 id/查询失败/查无此行）
+// 一律按无站点分类处理，作品走 local 回退。
+func (h *LocalImportTaskHandler) resolveSiteKeyByID(idStr string) string {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		return ""
+	}
+	h.siteKeyMu.Lock()
+	defer h.siteKeyMu.Unlock()
+	if h.siteKeyByID == nil {
+		if h.ctx == nil {
+			return ""
+		}
+		resp, err := h.ctx.ListSites()
+		if err != nil {
+			h.ctx.Warnf("查询站点列表失败，站点分类含义按无站点分类处理: %v", err)
+			return ""
+		}
+		byID := make(map[int64]string, len(resp.Items))
+		for _, s := range resp.Items {
+			if s != nil && s.SiteKey != "" {
+				byID[s.Id] = s.SiteKey
+			}
+		}
+		h.siteKeyByID = byID
+	}
+	return h.siteKeyByID[id]
 }
 
 // Create 扫描本地路径，流式产出任务
@@ -117,65 +160,107 @@ func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, e
 
 			taskName := fmt.Sprintf("导入【%s】", path)
 
-			children := make([]*sdkdto.TaskCreateChildResponse, 0, len(files))
-			for _, f := range files {
-				fi, err := os.Stat(f.FullPath)
-				if err != nil {
-					continue
-				}
+			// 站点分类含义 → 子树归属站点键（site 含义 ID=站点 DB 行 id，经注册表投影解析）
+			classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
 
-				fp := &FilePluginData{
-					SchemaVersion: currentPluginDataVersion,
-					FullPath:      f.FullPath,
-					RelPath:       f.RelPath,
-					Hash:          f.Hash,
-					Size:          fi.Size(),
-					Metadata:      metadata,
-				}
-				fpJSON, _ := json.Marshal(fp)
-
-				children = append(children, &sdkdto.TaskCreateChildResponse{
-					TaskName:     filepath.Base(f.FullPath),
-					SiteWorkId:   f.Hash,
-					Url:          "local://" + f.FullPath,
-					PluginData:   string(fpJSON),
-					ResourceType: classifyResourceType(f.FullPath),
-				})
+			// 按归属裁决拆分：子任务站点继承父应答，同目录混合归属（真实域/local 回退）
+			// 须拆为多个应答各自携带站点键
+			localFiles, realFiles := partitionByAttribution(files, classifiedSiteKey)
+			if resp := buildDirGroupResponse(path, dirRelPath, taskName, metadata, localFiles); resp != nil {
+				ch <- resp
 			}
-
-			dp := &DirPluginData{
-				SchemaVersion: currentPluginDataVersion,
-				DirRelPath:    dirRelPath,
-				Metadata:      metadata,
-			}
-			dpJSON, _ := json.Marshal(dp)
-
-			if len(children) == 1 {
-				ch <- &sdkdto.TaskCreateResponse{
-					PluginTaskId: children[0].SiteWorkId,
-					TaskName:     children[0].TaskName,
-					SiteWorkId:   children[0].SiteWorkId,
-					Url:          children[0].Url,
-					PluginData:   children[0].PluginData,
-					SiteKey:      identity.Local.Key,
-					ResourceType: children[0].ResourceType,
-				}
-			} else {
-				ch <- &sdkdto.TaskCreateResponse{
-					PluginTaskId: fmt.Sprintf("local-dir-%s", dirRelPath),
-					TaskName:     taskName,
-					SiteWorkId:   fmt.Sprintf("local-dir-%s", dirRelPath),
-					Url:          "local://" + filepath.Join(path, dirRelPath),
-					PluginData:   string(dpJSON),
-					SiteKey:      identity.Local.Key,
-					ResourceType: "", // 有 children 时由各 child 声明(parent 不声明)
-					Children:     children,
-				}
+			if resp := buildDirGroupResponse(path, dirRelPath, taskName, metadata, realFiles); resp != nil {
+				ch <- resp
 			}
 		}
 	}()
 
 	return sdkdto.StreamResult(ch), nil
+}
+
+// buildDirGroupResponse 为同目录同归属的一组文件构造任务应答：
+// 单文件=叶任务（身份=该文件的作品 ID），多文件=父容器+子任务。
+// 组内归属一致（调用方按归属裁决拆分）；local 组维持既有任务身份形态
+// （local-dir 前缀父任务/哈希身份），真实域组的父任务身份加站点键后缀，
+// 区分同目录拆分后的两组任务（PluginTaskId 是同流应答的父任务合并键）。
+// 全部文件不可访问（os.Stat 失败）时返回 nil。
+func buildDirGroupResponse(path, dirRelPath, taskName string, metadata []PathMeaning, files []attributedFile) *sdkdto.TaskCreateResponse {
+	if len(files) == 0 {
+		return nil
+	}
+	siteKey := files[0].attr.SiteKey
+
+	children := make([]*sdkdto.TaskCreateChildResponse, 0, len(files))
+	for _, af := range files {
+		fi, err := os.Stat(af.entry.FullPath)
+		if err != nil {
+			continue
+		}
+
+		// 作品身份：真实域=解析出的页级作品 ID，local 回退=文件内容哈希
+		workID := af.entry.Hash
+		fp := &FilePluginData{
+			SchemaVersion: currentPluginDataVersion,
+			FullPath:      af.entry.FullPath,
+			RelPath:       af.entry.RelPath,
+			Hash:          af.entry.Hash,
+			Size:          fi.Size(),
+			Metadata:      metadata,
+		}
+		if af.attr.isReal() {
+			workID = af.attr.PageWorkID
+			fp.SiteKey = af.attr.SiteKey
+			fp.SiteWorkId = af.attr.PageWorkID
+		}
+		fpJSON, _ := json.Marshal(fp)
+
+		children = append(children, &sdkdto.TaskCreateChildResponse{
+			TaskName:     filepath.Base(af.entry.FullPath),
+			SiteWorkId:   workID,
+			Url:          "local://" + af.entry.FullPath,
+			PluginData:   string(fpJSON),
+			ResourceType: classifyResourceType(af.entry.FullPath),
+		})
+	}
+
+	if len(children) == 0 {
+		return nil
+	}
+
+	if len(children) == 1 {
+		return &sdkdto.TaskCreateResponse{
+			PluginTaskId: children[0].SiteWorkId,
+			TaskName:     children[0].TaskName,
+			SiteWorkId:   children[0].SiteWorkId,
+			Url:          children[0].Url,
+			PluginData:   children[0].PluginData,
+			SiteKey:      siteKey,
+			ResourceType: children[0].ResourceType,
+		}
+	}
+
+	dp := &DirPluginData{
+		SchemaVersion: currentPluginDataVersion,
+		DirRelPath:    dirRelPath,
+		Metadata:      metadata,
+	}
+	dpJSON, _ := json.Marshal(dp)
+
+	parentID := fmt.Sprintf("local-dir-%s", dirRelPath)
+	if files[0].attr.isReal() {
+		parentID = parentID + "@" + siteKey
+	}
+
+	return &sdkdto.TaskCreateResponse{
+		PluginTaskId: parentID,
+		TaskName:     taskName,
+		SiteWorkId:   parentID,
+		Url:          "local://" + filepath.Join(path, dirRelPath),
+		PluginData:   string(dpJSON),
+		SiteKey:      siteKey,
+		ResourceType: "", // 有 children 时由各 child 声明(parent 不声明)
+		Children:     children,
+	}
 }
 
 // CreateWorkInfo 从 PluginData 反序列化路径元数据，构建 WorkResponse
@@ -197,9 +282,15 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	if ext := filepath.Ext(workName); ext != "" {
 		workName = workName[:len(workName)-len(ext)]
 	}
+
+	// 作品身份：真实域归属（扫描期裁决进 PluginData）=页级作品 ID；local 回退=文件内容哈希
+	siteWorkID := fp.Hash
+	if fp.hasRealAttribution() {
+		siteWorkID = fp.SiteWorkId
+	}
 	resp := &sdkdto.WorkResponse{
 		Work: &sdkdto.WorkDTO{
-			SiteWorkId:   &fp.Hash,
+			SiteWorkId:   &siteWorkID,
 			SiteWorkName: &workName,
 		},
 	}
@@ -212,23 +303,33 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 				resp.LocalAuthors = append(resp.LocalAuthors, &sdkdto.LocalAuthorDTO{Id: id})
 			}
 		case "siteAuthor":
-			siteAuthorID := "siteAuthor:" + m.Name
-			resp.SiteAuthors = append(resp.SiteAuthors, &sdkdto.TaskSiteAuthorDTO{
-				SiteAuthorId: siteAuthorID,
-				AuthorName:   m.Name,
-			})
+			// 用户供数只有名字：按名落本地域（ID=0 名称模式，宿主 find-or-create）。
+			// 站点域行的身份只能来自站点侧 ID，名字不造站点域行
+			if m.Name != "" {
+				name := m.Name
+				resp.LocalAuthors = append(resp.LocalAuthors, &sdkdto.LocalAuthorDTO{AuthorName: &name})
+			}
 		case "localTag":
 			id, _ := strconv.ParseInt(m.ID, 10, 64)
 			if id > 0 {
 				resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{Id: id})
 			}
 		case "siteTag":
-			siteTagID := "siteTag:" + m.Name
-			resp.SiteTags = append(resp.SiteTags, &sdkdto.TaskSiteTagDTO{
-				SiteTagId: siteTagID,
-				TagName:   m.Name,
-			})
+			// 同 siteAuthor：按名落本地域
+			if m.Name != "" {
+				name := m.Name
+				resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{LocalTagName: &name})
+			}
 		case "workSet":
+			// 作品集按名 upsert 落作品所属站点域：local 归属作品落 local 域
+			// （workSet:{名} 即 local 站点的作品集 ID 约定形态）。真实域归属作品的
+			// 站点侧作品集 ID 无法从名字派生（键即身份，无 ID 不造行），跳过该含义
+			if fp.hasRealAttribution() {
+				if h.ctx != nil {
+					h.ctx.Infof("作品集含义按名仅支持 local 归属，真实域归属(%s)跳过: %s", fp.SiteKey, m.Name)
+				}
+				continue
+			}
 			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
 				SiteWorkSetId: "workSet:" + m.Name,
 				WorkSetName:   m.Name,

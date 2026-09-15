@@ -10,8 +10,16 @@
     >
       <template #header>
         <div class="explain-header">
-          <el-tooltip content="本地导入插件请求解释路径段的含义，以便为作品填充作者、标签等信息" placement="bottom">
+          <el-tooltip placement="bottom">
             <span>解释路径含义</span>
+            <template #content>
+              <div style="max-width: 300px;">
+                本地导入插件请求解释路径段的含义，以便为作品填充作者、标签等信息。<br />
+                按名输入的作者/标签将按名称匹配或新建本地域实体；<br />
+                站点归属声明作用于其子树：子树内文件解析出的作品归入该站点域；<br />
+                作品集名仅对 local 归属的作品生效。
+              </div>
+            </template>
           </el-tooltip>
           <div class="explain-actions">
             <el-button type="success" icon="CirclePlus" @click="addMeaning">新增</el-button>
@@ -88,13 +96,13 @@ interface SelectState {
 }
 
 const meaningTypes = [
-  { value: 'localAuthor', label: '本地作者' },
-  { value: 'siteAuthor', label: '站点作者' },
-  { value: 'localTag', label: '本地标签' },
-  { value: 'siteTag', label: '站点标签' },
+  { value: 'localAuthor', label: '本地作者（选择）' },
+  { value: 'siteAuthor', label: '本地作者（按名）' },
+  { value: 'localTag', label: '本地标签（选择）' },
+  { value: 'siteTag', label: '本地标签（按名）' },
   { value: 'workName', label: '作品名称' },
   { value: 'workSet', label: '作品集名称' },
-  { value: 'site', label: '站点名称' },
+  { value: 'site', label: '站点（子树归属）' },
   { value: 'unknown', label: '未知/无含义' }
 ]
 

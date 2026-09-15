@@ -48,7 +48,7 @@ type ClassifyResponse struct {
 // PathClassifier 路径分类器，管理已学规则并与前端交互
 type PathClassifier struct {
 	ctx          sdkdto.PluginContext
-	learnedRules map[int][]string // level → 已学的类型列表
+	learnedRules map[int][]PathMeaning // level → 已学的含义（含选择型含义的实体 ID/站点键）
 	pendingCh    chan *ClassifyResponse
 	mu           sync.Mutex
 }
@@ -57,7 +57,7 @@ type PathClassifier struct {
 func NewPathClassifier(ctx sdkdto.PluginContext) *PathClassifier {
 	return &PathClassifier{
 		ctx:          ctx,
-		learnedRules: make(map[int][]string),
+		learnedRules: make(map[int][]PathMeaning),
 		pendingCh:    make(chan *ClassifyResponse, 1),
 	}
 }
@@ -73,12 +73,18 @@ func (c *PathClassifier) HandleResponse(resp *ClassifyResponse) {
 // ClassifyDir 对目录名进行分类，返回该目录的所有含义
 func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, error) {
 	c.mu.Lock()
-	if types, ok := c.learnedRules[level]; ok {
+	if learned, ok := c.learnedRules[level]; ok {
 		c.mu.Unlock()
-		c.ctx.Infof("目录分类命中已学规则: level=%d, dirName=%s, types=%v", level, dirName, types)
-		meanings := make([]PathMeaning, len(types))
-		for i, t := range types {
-			meanings[i] = PathMeaning{Type: t, Name: dirName}
+		c.ctx.Infof("目录分类命中已学规则: level=%d, dirName=%s, meanings=%+v", level, dirName, learned)
+		meanings := make([]PathMeaning, len(learned))
+		for i, m := range learned {
+			if m.ID != "" {
+				// 选择型含义按首次选择的实体回放：站点键/本地实体 ID 是身份，不随目录名变化
+				meanings[i] = PathMeaning{Type: m.Type, ID: m.ID, Name: m.Name}
+			} else {
+				// 文本型含义：目录名即名字
+				meanings[i] = PathMeaning{Type: m.Type, Name: dirName}
+			}
 		}
 		return meanings, nil
 	}
@@ -112,12 +118,9 @@ func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, 
 		if resp.Cancel {
 			return nil, fmt.Errorf("用户取消分类")
 		}
-		types := make([]string, len(resp.Meanings))
-		for i, m := range resp.Meanings {
-			types[i] = m.Type
-		}
+		learned := append([]PathMeaning(nil), resp.Meanings...)
 		c.mu.Lock()
-		c.learnedRules[level] = types
+		c.learnedRules[level] = learned
 		c.mu.Unlock()
 		c.ctx.Infof("收到分类响应: level=%d, dirName=%s, meanings=%+v", level, dirName, resp.Meanings)
 		return resp.Meanings, nil
