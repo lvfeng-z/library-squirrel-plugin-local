@@ -6,26 +6,8 @@ import (
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
-// Activate 插件激活回调，注册扩展点和 URL 监听器
+// Activate 插件激活回调（扩展点注册与 URL 监听已由清单声明，宿主激活期派生）
 func Activate(ctx sdkdto.PluginContext, handler *LocalImportTaskHandler) {
-	// 注册任务处理器
-	if err := ctx.RegisterTaskHandler("main", "本地导入", "从本地路径导入文件", handler); err != nil {
-		ctx.Errorf("注册任务处理器失败: %v", err)
-		return
-	}
-
-	// 注册 URL 监听器
-	// local:// 自定义协议 + Windows 本地路径（C:\...、D:\...、\\server\share\...）
-	listeners := []string{
-		`^local://.*`,
-		`^[A-Za-z]:\\.*`,
-		`^\\\\[^\]+\\.*`,
-	}
-	if err := ctx.RegisterUrlListener("main", listeners); err != nil {
-		ctx.Errorf("注册URL监听器失败: %v", err)
-		return
-	}
-
 	// 订阅前端分类响应
 	handler.ctx = ctx
 	handler.classifier = NewPathClassifier(ctx)
