@@ -7,7 +7,7 @@ import (
 )
 
 // Activate 插件激活回调（扩展点注册与 URL 监听已由清单声明，宿主激活期派生）
-func Activate(ctx sdkdto.PluginContext, handler *LocalImportTaskHandler) {
+func Activate(ctx sdkdto.PluginContext, handler *LocalImportWorkFetcher) {
 	// 订阅前端分类响应
 	handler.ctx = ctx
 	handler.classifier = NewPathClassifier(ctx)

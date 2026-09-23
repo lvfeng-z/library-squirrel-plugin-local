@@ -127,7 +127,7 @@ func TestPartitionByAttribution(t *testing.T) {
 // TestResolveSiteKeyByIDNilContext 无宿主上下文（ctx 未注入）时站点 DB 行 id 一律不可解析，
 // 走无站点分类→local 回退
 func TestResolveSiteKeyByIDNilContext(t *testing.T) {
-	h := &LocalImportTaskHandler{}
+	h := &LocalImportWorkFetcher{}
 	if got := h.resolveSiteKeyByID("7"); got != "" {
 		t.Fatalf("nil ctx 下应返回空串，实得 %q", got)
 	}

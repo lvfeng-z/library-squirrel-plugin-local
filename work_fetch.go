@@ -56,8 +56,8 @@ type DirPluginData struct {
 	Metadata      []PathMeaning `json:"metadata"`
 }
 
-// LocalImportTaskHandler 本地文件导入任务处理器
-type LocalImportTaskHandler struct {
+// LocalImportWorkFetcher 本地文件导入作品拉取扩展
+type LocalImportWorkFetcher struct {
 	ctx        sdkdto.PluginContext
 	classifier *PathClassifier
 	readers    sync.Map // taskID → *os.File
@@ -69,7 +69,7 @@ type LocalImportTaskHandler struct {
 // resolveSiteKeyByID 站点 DB 行 id → 站点键。面板站点下拉选择项的 value 是站点 DB 行 id，
 // 而跨库身份是站点键，经 ListSites 注册表投影解析；不可解析（空 id/查询失败/查无此行）
 // 一律按无站点分类处理，作品走 local 回退。
-func (h *LocalImportTaskHandler) resolveSiteKeyByID(idStr string) string {
+func (h *LocalImportWorkFetcher) resolveSiteKeyByID(idStr string) string {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
 		return ""
@@ -97,7 +97,7 @@ func (h *LocalImportTaskHandler) resolveSiteKeyByID(idStr string) string {
 }
 
 // Create 扫描本地路径，流式产出任务
-func (h *LocalImportTaskHandler) Create(url string) (*sdkdto.TaskCreateResult, error) {
+func (h *LocalImportWorkFetcher) Create(url string) (*sdkdto.TaskCreateResult, error) {
 	path := url
 	if len(path) >= 8 && path[:8] == "local://" {
 		path = path[8:]
@@ -264,7 +264,7 @@ func buildDirGroupResponse(path, dirRelPath, taskName string, metadata []PathMea
 }
 
 // CreateWorkInfo 从 PluginData 反序列化路径元数据，构建 WorkResponse
-func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
+func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, fmt.Errorf("pluginData 为空")
 	}
@@ -341,7 +341,7 @@ func (h *LocalImportTaskHandler) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 }
 
 // Start 打开文件,按 storeRoles 选择性返回 StoreSpec 流集合(主资源 downloaded + 缩略图 derived)与作品信息
-func (h *LocalImportTaskHandler) Start(ctx context.Context, task *sdkdto.TaskDTO, storeRoles []string) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
+func (h *LocalImportWorkFetcher) Start(ctx context.Context, task *sdkdto.TaskDTO, storeRoles []string) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, nil, fmt.Errorf("pluginData 为空")
 	}
@@ -429,23 +429,23 @@ func wantsRole(storeRoles []string, role string) bool {
 }
 
 // Retry 委托到 Start
-func (h *LocalImportTaskHandler) Retry(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
+func (h *LocalImportWorkFetcher) Retry(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
 	return nil, fmt.Errorf("retry 不支持，请使用 start")
 }
 
 // Pause 关闭文件句柄
-func (h *LocalImportTaskHandler) Pause(param *sdkdto.TaskResParam) error {
+func (h *LocalImportWorkFetcher) Pause(param *sdkdto.TaskResParam) error {
 	return h.closeReader(param)
 }
 
 // Stop 关闭文件句柄
-func (h *LocalImportTaskHandler) Stop(param *sdkdto.TaskResParam) error {
+func (h *LocalImportWorkFetcher) Stop(param *sdkdto.TaskResParam) error {
 	return h.closeReader(param)
 }
 
 // Resume 恢复下载:按 TaskResumeParam.StreamOffsets 续传未完成的主资源轨
 // 缩略图(derived)为一次性产物,暂停的任务意味着其已完成,故 Resume 不再产出
-func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskResumeParam) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
+func (h *LocalImportWorkFetcher) Resume(ctx context.Context, param *sdkdto.TaskResumeParam) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if param.Task == nil || param.Task.PluginData == nil {
 		return nil, nil, fmt.Errorf("task 或 pluginData 为空")
 	}
@@ -504,7 +504,7 @@ func (h *LocalImportTaskHandler) Resume(ctx context.Context, param *sdkdto.TaskR
 	return []*sdkdto.StoreSpec{spec}, resp, nil
 }
 
-func (h *LocalImportTaskHandler) closeReader(param *sdkdto.TaskResParam) error {
+func (h *LocalImportWorkFetcher) closeReader(param *sdkdto.TaskResParam) error {
 	if param.Task == nil {
 		return nil
 	}

@@ -58,7 +58,7 @@ func findResponse(resps []*sdkdto.TaskCreateResponse, siteKey string) *sdkdto.Ta
 func TestCreateEmptyDirSetsReason(t *testing.T) {
 	dir := t.TempDir()
 
-	h := &LocalImportTaskHandler{}
+	h := &LocalImportWorkFetcher{}
 	result, err := h.Create(dir)
 	if err != nil {
 		t.Fatalf("空目录 Create 不应报错: %v", err)
@@ -98,7 +98,7 @@ func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 	classifier.mu.Lock()
 	classifier.learnedRules[0] = []PathMeaning{{Type: "site", ID: "7", Name: "pixiv"}}
 	classifier.mu.Unlock()
-	h := &LocalImportTaskHandler{ctx: ctx, classifier: classifier}
+	h := &LocalImportWorkFetcher{ctx: ctx, classifier: classifier}
 
 	resps := collectResponses(t, mustCreate(t, h, root))
 	if len(resps) != 3 {
@@ -141,7 +141,7 @@ func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 	classifier2.mu.Lock()
 	classifier2.learnedRules[1] = []PathMeaning{{Type: "site", ID: "9", Name: "bilibili"}}
 	classifier2.mu.Unlock()
-	h2 := &LocalImportTaskHandler{ctx: ctx, classifier: classifier2}
+	h2 := &LocalImportWorkFetcher{ctx: ctx, classifier: classifier2}
 	resps2 := collectResponses(t, mustCreate(t, h2, root2))
 	var rootFileSite, deepFileSite string
 	for _, r := range resps2 {
@@ -167,7 +167,7 @@ func TestCreateMixedDirSplitsByAttribution(t *testing.T) {
 	writeFile(t, filepath.Join(root, "11111111_p0.jpg"), "a")
 	writeFile(t, filepath.Join(root, "plain.png"), "b")
 
-	h := &LocalImportTaskHandler{ctx: stubPluginCtx{}, classifier: NewPathClassifier(stubPluginCtx{})}
+	h := &LocalImportWorkFetcher{ctx: stubPluginCtx{}, classifier: NewPathClassifier(stubPluginCtx{})}
 	resps := collectResponses(t, mustCreate(t, h, root))
 	if len(resps) != 2 {
 		t.Fatalf("同目录混合归属应拆为 2 个应答，实得 %d 个", len(resps))
@@ -193,7 +193,7 @@ func TestCreateLocalEmissionFormUnchanged(t *testing.T) {
 	writeFile(t, filepath.Join(root, "a.png"), "a")
 	writeFile(t, filepath.Join(root, "b.png"), "b")
 
-	h := &LocalImportTaskHandler{ctx: stubPluginCtx{}, classifier: NewPathClassifier(stubPluginCtx{})}
+	h := &LocalImportWorkFetcher{ctx: stubPluginCtx{}, classifier: NewPathClassifier(stubPluginCtx{})}
 	resps := collectResponses(t, mustCreate(t, h, root))
 	if len(resps) != 1 {
 		t.Fatalf("根目录两文件应产出单父任务应答，实得 %d 个", len(resps))
@@ -230,7 +230,7 @@ func TestCreateLocalEmissionFormUnchanged(t *testing.T) {
 // 作品身份=哈希；站点域列表恒空（伪行停写）；站点作者/标签输入按名落本地域（ID=0 名称模式）；
 // 作品集按名保留（local 站点的作品集 ID 约定形态）
 func TestCreateWorkInfoLocalAttributionFieldsUnchanged(t *testing.T) {
-	h := &LocalImportTaskHandler{}
+	h := &LocalImportWorkFetcher{}
 	pd := `{"schemaVersion":2,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"abc123","size":10,` +
 		`"metadata":[{"type":"localAuthor","id":"5"},{"type":"siteAuthor","name":"作者甲"},` +
 		`{"type":"localTag","id":"6"},{"type":"siteTag","name":"标签乙"},{"type":"workSet","name":"合集"}]}`
@@ -282,7 +282,7 @@ func TestCreateWorkInfoLocalAttributionFieldsUnchanged(t *testing.T) {
 // TestCreateWorkInfoRealAttribution 真实域归属的作品信息：作品身份=页级作品 ID（非哈希）；
 // 周边按名仍落本地域；作品集含义跳过（真实域作品集 ID 无法从名字派生，无 ID 不造行）
 func TestCreateWorkInfoRealAttribution(t *testing.T) {
-	h := &LocalImportTaskHandler{}
+	h := &LocalImportWorkFetcher{}
 	pd := `{"schemaVersion":2,"fullPath":"C:/lib/12345678-abcdef_p0.jpg","relPath":"12345678-abcdef_p0.jpg",` +
 		`"hash":"abc123","size":10,"siteKey":"pixiv","siteWorkId":"12345678-abcdef_p0",` +
 		`"metadata":[{"type":"siteAuthor","name":"作者甲"},{"type":"siteTag","name":"标签乙"},{"type":"workSet","name":"合集"}]}`
@@ -313,7 +313,7 @@ func TestCreateWorkInfoRealAttribution(t *testing.T) {
 // schemaVersion 0/1）内嵌的 siteAuthor/siteTag 名字声明按新规则转报本地域按名——
 // 站点域伪行不再产生，作品身份维持既有哈希（旧任务按创建时归属执行）
 func TestCreateWorkInfoLegacyPseudoFormDataConvertsByName(t *testing.T) {
-	h := &LocalImportTaskHandler{}
+	h := &LocalImportWorkFetcher{}
 	for _, version := range []int{0, 1} {
 		pd := `{"schemaVersion":` + itoa(version) + `,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"legacyhash","size":10,` +
 			`"metadata":[{"type":"siteAuthor","name":"旧作者"},{"type":"siteTag","name":"旧标签"}]}`
@@ -379,7 +379,7 @@ func TestBuildDirGroupResponseRealParentIdentity(t *testing.T) {
 	}
 }
 
-func mustCreate(t *testing.T, h *LocalImportTaskHandler, path string) *sdkdto.TaskCreateResult {
+func mustCreate(t *testing.T, h *LocalImportWorkFetcher, path string) *sdkdto.TaskCreateResult {
 	t.Helper()
 	result, err := h.Create(path)
 	if err != nil {

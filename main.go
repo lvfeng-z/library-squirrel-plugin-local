@@ -6,10 +6,10 @@ import (
 )
 
 func main() {
-	handler := &LocalImportTaskHandler{}
+	handler := &LocalImportWorkFetcher{}
 
 	sdkplugin.Serve(
-		sdkplugin.WithTaskHandler(handler),
+		sdkplugin.WithWorkFetcher(handler),
 		sdkplugin.WithActivate(func(ctx sdkdto.PluginContext) {
 			Activate(ctx, handler)
 		}),
