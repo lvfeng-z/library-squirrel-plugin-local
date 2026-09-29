@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -48,6 +51,16 @@ func findResponse(resps []*sdkdto.TaskCreateResponse, siteKey string) *sdkdto.Ta
 	for _, r := range resps {
 		if r.SiteKey == siteKey {
 			return r
+		}
+	}
+	return nil
+}
+
+// findSpecByRole 按 role 查找 store 规格（同 role 多轨时返回首个）
+func findSpecByRole(specs []*sdkdto.StoreSpec, role string) *sdkdto.StoreSpec {
+	for _, s := range specs {
+		if s.Role == role {
+			return s
 		}
 	}
 	return nil
@@ -106,8 +119,15 @@ func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 	}
 
 	// 根组：原图形态文件 → pixiv 页级叶任务
-	pixivRoot := findResponse(resps, identity.Pixiv.Key)
-	if pixivRoot == nil || pixivRoot.SiteWorkId != "12345678_p0" || pixivRoot.PluginTaskId != "12345678_p0" {
+	// （应答按父目录分组 map 随机序产出，须按作品 ID 无序定位，不能取首个 pixiv 键应答）
+	var pixivRoot *sdkdto.TaskCreateResponse
+	for _, r := range resps {
+		if r.SiteWorkId == "12345678_p0" {
+			pixivRoot = r
+			break
+		}
+	}
+	if pixivRoot == nil || pixivRoot.PluginTaskId != "12345678_p0" {
 		t.Fatalf("根组应产出 pixiv 页级叶任务(12345678_p0)，实得 %+v", pixivRoot)
 	}
 	// 子树生效：根级 site 规则传导到子目录组的文件归属
@@ -398,4 +418,132 @@ func writeFile(t *testing.T, path, content string) string {
 
 func itoa(v int) string {
 	return strconv.Itoa(v)
+}
+
+// stubThumbGenerator 桩缩略图生成器：固定字节，规避单测对 FFmpeg 的环境依赖
+type stubThumbGenerator struct{}
+
+func (stubThumbGenerator) generate(string) ([]byte, string, error) {
+	return []byte("stub-thumbnail-bytes"), "jpg", nil
+}
+
+// pluginDataJSON 构造文件级 PluginData JSON（fullPath 统一斜杠形态，避免 Windows 反斜杠转义）
+func pluginDataJSON(fullPath, relPath, hash string, size int64) string {
+	b, _ := json.Marshal(FilePluginData{
+		SchemaVersion: currentPluginDataVersion,
+		FullPath:      filepath.ToSlash(fullPath),
+		RelPath:       relPath,
+		Hash:          hash,
+		Size:          size,
+	})
+	return string(b)
+}
+
+// TestStartDeclaresExpectedSha256 Start 主资源轨期望哈希声明（决策1 选项A：声明扫描期哈希）：
+// ①声明值 == PluginData.Hash；④Hash 为空的异常数据不声明（nil，不构造空串声明）
+func TestStartDeclaresExpectedSha256(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "photo.png")
+	writeFile(t, path, "png-bytes")
+
+	hash, err := ComputeFileHash(path)
+	if err != nil {
+		t.Fatalf("计算测试文件哈希失败: %v", err)
+	}
+
+	h := &LocalImportWorkFetcher{}
+	task := &sdkdto.TaskDTO{Id: 1, PluginData: strPtr(pluginDataJSON(path, "photo.png", hash, 9))}
+	specs, _, err := h.Start(context.Background(), task, nil)
+	if err != nil {
+		t.Fatalf("Start 不应报错: %v", err)
+	}
+	main := findSpecByRole(specs, sdkdto.StoreRoleImage)
+	if main == nil {
+		t.Fatalf("应产出 image 主资源轨，实得 %d 条规格", len(specs))
+	}
+	if main.ExpectedSha256 == nil || *main.ExpectedSha256 != hash {
+		t.Fatalf("①Start 主资源轨 ExpectedSha256 应声明 PluginData.Hash(%q)，实得 %v", hash, main.ExpectedSha256)
+	}
+	if err := h.Stop(&sdkdto.TaskResParam{Task: task}); err != nil {
+		t.Fatalf("关闭源文件句柄失败: %v", err)
+	}
+
+	// ④防御分支：Hash 为空时不声明（nil）
+	emptyTask := &sdkdto.TaskDTO{Id: 2, PluginData: strPtr(pluginDataJSON(path, "photo.png", "", 9))}
+	specs, _, err = h.Start(context.Background(), emptyTask, nil)
+	if err != nil {
+		t.Fatalf("Start(hash 空) 不应报错: %v", err)
+	}
+	main = findSpecByRole(specs, sdkdto.StoreRoleImage)
+	if main == nil {
+		t.Fatalf("hash 空也应产出主资源轨，实得 %d 条规格", len(specs))
+	}
+	if main.ExpectedSha256 != nil {
+		t.Fatalf("④Hash 为空时不应声明期望哈希(nil)，实得 %q", *main.ExpectedSha256)
+	}
+	if err := h.Stop(&sdkdto.TaskResParam{Task: emptyTask}); err != nil {
+		t.Fatalf("关闭源文件句柄失败: %v", err)
+	}
+}
+
+// TestResumeDeclaresExpectedSha256 ②Resume 主资源轨同声明：声明值 == PluginData.Hash
+// （跨会话实测哈希一致由主程序暂存前缀回读保证，插件侧无需额外处理）
+func TestResumeDeclaresExpectedSha256(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "movie.mp4")
+	writeFile(t, path, "mp4-bytes")
+
+	hash, err := ComputeFileHash(path)
+	if err != nil {
+		t.Fatalf("计算测试文件哈希失败: %v", err)
+	}
+
+	h := &LocalImportWorkFetcher{}
+	task := &sdkdto.TaskDTO{Id: 7, PluginData: strPtr(pluginDataJSON(path, "movie.mp4", hash, 9))}
+	specs, _, err := h.Resume(context.Background(), &sdkdto.TaskResumeParam{
+		Task: task,
+		StreamOffsets: []*sdkdto.StoreResumeOffset{
+			{Role: sdkdto.StoreRoleVideoMain, StoreSeq: 0, Offset: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resume 不应报错: %v", err)
+	}
+	main := findSpecByRole(specs, sdkdto.StoreRoleVideoMain)
+	if main == nil {
+		t.Fatalf("应产出 videoMain 续传轨，实得 %d 条规格", len(specs))
+	}
+	if main.ExpectedSha256 == nil || *main.ExpectedSha256 != hash {
+		t.Fatalf("②Resume 主资源轨 ExpectedSha256 应声明 PluginData.Hash(%q)，实得 %v", hash, main.ExpectedSha256)
+	}
+	if err := h.Stop(&sdkdto.TaskResParam{Task: task}); err != nil {
+		t.Fatalf("关闭源文件句柄失败: %v", err)
+	}
+}
+
+// TestStartThumbnailDeclaresSha256 ③缩略图轨（derived 生成产物轨）期望哈希 == 生成字节的 sha256：
+// 桩生成器替换视频生成器规避 FFmpeg 依赖，期望值由测试独立计算（不经被测辅助函数）
+func TestStartThumbnailDeclaresSha256(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clip.mp4")
+	writeFile(t, path, "mp4-bytes")
+
+	old := extensionGenerators[".mp4"]
+	extensionGenerators[".mp4"] = stubThumbGenerator{}
+	defer func() { extensionGenerators[".mp4"] = old }()
+
+	h := &LocalImportWorkFetcher{}
+	task := &sdkdto.TaskDTO{Id: 3, PluginData: strPtr(pluginDataJSON(path, "clip.mp4", "abc123", 9))}
+	specs, _, err := h.Start(context.Background(), task, []string{sdkdto.StoreRoleThumbnail})
+	if err != nil {
+		t.Fatalf("Start 不应报错: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Role != sdkdto.StoreRoleThumbnail {
+		t.Fatalf("仅选缩略图角色应产出单条 thumbnail 轨，实得 %d 条", len(specs))
+	}
+	sum := sha256.Sum256([]byte("stub-thumbnail-bytes"))
+	want := hex.EncodeToString(sum[:])
+	if specs[0].ExpectedSha256 == nil || *specs[0].ExpectedSha256 != want {
+		t.Fatalf("③缩略图轨 ExpectedSha256 应为生成字节 sha256(%q)，实得 %v", want, specs[0].ExpectedSha256)
+	}
 }
