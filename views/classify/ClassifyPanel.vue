@@ -1,69 +1,65 @@
 <template>
-  <teleport to="#dialog-mount-point">
-    <el-dialog
-      v-model="visible"
-      style="height: fit-content;"
-      width="520px"
-      :close-on-click-modal="false"
-      :close-on-press-escape="false"
-      :show-close="false"
-    >
-      <template #header>
-        <div class="explain-header">
-          <el-tooltip placement="bottom">
-            <span>解释路径含义</span>
-            <template #content>
-              <div style="max-width: 300px;">
-                本地导入插件请求解释路径段的含义，以便为作品填充作者、标签等信息。<br />
-                按名输入的作者/标签将按名称匹配或新建本地域实体；<br />
-                站点归属声明作用于其子树：子树内文件解析出的作品归入该站点域；<br />
-                作品集名仅对 local 归属的作品生效。
-              </div>
-            </template>
-          </el-tooltip>
-          <div class="explain-actions">
-            <el-button type="success" icon="CirclePlus" @click="addMeaning">新增</el-button>
-            <el-button type="primary" @click="confirm">确定</el-button>
-            <el-button @click="cancel">取消</el-button>
-          </div>
+  <AutoHeightDialog
+    v-model:state="visible"
+    width="min(520px, 90vw)"
+    height="80vh"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    :show-close="false"
+  >
+    <template #header>
+      <div class="explain-header">
+        <el-tooltip placement="bottom">
+          <span>解释路径含义</span>
+          <template #content>
+            <div style="max-width: 300px;">
+              本地导入插件请求解释路径段的含义，以便为作品填充作者、标签等信息。<br />
+              按名输入的作者/标签将按名称匹配或新建本地域实体；<br />
+              站点归属声明作用于其子树：子树内文件解析出的作品归入该站点域；<br />
+              作品集名仅对 local 归属的作品生效。
+            </div>
+          </template>
+        </el-tooltip>
+        <div class="explain-actions">
+          <el-button type="success" icon="CirclePlus" @click="addMeaning">新增</el-button>
+          <el-button type="primary" @click="confirm">确定</el-button>
+          <el-button @click="cancel">取消</el-button>
         </div>
-      </template>
-      <div class="explain-panel">
-        <el-text class="explain-path-text">{{ question?.dirName }}</el-text>
-        <el-scrollbar class="explain-scroll">
-          <div class="explain-scroll-inner">
-          <div v-for="(meaning, index) in meanings" :key="index" class="explain-row">
-            <el-select v-model="meaning.type" class="explain-type-select" @change="onTypeChange(meaning, index)">
-              <el-option v-for="opt in meaningTypes" :key="opt.value" :value="opt.value" :label="opt.label" />
-            </el-select>
-            <el-select
-              v-if="isSelectType(meaning.type)"
-              v-el-select-bottomed="() => loadPage(index)"
-              v-model="meaning.id"
-              class="explain-name-input"
-              filterable
-              remote
-              clearable
-              :remote-method="(q: string) => search(index, q)"
-              :loading="getState(index).searchLoading"
-              @change="onItemSelect(meaning, index)"
-              @visible-change="(v: boolean) => onDropdownOpen(index, v)"
-            >
-              <el-option
-                v-for="item in getState(index).options"
-                :key="item.value"
-                :value="item.value"
-                :label="item.label"
-              />
-            </el-select>
-            <el-input v-else v-model="meaning.name" class="explain-name-input" clearable />
-            <el-button icon="Remove" @click="removeMeaning(index)" />
-          </div>
-          </div>
-        </el-scrollbar>
       </div>
-    </el-dialog>
-  </teleport>
+    </template>
+    <div class="explain-panel">
+      <el-text class="explain-path-text">{{ question?.dirName }}</el-text>
+      <div class="explain-scroll-inner">
+        <div v-for="(meaning, index) in meanings" :key="index" class="explain-row">
+          <el-select v-model="meaning.type" class="explain-type-select" @change="onTypeChange(meaning, index)">
+            <el-option v-for="opt in meaningTypes" :key="opt.value" :value="opt.value" :label="opt.label" />
+          </el-select>
+          <el-select
+            v-if="isSelectType(meaning.type)"
+            v-el-select-bottomed="() => loadPage(index)"
+            v-model="meaning.id"
+            class="explain-name-input"
+            filterable
+            remote
+            clearable
+            :remote-method="(q: string) => search(index, q)"
+            :loading="getState(index).searchLoading"
+            @change="onItemSelect(meaning, index)"
+            @visible-change="(v: boolean) => onDropdownOpen(index, v)"
+          >
+            <el-option
+              v-for="item in getState(index).options"
+              :key="item.value"
+              :value="item.value"
+              :label="item.label"
+            />
+          </el-select>
+          <el-input v-else v-model="meaning.name" class="explain-name-input" clearable />
+          <el-button icon="Remove" @click="removeMeaning(index)" />
+        </div>
+      </div>
+    </div>
+  </AutoHeightDialog>
 </template>
 
 <script setup lang="ts">
@@ -303,9 +299,6 @@ onUnmounted(() => {
   font-size: 14px;
   color: #606266;
   word-break: break-all;
-}
-.explain-scroll :deep(.el-scrollbar__wrap) {
-  max-height: 300px;
 }
 .explain-scroll-inner {
   display: flex;
