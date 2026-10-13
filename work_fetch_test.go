@@ -452,7 +452,7 @@ func TestStartDeclaresExpectedSha256(t *testing.T) {
 	}
 
 	h := &LocalImportWorkFetcher{}
-	task := &sdkdto.TaskDTO{Id: 1, PluginData: strPtr(pluginDataJSON(path, "photo.png", hash, 9))}
+	task := &sdkdto.TaskDTO{Id: 1, PluginData: new(pluginDataJSON(path, "photo.png", hash, 9))}
 	specs, _, err := h.Start(context.Background(), task, nil)
 	if err != nil {
 		t.Fatalf("Start 不应报错: %v", err)
@@ -469,7 +469,7 @@ func TestStartDeclaresExpectedSha256(t *testing.T) {
 	}
 
 	// ④防御分支：Hash 为空时不声明（nil）
-	emptyTask := &sdkdto.TaskDTO{Id: 2, PluginData: strPtr(pluginDataJSON(path, "photo.png", "", 9))}
+	emptyTask := &sdkdto.TaskDTO{Id: 2, PluginData: new(pluginDataJSON(path, "photo.png", "", 9))}
 	specs, _, err = h.Start(context.Background(), emptyTask, nil)
 	if err != nil {
 		t.Fatalf("Start(hash 空) 不应报错: %v", err)
@@ -499,7 +499,7 @@ func TestResumeDeclaresExpectedSha256(t *testing.T) {
 	}
 
 	h := &LocalImportWorkFetcher{}
-	task := &sdkdto.TaskDTO{Id: 7, PluginData: strPtr(pluginDataJSON(path, "movie.mp4", hash, 9))}
+	task := &sdkdto.TaskDTO{Id: 7, PluginData: new(pluginDataJSON(path, "movie.mp4", hash, 9))}
 	specs, _, err := h.Resume(context.Background(), &sdkdto.TaskResumeParam{
 		Task: task,
 		StreamOffsets: []*sdkdto.StoreResumeOffset{
@@ -533,7 +533,7 @@ func TestStartThumbnailDeclaresSha256(t *testing.T) {
 	defer func() { extensionGenerators[".mp4"] = old }()
 
 	h := &LocalImportWorkFetcher{}
-	task := &sdkdto.TaskDTO{Id: 3, PluginData: strPtr(pluginDataJSON(path, "clip.mp4", "abc123", 9))}
+	task := &sdkdto.TaskDTO{Id: 3, PluginData: new(pluginDataJSON(path, "clip.mp4", "abc123", 9))}
 	specs, _, err := h.Start(context.Background(), task, []string{sdkdto.StoreRoleThumbnail})
 	if err != nil {
 		t.Fatalf("Start 不应报错: %v", err)

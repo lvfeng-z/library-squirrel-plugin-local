@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -378,12 +379,12 @@ func (h *LocalImportWorkFetcher) Start(ctx context.Context, task *sdkdto.TaskDTO
 		}
 		h.readers.Store(taskID, f)
 		specs = append(specs, &sdkdto.StoreSpec{
-			Role:       mainRole,
-			Generation: sdkdto.GenerationDownloaded,
-			ReadCloser: f,
-			Format:     ext,
-			Size:       fi.Size(),
-			Continuable: boolPtr(true),
+			Role:        mainRole,
+			Generation:  sdkdto.GenerationDownloaded,
+			ReadCloser:  f,
+			Format:      ext,
+			Size:        fi.Size(),
+			Continuable: new(true),
 			// 期望哈希声明(决策1 选项A):声明扫描期哈希,源文件扫描后被改动将触发
 			// 主程序侧「资源完整性校验失败」而非静默导入新内容
 			ExpectedSha256: expectedSha256Of(fp.Hash),
@@ -397,14 +398,14 @@ func (h *LocalImportWorkFetcher) Start(ctx context.Context, task *sdkdto.TaskDTO
 				thumbFormat = "jpg"
 			}
 			specs = append(specs, &sdkdto.StoreSpec{
-				Role:       sdkdto.StoreRoleThumbnail,
-				Generation: sdkdto.GenerationDerived,
-				ReadCloser: io.NopCloser(bytes.NewReader(thumbData)),
-				Format:     thumbFormat,
-				Size:       int64(len(thumbData)),
-				Continuable: boolPtr(false),
+				Role:        sdkdto.StoreRoleThumbnail,
+				Generation:  sdkdto.GenerationDerived,
+				ReadCloser:  io.NopCloser(bytes.NewReader(thumbData)),
+				Format:      thumbFormat,
+				Size:        int64(len(thumbData)),
+				Continuable: new(false),
 				// 生成产物轨对内存字节直接算哈希声明,与下载轨声明形态统一
-				ExpectedSha256: strPtr(sha256Hex(thumbData)),
+				ExpectedSha256: new(sha256Hex(thumbData)),
 			})
 		}
 	}
@@ -427,12 +428,7 @@ func wantsRole(storeRoles []string, role string) bool {
 	if len(storeRoles) == 0 {
 		return true
 	}
-	for _, r := range storeRoles {
-		if r == role {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(storeRoles, role)
 }
 
 // Retry 委托到 Start
@@ -494,12 +490,12 @@ func (h *LocalImportWorkFetcher) Resume(ctx context.Context, param *sdkdto.TaskR
 	workName := stripExt(filepath.Base(fp.FullPath))
 
 	spec := &sdkdto.StoreSpec{
-		Role:       mainRole,
-		Generation: sdkdto.GenerationDownloaded,
-		ReadCloser: f,
-		Format:     ext,
-		Size:       fp.Size,
-		Continuable: boolPtr(true),
+		Role:        mainRole,
+		Generation:  sdkdto.GenerationDownloaded,
+		ReadCloser:  f,
+		Format:      ext,
+		Size:        fp.Size,
+		Continuable: new(true),
 		// 与 Start 主资源轨同声明(扫描期哈希);跨会话实测哈希一致由主程序暂存前缀回读保证
 		ExpectedSha256: expectedSha256Of(fp.Hash),
 	}
@@ -525,10 +521,14 @@ func (h *LocalImportWorkFetcher) closeReader(param *sdkdto.TaskResParam) error {
 }
 
 // boolPtr 返回 bool 值的指针
-func boolPtr(b bool) *bool { return &b }
+//
+//go:fix inline
+func boolPtr(b bool) *bool { return new(b) }
 
 // strPtr 返回字符串值的指针
-func strPtr(s string) *string { return &s }
+//
+//go:fix inline
+func strPtr(s string) *string { return new(s) }
 
 // expectedSha256Of 期望 SHA-256 声明(决策1 选项A:声明扫描时点哈希)。
 // 防御:扫描期哈希为空(异常数据)不声明(nil)——不构造空串声明
@@ -537,7 +537,7 @@ func expectedSha256Of(hash string) *string {
 	if hash == "" {
 		return nil
 	}
-	return strPtr(hash)
+	return new(hash)
 }
 
 // sha256Hex 计算内存字节的 SHA-256(十六进制):
