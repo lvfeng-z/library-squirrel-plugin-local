@@ -12,6 +12,16 @@ func Activate(ctx sdkdto.PluginContext, handler *LocalImportWorkFetcher) {
 	handler.ctx = ctx
 	handler.classifier = NewPathClassifier(ctx)
 
+	// 激活期读档预热与校验观测：坏规则逐条告警（错误携带规则 ID），不阻塞激活；
+	// 加载结果不驻留，Create/CreateWorkInfo 按需各自重读档案
+	profile, errs := LoadProfile(NewContextProfileStore(ctx))
+	for _, err := range errs {
+		ctx.Warnf("规则档案载入异常: %v", err)
+	}
+	if profile != nil {
+		ctx.Infof("规则档案预热完成: 用户规则 %d 条", len(profile.Rules))
+	}
+
 	ch, err := ctx.SubscribeFrontend("plugin:local-import:classify:response")
 	if err != nil {
 		ctx.Errorf("订阅前端事件失败: %v", err)

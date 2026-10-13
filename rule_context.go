@@ -1,0 +1,113 @@
+// 规则匹配阶段的输入快照与解析上下文：纯数据模型与无副作用方法，无 IO。
+package main
+
+import (
+	"path/filepath"
+	"strings"
+)
+
+// MatchInput 为单条待解析条目的匹配输入。
+type MatchInput struct {
+	// FileName 为文件名（含扩展名），不含目录部分。
+	FileName string
+	// DirNames 为从库根到直接父目录的各层目录名，索引即深度。
+	DirNames []string
+	// RelPath 为以 '/' 分隔的相对路径（相对库根）。
+	RelPath string
+	// Siblings 为同目录全部兄弟文件名（含自身）。
+	Siblings []string
+}
+
+// LibraryIndex 为谓词求值时注入的库内数据快照。
+type LibraryIndex struct {
+	// AuthorNames 为库内已有作者名集合。
+	AuthorNames map[string]struct{}
+	// TagNames 为库内已有标签名集合。
+	TagNames map[string]struct{}
+}
+
+// GroupAnalysis 为群组分析产物，描述条目所属的连续序列群组。
+type GroupAnalysis struct {
+	// Key 为分组键，同一群组内所有成员相同。
+	Key string
+	// Prefix 为群组公共前缀。
+	Prefix string
+	// Seq 为本条目在群组内的序号，从 1 起。
+	Seq int
+	// Size 为群组成员总数。
+	Size int
+}
+
+// CaptureBinding 为一条正则命名捕获组的命中绑定。
+type CaptureBinding struct {
+	// Name 为捕获组名。
+	Name string
+	// Value 为该次命中的捕获文本。
+	Value string
+}
+
+// PredicateHit 为一次谓词命中记录。
+type PredicateHit struct {
+	// Kind 为谓词类别，取值 "author" 或 "tag"；谓词类型枚举定义在 pattern 文件中。
+	Kind string
+	// Input 为参与求值的输入文本。
+	Input string
+	// Name 为命中的作者名或标签名。
+	Name string
+}
+
+// DirHit 为一次目录层命中记录。
+type DirHit struct {
+	// Depth 为命中目录的深度，与 DirNames 的索引对应。
+	Depth int
+	// Name 为命中的目录名。
+	Name string
+}
+
+// ParseContext 为解析上下文：匹配过程产出的全部绑定；非群组成员时 Group 为 nil。
+type ParseContext struct {
+	// Captures 为全部命名捕获组绑定，按命中顺序追加。
+	Captures []CaptureBinding
+	// Group 为所属群组的分析产物，非群组成员时为 nil。
+	Group *GroupAnalysis
+	// DirNames 为从库根到直接父目录的各层目录名，索引即深度。
+	DirNames []string
+	// Depth 为条目所在目录的深度。
+	Depth int
+	// PredHits 为全部谓词命中记录，按命中顺序追加。
+	PredHits []PredicateHit
+	// DirHits 为全部目录层命中记录，按命中顺序追加。
+	DirHits []DirHit
+}
+
+// Capture 返回组名为 name 的最后一条绑定值；不存在时返回 ("", false)。
+func (c *ParseContext) Capture(name string) (string, bool) {
+	value := ""
+	found := false
+	for _, binding := range c.Captures {
+		if binding.Name == name {
+			value = binding.Value
+			found = true
+		}
+	}
+	return value, found
+}
+
+// LastDirHit 返回 Depth 最大的一条目录命中（Depth 相同时取最后一条）；无记录时返回零值与 false。
+func (c *ParseContext) LastDirHit() (DirHit, bool) {
+	var best DirHit
+	found := false
+	for _, hit := range c.DirHits {
+		if !found || hit.Depth >= best.Depth {
+			best = hit
+			found = true
+		}
+	}
+	return best, found
+}
+
+// BaseNameWithoutExt 去掉文件名的最后一段扩展名（filepath.Ext 语义）：
+// 多点文件（如 "a.tar.gz"）只去最后一段得 "a.tar"；无扩展名时原样返回。
+func BaseNameWithoutExt(name string) string {
+	return strings.TrimSuffix(name, filepath.Ext(name))
+}

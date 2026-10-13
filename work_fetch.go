@@ -99,7 +99,10 @@ func (h *LocalImportWorkFetcher) resolveSiteKeyByID(idStr string) string {
 	return h.siteKeyByID[id]
 }
 
-// Create 扫描本地路径，流式产出任务
+// Create 扫描本地路径，流式产出任务：
+// 扫描条目先经解析内核流水线求值（规则来源=用户档案+内置），兄弟群组规则定群的
+// 成员各自声明为单文件作品（叶任务），落单条目按同目录聚合走目录组声明路径
+// （多文件=父容器+子任务，单文件=叶任务）。
 func (h *LocalImportWorkFetcher) Create(url string) (*sdkdto.TaskCreateResult, error) {
 	path := url
 	if len(path) >= 8 && path[:8] == "local://" {
@@ -120,6 +123,11 @@ func (h *LocalImportWorkFetcher) Create(url string) (*sdkdto.TaskCreateResult, e
 		return result, nil
 	}
 
+	// 流水线求值：FileDecision 不落 PluginData——后续阶段按原始路径
+	// （PluginData 携带 FullPath/RelPath）与同一规则档案重算，无需缓存决策。
+	// 库内索引本阶段不注入（nil 时谓词规则恒不命中），索引装配属后续阶段。
+	decisions := RunPipeline(buildScanFiles(scanResult.Files), h.resolvePipelineRules(), nil)
+
 	ch := make(chan *sdkdto.TaskCreateResponse, 16)
 
 	go func() {
@@ -137,17 +145,20 @@ func (h *LocalImportWorkFetcher) Create(url string) (*sdkdto.TaskCreateResult, e
 			}
 		}
 
-		groups := GroupFilesByParentDir(scanResult.Files)
+		decisionByRel := make(map[string]FileDecision, len(decisions))
+		for _, d := range decisions {
+			decisionByRel[d.RelPath] = d
+		}
 
-		for dirRelPath, files := range groups {
+		for _, group := range groupEntriesByDir(scanResult.Files) {
 			var metadata []PathMeaning
 
 			if isDir {
 				metadata = append(metadata, rootMeanings...)
 			}
 
-			if len(files) > 0 {
-				levelsSlice := ExtractDirLevels(files[0].RelPath)
+			if len(group.files) > 0 {
+				levelsSlice := ExtractDirLevels(group.files[0].RelPath)
 				levelOffset := 0
 				if isDir {
 					levelOffset = 1
@@ -166,19 +177,92 @@ func (h *LocalImportWorkFetcher) Create(url string) (*sdkdto.TaskCreateResult, e
 			// 站点分类含义 → 子树归属站点键（site 含义 ID=站点 DB 行 id，经注册表投影解析）
 			classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
 
+			// 群成员（兄弟群组规则定群）各自声明为单文件作品（叶任务，归属按
+			// 同目录站点分类裁决）；落单条目留在同目录聚合的目录组声明路径
+			var singles []FileEntry
+			for _, f := range group.files {
+				if decisionByRel[f.RelPath].Group == nil {
+					singles = append(singles, f)
+					continue
+				}
+				attr := resolveWorkAttribution(filepath.Base(f.FullPath), classifiedSiteKey)
+				if resp := buildDirGroupResponse(path, group.dirRelPath, taskName, metadata, []attributedFile{{entry: f, attr: attr}}); resp != nil {
+					ch <- resp
+				}
+			}
+
 			// 按归属裁决拆分：子任务站点继承父应答，同目录混合归属（真实域/local 回退）
 			// 须拆为多个应答各自携带站点键
-			localFiles, realFiles := partitionByAttribution(files, classifiedSiteKey)
-			if resp := buildDirGroupResponse(path, dirRelPath, taskName, metadata, localFiles); resp != nil {
+			localFiles, realFiles := partitionByAttribution(singles, classifiedSiteKey)
+			if resp := buildDirGroupResponse(path, group.dirRelPath, taskName, metadata, localFiles); resp != nil {
 				ch <- resp
 			}
-			if resp := buildDirGroupResponse(path, dirRelPath, taskName, metadata, realFiles); resp != nil {
+			if resp := buildDirGroupResponse(path, group.dirRelPath, taskName, metadata, realFiles); resp != nil {
 				ch <- resp
 			}
 		}
 	}()
 
 	return sdkdto.StreamResult(ch), nil
+}
+
+// buildScanFiles 把扫描条目转为流水线输入：文件名含扩展名，目录层级取相对路径的
+// 目录段（索引即深度），Path 保留完整路径。
+func buildScanFiles(files []FileEntry) []ScanFile {
+	out := make([]ScanFile, 0, len(files))
+	for _, f := range files {
+		out = append(out, ScanFile{
+			Path:     f.FullPath,
+			FileName: filepath.Base(f.FullPath),
+			DirNames: ExtractDirLevels(f.RelPath),
+			RelPath:  f.RelPath,
+		})
+	}
+	return out
+}
+
+// resolvePipelineRules 解析流水线规则来源：插件上下文可用时经 KV 载入用户规则档案
+// 并与内置规则合并（用户规则在前）；个别坏规则被跳过时记录日志、其余规则照常参与；
+// 档案整体不可载入（读取失败/结构版本不符）降级为仅内置并记录日志；上下文不可用时
+// 仅内置。
+func (h *LocalImportWorkFetcher) resolvePipelineRules() []RuleEntry {
+	if h.ctx == nil {
+		return EffectiveRules(nil)
+	}
+	profile, errs := LoadProfile(NewContextProfileStore(h.ctx))
+	for _, err := range errs {
+		h.ctx.Warnf("规则档案载入异常: %v", err)
+	}
+	if profile == nil {
+		return EffectiveRules(nil)
+	}
+	return EffectiveRules(profile)
+}
+
+// scanFileGroup 同目录扫描条目桶：dirRelPath 为以 '/' 连接的目录相对路径
+// （扫描根直下为空串），files 保持扫描顺序。
+type scanFileGroup struct {
+	dirRelPath string
+	files      []FileEntry
+}
+
+// groupEntriesByDir 按直接父目录聚合扫描条目：聚合键与流水线一致（目录名整序列），
+// 桶序为目录首次出现序。
+func groupEntriesByDir(files []FileEntry) []scanFileGroup {
+	index := make(map[string]int, len(files))
+	groups := make([]scanFileGroup, 0, len(files))
+	for _, f := range files {
+		dirNames := ExtractDirLevels(f.RelPath)
+		key := dirGroupKey(dirNames)
+		idx, ok := index[key]
+		if !ok {
+			idx = len(groups)
+			index[key] = idx
+			groups = append(groups, scanFileGroup{dirRelPath: strings.Join(dirNames, "/")})
+		}
+		groups[idx].files = append(groups[idx].files, f)
+	}
+	return groups
 }
 
 // buildDirGroupResponse 为同目录同归属的一组文件构造任务应答：
@@ -266,7 +350,92 @@ func buildDirGroupResponse(path, dirRelPath, taskName string, metadata []PathMea
 	}
 }
 
-// CreateWorkInfo 从 PluginData 反序列化路径元数据，构建 WorkResponse
+// recomputeFileDecision 按 PluginData 携带的原始路径重算单文件的流水线结论：
+// FileName/DirNames/RelPath 由路径分解重建（与 Create 期 buildScanFiles 同构），
+// Siblings 经父目录 os.ReadDir 重扫（与 Create 期扫描同源同键——同目录常规文件
+// 名全集、字典序）；库内索引不注入（与 Create 期一致，谓词规则恒不命中）。
+// 返回流水线结论与匹配输入（匹配输入供归属裁决重放规则取捕获值）。
+func (h *LocalImportWorkFetcher) recomputeFileDecision(fp *FilePluginData, rules []RuleEntry) (FileDecision, *MatchInput) {
+	dirNames := ExtractDirLevels(fp.RelPath)
+	in := &MatchInput{
+		FileName: filepath.Base(fp.FullPath),
+		DirNames: dirNames,
+		RelPath:  fp.RelPath,
+		Siblings: h.rescanSiblingNames(filepath.Dir(fp.FullPath)),
+	}
+	ctx := &ParseContext{DirNames: dirNames, Depth: len(dirNames)}
+	decision := FileDecision{RelPath: fp.RelPath, FileName: in.FileName}
+	decision.Group = runGroupStage(rules, in, nil, ctx)
+	runExtractionStage(&decision, rules, in, nil, ctx)
+	return decision, in
+}
+
+// rescanSiblingNames 重扫父目录取同目录常规文件名全集（ReadDir 按名字典序返回，
+// 与扫描器的目录遍历同序）；父目录不可读（路径已移动/删除）时记日志并返回空集，
+// 兄弟群组规则按落单求值，不中断整体重算。
+func (h *LocalImportWorkFetcher) rescanSiblingNames(parentDir string) []string {
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		if h.ctx != nil {
+			h.ctx.Warnf("重扫父目录取兄弟文件失败，兄弟群组规则按落单求值: %s: %v", parentDir, err)
+		}
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+// logPendingSynthesis 逐条记录合成待裁决项（归因观测面）：维度、候选值与冲突
+// 原因进日志，供人工裁决后调整规则或合成策略重跑；上下文不可用时静默跳过。
+func (h *LocalImportWorkFetcher) logPendingSynthesis(fullPath string, pending []PendingItem) {
+	if len(pending) == 0 || h.ctx == nil {
+		return
+	}
+	for _, item := range pending {
+		values := make([]string, 0, len(item.Candidates))
+		for _, decl := range item.Candidates {
+			values = append(values, decl.Value)
+		}
+		h.ctx.Warnf("文件 %s 的 %s 维度声明无法自动裁决，候选值 %v：%s", fullPath, item.Dimension, values, item.Reason)
+	}
+}
+
+// pixivPageWorkIDOf 取内置 pixiv 规则重算的归属域键：流水线结论命中
+// （MatchedRuleIDs 含其 ID）时对同一匹配输入重放该规则取捕获值——锚定全匹配下
+// 捕获值即页级作品 ID（命中即真实域键）；未命中返回空串。
+func pixivPageWorkIDOf(decision FileDecision, rules []RuleEntry, in *MatchInput) string {
+	if !slices.Contains(decision.MatchedRuleIDs, builtinRuleIDPixivPageWorkID) {
+		return ""
+	}
+	for _, rule := range rules {
+		if rule.ID != builtinRuleIDPixivPageWorkID || rule.Pattern == nil {
+			continue
+		}
+		ctx := &ParseContext{}
+		if !rule.Pattern.Evaluate(in, nil, ctx) {
+			return ""
+		}
+		value, _ := ctx.Capture(builtinPageWorkIDCapture)
+		return value
+	}
+	return ""
+}
+
+// CreateWorkInfo 从 PluginData 反序列化路径元数据，并按原始路径重算解析内核流水线
+// 合成产出作品信息：规则解析与 Create 共用同一入口（resolvePipelineRules），提取
+// 声明经 AggregateSynthesis → Synthesize 得终选与待裁决——待裁决项逐条记日志
+// （维度/候选值/原因，归因观测面）。终选映射：标题→作品名（无标题声明回退整个
+// 文件名去扩展名，扩展名由 Resource.Format 单独提供）、作者→本地作者声明（带
+// 声明级角色）、标签→本地标签声明、作品集→作品集声明（集名=声明值，集内序不传
+// 契约——宿主续排近似，本期既定裁决）；路径含义（PathMeaning）映射维持现状。
+// 归属裁决按内置 pixiv 规则重算：命中即真实域键（捕获值=页级作品 ID，与原
+// parsePixivPageWorkID 逐例等价），未命中走现状非 pixiv 路径（PluginData 携带的
+// 扫描期归属，无归属=文件内容哈希）。
 func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, fmt.Errorf("pluginData 为空")
@@ -280,23 +449,51 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 		return nil, err
 	}
 
-	workName := filepath.Base(fp.FullPath)
-	// 去除扩展名，扩展名由 Resource.Format 单独提供
-	if ext := filepath.Ext(workName); ext != "" {
-		workName = workName[:len(workName)-len(ext)]
+	// 单任务重算流水线并合成终选声明（库内索引与 Create 期一致不注入）
+	rules := h.resolvePipelineRules()
+	decision, in := h.recomputeFileDecision(&fp, rules)
+	final, pending := Synthesize(decision.Declarations, AggregateSynthesis(rules))
+	h.logPendingSynthesis(fp.FullPath, pending)
+
+	resp := &sdkdto.WorkResponse{Work: &sdkdto.WorkDTO{}}
+	workName := stripExt(filepath.Base(fp.FullPath))
+	titleDeclared := false
+	for _, decl := range final {
+		switch decl.Dimension {
+		case DimTitle:
+			// 标题取首个终选声明（highTrust 择一常为单值，用户策略并集多值时保首个）
+			if !titleDeclared {
+				workName = decl.Value
+				titleDeclared = true
+			}
+		case DimAuthor:
+			// 本地作者按名声明（ID=0 名称模式，宿主 find-or-create），携带声明级角色
+			author := &sdkdto.LocalAuthorDTO{AuthorName: new(decl.Value)}
+			if decl.RoleName != "" {
+				author.RoleName = new(decl.RoleName)
+			}
+			resp.LocalAuthors = append(resp.LocalAuthors, author)
+		case DimTag:
+			resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{LocalTagName: new(decl.Value)})
+		case DimCollection:
+			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
+				SiteWorkSetId: "workSet:" + decl.Value,
+				WorkSetName:   decl.Value,
+			})
+		}
 	}
 
-	// 作品身份：真实域归属（扫描期裁决进 PluginData）=页级作品 ID；local 回退=文件内容哈希
+	// 作品身份：内置 pixiv 规则命中即真实域键；未命中=扫描期归属（真实域页级
+	// 作品 ID）或 local 回退的文件内容哈希
 	siteWorkID := fp.Hash
 	if fp.hasRealAttribution() {
 		siteWorkID = fp.SiteWorkId
 	}
-	resp := &sdkdto.WorkResponse{
-		Work: &sdkdto.WorkDTO{
-			SiteWorkId:   &siteWorkID,
-			SiteWorkName: &workName,
-		},
+	if pageID := pixivPageWorkIDOf(decision, rules, in); pageID != "" {
+		siteWorkID = pageID
 	}
+	resp.Work.SiteWorkId = new(siteWorkID)
+	resp.Work.SiteWorkName = new(workName)
 
 	for _, m := range fp.Metadata {
 		switch m.Type {

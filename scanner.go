@@ -98,17 +98,3 @@ func ExtractDirLevels(relPath string) []string {
 	}
 	return strings.Split(filepath.ToSlash(dir), "/")
 }
-
-// GroupFilesByParentDir 按直接父目录分组文件
-// 同一目录下的文件属于同一个 parent task
-func GroupFilesByParentDir(files []FileEntry) map[string][]FileEntry {
-	groups := make(map[string][]FileEntry)
-	for _, f := range files {
-		dir := filepath.Dir(f.RelPath)
-		if dir == "." {
-			dir = ""
-		}
-		groups[dir] = append(groups[dir], f)
-	}
-	return groups
-}

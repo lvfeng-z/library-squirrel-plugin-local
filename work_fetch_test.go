@@ -8,7 +8,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
@@ -16,10 +18,11 @@ import (
 )
 
 // stubPluginCtx 测试桩：嵌入 PluginContext 接口，仅实现 Create 链触及的方法
-// （日志、站点查询、前端发布）；未实现方法一旦被调用即 panic 暴露测试缺口
+// （日志、站点查询、前端发布、KV 读写）；未实现方法一旦被调用即 panic 暴露测试缺口
 type stubPluginCtx struct {
 	sdkdto.PluginContext
 	sites []*sdkdto.SiteDTO
+	kv    map[string]string
 }
 
 func (c stubPluginCtx) Infof(string, ...any) {}
@@ -31,6 +34,58 @@ func (c stubPluginCtx) ListSites() (*sdkdto.ListSitesResponse, error) {
 
 func (c stubPluginCtx) PublishToFrontend(string, []byte) error {
 	return errors.New("测试环境无前端通道")
+}
+
+// GetValue 读桩 KV；键不存在时返回 nil 存储值（等价键未写入，走空档案路径）
+func (c stubPluginCtx) GetValue(key string) (*sdkdto.StorageValue, error) {
+	if v, ok := c.kv[key]; ok {
+		return &sdkdto.StorageValue{Value: v}, nil
+	}
+	return nil, nil
+}
+
+// SetValue 写桩 KV；未初始化 KV 的桩实例不持久化（测试侧只读）
+func (c stubPluginCtx) SetValue(key string, value string) error {
+	if c.kv == nil {
+		return nil
+	}
+	c.kv[key] = value
+	return nil
+}
+
+// qnaStubCtx 问答通路测试桩：发布分类问题时按目录名查预置答案，命中即同步回送
+// （响应通道缓冲 1，发布返回后分类器必能收到）；未预置答案的目录发布失败，走
+// 「发送失败默认规则」回退；published 计数已送达答案的发布次数，供问答触发断言。
+type qnaStubCtx struct {
+	stubPluginCtx
+	answers    map[string]*ClassifyResponse // 目录名 → 预置响应
+	published  int                          // 已送达答案的发布次数
+	classifier *PathClassifier              // 回送目标分类器
+}
+
+// newQnaStubCtx 构造带站点注册表与预置答案的问答通路桩（KV 档案可读写）。
+func newQnaStubCtx(sites []*sdkdto.SiteDTO, answers map[string]*ClassifyResponse) *qnaStubCtx {
+	ctx := &qnaStubCtx{
+		stubPluginCtx: stubPluginCtx{sites: sites, kv: make(map[string]string)},
+		answers:       answers,
+	}
+	ctx.classifier = NewPathClassifier(ctx)
+	return ctx
+}
+
+// PublishToFrontend 解析问题并按目录名回送预置答案；无预置答案返回错误触发默认回退。
+func (c *qnaStubCtx) PublishToFrontend(_ string, data []byte) error {
+	var q ClassifyQuestion
+	if err := json.Unmarshal(data, &q); err != nil {
+		return err
+	}
+	resp, ok := c.answers[q.DirName]
+	if !ok {
+		return errors.New("测试环境该目录无预置答案")
+	}
+	c.published++
+	c.classifier.HandleResponse(resp)
+	return nil
 }
 
 // collectResponses 读取流式创建结果全部应答
@@ -92,9 +147,9 @@ func TestCreateEmptyDirSetsReason(t *testing.T) {
 	}
 }
 
-// TestCreateSiteClassifiedSubtreeGoesRealDomain site 分类消费：目录命中 site 含义
-// （面板选择项 value=站点 DB 行 id）时，子树内文件解析出的作品归该站点域；
-// 解析不出页级 ID 的文件回退 local；层级作用域对照——更深层 site 规则不外溢到浅层文件
+// TestCreateSiteClassifiedSubtreeGoesRealDomain site 分类消费：目录经问答指认 site 含义
+// （答案 ID=面板选择项 value=站点 DB 行 id）时，子树内文件解析出的作品归该站点域；
+// 解析不出页级 ID 的文件回退 local；层级作用域对照——更深层 site 含义不外溢到浅层文件
 func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "12345678_p0.jpg"), "a")
@@ -103,15 +158,14 @@ func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "sub2"), 0o755)
 	writeFile(t, filepath.Join(root, "sub2", "readme.txt"), "c")
 
-	ctx := stubPluginCtx{sites: []*sdkdto.SiteDTO{
+	sites := []*sdkdto.SiteDTO{
 		{Id: 7, SiteKey: identity.Pixiv.Key},
 		{Id: 9, SiteKey: identity.Bilibili.Key},
-	}}
-	classifier := NewPathClassifier(ctx)
-	classifier.mu.Lock()
-	classifier.learnedRules[0] = []PathMeaning{{Type: "site", ID: "7", Name: "pixiv"}}
-	classifier.mu.Unlock()
-	h := &LocalImportWorkFetcher{ctx: ctx, classifier: classifier}
+	}
+	ctx := newQnaStubCtx(sites, map[string]*ClassifyResponse{
+		filepath.Base(root): {Meanings: []PathMeaning{{Type: "site", ID: "7", Name: "pixiv"}}},
+	})
+	h := &LocalImportWorkFetcher{ctx: ctx, classifier: ctx.classifier}
 
 	resps := collectResponses(t, mustCreate(t, h, root))
 	if len(resps) != 3 {
@@ -149,19 +203,22 @@ func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 	if err != nil || localResp.SiteWorkId != expectHash {
 		t.Fatalf("local 回退身份应为内容哈希 %q，实得 %q (err=%v)", expectHash, localResp.SiteWorkId, err)
 	}
+	// 站点答案无可映射含义维度：不生成规则，不落规则档案键（含义仅本次运行消费）
+	if _, ok := ctx.kv[RuleProfileKVKey]; ok {
+		t.Fatalf("站点答案无可映射含义维度，不应写入规则档案键 %q", RuleProfileKVKey)
+	}
 
-	// 层级作用域对照：更深层（level 1）的 site 规则只作用于该层子树——
+	// 层级作用域对照：更深层（level 1）的 site 含义只作用于该层子树——
 	// 根层文件不受其影响（不外溢到浅层），按文件名形态独立锚定 pixiv
 	root2 := t.TempDir()
 	writeFile(t, filepath.Join(root2, "12345678_p0.jpg"), "d")
 	os.MkdirAll(filepath.Join(root2, "deep"), 0o755)
 	writeFile(t, filepath.Join(root2, "deep", "99999999_p1.png"), "e")
 
-	classifier2 := NewPathClassifier(ctx)
-	classifier2.mu.Lock()
-	classifier2.learnedRules[1] = []PathMeaning{{Type: "site", ID: "9", Name: "bilibili"}}
-	classifier2.mu.Unlock()
-	h2 := &LocalImportWorkFetcher{ctx: ctx, classifier: classifier2}
+	ctx2 := newQnaStubCtx(sites, map[string]*ClassifyResponse{
+		"deep": {Meanings: []PathMeaning{{Type: "site", ID: "9", Name: "bilibili"}}},
+	})
+	h2 := &LocalImportWorkFetcher{ctx: ctx2, classifier: ctx2.classifier}
 	resps2 := collectResponses(t, mustCreate(t, h2, root2))
 	var rootFileSite, deepFileSite string
 	for _, r := range resps2 {
@@ -177,6 +234,93 @@ func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 	}
 	if deepFileSite != identity.Bilibili.Key {
 		t.Fatalf("深层文件应受 level 1 站点规则归 bilibili，实得 %q", deepFileSite)
+	}
+}
+
+// TestClassifyDirAbsorbsAnswerAsQnaRule 问答吸收与回放：作者答案生成一条 qna 规则
+// （层深锚定的 LocationPattern + 目录名全匹配正则、ancestorDir→作者维度提取），
+// 经 SaveProfile 落键 rule-profile（重启语义由 KV 落地承载）；再次扫描时规则回放
+// 含义（作者=目录名），不再发起问答；同层同目录锚点重复吸收原位替换不重复追加
+func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.png"), "a")
+	rootName := filepath.Base(root)
+
+	ctx := newQnaStubCtx(nil, map[string]*ClassifyResponse{
+		rootName: {Meanings: []PathMeaning{{Type: "localAuthor", Name: "首答作者"}}},
+	})
+	h := &LocalImportWorkFetcher{ctx: ctx, classifier: ctx.classifier}
+	collectResponses(t, mustCreate(t, h, root))
+
+	raw, ok := ctx.kv[RuleProfileKVKey]
+	if !ok {
+		t.Fatalf("问答响应后应经 SaveProfile 落键 %q", RuleProfileKVKey)
+	}
+	profile, errs := ParseProfile([]byte(raw))
+	if profile == nil || len(errs) != 0 {
+		t.Fatalf("落库档案应可整体解析，实得 profile=%v errs=%v", profile, errs)
+	}
+	if len(profile.Rules) != 1 {
+		t.Fatalf("应恰有一条规则，实得 %d 条", len(profile.Rules))
+	}
+	rule := profile.Rules[0]
+	if rule.ID != qnaRuleID(0, rootName) || rule.Source != RuleSourceQna || !rule.Enabled {
+		t.Fatalf("规则应为启用的 qna 规则 %q，实得 id=%q source=%q enabled=%v", qnaRuleID(0, rootName), rule.ID, rule.Source, rule.Enabled)
+	}
+	loc, ok := rule.Pattern.(*LocationPattern)
+	if !ok || loc.MinDepth != 0 || loc.MaxDepth != 0 {
+		t.Fatalf("模式应为层深锚定的 LocationPattern(0,0)，实得 %#v", rule.Pattern)
+	}
+	re, ok := loc.Ancestor.(*RegexPattern)
+	if !ok || re.Target != TargetFileName || re.Expr != "^"+regexp.QuoteMeta(rootName)+"$" {
+		t.Fatalf("Ancestor 应为目录名全匹配正则，实得 %#v", loc.Ancestor)
+	}
+	if len(rule.Extractions) != 1 || rule.Extractions[0].Dimension != DimAuthor ||
+		rule.Extractions[0].From != FromAncestorDir {
+		t.Fatalf("提取动作应为 ancestorDir→作者维度，实得 %+v", rule.Extractions)
+	}
+	if !strings.Contains(rule.Description, rootName) {
+		t.Fatalf("规则描述应含问答上下文（目录名），实得 %q", rule.Description)
+	}
+
+	// 重启语义：新分类器经同一 KV 档案回放——不再发起问答，作者含义按目录名表达
+	// （桩的回送目标切到新分类器，防回放失效时答案误送旧分类器拖满超时）
+	before := ctx.published
+	replayClassifier := NewPathClassifier(ctx)
+	ctx.classifier = replayClassifier
+	h2 := &LocalImportWorkFetcher{ctx: ctx, classifier: replayClassifier}
+	resps2 := collectResponses(t, mustCreate(t, h2, root))
+	if ctx.published != before {
+		t.Fatalf("规则已覆盖该层含义，不应再次发起问答（发布 %d → %d）", before, ctx.published)
+	}
+	if len(resps2) != 1 {
+		t.Fatalf("单文件应产出一叶应答，实得 %d 个", len(resps2))
+	}
+	var fp FilePluginData
+	if err := json.Unmarshal([]byte(resps2[0].PluginData), &fp); err != nil {
+		t.Fatalf("解析叶应答 PluginData 失败: %v", err)
+	}
+	found := false
+	for _, m := range fp.Metadata {
+		if m.Type == string(PathTypeLocalAuthor) && m.Name == rootName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("规则回放应产出作者含义（名字=目录名），实得 %+v", fp.Metadata)
+	}
+
+	// 重复吸收（同层同目录锚点）：原位替换为新的维度集合，不重复追加
+	ctx.classifier.absorbResponse(0, rootName, &ClassifyResponse{
+		Meanings: []PathMeaning{{Type: "localTag", Name: "次答标签"}},
+	})
+	profile2, errs := ParseProfile([]byte(ctx.kv[RuleProfileKVKey]))
+	if profile2 == nil || len(errs) != 0 {
+		t.Fatalf("替换后档案应可整体解析，errs=%v", errs)
+	}
+	if len(profile2.Rules) != 1 || len(profile2.Rules[0].Extractions) != 1 ||
+		profile2.Rules[0].Extractions[0].Dimension != DimTag {
+		t.Fatalf("重复吸收应原位替换为标签维度且仍只有一条规则，实得 %+v", profile2.Rules)
 	}
 }
 
@@ -203,6 +347,48 @@ func TestCreateMixedDirSplitsByAttribution(t *testing.T) {
 	}
 	if !hasPixiv || !hasLocal {
 		t.Fatalf("应同时存在 pixiv(11111111_p0) 与 local 应答，实得 %+v", resps)
+	}
+}
+
+// TestCreateSiblingGroupMembersBecomeSingleWorks Create 级群成员集成断言：
+// 档案内兄弟群组规则（key 正则剥序号、minGroupSize=2）命中同目录序列文件后，
+// 两名群成员各自成单文件作品叶任务（身份=内容哈希，落 local 域），落单文件
+// 走目录组路径（本例组内仅剩单文件亦成叶）——全叶输出，无目录父任务应答
+func TestCreateSiblingGroupMembersBecomeSingleWorks(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "photo_1.jpg"), "a")
+	writeFile(t, filepath.Join(root, "photo_2.jpg"), "b")
+	writeFile(t, filepath.Join(root, "plain.txt"), "c")
+
+	profile := `{"schemaVersion":1,"rules":[{` +
+		`"id":"sibling-photo","description":"同前缀序列文件成群","source":"manual","enabled":true,` +
+		`"pattern":{"kind":"sibling","keyExpr":"^(.*)_","seqExpr":"_(\\d+)","minGroupSize":2,"outcome":"collection"},` +
+		`"extractions":[]}]}`
+	ctx := stubPluginCtx{kv: map[string]string{RuleProfileKVKey: profile}}
+	h := &LocalImportWorkFetcher{ctx: ctx, classifier: NewPathClassifier(ctx)}
+
+	resps := collectResponses(t, mustCreate(t, h, root))
+	if len(resps) != 3 {
+		t.Fatalf("两名群成员+一名落单者应各成叶任务（3 应答），实得 %d 个", len(resps))
+	}
+	seen := map[string]bool{}
+	for _, r := range resps {
+		if len(r.Children) != 0 || strings.HasPrefix(r.PluginTaskId, "local-dir-") {
+			t.Fatalf("不应出现目录父任务应答，实得 PluginTaskId=%q children=%d", r.PluginTaskId, len(r.Children))
+		}
+		if r.SiteKey != identity.Local.Key {
+			t.Fatalf("无站点分类时成员应落 local 域，实得 SiteKey=%q", r.SiteKey)
+		}
+		expectHash, err := ComputeFileHash(filepath.Join(root, r.TaskName))
+		if err != nil || r.SiteWorkId != expectHash {
+			t.Fatalf("叶任务身份应为内容哈希 %q，实得 %q (err=%v)", expectHash, r.SiteWorkId, err)
+		}
+		seen[r.TaskName] = true
+	}
+	for _, name := range []string{"photo_1.jpg", "photo_2.jpg", "plain.txt"} {
+		if !seen[name] {
+			t.Fatalf("缺少 %s 的叶任务应答，实见 %v", name, seen)
+		}
 	}
 }
 
