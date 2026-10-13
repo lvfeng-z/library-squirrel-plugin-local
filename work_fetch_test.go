@@ -240,14 +240,17 @@ func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
 // TestClassifyDirAbsorbsAnswerAsQnaRule 问答吸收与回放：作者答案生成一条 qna 规则
 // （层深锚定的 LocationPattern + 目录名全匹配正则、ancestorDir→作者维度提取），
 // 经 SaveProfile 落键 rule-profile（重启语义由 KV 落地承载）；再次扫描时规则回放
-// 含义（作者=目录名），不再发起问答；同层同目录锚点重复吸收原位替换不重复追加
+// 含义（作者=目录名），不再发起问答；同层同目录锚点重复吸收原位替换不重复追加。
+// 锚点取扫描根下首层目录（问答层深 1）：规则的 LocationPattern 层深须为换算后的
+// DirNames 索引 0。
 func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "a.png"), "a")
-	rootName := filepath.Base(root)
+	os.MkdirAll(filepath.Join(root, "作者目录"), 0o755)
+	writeFile(t, filepath.Join(root, "作者目录", "a.png"), "a")
+	dirName := "作者目录"
 
 	ctx := newQnaStubCtx(nil, map[string]*ClassifyResponse{
-		rootName: {Meanings: []PathMeaning{{Type: "localAuthor", Name: "首答作者"}}},
+		dirName: {Meanings: []PathMeaning{{Type: "localAuthor", Name: "首答作者"}}},
 	})
 	h := &LocalImportWorkFetcher{ctx: ctx, classifier: ctx.classifier}
 	collectResponses(t, mustCreate(t, h, root))
@@ -264,22 +267,22 @@ func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 		t.Fatalf("应恰有一条规则，实得 %d 条", len(profile.Rules))
 	}
 	rule := profile.Rules[0]
-	if rule.ID != qnaRuleID(0, rootName) || rule.Source != RuleSourceQna || !rule.Enabled {
-		t.Fatalf("规则应为启用的 qna 规则 %q，实得 id=%q source=%q enabled=%v", qnaRuleID(0, rootName), rule.ID, rule.Source, rule.Enabled)
+	if rule.ID != qnaRuleID(1, dirName) || rule.Source != RuleSourceQna || !rule.Enabled {
+		t.Fatalf("规则应为启用的 qna 规则 %q，实得 id=%q source=%q enabled=%v", qnaRuleID(1, dirName), rule.ID, rule.Source, rule.Enabled)
 	}
 	loc, ok := rule.Pattern.(*LocationPattern)
 	if !ok || loc.MinDepth != 0 || loc.MaxDepth != 0 {
-		t.Fatalf("模式应为层深锚定的 LocationPattern(0,0)，实得 %#v", rule.Pattern)
+		t.Fatalf("问答层深 1（扫描根下首层）应换算为 DirNames 索引 0 的 LocationPattern(0,0)，实得 %#v", rule.Pattern)
 	}
 	re, ok := loc.Ancestor.(*RegexPattern)
-	if !ok || re.Target != TargetFileName || re.Expr != "^"+regexp.QuoteMeta(rootName)+"$" {
+	if !ok || re.Target != TargetFileName || re.Expr != "^"+regexp.QuoteMeta(dirName)+"$" {
 		t.Fatalf("Ancestor 应为目录名全匹配正则，实得 %#v", loc.Ancestor)
 	}
 	if len(rule.Extractions) != 1 || rule.Extractions[0].Dimension != DimAuthor ||
 		rule.Extractions[0].From != FromAncestorDir {
 		t.Fatalf("提取动作应为 ancestorDir→作者维度，实得 %+v", rule.Extractions)
 	}
-	if !strings.Contains(rule.Description, rootName) {
+	if !strings.Contains(rule.Description, dirName) {
 		t.Fatalf("规则描述应含问答上下文（目录名），实得 %q", rule.Description)
 	}
 
@@ -302,7 +305,7 @@ func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 	}
 	found := false
 	for _, m := range fp.Metadata {
-		if m.Type == string(PathTypeLocalAuthor) && m.Name == rootName {
+		if m.Type == string(PathTypeLocalAuthor) && m.Name == dirName {
 			found = true
 		}
 	}
@@ -311,7 +314,7 @@ func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 	}
 
 	// 重复吸收（同层同目录锚点）：原位替换为新的维度集合，不重复追加
-	ctx.classifier.absorbResponse(0, rootName, &ClassifyResponse{
+	ctx.classifier.absorbResponse(1, dirName, &ClassifyResponse{
 		Meanings: []PathMeaning{{Type: "localTag", Name: "次答标签"}},
 	})
 	profile2, errs := ParseProfile([]byte(ctx.kv[RuleProfileKVKey]))
@@ -321,6 +324,55 @@ func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 	if len(profile2.Rules) != 1 || len(profile2.Rules[0].Extractions) != 1 ||
 		profile2.Rules[0].Extractions[0].Dimension != DimTag {
 		t.Fatalf("重复吸收应原位替换为标签维度且仍只有一条规则，实得 %+v", profile2.Rules)
+	}
+}
+
+// TestQnaRuleDepthAlignsWithDirNamesIndex 层深编号对齐锁定：问答层深沿用调用方
+// 编号（扫描根本身为 0、根下首层为 1），吸收生成的 qna 规则求值须落在 DirNames
+// 索引语义的同层目录上——问答指认「扫描根下第 1 层目录为作者」，规则对已知
+// DirNames 的 ScanFile 命中 DirNames[0]（作者声明=首层目录名），层深 2 的规则
+// 命中 DirNames[1]，互不串层；层深 0（扫描根本身）不入 DirNames，不生成规则。
+func TestQnaRuleDepthAlignsWithDirNamesIndex(t *testing.T) {
+	ctx := newQnaStubCtx(nil, nil)
+	ctx.classifier.absorbResponse(1, "作者甲", &ClassifyResponse{
+		Meanings: []PathMeaning{{Type: "localAuthor", Name: "首层作者"}},
+	})
+	ctx.classifier.absorbResponse(2, "画集", &ClassifyResponse{
+		Meanings: []PathMeaning{{Type: "localTag", Name: "第二层标签"}},
+	})
+	ctx.classifier.absorbResponse(0, "扫描根本身", &ClassifyResponse{
+		Meanings: []PathMeaning{{Type: "localTag", Name: "根目录标签"}},
+	})
+
+	profile, errs := ParseProfile([]byte(ctx.kv[RuleProfileKVKey]))
+	if profile == nil || len(errs) != 0 {
+		t.Fatalf("问答规则档案应可整体解析，实得 profile=%v errs=%v", profile, errs)
+	}
+	if len(profile.Rules) != 2 {
+		t.Fatalf("层深 1/2 各生成一条规则、层深 0（扫描根本身）不生成，应恰有 2 条，实得 %d", len(profile.Rules))
+	}
+
+	// 与 Create 期 buildScanFiles 同构：DirNames 由相对扫描根的 RelPath 分解，
+	// 不含扫描根——首层「作者甲」=DirNames[0]、第二层「画集」=DirNames[1]
+	files := buildScanFiles([]FileEntry{{FullPath: `E:\库\作者甲\画集\a.jpg`, RelPath: "作者甲/画集/a.jpg"}})
+	decisions := RunPipeline(files, profile.Rules, nil)
+	if len(decisions) != 1 {
+		t.Fatalf("单文件应产出一行流水线结论，实得 %d 行", len(decisions))
+	}
+	var authors, tags []string
+	for _, decl := range decisions[0].Declarations {
+		switch decl.Dimension {
+		case DimAuthor:
+			authors = append(authors, decl.Value)
+		case DimTag:
+			tags = append(tags, decl.Value)
+		}
+	}
+	if len(authors) != 1 || authors[0] != "作者甲" {
+		t.Fatalf("层深 1 的作者规则应命中 DirNames[0]（作者=首层目录名「作者甲」），实得 %v", authors)
+	}
+	if len(tags) != 1 || tags[0] != "画集" {
+		t.Fatalf("层深 2 的标签规则应命中 DirNames[1]（标签=第二层目录名「画集」），实得 %v", tags)
 	}
 }
 

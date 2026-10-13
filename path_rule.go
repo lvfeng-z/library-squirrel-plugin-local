@@ -91,6 +91,15 @@ func qnaRuleID(level int, dirName string) string {
 	return fmt.Sprintf("qna-dir-%d-%s", level, dirName)
 }
 
+// qnaDirDepth 问答层深 → 规则档案目录深度（DirNames 索引）的换算：问答层深沿用
+// 调用方编号——扫描根本身为 0、根下首层为 1；规则档案的 LocationPattern 深度是
+// DirNames 的索引语义——DirNames 不含扫描根、根下首层为 0。两套编号恰差 1，
+// 换算式 depth = level - 1；层深 0（扫描根本身）得 -1，表示无对应索引——扫描根
+// 永不入 DirNames，位置规则无法锚定扫描根。
+func qnaDirDepth(level int) int {
+	return level - 1
+}
+
 // PathClassifier 路径分类器：与前端交互完成目录层含义问答，并把答案吸收为
 // 规则档案内的 qna 规则。
 type PathClassifier struct {
@@ -160,13 +169,15 @@ func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, 
 	}
 }
 
-// meaningsFromRules 依规则档案回放该层目录含义：构造仅该层目录名有效的合成匹配
-// 输入（其余层名空占位、文件名留空使文件名规则不参与），逐条求值可表达目录层
-// 含义的启用规则；命中落点须恰为该层该名（占位层命中不算覆盖），再执行提取动作
-// 把声明转回路径含义并按（类型,名字）去重。无含义产出时返回 nil，视为规则未
-// 覆盖、需发起问答。
+// meaningsFromRules 依规则档案回放该层目录含义：层深先经 qnaDirDepth 换算为档案
+// 的 DirNames 索引（问答层深与档案层深两套编号恰差 1），再构造仅该层目录名有效
+// 的合成匹配输入（其余层名空占位、文件名留空使文件名规则不参与），逐条求值可
+// 表达目录层含义的启用规则；命中落点须恰为该层该名（占位层命中不算覆盖），再
+// 执行提取动作把声明转回路径含义并按（类型,名字）去重。层深 0（扫描根本身）
+// 无对应索引、或无含义产出时返回 nil，视为规则未覆盖、需发起问答。
 func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMeaning {
-	if level < 0 {
+	depth := qnaDirDepth(level)
+	if depth < 0 {
 		return nil
 	}
 	rules := EffectiveRules(nil)
@@ -179,8 +190,8 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 			rules = EffectiveRules(profile)
 		}
 	}
-	dirNames := make([]string, level+1)
-	dirNames[level] = dirName
+	dirNames := make([]string, depth+1)
+	dirNames[depth] = dirName
 	in := &MatchInput{DirNames: dirNames}
 	var meanings []PathMeaning
 	seen := make(map[PathMeaning]bool)
@@ -192,11 +203,11 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 			// 兄弟群组规则定群文件归属，不表达目录层含义
 			continue
 		}
-		ctx := &ParseContext{DirNames: dirNames, Depth: level + 1}
+		ctx := &ParseContext{DirNames: dirNames, Depth: depth + 1}
 		if !rule.Pattern.Evaluate(in, nil, ctx) {
 			continue
 		}
-		if hit, ok := ctx.LastDirHit(); !ok || hit.Depth != level || hit.Name != dirName {
+		if hit, ok := ctx.LastDirHit(); !ok || hit.Depth != depth || hit.Name != dirName {
 			// 命中未落在本层目录名上（占位层假命中），不算覆盖
 			continue
 		}
@@ -221,12 +232,20 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 
 // absorbResponse 把问答响应吸收为一条 qna 规则并持久化入档：答案词汇映射新体系
 // 含义维度（无可映射维度的答案逐条告警后舍弃，全部不可映射时放弃生成），规则为
-// LocationPattern（MinDepth=MaxDepth=所问层深）+ 目录名全匹配正则，提取动作按
-// 维度取 ancestorDir；持久化经 LoadProfile→追加→SaveProfile，同层同目录锚点
+// LocationPattern（MinDepth=MaxDepth=所问层深经 qnaDirDepth 换算出的 DirNames
+// 索引）+ 目录名全匹配正则，提取动作按维度取 ancestorDir；层深 0（扫描根本身）
+// 无对应索引，不生成规则；持久化经 LoadProfile→追加→SaveProfile，同层同目录锚点
 // （同 ID）已有 qna 规则时原位替换，新答案的维度集合整体取代旧规则。插件上下文
 // 不可用或档案不可载入时不落库（不覆写既有档案），仅告警。
 func (c *PathClassifier) absorbResponse(level int, dirName string, resp *ClassifyResponse) {
 	if c.ctx == nil {
+		return
+	}
+	depth := qnaDirDepth(level)
+	if depth < 0 {
+		// 层深 0 是扫描根本身：DirNames 不含扫描根，位置规则无从锚定，
+		// 答案仅本次运行消费，不吸收为跨运行规则
+		c.ctx.Warnf("扫描根本身不在规则层深编号内（DirNames 不含扫描根），问答答案不生成规则: level=%d, dirName=%s", level, dirName)
 		return
 	}
 	var extractions []ExtractionAction
@@ -257,7 +276,7 @@ func (c *PathClassifier) absorbResponse(level int, dirName string, resp *Classif
 		c.ctx.Warnf("构造问答规则目录名正则失败，放弃生成规则: %v", err)
 		return
 	}
-	pattern, err := NewLocationPattern(level, level, ancestor)
+	pattern, err := NewLocationPattern(depth, depth, ancestor)
 	if err != nil {
 		c.ctx.Warnf("构造问答规则位置模式失败，放弃生成规则: %v", err)
 		return
