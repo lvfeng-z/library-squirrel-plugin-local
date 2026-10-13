@@ -1,8 +1,8 @@
 module github.com/lvfeng/library-squirrel-plugin-local
 
-go 1.26.1
+go 1.26.9
 
-require github.com/lvfeng-z/library-squirrel-sdk v0.0.4
+require github.com/lvfeng-z/library-squirrel-sdk v0.0.6
 
 require (
 	github.com/fatih/color v1.19.0 // indirect
@@ -13,12 +13,12 @@ require (
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/oklog/run v1.2.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/grpc v1.81.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
+	google.golang.org/grpc v1.84.0 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 )
 
 replace github.com/lvfeng-z/library-squirrel-sdk => ../library-squirrel-sdk
