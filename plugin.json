@@ -1,7 +1,7 @@
 {
   "id": "com.lvfeng.localImport",
   "name": "localImport",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "contractVersion": 18,
   "author": "lvfeng",
   "description": "从本地路径导入文件到资源库",
