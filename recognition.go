@@ -126,43 +126,59 @@ type FileConclusion struct {
 // 结果压过普适规则）。识别干跑与会话模式的任务创建共用本入口（合并逻辑唯一
 // 实现，两处结论同源）。
 func MergedRecognition(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, assigns map[string]SessionAssignment) []FileConclusion {
-	decisions := RunPipeline(files, rules, lib)
-	policy := AggregateSynthesis(rules)
-	// 定群规则与序号原文重放需要同目录兄弟全集——与 RunPipeline 内部同键同序构造
+	// 同目录兄弟全集按「父目录」批量构造（与 RunPipeline 内部同键同序）；单文件
+	// 重算通道（recomputeFileDecision）经磁盘重扫预填兄弟全集后共用同一单文件
+	// 合并实现
 	siblingsByDir := make(map[string][]string, len(files))
 	for _, file := range files {
 		key := dirGroupKey(file.DirNames)
 		siblingsByDir[key] = append(siblingsByDir[key], file.FileName)
 	}
-	conclusions := make([]FileConclusion, 0, len(decisions))
-	for i, d := range decisions {
-		final, pending := Synthesize(d.Declarations, policy)
-		if assign, ok := assigns[d.RelPath]; ok {
-			final, pending = applyAssignmentToConclusion(final, pending, &assign)
+	conclusions := make([]FileConclusion, 0, len(files))
+	for _, file := range files {
+		in := &MatchInput{
+			FileName: file.FileName, DirNames: file.DirNames, RelPath: file.RelPath,
+			Siblings: siblingsByDir[dirGroupKey(file.DirNames)],
 		}
-		c := FileConclusion{
-			RelPath: d.RelPath, FileName: d.FileName, DirRelKey: dirRelKeyOf(d.RelPath),
-			Group: d.Group, MatchedRuleIDs: d.MatchedRuleIDs,
-			Final: final, Pending: pending,
+		var assign *SessionAssignment
+		if a, ok := assigns[file.RelPath]; ok {
+			assign = &a
 		}
-		if d.Group != nil {
-			in := &MatchInput{
-				FileName: d.FileName, DirNames: files[i].DirNames, RelPath: d.RelPath,
-				Siblings: siblingsByDir[dirGroupKey(files[i].DirNames)],
-			}
-			ctx := &ParseContext{DirNames: files[i].DirNames, Depth: len(files[i].DirNames)}
-			if group, ruleID := runGroupStage(rules, in, lib, ctx); group != nil {
-				c.Group, c.GroupRuleID = group, ruleID
-				if sibling, ok := ruleByID(rules, ruleID).(*SiblingPattern); ok {
-					if text, has := sibling.seqTextOf(d.FileName); has {
-						c.GroupSeqText = text
-					}
-				}
-			}
-		}
-		conclusions = append(conclusions, c)
+		conclusions = append(conclusions, mergedFileConclusionOf(in, rules, lib, assign))
 	}
 	return conclusions
+}
+
+// mergedFileConclusionOf 单文件「档案规则 ∪ 会话赋值」合并求值结论——合并逻辑
+// 的唯一实现：先流水线两段求值（分组定群+提取声明，注入库内谓词索引），再合成
+// 终选与待裁决，最后会话赋值按维度覆盖终选（特异性压过普适）；群组成员附定群
+// 规则 ID 与序号原文（识别全景的序列形态呈现）。识别干跑（MergedRecognition
+// 批量入口）与执行期单文件重算（recomputeFileDecision，消费任务级赋值快照）
+// 共用本函数——风险13（干跑与会话模式合并同源）的构造性保证。
+func mergedFileConclusionOf(in *MatchInput, rules []RuleEntry, lib *LibraryIndex, assign *SessionAssignment) FileConclusion {
+	ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+	decision := FileDecision{RelPath: in.RelPath, FileName: in.FileName}
+	group, groupRuleID := runGroupStage(rules, in, lib, ctx)
+	decision.Group = group
+	runExtractionStage(&decision, rules, in, lib, ctx)
+	final, pending := Synthesize(decision.Declarations, AggregateSynthesis(rules))
+	if assign != nil {
+		final, pending = applyAssignmentToConclusion(final, pending, assign)
+	}
+	c := FileConclusion{
+		RelPath: in.RelPath, FileName: in.FileName, DirRelKey: dirRelKeyOf(in.RelPath),
+		Group: decision.Group, MatchedRuleIDs: decision.MatchedRuleIDs,
+		Final: final, Pending: pending,
+	}
+	if decision.Group != nil && groupRuleID != "" {
+		c.GroupRuleID = groupRuleID
+		if sibling, ok := ruleByID(rules, groupRuleID).(*SiblingPattern); ok {
+			if text, has := sibling.seqTextOf(in.FileName); has {
+				c.GroupSeqText = text
+			}
+		}
+	}
+	return c
 }
 
 // ruleByID 在规则序列中按 ID 取顶层模式（未命中返回 nil）。

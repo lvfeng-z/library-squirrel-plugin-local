@@ -121,128 +121,20 @@ func findSpecByRole(specs []*sdkdto.StoreSpec, role string) *sdkdto.StoreSpec {
 	return nil
 }
 
-// TestCreateEmptyDirSetsReason 空目录创建任务时零任务返回并经 SetReason 声明用户可读原因；
-// 路径不可访问仍走错误返回（经 SDK 的 error 块通道透传，不经 reason）
-func TestScanEmptyDirSetsReason(t *testing.T) {
-	dir := t.TempDir()
-
-	h := &LocalImportWorkFetcher{}
-	result, err := h.streamScanTasks(dir)
-	if err != nil {
-		t.Fatalf("空目录扫描产出不应报错: %v", err)
-	}
-	if result.IsStream() {
-		t.Fatalf("空目录应返回批量结果而非流式")
-	}
-	if tasks := result.Array(); len(tasks) != 0 {
-		t.Fatalf("空目录不应产出任务，实际产出 %d 个", len(tasks))
-	}
-	if result.Reason() == "" {
-		t.Fatalf("空目录应经 SetReason 声明原因，Reason() 为空")
-	}
-
-	missing := filepath.Join(dir, "不存在的子目录")
-	if _, err := h.streamScanTasks(missing); err == nil {
-		t.Fatalf("不可访问路径应保持错误返回，实际无错误")
-	}
-}
-
-// TestCreateSiteClassifiedSubtreeGoesRealDomain site 分类消费：目录经问答指认 site 含义
-// （答案 ID=面板选择项 value=站点 DB 行 id）时，子树内文件解析出的作品归该站点域；
-// 解析不出页级 ID 的文件回退 local；层级作用域对照——更深层 site 含义不外溢到浅层文件
-func TestCreateSiteClassifiedSubtreeGoesRealDomain(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "12345678_p0.jpg"), "a")
-	os.MkdirAll(filepath.Join(root, "sub"), 0o755)
-	writeFile(t, filepath.Join(root, "sub", "99999999_p1.png"), "b")
-	os.MkdirAll(filepath.Join(root, "sub2"), 0o755)
-	writeFile(t, filepath.Join(root, "sub2", "readme.txt"), "c")
-
-	sites := []*sdkdto.SiteDTO{
-		{Id: 7, SiteKey: identity.Pixiv.Key},
-		{Id: 9, SiteKey: identity.Bilibili.Key},
-	}
-	ctx := newQnaStubCtx(sites, map[string]*ClassifyResponse{
-		filepath.Base(root): {Meanings: []PathMeaning{{Type: "site", ID: "7", Name: "pixiv"}}},
-	})
-	h := &LocalImportWorkFetcher{ctx: ctx, classifier: ctx.classifier}
-
-	resps := collectResponses(t, mustCreate(t, h, root))
-	if len(resps) != 3 {
-		t.Fatalf("三个目录组应各产出一应答（根/sub/sub2 各单文件成叶），实得 %d 个", len(resps))
-	}
-
-	// 根组：原图形态文件 → pixiv 页级叶任务
-	// （应答按父目录分组 map 随机序产出，须按作品 ID 无序定位，不能取首个 pixiv 键应答）
-	var pixivRoot *sdkdto.TaskCreateResponse
-	for _, r := range resps {
-		if r.SiteWorkId == "12345678_p0" {
-			pixivRoot = r
-			break
-		}
-	}
-	if pixivRoot == nil || pixivRoot.PluginTaskId != "12345678_p0" {
-		t.Fatalf("根组应产出 pixiv 页级叶任务(12345678_p0)，实得 %+v", pixivRoot)
-	}
-	// 子树生效：根级 site 规则传导到子目录组的文件归属
-	foundSub := false
-	for _, r := range resps {
-		if r.SiteKey == identity.Pixiv.Key && r.SiteWorkId == "99999999_p1" {
-			foundSub = true
-		}
-	}
-	if !foundSub {
-		t.Fatalf("子目录原图形态文件应归 pixiv 域(99999999_p1)，实得应答 %+v", resps)
-	}
-	// 站点分类在场但文件名解析不出页级 ID → local 回退
-	localResp := findResponse(resps, identity.Local.Key)
-	if localResp == nil || localResp.SiteWorkId == "" {
-		t.Fatalf("解析不出真实 ID 的文件应回退 local 哈希身份，实得 %+v", localResp)
-	}
-	expectHash, err := ComputeFileHash(filepath.Join(root, "sub2", "readme.txt"))
-	if err != nil || localResp.SiteWorkId != expectHash {
-		t.Fatalf("local 回退身份应为内容哈希 %q，实得 %q (err=%v)", expectHash, localResp.SiteWorkId, err)
-	}
-	// 站点答案无可映射含义维度：不生成规则，不落规则档案键（含义仅本次运行消费）
-	if _, ok := ctx.kv[RuleProfileKVKey]; ok {
-		t.Fatalf("站点答案无可映射含义维度，不应写入规则档案键 %q", RuleProfileKVKey)
-	}
-
-	// 层级作用域对照：更深层（level 1）的 site 含义只作用于该层子树——
-	// 根层文件不受其影响（不外溢到浅层），按文件名形态独立锚定 pixiv
-	root2 := t.TempDir()
-	writeFile(t, filepath.Join(root2, "12345678_p0.jpg"), "d")
-	os.MkdirAll(filepath.Join(root2, "deep"), 0o755)
-	writeFile(t, filepath.Join(root2, "deep", "99999999_p1.png"), "e")
-
-	ctx2 := newQnaStubCtx(sites, map[string]*ClassifyResponse{
-		"deep": {Meanings: []PathMeaning{{Type: "site", ID: "9", Name: "bilibili"}}},
-	})
-	h2 := &LocalImportWorkFetcher{ctx: ctx2, classifier: ctx2.classifier}
-	resps2 := collectResponses(t, mustCreate(t, h2, root2))
-	var rootFileSite, deepFileSite string
-	for _, r := range resps2 {
-		if r.SiteWorkId == "12345678_p0" {
-			rootFileSite = r.SiteKey
-		}
-		if r.SiteWorkId == "99999999_p1" {
-			deepFileSite = r.SiteKey
-		}
-	}
-	if rootFileSite != identity.Pixiv.Key {
-		t.Fatalf("根层文件不应受 level 1 站点规则影响（应为 pixiv 形态锚定），实得 %q", rootFileSite)
-	}
-	if deepFileSite != identity.Bilibili.Key {
-		t.Fatalf("深层文件应受 level 1 站点规则归 bilibili，实得 %q", deepFileSite)
-	}
-}
+// —— 旧直建路径退役说明（决策6，阶段4）——
+// 原驱动 streamScanTasks 的用例（空目录 reason、问答 site 分类子树归属、混合
+// 归属拆分、群成员叶任务、local 发射形态）已随该路径删除；问答 site 分类在会话
+// 模式下结构性不可达（目录含义只取快照规则回放，见 emitSelectedWorks）。混合
+// 归属拆分与发射形态断言由 selection_test.go 的会话模式用例承接
+//（TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 族）。
 
 // TestClassifyDirAbsorbsAnswerAsQnaRule 问答吸收与回放：作者答案生成一条 qna 规则
-// （层深锚定的 LocationPattern + 目录名全匹配正则、ancestorDir→作者维度提取），
-// 经 SaveProfile 落键 rule-profile（重启语义由 KV 落地承载）；再次扫描时规则回放
+//（层深锚定的 LocationPattern + 目录名全匹配正则、ancestorDir→作者维度提取），
+// 经 SaveProfile 落键 rule-profile（重启语义由 KV 落地承载）；再次分类时规则回放
 // 含义（作者=目录名），不再发起问答；同层同目录锚点重复吸收原位替换不重复追加。
 // 锚点取扫描根下首层目录（问答层深 1）：规则的 LocationPattern 层深须为换算后的
-// DirNames 索引 0。
+// DirNames 索引 0。（旧直建路径退役后经 ClassifyDir 直驱——问答吸收机制保留为
+// 不可达历史代码，本测锚定其行为不回归。）
 func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "作者目录"), 0o755)
@@ -253,7 +145,9 @@ func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 		dirName: {Meanings: []PathMeaning{{Type: "localAuthor", Name: "首答作者"}}},
 	})
 	h := &LocalImportWorkFetcher{ctx: ctx, classifier: ctx.classifier}
-	collectResponses(t, mustCreate(t, h, root))
+	if _, err := h.classifier.ClassifyDir(1, dirName); err != nil {
+		t.Fatalf("分类器问答失败: %v", err)
+	}
 
 	raw, ok := ctx.kv[RuleProfileKVKey]
 	if !ok {
@@ -292,25 +186,21 @@ func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 	replayClassifier := NewPathClassifier(ctx)
 	ctx.classifier = replayClassifier
 	h2 := &LocalImportWorkFetcher{ctx: ctx, classifier: replayClassifier}
-	resps2 := collectResponses(t, mustCreate(t, h2, root))
+	meanings, err := h2.classifier.ClassifyDir(1, dirName)
+	if err != nil {
+		t.Fatalf("规则回放分类失败: %v", err)
+	}
 	if ctx.published != before {
 		t.Fatalf("规则已覆盖该层含义，不应再次发起问答（发布 %d → %d）", before, ctx.published)
 	}
-	if len(resps2) != 1 {
-		t.Fatalf("单文件应产出一叶应答，实得 %d 个", len(resps2))
-	}
-	var fp FilePluginData
-	if err := json.Unmarshal([]byte(resps2[0].PluginData), &fp); err != nil {
-		t.Fatalf("解析叶应答 PluginData 失败: %v", err)
-	}
 	found := false
-	for _, m := range fp.Metadata {
+	for _, m := range meanings {
 		if m.Type == string(PathTypeLocalAuthor) && m.Name == dirName {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("规则回放应产出作者含义（名字=目录名），实得 %+v", fp.Metadata)
+		t.Fatalf("规则回放应产出作者含义（名字=目录名），实得 %+v", meanings)
 	}
 
 	// 重复吸收（同层同目录锚点）：原位替换为新的维度集合，不重复追加
@@ -373,114 +263,6 @@ func TestQnaRuleDepthAlignsWithDirNamesIndex(t *testing.T) {
 	}
 	if len(tags) != 1 || tags[0] != "画集" {
 		t.Fatalf("层深 2 的标签规则应命中 DirNames[1]（标签=第二层目录名「画集」），实得 %v", tags)
-	}
-}
-
-// TestCreateMixedDirSplitsByAttribution 同目录混合归属（原图形态+普通文件名）：
-// 拆为两个应答各自携带站点键（子任务站点继承父应答，无法在同应答内混合归属）
-func TestCreateMixedDirSplitsByAttribution(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "11111111_p0.jpg"), "a")
-	writeFile(t, filepath.Join(root, "plain.png"), "b")
-
-	h := &LocalImportWorkFetcher{ctx: stubPluginCtx{}, classifier: NewPathClassifier(stubPluginCtx{})}
-	resps := collectResponses(t, mustCreate(t, h, root))
-	if len(resps) != 2 {
-		t.Fatalf("同目录混合归属应拆为 2 个应答，实得 %d 个", len(resps))
-	}
-	var hasPixiv, hasLocal bool
-	for _, r := range resps {
-		switch r.SiteKey {
-		case identity.Pixiv.Key:
-			hasPixiv = r.SiteWorkId == "11111111_p0"
-		case identity.Local.Key:
-			hasLocal = r.SiteWorkId != ""
-		}
-	}
-	if !hasPixiv || !hasLocal {
-		t.Fatalf("应同时存在 pixiv(11111111_p0) 与 local 应答，实得 %+v", resps)
-	}
-}
-
-// TestCreateSiblingGroupMembersBecomeSingleWorks Create 级群成员集成断言：
-// 档案内兄弟群组规则（key 正则剥序号、minGroupSize=2）命中同目录序列文件后，
-// 两名群成员各自成单文件作品叶任务（身份=内容哈希，落 local 域），落单文件
-// 走目录组路径（本例组内仅剩单文件亦成叶）——全叶输出，无目录父任务应答
-func TestCreateSiblingGroupMembersBecomeSingleWorks(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "photo_1.jpg"), "a")
-	writeFile(t, filepath.Join(root, "photo_2.jpg"), "b")
-	writeFile(t, filepath.Join(root, "plain.txt"), "c")
-
-	profile := `{"schemaVersion":1,"rules":[{` +
-		`"id":"sibling-photo","description":"同前缀序列文件成群","source":"manual","enabled":true,` +
-		`"pattern":{"kind":"sibling","keyExpr":"^(.*)_","seqExpr":"_(\\d+)","minGroupSize":2,"outcome":"collection"},` +
-		`"extractions":[]}]}`
-	ctx := stubPluginCtx{kv: map[string]string{RuleProfileKVKey: profile}}
-	h := &LocalImportWorkFetcher{ctx: ctx, classifier: NewPathClassifier(ctx)}
-
-	resps := collectResponses(t, mustCreate(t, h, root))
-	if len(resps) != 3 {
-		t.Fatalf("两名群成员+一名落单者应各成叶任务（3 应答），实得 %d 个", len(resps))
-	}
-	seen := map[string]bool{}
-	for _, r := range resps {
-		if len(r.Children) != 0 || strings.HasPrefix(r.PluginTaskId, "local-dir-") {
-			t.Fatalf("不应出现目录父任务应答，实得 PluginTaskId=%q children=%d", r.PluginTaskId, len(r.Children))
-		}
-		if r.SiteKey != identity.Local.Key {
-			t.Fatalf("无站点分类时成员应落 local 域，实得 SiteKey=%q", r.SiteKey)
-		}
-		expectHash, err := ComputeFileHash(filepath.Join(root, r.TaskName))
-		if err != nil || r.SiteWorkId != expectHash {
-			t.Fatalf("叶任务身份应为内容哈希 %q，实得 %q (err=%v)", expectHash, r.SiteWorkId, err)
-		}
-		seen[r.TaskName] = true
-	}
-	for _, name := range []string{"photo_1.jpg", "photo_2.jpg", "plain.txt"} {
-		if !seen[name] {
-			t.Fatalf("缺少 %s 的叶任务应答，实见 %v", name, seen)
-		}
-	}
-}
-
-// TestCreateLocalEmissionFormUnchanged local 归属路径字段零变化（回归锚）：
-// 无站点分类时父任务身份/local 键/子任务哈希身份维持既有形态，PluginData 不携带归属字段
-func TestCreateLocalEmissionFormUnchanged(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "a.png"), "a")
-	writeFile(t, filepath.Join(root, "b.png"), "b")
-
-	h := &LocalImportWorkFetcher{ctx: stubPluginCtx{}, classifier: NewPathClassifier(stubPluginCtx{})}
-	resps := collectResponses(t, mustCreate(t, h, root))
-	if len(resps) != 1 {
-		t.Fatalf("根目录两文件应产出单父任务应答，实得 %d 个", len(resps))
-	}
-	r := resps[0]
-	if r.SiteKey != identity.Local.Key || len(r.Children) != 2 {
-		t.Fatalf("应答应为 local 父任务+2 子任务，实得 SiteKey=%q children=%d", r.SiteKey, len(r.Children))
-	}
-	if r.PluginTaskId != "local-dir-" || r.SiteWorkId != "local-dir-" {
-		t.Fatalf("父任务身份应维持 local-dir 前缀形态，实得 %q/%q", r.PluginTaskId, r.SiteWorkId)
-	}
-	if r.ResourceType != "" {
-		t.Fatalf("父任务不应声明 ResourceType，实得 %q", r.ResourceType)
-	}
-	for _, child := range r.Children {
-		expectHash, err := ComputeFileHash(filepath.Join(root, child.TaskName))
-		if err != nil || child.SiteWorkId != expectHash {
-			t.Fatalf("local 子任务身份应为内容哈希，期望 %q 实得 %q (err=%v)", expectHash, child.SiteWorkId, err)
-		}
-		var fpMap map[string]any
-		if err := json.Unmarshal([]byte(child.PluginData), &fpMap); err != nil {
-			t.Fatalf("解析子任务 PluginData 失败: %v", err)
-		}
-		if _, ok := fpMap["siteKey"]; ok {
-			t.Fatalf("local 归属 PluginData 不应携带 siteKey 字段")
-		}
-		if _, ok := fpMap["siteWorkId"]; ok {
-			t.Fatalf("local 归属 PluginData 不应携带 siteWorkId 字段")
-		}
 	}
 }
 
@@ -607,7 +389,7 @@ func TestBuildDirGroupResponseRealParentIdentity(t *testing.T) {
 		{entry: FileEntry{FullPath: f1, RelPath: "sub/11111111_p0.jpg", Hash: "h1"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p0"}},
 		{entry: FileEntry{FullPath: f2, RelPath: "sub/11111111_p1.jpg", Hash: "h2"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p1"}},
 	}
-	resp := buildDirGroupResponse("root", "sub", "导入【root】", nil, files)
+	resp := buildDirGroupResponse("root", "sub", "导入【root】", nil, files, nil)
 	if resp == nil {
 		t.Fatalf("应产出父任务应答")
 	}
@@ -631,19 +413,10 @@ func TestBuildDirGroupResponseRealParentIdentity(t *testing.T) {
 	}
 
 	single := []attributedFile{files[0]}
-	leaf := buildDirGroupResponse("root", "sub", "导入【root】", nil, single)
+	leaf := buildDirGroupResponse("root", "sub", "导入【root】", nil, single, nil)
 	if leaf == nil || leaf.Children != nil || leaf.PluginTaskId != "11111111_p0" || leaf.SiteWorkId != "11111111_p0" {
 		t.Fatalf("真实域单文件应成叶任务(身份=页级 ID)，实得 %+v", leaf)
 	}
-}
-
-func mustCreate(t *testing.T, h *LocalImportWorkFetcher, path string) *sdkdto.TaskCreateResult {
-	t.Helper()
-	result, err := h.streamScanTasks(path)
-	if err != nil {
-		t.Fatalf("Create 不应报错: %v", err)
-	}
-	return result
 }
 
 func writeFile(t *testing.T, path, content string) string {

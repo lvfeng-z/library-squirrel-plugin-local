@@ -75,8 +75,27 @@ type workbenchTestCtx struct {
 	// library 谓词索引构造的分页数据集（Query* 四方法的桩数据；零值=四轨全空）。
 	library libraryFixture
 
+	// CreateTask 桩：createTaskStub 为应答（nil=默认成功 AddedQuantity=3），
+	// 计数与末次 URL 供创建编排断言。
+	createTaskStub   *sdkdto.CreateTaskResult
+	createTaskCount  int
+	createTaskLastURL string
+
 	mu        sync.Mutex
 	published []publishedEvent
+}
+
+// CreateTask 创建编排动作（ApplyCreateTasks）的桩：记录调用并回告预设结论
+//（真实 Create 过滤产出分支由测试直驱，不经此桩）。
+func (c *workbenchTestCtx) CreateTask(url string) (*sdkdto.CreateTaskResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.createTaskCount++
+	c.createTaskLastURL = url
+	if c.createTaskStub != nil {
+		return c.createTaskStub, nil
+	}
+	return &sdkdto.CreateTaskResult{Succeed: true, AddedQuantity: 3}, nil
 }
 
 func (c *workbenchTestCtx) GetValue(key string) (*sdkdto.StorageValue, error) {

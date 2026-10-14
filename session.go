@@ -1,7 +1,7 @@
 // 工作台会话管理：多会话（按库根）的 KV 持久化工件、会话状态机、档案与会话写的
 // 单点串行、库根获取与档案外部变更对账，以及工作台前端事件协议（请求/应答/事件）
-// 的请求侧处理。识别全景快照、单次赋值与资源选择集等会话内容字段由后续阶段在
-// WorkbenchSession 上扩展，本文件承载键管理与生命周期骨架。
+// 的请求侧处理。识别全景快照、单次赋值与资源选择集等会话内容字段的模型与编排
+// 见 recognition.go / parse_actions.go / selection.go。
 package main
 
 import (
@@ -90,9 +90,9 @@ type WorkbenchSession struct {
 	// 被清除后其目录不再由赋值集锚定，修订号闸门保证清除前的结论不被 mtime
 	// 游标复用（赋值变更一律全量重算）。
 	AssignRevision int64 `json:"assignRevision,omitempty"`
-	// PendingWorkbenchCreate 工作台发起创建的标记：工作台在调用 CreateTask 前
-	// 置位，Create 按此分派到「过滤产出」分支（只产出所选作品，防递归确认），
-	// 分派时消费。接线属后续阶段，本阶段仅分支骨架读取。
+	// PendingWorkbenchCreate 工作台发起创建的标记：工作台创建编排动作
+	//（ApplyCreateTasks）在调用 CreateTask 前置位，Create 按此分派到「过滤产出」
+	// 分支（只产出所选作品，防递归确认），分派时消费。
 	PendingWorkbenchCreate bool `json:"pendingWorkbenchCreate"`
 	// Snapshot 识别全景快照（裁剪形态，识别干跑完成时写入；含按目录 mtime 的
 	// 重识别增量游标）。
@@ -105,8 +105,10 @@ type WorkbenchSession struct {
 	Assignments map[string]SessionAssignment `json:"assignments,omitempty"`
 	// Ignored 已忽略项（相对路径集合，阶段3 接线）。
 	Ignored []string `json:"ignored,omitempty"`
-	// Selection 资源选择集（已选定为任务的作品，相对路径集合，阶段4 接线；
-	// 作品为最小粒度，集为默认聚合单元）。
+	// Selection 资源选择集（已选定为任务的作品键集合，阶段4 接线）：作品为最小
+	// 粒度（多轨原子，键形态见 selection.go 的两类前缀——半作品结构性不可表达），
+	// 集为默认聚合单元（集聚合由前端按选择域展开为成员作品键）。创建成功后清空，
+	// 赋值与快照保留。
 	Selection []string `json:"selection,omitempty"`
 }
 
@@ -688,6 +690,8 @@ const (
 	workbenchActionGeneralize       = "generalize"    // 泛化成规则（档案写+验证轮）
 	workbenchActionAdjudicate       = "adjudicate"    // 冲突裁决生成组合规则
 	workbenchActionGetDiff          = "getDiff"       // 最近一次重识别差异集
+	workbenchActionSetSelection     = "setSelection"  // 全量替换资源选择集（作品键）
+	workbenchActionCreateTasks      = "createTasks"   // 创建编排（对账→CreateTask→清理选择集）
 )
 
 // getPanorama 的分节拉取词汇。
@@ -739,6 +743,11 @@ type workbenchFrontendRequest struct {
 	// 候选下标。
 	PresentIndex int `json:"presentIndex,omitempty"`
 	AbsentIndex  int `json:"absentIndex,omitempty"`
+
+	// —— 资源选择族载荷（阶段4）——
+	// Works setSelection 的作品键全集（全量替换：集聚合/树递选/过滤全选等批量
+	// 组合由前端按选择域展开为成员作品键后整体提交）。
+	Works []string `json:"works,omitempty"`
 }
 
 // workbenchSessionSummary 会话的前端呈现摘要。
@@ -778,6 +787,12 @@ type workbenchFrontendResponse struct {
 	Assignment *workbenchAssignmentView `json:"assignment,omitempty"`
 	// Rule generalize/adjudicate 生成的规则摘要（已入档案并触发验证轮）。
 	Rule *GeneratedRuleView `json:"rule,omitempty"`
+	// Domain getPanorama 附带的资源选择域（阶段4：作品原子结构+集视图，前端
+	// 选择交互与选择集键的单一推导源）。
+	Domain *WorkDomain `json:"domain,omitempty"`
+	// Created / CreateMsg createTasks 的创建结论：已提交作品数与用户可读摘要。
+	Created  int    `json:"created,omitempty"`
+	CreateMsg string `json:"createMsg,omitempty"`
 }
 
 // workbenchSessionDecisionsView 会话决策态投影（元素7 的活数据——赋值/忽略/
@@ -785,7 +800,8 @@ type workbenchFrontendResponse struct {
 type workbenchSessionDecisionsView struct {
 	// Assignments 已手动解析项（含是否已泛化标记）。
 	Assignments []workbenchAssignmentView `json:"assignments,omitempty"`
-	// Ignored 已忽略项；Selection 已选定为任务的项（相对路径）。
+	// Ignored 已忽略项；Selection 已选定为任务的作品键集合（两类前缀见
+	// selection.go——作品原子，半作品不可表达）。
 	Ignored   []string `json:"ignored,omitempty"`
 	Selection []string `json:"selection,omitempty"`
 }
@@ -946,6 +962,7 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.Panorama = &view
 		resp.Decisions = decisionsViewOf(sess)
 		resp.Diff = sess.LastDiff
+		resp.Domain = domainViewOf(DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess)))
 	case workbenchActionAssign:
 		sess, view, err := m.ApplyAssignment(req.Root, req.RelPath, SessionAssignment{
 			Author: req.Author, AuthorRole: req.AuthorRole, Title: req.Title,
@@ -1009,6 +1026,24 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			}
 		}
 		resp.Diff = sess.LastDiff
+	case workbenchActionSetSelection:
+		sess, err := m.SetSelection(req.Root, req.Works)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Decisions = decisionsViewOf(sess)
+	case workbenchActionCreateTasks:
+		outcome, err := m.ApplyCreateTasks(req.Root)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Created = outcome.Works
+		resp.CreateMsg = outcome.Message
+		if sess, err := m.SessionOf(req.Root); err == nil {
+			resp.Decisions = decisionsViewOf(sess)
+		}
 	default:
 		resp.OK, resp.Error = false, fmt.Sprintf("未知的工作台请求动作 %q", req.Action)
 	}

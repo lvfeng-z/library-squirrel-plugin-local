@@ -61,9 +61,10 @@ func TestCreateRequiresSessionManager(t *testing.T) {
 	}
 }
 
-// TestCreateBranchWorkbenchInitiatedPlaceholder 分支 1（工作台发起）：会话带发起
-// 标记的创建进占位过滤路径——零任务、按 reason 说明占位（选择集过滤属后续阶段），
-// 不弹确认、不建会话、标记被消费。
+// TestCreateBranchWorkbenchInitiatedPlaceholder 分支 1（工作台发起）未识别态守卫：
+// 会话带发起标记但尚未完成全量识别（无快照）时，过滤产出分支零任务、按 reason
+// 说明（选择域须由识别快照推导），不弹确认、不建会话、标记被消费。已识别态的
+// 过滤产出（按选择集只产出所选作品）见 selection_test.go。
 func TestCreateBranchWorkbenchInitiatedPlaceholder(t *testing.T) {
 	h, mgr, _, ctx := newTestFetcher(t, time.Second, 0)
 	if _, err := mgr.CreateSession(`D:\库甲`); err != nil {
