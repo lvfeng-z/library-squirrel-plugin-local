@@ -3,4 +3,6 @@ dist/
 .idea
 views/classify/classify-panel.js
 views/classify/style.css
+views/workbench/*.js
+views/workbench/*.css
 frontend/node_modules/

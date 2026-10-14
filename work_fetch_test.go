@@ -123,13 +123,13 @@ func findSpecByRole(specs []*sdkdto.StoreSpec, role string) *sdkdto.StoreSpec {
 
 // TestCreateEmptyDirSetsReason 空目录创建任务时零任务返回并经 SetReason 声明用户可读原因；
 // 路径不可访问仍走错误返回（经 SDK 的 error 块通道透传，不经 reason）
-func TestCreateEmptyDirSetsReason(t *testing.T) {
+func TestScanEmptyDirSetsReason(t *testing.T) {
 	dir := t.TempDir()
 
 	h := &LocalImportWorkFetcher{}
-	result, err := h.Create(dir)
+	result, err := h.streamScanTasks(dir)
 	if err != nil {
-		t.Fatalf("空目录 Create 不应报错: %v", err)
+		t.Fatalf("空目录扫描产出不应报错: %v", err)
 	}
 	if result.IsStream() {
 		t.Fatalf("空目录应返回批量结果而非流式")
@@ -142,7 +142,7 @@ func TestCreateEmptyDirSetsReason(t *testing.T) {
 	}
 
 	missing := filepath.Join(dir, "不存在的子目录")
-	if _, err := h.Create(missing); err == nil {
+	if _, err := h.streamScanTasks(missing); err == nil {
 		t.Fatalf("不可访问路径应保持错误返回，实际无错误")
 	}
 }
@@ -639,7 +639,7 @@ func TestBuildDirGroupResponseRealParentIdentity(t *testing.T) {
 
 func mustCreate(t *testing.T, h *LocalImportWorkFetcher, path string) *sdkdto.TaskCreateResult {
 	t.Helper()
-	result, err := h.Create(path)
+	result, err := h.streamScanTasks(path)
 	if err != nil {
 		t.Fatalf("Create 不应报错: %v", err)
 	}

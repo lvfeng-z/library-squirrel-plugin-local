@@ -237,6 +237,12 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 // 无对应索引，不生成规则；持久化经 LoadProfile→追加→SaveProfile，同层同目录锚点
 // （同 ID）已有 qna 规则时原位替换，新答案的维度集合整体取代旧规则。插件上下文
 // 不可用或档案不可载入时不落库（不覆写既有档案），仅告警。
+//
+// 退役注记：此档案吸收写点随旧直接创建流程退役——Create 入口已改经工作台会话
+// 分派（见 work_fetch.go CreateWithHeartbeat），ClassifyDir 弹问通道在全部创建
+// 路径上结构性不可达，本写点随之不可达，保留为不可达历史代码；档案写一律经
+// 工作台会话管理器单点串行（泛化/裁决生成/规则编辑面三入口，见 session.go
+// UpdateProfile），本写点不纳入串行接入名单。
 func (c *PathClassifier) absorbResponse(level int, dirName string, resp *ClassifyResponse) {
 	if c.ctx == nil {
 		return

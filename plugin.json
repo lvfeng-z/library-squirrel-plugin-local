@@ -2,7 +2,7 @@
   "id": "com.lvfeng.localImport",
   "name": "localImport",
   "version": "1.1.0",
-  "contractVersion": 12,
+  "contractVersion": 18,
   "author": "lvfeng",
   "description": "从本地路径导入文件到资源库",
   "entryFile": "local_import.exe",
@@ -29,6 +29,88 @@
         "content": {
           "contentType": "precompiled",
           "source": {"js": "views/classify/classify-panel.js", "css": "views/classify/style.css"}
+        }
+      },
+      {
+        "id": "workbench",
+        "name": "本地导入工作台",
+        "description": "按库根管理解析会话（新建/恢复/删除），进入解析视图完成全量识别、手动解析与任务创建",
+        "kind": "view",
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/workbench/workbench.js", "css": "views/workbench/workbench.css"}
+        }
+      },
+      {
+        "id": "workbench-menu",
+        "name": "本地导入工作台",
+        "description": "侧栏入口，直达本地导入工作台会话列表",
+        "kind": "menu",
+        "content": {"viewId": "workbench"}
+      },
+      {
+        "id": "workbench-parse",
+        "name": "解析视图",
+        "description": "解析会话的工作页（二级页面）：会话恢复与档案对账提示、子页导航",
+        "kind": "view",
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/workbench/parse.js", "css": "views/workbench/parse.css"},
+          "parent": "workbench"
+        }
+      },
+      {
+        "id": "workbench-panorama",
+        "name": "识别全景",
+        "description": "全量识别干跑后的识别全景呈现（骨架占位，识别引擎属后续阶段）",
+        "kind": "view",
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/workbench/panorama.js", "css": "views/workbench/panorama.css"},
+          "parent": "workbench-parse"
+        }
+      },
+      {
+        "id": "workbench-manual-parse",
+        "name": "手动解析",
+        "description": "未识别/识别错资源的手动指定：单次赋值、泛化成规则、冲突裁决（骨架占位，三动作属后续阶段）",
+        "kind": "view",
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/workbench/manual-parse.js", "css": "views/workbench/manual-parse.css"},
+          "parent": "workbench-parse"
+        }
+      },
+      {
+        "id": "workbench-rules",
+        "name": "规则管理",
+        "description": "规则档案的列表/启停/删除/编辑（骨架占位，维护面属后续阶段）",
+        "kind": "view",
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/workbench/rules.js", "css": "views/workbench/rules.css"},
+          "parent": "workbench-parse"
+        }
+      },
+      {
+        "id": "workbench-observation",
+        "name": "解析观测",
+        "description": "资源与元数据关联可视化与利用率观测的挂载位（建设中占位）",
+        "kind": "view",
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/workbench/observation.js", "css": "views/workbench/observation.css"},
+          "parent": "workbench-parse"
+        }
+      },
+      {
+        "id": "workbench-entry-confirm",
+        "name": "开始解析确认",
+        "description": "创建流内的入口确认弹窗：二选「开始解析（默认）/取消」，静置 5 分钟自动取消",
+        "kind": "dialog",
+        "content": {
+          "contentType": "precompiled",
+          "source": {"js": "views/workbench/entry-confirm.js", "css": "views/workbench/entry-confirm.css"}
         }
       }
     ]

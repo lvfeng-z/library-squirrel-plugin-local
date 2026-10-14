@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
@@ -67,6 +69,11 @@ type LocalImportWorkFetcher struct {
 
 	siteKeyMu   sync.Mutex
 	siteKeyByID map[int64]string // 站点 DB 行 id → 站点键（ListSites 注册表投影一次拉取的缓存）
+
+	// sessions 工作台会话管理器（Activate 装配）；Create 入口按会话分派三分支
+	sessions *SessionManager
+	// entryConfirm Create 流内入口确认弹窗协调器（Activate 装配）
+	entryConfirm *entryConfirmCoordinator
 }
 
 // resolveSiteKeyByID 站点 DB 行 id → 站点键。面板站点下拉选择项的 value 是站点 DB 行 id，
@@ -99,15 +106,90 @@ func (h *LocalImportWorkFetcher) resolveSiteKeyByID(idStr string) string {
 	return h.siteKeyByID[id]
 }
 
-// Create 扫描本地路径，流式产出任务：
+// localImportPathOf 从创建 URL 提取本地路径：剥离 local:// 前缀，余者原样。
+func localImportPathOf(url string) string {
+	if len(url) >= 8 && url[:8] == "local://" {
+		return url[8:]
+	}
+	return url
+}
+
+// intentOnlyResult 构造零任务、以意图信号收尾的创建结果。
+func intentOnlyResult(kind sdkdto.CreateIntentKind, message string) *sdkdto.TaskCreateResult {
+	result := sdkdto.BatchResult(nil)
+	result.SetIntent(kind, message)
+	return result
+}
+
+// 编译期锚定：实现 Create 流等待期心跳接入接口（HeartbeatCreateFetcher）——
+// 入口确认弹窗等待期经 reporter 周期上报心跳维持宿主 60 秒空闲窗。
+var _ sdkdto.HeartbeatCreateFetcher = (*LocalImportWorkFetcher)(nil)
+
+// CreateWithHeartbeat 工作台入口的创建分派（三分支）：
+//
+//  1. 工作台发起（会话带发起标记）→ 过滤产出分支：只产出所选作品防递归确认。
+//     本阶段为占位骨架——选择集与会话赋值注入属后续阶段，占位路径零任务收尾；
+//  2. 库根命中既有会话 → 不重问，意图信号「转入解析」收尾（零任务）；
+//  3. 无会话 → Create 流内弹确认（二选：开始解析〔默认〕/取消），等待期心跳
+//     保活 + 插件侧 5 分钟超时（超时=取消）；采纳即建会话并以「转入解析」收尾，
+//     取消/超时以「已取消」收尾——两态均零任务零落库。
+//
+// 全量扫描直出的旧创建路径不再从入口触达（宿主新建任务输路径后必经上述分派），
+// 扫描产出实现保留为 streamScanTasks，供工作台过滤产出接线复用。
+func (h *LocalImportWorkFetcher) CreateWithHeartbeat(url string, reporter sdkdto.HeartbeatReporter) (*sdkdto.TaskCreateResult, error) {
+	if h.sessions == nil {
+		return nil, fmt.Errorf("会话管理器未装配，无法处理创建: %s", url)
+	}
+	root := localImportPathOf(url)
+
+	// 分支 1：工作台发起的创建（会话+选择集在）→ 过滤产出
+	if h.sessions.ConsumeWorkbenchCreateMarker(root) {
+		return h.createWorkbenchFiltered(url, root)
+	}
+
+	// 分支 2：库根命中既有活动会话 → 直接进既有会话，不重问
+	if _, err := h.sessions.SessionOf(root); err == nil {
+		return intentOnlyResult(sdkdto.CreateIntentToParse,
+			"该库根已有进行中的解析会话：请从侧栏「本地导入工作台」进入继续"), nil
+	} else if !errors.Is(err, ErrWorkbenchSessionNotFound) {
+		return nil, err
+	}
+
+	// 分支 3：无会话 → Create 流内弹确认（等待期心跳保活）
+	outcome := h.entryConfirm.Await(root, reporter)
+	if !outcome.accepted {
+		return intentOnlyResult(sdkdto.CreateIntentCancelled, outcome.cancelMessage()), nil
+	}
+	if _, err := h.sessions.CreateSession(root); err != nil {
+		return nil, fmt.Errorf("建立解析会话失败: %w", err)
+	}
+	return intentOnlyResult(sdkdto.CreateIntentToParse,
+		"已开始解析：解析会话已建立，正在进入解析视图（亦可从侧栏「本地导入工作台」进入）"), nil
+}
+
+// createWorkbenchFiltered 工作台发起创建的过滤产出分支（占位骨架）：正式实现为
+// 注入会话赋值求值 + 按资源选择集只产出所选作品（集父行按所选成员生成），属后续
+// 阶段接线；本阶段占位零任务收尾，防同一创建递归进入确认分支。
+func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string) (*sdkdto.TaskCreateResult, error) {
+	result := sdkdto.BatchResult(nil)
+	result.SetReason("工作台发起创建的过滤产出尚未实现（选择集过滤属后续阶段），本次未产出任务")
+	return result, nil
+}
+
+// Create WorkFetcher 接口原方法：委托 CreateWithHeartbeat 的同一分派路径，上报器
+// 传空实现（等待期不上报心跳）。SDK 服务端对实现了心跳接入接口的拉取器调用
+// CreateWithHeartbeat，本方法保留接口完整性与进程内直调路径。
+func (h *LocalImportWorkFetcher) Create(url string) (*sdkdto.TaskCreateResult, error) {
+	return h.CreateWithHeartbeat(url, sdkdto.NoopHeartbeat{})
+}
+
+// streamScanTasks 扫描本地路径并流式直出全部可导入任务（无选择集过滤）：
 // 扫描条目先经解析内核流水线求值（规则来源=用户档案+内置），兄弟群组规则定群的
 // 成员各自声明为单文件作品（叶任务），落单条目按同目录聚合走目录组声明路径
 // （多文件=父容器+子任务，单文件=叶任务）。
-func (h *LocalImportWorkFetcher) Create(url string) (*sdkdto.TaskCreateResult, error) {
-	path := url
-	if len(path) >= 8 && path[:8] == "local://" {
-		path = path[8:]
-	}
+// 工作台发起创建的过滤产出以本实现为基底（按选择集过滤的接线属后续阶段）。
+func (h *LocalImportWorkFetcher) streamScanTasks(url string) (*sdkdto.TaskCreateResult, error) {
+	path := localImportPathOf(url)
 
 	scanner := NewScanner(path)
 	scanResult, err := scanner.Scan()
@@ -750,4 +832,169 @@ func stripExt(name string) string {
 		return strings.TrimSuffix(name, ext)
 	}
 	return name
+}
+
+// —— Create 流内入口确认协调器 ——
+
+// 入口确认等待上限与心跳节拍。等待上限 5 分钟与分类问答降级时长一致：弹窗静置
+// 超时即视为取消（意图信号·已取消）；心跳节拍 1 秒（SDK 上报器内置 20 秒限频，
+// 等待线上实际每 20 秒一块）维持宿主 Create 流 60 秒空闲窗。
+const (
+	entryConfirmWaitLimit     = 5 * time.Minute
+	entryConfirmHeartbeatTick = time.Second
+)
+
+// 入口确认事件种类（workbenchTopicEvent 通道的 kind 词汇）。
+const (
+	workbenchEventEntryConfirm        = "entryConfirm"        // 拉起确认弹窗（携带库根与确认配对序号）
+	workbenchEventEntryConfirmDismiss = "entryConfirmDismiss" // 关窗指令（等待超时，组件收令关窗不补发答复）
+)
+
+// workbenchFrontendEvent 插件→前端的事件载荷（无配对序号的主动通知；入口确认
+// 携带自身的确认配对序号供答复配对）。
+type workbenchFrontendEvent struct {
+	Kind string `json:"kind"`
+	// Seq 入口确认的配对序号（entryConfirm/entryConfirmDismiss 携带）。
+	Seq int64 `json:"seq,omitempty"`
+	// Root 库根（entryConfirm 携带，弹窗展示用）。
+	Root string `json:"root,omitempty"`
+}
+
+// entryConfirmOutcome 入口确认终态：采纳（accepted 真）或未采纳（携带原因）。
+type entryConfirmOutcome struct {
+	accepted bool
+	// reason 未采纳原因：user-cancel / timeout / publish-fail 之一。
+	reason string
+}
+
+// cancelMessage 未采纳时意图信号（已取消）的用户可读文案。
+func (o entryConfirmOutcome) cancelMessage() string {
+	switch o.reason {
+	case "timeout":
+		return "确认超时已自动取消：本次未创建任何任务，需要时可重新发起导入"
+	case "publish-fail":
+		return "无法弹出确认窗口，本次导入已取消：请确认插件页面可用后重试"
+	default:
+		return "已取消：本次未开始解析，未创建任何任务"
+	}
+}
+
+// entryConfirmDeps 入口确认编排所需能力（消费侧窄接口，便于单测注入桩）。
+type entryConfirmDeps interface {
+	PublishToFrontend(topic string, data []byte) error
+}
+
+// entryConfirmCoordinator 入口确认弹窗编排：Create 流内弹确认的拉起、答复配对
+// 与超时关窗。同库根并发创建合流共等一次确认（按确认序号配对，迟到答复丢弃）。
+type entryConfirmCoordinator struct {
+	deps      entryConfirmDeps
+	logger    sdkdto.Logger
+	waitLimit time.Duration // 等待上限（生产 5 分钟，单测注入短值）
+	tick      time.Duration // 心跳上报节拍（生产 1 秒，单测注入短值）
+
+	mu      sync.Mutex
+	nextSeq int64
+	// waiters 确认序号 → 答复通道（缓冲 1，每通道恰投递一次）。
+	waiters map[int64]chan bool
+}
+
+// newEntryConfirmCoordinator 创建协调器（等待上限可注入）。
+func newEntryConfirmCoordinator(deps entryConfirmDeps, logger sdkdto.Logger, waitLimit time.Duration) *entryConfirmCoordinator {
+	return newEntryConfirmCoordinatorWithTick(deps, logger, waitLimit, entryConfirmHeartbeatTick)
+}
+
+// newEntryConfirmCoordinatorWithTick 创建等待上限与心跳节拍均可注入的协调器（单测用）。
+func newEntryConfirmCoordinatorWithTick(deps entryConfirmDeps, logger sdkdto.Logger, waitLimit, tick time.Duration) *entryConfirmCoordinator {
+	return &entryConfirmCoordinator{
+		deps:      deps,
+		logger:    logger,
+		waitLimit: waitLimit,
+		tick:      tick,
+		waiters:   make(map[int64]chan bool),
+	}
+}
+
+// publishEvent 向前端发布工作台事件。
+func (c *entryConfirmCoordinator) publishEvent(evt *workbenchFrontendEvent) error {
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return c.deps.PublishToFrontend(workbenchTopicEvent, data)
+}
+
+// Await 拉起确认弹窗并阻塞等待答复：等待期按节拍经 reporter 上报心跳维持宿主
+// 空闲窗；用户答复（经前端 confirmAnswer 请求 → HandleAnswer）投递通道解除等待；
+// 超时向前端发关窗指令并按取消收尾。发送拉起事件失败直接按未采纳收尾（无窗口可答）。
+func (c *entryConfirmCoordinator) Await(root string, reporter sdkdto.HeartbeatReporter) entryConfirmOutcome {
+	ch, seq := c.register()
+	evt := &workbenchFrontendEvent{Kind: workbenchEventEntryConfirm, Seq: seq, Root: root}
+	if err := c.publishEvent(evt); err != nil {
+		c.remove(seq)
+		if c.logger != nil {
+			c.logger.Warnf("发送入口确认拉起事件失败: %v", err)
+		}
+		return entryConfirmOutcome{reason: "publish-fail"}
+	}
+
+	ticker := time.NewTicker(c.tick)
+	defer ticker.Stop()
+	timer := time.NewTimer(c.waitLimit)
+	defer timer.Stop()
+	for {
+		select {
+		case accepted := <-ch:
+			return entryConfirmOutcome{accepted: accepted}
+		case <-ticker.C:
+			reporter.Heartbeat()
+		case <-timer.C:
+			// 超时：登记在表者负责关窗指令；已被答复解除时补收结果
+			if c.remove(seq) {
+				evt := &workbenchFrontendEvent{Kind: workbenchEventEntryConfirmDismiss, Seq: seq}
+				if err := c.publishEvent(evt); err != nil && c.logger != nil {
+					c.logger.Errorf("发送入口确认关窗指令失败: %v", err)
+				}
+			}
+			select {
+			case accepted := <-ch:
+				return entryConfirmOutcome{accepted: accepted}
+			default:
+				return entryConfirmOutcome{reason: "timeout"}
+			}
+		}
+	}
+}
+
+// register 登记等待者并分配确认序号。
+func (c *entryConfirmCoordinator) register() (<-chan bool, int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextSeq++
+	ch := make(chan bool, 1)
+	c.waiters[c.nextSeq] = ch
+	return ch, c.nextSeq
+}
+
+// remove 移除等待者；返回移除前是否在表（超时方据此判定关窗指令归属——
+// 已被答复解除的会话不重发关窗）。
+func (c *entryConfirmCoordinator) remove(seq int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.waiters[seq]
+	delete(c.waiters, seq)
+	return ok
+}
+
+// HandleAnswer 处理前端确认答复（采纳/取消）：命中在等确认即投递并返回真；
+// 无在等确认（超时后迟到/重复答复）返回假，由请求处理层回告失效。
+func (c *entryConfirmCoordinator) HandleAnswer(confirmSeq int64, accepted bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch, ok := c.waiters[confirmSeq]
+	if !ok {
+		return false
+	}
+	delete(c.waiters, confirmSeq)
+	ch <- accepted
+	return true
 }
