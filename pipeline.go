@@ -68,7 +68,7 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 			Siblings: siblingsByDir[dirGroupKey(file.DirNames)],
 		}
 		decision := FileDecision{RelPath: file.RelPath, FileName: file.FileName}
-		decision.Group = runGroupStage(rules, in, lib, ctx)
+		decision.Group, _ = runGroupStage(rules, in, lib, ctx)
 		runExtractionStage(&decision, rules, in, lib, ctx)
 		decisions = append(decisions, decision)
 	}
@@ -76,9 +76,10 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 }
 
 // runGroupStage 分组段：对顶层 Pattern 为 SiblingPattern 的启用规则逐条求值，
-// 首个命中的规则把群组分析写入 ctx 并作为定群结果返回；全部不命中返回 nil
+// 首个命中的规则把群组分析写入 ctx 并作为定群结果返回（同时返回定群规则 ID，
+// 供识别全景的序号形态重放与规则命中统计消费）；全部不命中返回 nil
 // （独立文件）。禁用规则与非兄弟群组模式的规则不参与本段。
-func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) *GroupAnalysis {
+func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) (*GroupAnalysis, string) {
 	for _, rule := range rules {
 		if !rule.Enabled {
 			continue
@@ -87,10 +88,10 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 			continue
 		}
 		if rule.Pattern.Evaluate(in, lib, ctx) {
-			return ctx.Group
+			return ctx.Group, rule.ID
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 // runExtractionStage 提取段：对顶层 Pattern 非 SiblingPattern 的启用规则按传入
@@ -131,13 +132,16 @@ type PendingItem struct {
 // sourceTrust 为来源载体的可信度分层（数字越大越可信）。dir>filename>constant
 // 为既定分层；predicate 高于 filename：谓词取值须同时通过文件名内容与库内策展
 // 集合双门槛，比纯文件名解析多一道确证；group 低于 filename：群组公共前缀是
-// 兄弟文件名的结构推断，未经任何内容解析。
+// 兄弟文件名的结构推断，未经任何内容解析；assignment 为会话赋值（用户手工
+// 指定的特异性结果），高于全部规则推导来源——赋值经合成后按维度覆盖，不参与
+// 择一，此处登记信任级仅防赋值声明被再次喂入合成时被误降级。
 var sourceTrust = map[SourceKind]int{
-	SourceDir:       5,
-	SourcePredicate: 4,
-	SourceFilename:  3,
-	SourceGroup:     2,
-	SourceConstant:  1,
+	SourceDir:        5,
+	SourcePredicate:  4,
+	SourceFilename:   3,
+	SourceGroup:      2,
+	SourceConstant:   1,
+	SourceAssignment: 6,
 }
 
 // defaultDimStrategies 为含义维度未配置策略时的缺省策略：标题多候选并存会

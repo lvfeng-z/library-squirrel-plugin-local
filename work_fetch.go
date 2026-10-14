@@ -435,7 +435,9 @@ func buildDirGroupResponse(path, dirRelPath, taskName string, metadata []PathMea
 // recomputeFileDecision 按 PluginData 携带的原始路径重算单文件的流水线结论：
 // FileName/DirNames/RelPath 由路径分解重建（与 Create 期 buildScanFiles 同构），
 // Siblings 经父目录 os.ReadDir 重扫（与 Create 期扫描同源同键——同目录常规文件
-// 名全集、字典序）；库内索引不注入（与 Create 期一致，谓词规则恒不命中）。
+// 名全集、字典序）；库内索引不注入（与 Create 期一致，谓词规则恒不命中）——
+// 现状核验结论：本方法与识别干跑（MergedRecognition 注入 BuildLibraryIndex 产物）
+// 尚未对齐，谓词维度的执行期重算对齐属阶段4 义务（会话模式 Create 注入后同步）。
 // 返回流水线结论与匹配输入（匹配输入供归属裁决重放规则取捕获值）。
 func (h *LocalImportWorkFetcher) recomputeFileDecision(fp *FilePluginData, rules []RuleEntry) (FileDecision, *MatchInput) {
 	dirNames := ExtractDirLevels(fp.RelPath)
@@ -447,7 +449,7 @@ func (h *LocalImportWorkFetcher) recomputeFileDecision(fp *FilePluginData, rules
 	}
 	ctx := &ParseContext{DirNames: dirNames, Depth: len(dirNames)}
 	decision := FileDecision{RelPath: fp.RelPath, FileName: in.FileName}
-	decision.Group = runGroupStage(rules, in, nil, ctx)
+	decision.Group, _ = runGroupStage(rules, in, nil, ctx)
 	runExtractionStage(&decision, rules, in, nil, ctx)
 	return decision, in
 }
@@ -851,13 +853,22 @@ const (
 )
 
 // workbenchFrontendEvent 插件→前端的事件载荷（无配对序号的主动通知；入口确认
-// 携带自身的确认配对序号供答复配对）。
+// 携带自身的确认配对序号供答复配对，识别进度/终态携带阶段与计数）。
 type workbenchFrontendEvent struct {
 	Kind string `json:"kind"`
 	// Seq 入口确认的配对序号（entryConfirm/entryConfirmDismiss 携带）。
 	Seq int64 `json:"seq,omitempty"`
-	// Root 库根（entryConfirm 携带，弹窗展示用）。
+	// Root 库根（entryConfirm 与识别进度/终态携带）。
 	Root string `json:"root,omitempty"`
+	// Phase / Done / Total 识别进度的阶段（scan/index/evaluate/save）与计数
+	//（recognitionProgress 携带；Done/Total 的口径随阶段：scan=待求值/全部文件，
+	// evaluate=已求值/待求值文件）。
+	Phase string `json:"phase,omitempty"`
+	Done  int    `json:"done,omitempty"`
+	Total int    `json:"total,omitempty"`
+	// Success / Message 识别终态的成败与用户可读摘要（recognitionDone 携带）。
+	Success bool   `json:"success,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // entryConfirmOutcome 入口确认终态：采纳（accepted 真）或未采纳（携带原因）。

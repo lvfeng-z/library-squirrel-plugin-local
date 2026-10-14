@@ -59,7 +59,11 @@ function decodePayload(raw: unknown): WorkbenchEvent | null {
       /* 尝试 base64 */
     }
     try {
-      return JSON.parse(atob(raw)) as WorkbenchEvent
+      // base64 → 字节 → UTF-8 文本：atob 直出 Latin-1 串会使多字节中文乱码
+      const bin = atob(raw)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      return JSON.parse(new TextDecoder().decode(bytes)) as WorkbenchEvent
     } catch {
       /* 放弃 */
     }

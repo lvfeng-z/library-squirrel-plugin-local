@@ -44,8 +44,8 @@
     <section class="li-parse-body">
       <template v-if="session">
         <p class="li-parse-desc">
-          解析视图骨架已就绪：全量识别与识别全景呈现、手动解析（赋值/泛化/裁决）、
-          资源选择与任务创建将在后续阶段逐面填充。可从上方入口进入各子页查看占位形态。
+          解析视图已就绪：识别全景（全量识别干跑与七类元素呈现）可用，手动解析
+          （赋值/泛化/裁决）、资源选择与任务创建将在后续阶段逐面填充。
         </p>
       </template>
       <el-empty
@@ -59,7 +59,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Events } from '@wailsio/runtime'
 
 // 工作台事件协议通道（与插件 Go 侧 session.go 约定一致）
@@ -94,7 +94,11 @@ function decodePayload(raw: unknown): WorkbenchResponse | null {
       /* 尝试 base64 */
     }
     try {
-      return JSON.parse(atob(raw)) as WorkbenchResponse
+      // base64 → 字节 → UTF-8 文本：atob 直出 Latin-1 串会使多字节中文乱码
+      const bin = atob(raw)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      return JSON.parse(new TextDecoder().decode(bytes)) as WorkbenchResponse
     } catch {
       /* 放弃 */
     }
@@ -105,12 +109,21 @@ function decodePayload(raw: unknown): WorkbenchResponse | null {
 // 本插件 view 路由复合键前缀（publicId=插件 id）
 const ROUTE_BASE = '#/com.lvfeng.localImport/'
 
-const subpages = [
-  { href: `${ROUTE_BASE}workbench-panorama`, title: '识别全景', note: '骨架占位' },
-  { href: `${ROUTE_BASE}workbench-manual-parse`, title: '手动解析', note: '骨架占位' },
-  { href: `${ROUTE_BASE}workbench-rules`, title: '规则管理', note: '骨架占位' },
-  { href: `${ROUTE_BASE}workbench-observation`, title: '解析观测', note: '建设中' }
+// 子页导航（携带库根，子页免二次寻址）
+const subpageDefs = [
+  { key: 'workbench-panorama', title: '识别全景', note: '全量识别与七类元素' },
+  { key: 'workbench-manual-parse', title: '手动解析', note: '骨架占位' },
+  { key: 'workbench-rules', title: '规则管理', note: '骨架占位' },
+  { key: 'workbench-observation', title: '解析观测', note: '建设中' }
 ]
+const subpages = computed(() => {
+  const rootSuffix = session.value ? `?root=${encodeURIComponent(session.value.rootPath)}` : ''
+  return subpageDefs.map((sub) => ({
+    href: `${ROUTE_BASE}${sub.key}${rootSuffix}`,
+    title: sub.title,
+    note: sub.note
+  }))
+})
 
 const session = ref<SessionSummary | null>(null)
 const profileChanged = ref(false)

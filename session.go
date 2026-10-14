@@ -71,8 +71,7 @@ func legalSessionTransition(from, to WorkbenchSessionState) bool {
 }
 
 // WorkbenchSession 会话持久化工件（KV 单键 JSON）。特异性知识（单次赋值、选择集、
-// 识别快照与重识别游标）属会话态，字段由后续阶段扩展；普适规律入规则档案，
-// 不在会话内。
+// 识别快照与重识别游标）属会话态；普适规律入规则档案，不在会话内。
 type WorkbenchSession struct {
 	// SchemaVersion 工件结构版本（自管）。
 	SchemaVersion int `json:"schemaVersion"`
@@ -90,6 +89,17 @@ type WorkbenchSession struct {
 	// 置位，Create 按此分派到「过滤产出」分支（只产出所选作品，防递归确认），
 	// 分派时消费。接线属后续阶段，本阶段仅分支骨架读取。
 	PendingWorkbenchCreate bool `json:"pendingWorkbenchCreate"`
+	// Snapshot 识别全景快照（裁剪形态，识别干跑完成时写入；含按目录 mtime 的
+	// 重识别增量游标）。
+	Snapshot *RecognitionSnapshot `json:"snapshot,omitempty"`
+	// Assignments 会话赋值（特异性手工解析结果，相对库根的 '/' 路径寻址）。
+	// 赋值创建交互属后续阶段，本阶段承载其数据模型与求值消费。
+	Assignments map[string]SessionAssignment `json:"assignments,omitempty"`
+	// Ignored 已忽略项（相对路径集合，阶段3 接线）。
+	Ignored []string `json:"ignored,omitempty"`
+	// Selection 资源选择集（已选定为任务的作品，相对路径集合，阶段4 接线；
+	// 作品为最小粒度，集为默认聚合单元）。
+	Selection []string `json:"selection,omitempty"`
 }
 
 // SessionStore 会话读写所需的最小存储方法集；签名与 SDK 的 dto.KVStore 同名方法
@@ -173,6 +183,11 @@ type SessionManager struct {
 	// confirmMu 保护 confirmAnswer（装配期注入一次，处理 goroutine 只读）。
 	confirmMu sync.RWMutex
 	confirm   confirmAnswerHandler
+
+	// recogMu 保护 recogRunning：识别干跑在跑互斥（按库根），干跑不持 mu
+	//（长跑不阻塞会话读写，落库时经 mutateSession 短暂加锁）。
+	recogMu      sync.Mutex
+	recogRunning map[string]bool
 }
 
 // NewSessionManager 创建会话管理器；ctx 为 nil 时可构造但读写报错（单测经
@@ -425,14 +440,36 @@ func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSessio
 	return sess, nil
 }
 
-// MarkRecognized 会话进入全量识别完成态（状态机唯一前向迁移 created→recognized；
-// 全量识别引擎属后续阶段，本阶段状态机与迁移判定先行落位）。
+// MarkRecognized 会话进入全量识别完成态（状态机唯一前向迁移 created→recognized）。
+// 生产路径经 CompleteRecognition（快照写入与状态迁移单次写原子完成），本方法
+// 保留纯状态迁移语义供单测直接驱动状态机。
 func (m *SessionManager) MarkRecognized(root string) (*WorkbenchSession, error) {
 	return m.mutateSession(root, func(sess *WorkbenchSession) error {
 		if !legalSessionTransition(sess.State, WorkbenchSessionRecognized) {
 			return fmt.Errorf("会话状态 %s 不允许迁移到 %s", sess.State, WorkbenchSessionRecognized)
 		}
 		sess.State = WorkbenchSessionRecognized
+		return nil
+	})
+}
+
+// CompleteRecognition 全量识别完成落库：识别全景快照入会话与状态迁移在锁内
+// 单次写完成——首次识别迁移 created→recognized；重识别（已 recognized）只覆写
+// 快照，状态不回退。会话的档案指纹同步为快照依据指纹（识别时点基准，后续
+// 档案外部变更仍可对账检出）。
+func (m *SessionManager) CompleteRecognition(root string, snapshot *RecognitionSnapshot) (*WorkbenchSession, error) {
+	if snapshot == nil {
+		return nil, errors.New("识别快照为空，无法落库")
+	}
+	return m.mutateSession(root, func(sess *WorkbenchSession) error {
+		if sess.State == WorkbenchSessionCreated {
+			if !legalSessionTransition(sess.State, WorkbenchSessionRecognized) {
+				return fmt.Errorf("会话状态 %s 不允许迁移到 %s", sess.State, WorkbenchSessionRecognized)
+			}
+			sess.State = WorkbenchSessionRecognized
+		}
+		sess.Snapshot = snapshot
+		sess.ProfileDigest = snapshot.ProfileDigest
 		return nil
 	})
 }
@@ -546,12 +583,21 @@ func (m *SessionManager) StubEditRule(marker string) error {
 
 // 前端请求动作词汇。
 const (
-	workbenchActionListSessions    = "listSessions"
-	workbenchActionCreateSession   = "createSession"
-	workbenchActionReplaceSession  = "replaceSession"
-	workbenchActionDeleteSession   = "deleteSession"
-	workbenchActionActivateSession = "activateSession"
-	workbenchActionConfirmAnswer   = "confirmAnswer"
+	workbenchActionListSessions     = "listSessions"
+	workbenchActionCreateSession    = "createSession"
+	workbenchActionReplaceSession   = "replaceSession"
+	workbenchActionDeleteSession    = "deleteSession"
+	workbenchActionActivateSession  = "activateSession"
+	workbenchActionConfirmAnswer    = "confirmAnswer"
+	workbenchActionStartRecognition = "startRecognition"
+	workbenchActionGetPanorama      = "getPanorama"
+)
+
+// getPanorama 的分节拉取词汇。
+const (
+	// panoramaSectionFiles 只取文件级清单（元素2/3 载体 + 序列群 + 待裁决明细 +
+	// 统计）——大库清单单独拉取，先渲染概览骨架再拉清单。
+	panoramaSectionFiles = "files"
 )
 
 // workbenchFrontendRequest 前端→插件请求载荷（序号配对）。
@@ -563,6 +609,8 @@ type workbenchFrontendRequest struct {
 	// ConfirmSeq / Accepted 入口确认答复的配对序号与采纳结果。
 	ConfirmSeq int64 `json:"confirmSeq,omitempty"`
 	Accepted   bool  `json:"accepted,omitempty"`
+	// Section getPanorama 的分节拉取（缺省=全量投影）。
+	Section string `json:"section,omitempty"`
 }
 
 // workbenchSessionSummary 会话的前端呈现摘要。
@@ -587,6 +635,52 @@ type workbenchFrontendResponse struct {
 	Conflict *workbenchSessionSummary `json:"conflict,omitempty"`
 	// ProfileChanged activateSession 的档案对账结论（真=档案被外部变更，提示重新识别）。
 	ProfileChanged bool `json:"profileChanged,omitempty"`
+	// Started / Running startRecognition 的启动结论：started=本次请求已启动干跑，
+	// running=同库根干跑已在途（本次未重复启动）。
+	Started bool `json:"started,omitempty"`
+	Running bool `json:"running,omitempty"`
+	// Panorama getPanorama 的识别全景投影（section=files 时仅含文件级清单）。
+	Panorama *RecognitionSnapshot `json:"panorama,omitempty"`
+	// Decisions getPanorama 附带的会话决策态（元素7：赋值/忽略/选择集的活数据）。
+	Decisions *workbenchSessionDecisionsView `json:"decisions,omitempty"`
+}
+
+// workbenchSessionDecisionsView 会话决策态投影（元素7 的活数据——赋值/忽略/
+// 选择集随用户操作即时变化，不入识别快照）。
+type workbenchSessionDecisionsView struct {
+	// Assignments 已手动解析项（含是否已泛化标记）。
+	Assignments []workbenchAssignmentView `json:"assignments,omitempty"`
+	// Ignored 已忽略项；Selection 已选定为任务的项（相对路径）。
+	Ignored   []string `json:"ignored,omitempty"`
+	Selection []string `json:"selection,omitempty"`
+}
+
+// workbenchAssignmentView 会话赋值的前端呈现形态。
+type workbenchAssignmentView struct {
+	RelPath     string   `json:"relPath"`
+	Author      string   `json:"author,omitempty"`
+	AuthorRole  string   `json:"authorRole,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Collection  string   `json:"collection,omitempty"`
+	Generalized bool     `json:"generalized,omitempty"`
+	UpdatedAtMs int64    `json:"updatedAtMs,omitempty"`
+}
+
+// decisionsViewOf 会话 → 决策态投影（按路径稳定序呈现）。
+func decisionsViewOf(sess *WorkbenchSession) *workbenchSessionDecisionsView {
+	view := &workbenchSessionDecisionsView{}
+	for _, relPath := range sortedKeys(sess.Assignments) {
+		assign := sess.Assignments[relPath]
+		view.Assignments = append(view.Assignments, workbenchAssignmentView{
+			RelPath: relPath, Author: assign.Author, AuthorRole: assign.AuthorRole,
+			Title: assign.Title, Tags: assign.Tags, Collection: assign.Collection,
+			Generalized: assign.Generalized, UpdatedAtMs: assign.UpdatedAtMs,
+		})
+	}
+	view.Ignored = append(view.Ignored, sess.Ignored...)
+	view.Selection = append(view.Selection, sess.Selection...)
+	return view
 }
 
 func summarizeSession(sess *WorkbenchSession) *workbenchSessionSummary {
@@ -596,6 +690,16 @@ func summarizeSession(sess *WorkbenchSession) *workbenchSessionSummary {
 		CreatedAtMs: sess.CreatedAtMs,
 		UpdatedAtMs: sess.UpdatedAtMs,
 	}
+}
+
+// sortedKeys 会话赋值表的路径稳定序（呈现顺序确定）。
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // PublishToFrontend 事件发布能力（请求处理应答与确认协调器事件共用；窄接口便于单测注入）。
@@ -678,6 +782,34 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		if handler == nil || !handler(req.ConfirmSeq, req.Accepted) {
 			resp.OK, resp.Error = false, "确认请求已失效（可能已超时关闭），请重新发起"
 		}
+	case workbenchActionStartRecognition:
+		started, running, err := m.StartRecognition(req.Root)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Started = started
+		resp.Running = running
+	case workbenchActionGetPanorama:
+		sess, err := m.SessionOf(req.Root)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		if sess.Snapshot == nil {
+			resp.OK, resp.Error = false, "该会话尚未完成全量识别，无识别全景可读"
+			break
+		}
+		view := panoramaViewOf(sess.Snapshot)
+		if req.Section == panoramaSectionFiles {
+			// 文件级清单分节：概览小节（目录树/规则态/死路径）不出现在本载荷
+			view = RecognitionSnapshot{
+				SchemaVersion: view.SchemaVersion, GeneratedAtMs: view.GeneratedAtMs,
+				Files: view.Files, Groups: view.Groups, Pending: view.Pending, Stats: view.Stats,
+			}
+		}
+		resp.Panorama = &view
+		resp.Decisions = decisionsViewOf(sess)
 	default:
 		resp.OK, resp.Error = false, fmt.Sprintf("未知的工作台请求动作 %q", req.Action)
 	}

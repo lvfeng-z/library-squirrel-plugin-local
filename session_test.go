@@ -72,6 +72,9 @@ type workbenchTestCtx struct {
 	sdkdto.PluginContext
 	store *fakeSessionStore
 
+	// library 谓词索引构造的分页数据集（Query* 四方法的桩数据；零值=四轨全空）。
+	library libraryFixture
+
 	mu        sync.Mutex
 	published []publishedEvent
 }

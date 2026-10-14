@@ -62,7 +62,7 @@
       {
         "id": "workbench-panorama",
         "name": "识别全景",
-        "description": "全量识别干跑后的识别全景呈现（骨架占位，识别引擎属后续阶段）",
+        "description": "全量识别干跑后的识别全景呈现：七类元素分节与全库资源级清单虚拟滚动",
         "kind": "view",
         "content": {
           "contentType": "precompiled",

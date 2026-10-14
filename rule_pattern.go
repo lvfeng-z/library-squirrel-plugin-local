@@ -254,15 +254,28 @@ func (p *SiblingPattern) groupKey(fileName string) string {
 
 // seqOf 提取文件名的序号：SeqExpr 命中且第一个捕获组可解析为整数时返回 (序号, true)。
 func (p *SiblingPattern) seqOf(fileName string) (int, bool) {
-	m := p.seqRe.FindStringSubmatch(fileName)
-	if len(m) < 2 {
+	text, ok := p.seqTextOf(fileName)
+	if !ok {
 		return 0, false
 	}
-	seq, err := strconv.Atoi(m[1])
+	seq, err := strconv.Atoi(text)
 	if err != nil {
 		return 0, false
 	}
 	return seq, true
+}
+
+// seqTextOf 提取文件名序号的原文（第一个捕获组文本）：供识别全景呈现序号形态
+// （零填充与否由原文的前导零体现，宽度信息在整数转换中会丢失）。
+func (p *SiblingPattern) seqTextOf(fileName string) (string, bool) {
+	if p.seqRe == nil {
+		return "", false
+	}
+	m := p.seqRe.FindStringSubmatch(fileName)
+	if len(m) < 2 {
+		return "", false
+	}
+	return m[1], true
 }
 
 // PredicatePattern 为谓词模式：以文件名去扩展名或某捕获组绑定的值为名字，查询库内集合。

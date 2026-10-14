@@ -34,6 +34,9 @@ const (
 	SourceGroup SourceKind = "group"
 	// SourcePredicate 表示谓词命中：值来自库内集合命中的名字。
 	SourcePredicate SourceKind = "predicate"
+	// SourceAssignment 表示会话赋值：值来自用户在解析会话内对该文件的手工指定
+	//（特异性知识，合成后按维度覆盖档案求值结论，不参与合成择一）。
+	SourceAssignment SourceKind = "assignment"
 )
 
 // ExtractionFrom 为提取动作的取值来源。

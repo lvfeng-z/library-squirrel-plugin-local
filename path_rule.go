@@ -169,17 +169,9 @@ func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, 
 	}
 }
 
-// meaningsFromRules 依规则档案回放该层目录含义：层深先经 qnaDirDepth 换算为档案
-// 的 DirNames 索引（问答层深与档案层深两套编号恰差 1），再构造仅该层目录名有效
-// 的合成匹配输入（其余层名空占位、文件名留空使文件名规则不参与），逐条求值可
-// 表达目录层含义的启用规则；命中落点须恰为该层该名（占位层命中不算覆盖），再
-// 执行提取动作把声明转回路径含义并按（类型,名字）去重。层深 0（扫描根本身）
-// 无对应索引、或无含义产出时返回 nil，视为规则未覆盖、需发起问答。
+// meaningsFromRules 依规则档案回放该层目录含义：以启用规则序列调 dirMeaningsFromRules
+// 求值（档案载入在方法内完成）。
 func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMeaning {
-	depth := qnaDirDepth(level)
-	if depth < 0 {
-		return nil
-	}
 	rules := EffectiveRules(nil)
 	if c.ctx != nil {
 		profile, errs := LoadProfile(NewContextProfileStore(c.ctx))
@@ -189,6 +181,21 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 		if profile != nil {
 			rules = EffectiveRules(profile)
 		}
+	}
+	return dirMeaningsFromRules(rules, level, dirName)
+}
+
+// dirMeaningsFromRules 依给定规则序列回放单个目录层的含义（纯求值，无 IO、不弹问）：
+// 层深先经 qnaDirDepth 换算为规则的 DirNames 索引（问答层深与规则层深两套编号恰差
+// 1），再构造仅该层目录名有效的合成匹配输入（其余层名空占位、文件名留空使文件名
+// 规则不参与），逐条求值可表达目录层含义的启用规则；命中落点须恰为该层该名
+// （占位层命中不算覆盖），再执行提取动作把声明转回路径含义并按（类型,名字）去重。
+// 层深 0（扫描根本身）无对应索引、或无含义产出时返回 nil，视为规则未覆盖。
+// 识别干跑的目录层含义状态求值与本方法同源（干跑零弹问，只取回放结论）。
+func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMeaning {
+	depth := qnaDirDepth(level)
+	if depth < 0 {
+		return nil
 	}
 	dirNames := make([]string, depth+1)
 	dirNames[depth] = dirName
