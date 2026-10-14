@@ -288,25 +288,81 @@ func (r *countingStubReporter) Heartbeat() {
 	r.count.Add(1)
 }
 
+// testMarkerRule 档案写入口测试的标记规则：可序列化可载入的最小合法规则。
+func testMarkerRule(t RuleSource, marker string) (RuleEntry, error) {
+	pattern, err := NewRegexPattern(string(TargetFileName), "^"+marker+`$`, nil)
+	if err != nil {
+		return RuleEntry{}, err
+	}
+	return RuleEntry{
+		ID:          "mark-" + marker,
+		Description: "档案写入口标记规则 " + marker,
+		Source:      t,
+		Enabled:     true,
+		Pattern:     pattern,
+		Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromConstant, Constant: marker}},
+	}, nil
+}
+
 // TestArchiveWriteThreeEntriesSerialized 档案写三入口（泛化/裁决生成/规则编辑面）
-// 并发互斥：桩入口与串行 API 并发写入时（变更体带在途观测），任意时刻至多一个
-// 档案变更在途，全部标记规则落库无丢失。
+// 并发互斥：真实档案写入口与串行 API 并发写入时（变更体带在途观测），任意时刻
+// 至多一个档案变更在途，全部标记规则落库无丢失。
 func TestArchiveWriteThreeEntriesSerialized(t *testing.T) {
 	store := newFakeSessionStore()
 	mgr, _ := newTestManager(t, store)
 
 	var inFlight, maxInFlight atomic.Int32
 	gate := make(chan struct{})
+	// 三真实写入口：泛化/裁决生成入口经 UpdateProfile 携对应入口标识（真实
+	// 事务 ApplyGeneralization / ApplyAdjudication 需会话与快照上下文，此处
+	// 以同一串行入口承载入口标识语义）；规则编辑面走真实事务 ApplySaveRule
+	// 全管线（解析→构造期校验→入档）。
+	markerRuleJSON := func(source RuleSource, marker string) ([]byte, error) {
+		rule, err := testMarkerRule(source, marker)
+		if err != nil {
+			return nil, err
+		}
+		rj, err := ruleToJSON(rule)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(rj)
+	}
 	entryFuncs := []func(string) error{
-		mgr.StubGeneralizeToRule,
-		mgr.StubAdjudicateToRule,
-		mgr.StubEditRule,
+		func(marker string) error {
+			rule, err := testMarkerRule(RuleSourceQna, marker)
+			if err != nil {
+				return err
+			}
+			return mgr.UpdateProfile(ArchiveWriteGeneralize, func(p *RuleProfile) error {
+				p.Rules = append(p.Rules, rule)
+				return nil
+			})
+		},
+		func(marker string) error {
+			rule, err := testMarkerRule(RuleSourceAdjudication, marker)
+			if err != nil {
+				return err
+			}
+			return mgr.UpdateProfile(ArchiveWriteAdjudicate, func(p *RuleProfile) error {
+				p.Rules = append(p.Rules, rule)
+				return nil
+			})
+		},
+		func(marker string) error {
+			data, err := markerRuleJSON(RuleSourceManual, marker)
+			if err != nil {
+				return err
+			}
+			_, err = mgr.ApplySaveRule(data)
+			return err
+		},
 	}
 	const stubWritesPerEntry = 4
 	const probeWriters = 6
 	var wg sync.WaitGroup
 
-	// 三入口桩并发写（各自标记规则落库）
+	// 三入口并发写（各自标记规则落库）
 	for entryIdx, entry := range entryFuncs {
 		for i := 0; i < stubWritesPerEntry; i++ {
 			wg.Add(1)
@@ -314,7 +370,7 @@ func TestArchiveWriteThreeEntriesSerialized(t *testing.T) {
 				defer wg.Done()
 				<-gate
 				if err := entry(fmtMarker(entryIdx, i)); err != nil {
-					t.Errorf("桩入口 %d 并发写失败: %v", entryIdx, err)
+					t.Errorf("入口 %d 并发写失败: %v", entryIdx, err)
 				}
 			}(entryIdx, i, entry)
 		}
@@ -338,7 +394,7 @@ func TestArchiveWriteThreeEntriesSerialized(t *testing.T) {
 				}
 				time.Sleep(5 * time.Millisecond)
 				inFlight.Add(-1)
-				rule, err := stubMarkerRule(RuleSourceManual, marker)
+				rule, err := testMarkerRule(RuleSourceManual, marker)
 				if err != nil {
 					return err
 				}
@@ -367,7 +423,7 @@ func TestArchiveWriteThreeEntriesSerialized(t *testing.T) {
 	}
 	seen := make(map[string]bool, len(profile.Rules))
 	for _, rule := range profile.Rules {
-		seen[strings.TrimPrefix(rule.ID, "stub-")] = true
+		seen[strings.TrimPrefix(rule.ID, "mark-")] = true
 	}
 	for entryIdx := 0; entryIdx <= len(entryFuncs); entryIdx++ {
 		n := stubWritesPerEntry
@@ -411,7 +467,7 @@ func TestProfileReconcileOnActivate(t *testing.T) {
 	if len(errs) != 0 || profile == nil {
 		t.Fatalf("档案载入异常: %v %+v", errs, profile)
 	}
-	rule, err := stubMarkerRule(RuleSourceManual, "external-direct-write")
+	rule, err := testMarkerRule(RuleSourceManual, "external-direct-write")
 	if err != nil {
 		t.Fatalf("构造外部变更规则失败: %v", err)
 	}

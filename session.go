@@ -165,11 +165,11 @@ func (s contextSessionStore) GetAllValues() (map[string]*sdkdto.StorageValue, er
 type ArchiveWriteEntry string
 
 const (
-	// ArchiveWriteGeneralize 手动解析泛化成规则（后续阶段接线）。
+	// ArchiveWriteGeneralize 手动解析泛化成规则。
 	ArchiveWriteGeneralize ArchiveWriteEntry = "generalize"
-	// ArchiveWriteAdjudicate 冲突裁决生成组合规则（后续阶段接线）。
+	// ArchiveWriteAdjudicate 冲突裁决生成组合规则。
 	ArchiveWriteAdjudicate ArchiveWriteEntry = "adjudicate"
-	// ArchiveWriteRuleEdit 规则编辑面（后续阶段接线）。
+	// ArchiveWriteRuleEdit 规则编辑面（条目保存/启停/删除与内置禁用清单维护）。
 	ArchiveWriteRuleEdit ArchiveWriteEntry = "rule-edit"
 )
 
@@ -620,58 +620,6 @@ func (m *SessionManager) UpdateProfile(entry ArchiveWriteEntry, mutate func(p *R
 	return nil
 }
 
-// stubMarkerRule 档案写桩入口的标记规则：可序列化可载入的最小合法规则。
-func stubMarkerRule(t RuleSource, marker string) (RuleEntry, error) {
-	pattern, err := NewRegexPattern(string(TargetFileName), "^"+marker+`$`, nil)
-	if err != nil {
-		return RuleEntry{}, err
-	}
-	return RuleEntry{
-		ID:          "stub-" + marker,
-		Description: "档案写桩入口标记规则 " + marker,
-		Source:      t,
-		Enabled:     true,
-		Pattern:     pattern,
-		Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromConstant, Constant: marker}},
-	}, nil
-}
-
-// 档案写三入口的桩：实现接线前的占位入口（手动解析泛化/冲突裁决生成/规则编辑面
-// 属后续阶段），当前用于单点串行 API 的并发互斥单测与装配核验；接线时以真实
-// 变更逻辑替换同名入口的内部实现。
-func (m *SessionManager) StubGeneralizeToRule(marker string) error {
-	rule, err := stubMarkerRule(RuleSourceQna, marker)
-	if err != nil {
-		return err
-	}
-	return m.UpdateProfile(ArchiveWriteGeneralize, func(p *RuleProfile) error {
-		p.Rules = append(p.Rules, rule)
-		return nil
-	})
-}
-
-func (m *SessionManager) StubAdjudicateToRule(marker string) error {
-	rule, err := stubMarkerRule(RuleSourceManual, marker)
-	if err != nil {
-		return err
-	}
-	return m.UpdateProfile(ArchiveWriteAdjudicate, func(p *RuleProfile) error {
-		p.Rules = append(p.Rules, rule)
-		return nil
-	})
-}
-
-func (m *SessionManager) StubEditRule(marker string) error {
-	rule, err := stubMarkerRule(RuleSourceManual, marker)
-	if err != nil {
-		return err
-	}
-	return m.UpdateProfile(ArchiveWriteRuleEdit, func(p *RuleProfile) error {
-		p.Rules = append(p.Rules, rule)
-		return nil
-	})
-}
-
 // —— 前端事件协议（请求侧）——
 
 // 前端请求动作词汇。
@@ -692,6 +640,14 @@ const (
 	workbenchActionGetDiff          = "getDiff"       // 最近一次重识别差异集
 	workbenchActionSetSelection     = "setSelection"  // 全量替换资源选择集（作品键）
 	workbenchActionCreateTasks      = "createTasks"   // 创建编排（对账→CreateTask→清理选择集）
+
+	// —— 规则管理族（规则子页）——
+	workbenchActionGetRules           = "getRules"           // 规则管理视图（档案条目+内置表+禁用清单+备份态）
+	workbenchActionSaveRule           = "saveRule"           // 规则条目保存（新建/编辑，构造期单条校验）
+	workbenchActionDeleteRule         = "deleteRule"         // 删除档案规则条目
+	workbenchActionSetRuleEnabled     = "setRuleEnabled"     // 档案规则条目启停
+	workbenchActionSetBuiltinDisabled = "setBuiltinDisabled" // 内置规则禁用/启用（档案禁用清单）
+	workbenchActionRollbackProfile    = "rollbackProfile"    // 档案回退一代（写前备份）
 )
 
 // getPanorama 的分节拉取词汇。
@@ -748,6 +704,19 @@ type workbenchFrontendRequest struct {
 	// Works setSelection 的作品键全集（全量替换：集聚合/树递选/过滤全选等批量
 	// 组合由前端按选择域展开为成员作品键后整体提交）。
 	Works []string `json:"works,omitempty"`
+
+	// —— 规则管理族载荷（规则子页）——
+	// Rule saveRule 的完整规则条目 JSON（ruleEntryJSON 形态：pattern 与
+	// extractions 为 JSON 片段原文，synthesis 为表单化字段组装）。
+	Rule json.RawMessage `json:"rule,omitempty"`
+	// RuleID deleteRule / setRuleEnabled 的档案条目寻址。
+	RuleID string `json:"ruleId,omitempty"`
+	// Enabled setRuleEnabled 的启停方向（假=停用，字段缺省同假）。
+	Enabled bool `json:"enabled,omitempty"`
+	// BuiltinID setBuiltinDisabled 的内置规则寻址。
+	BuiltinID string `json:"builtinId,omitempty"`
+	// Disabled setBuiltinDisabled 的方向（真=加入禁用清单，缺省=移出即启用）。
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // workbenchSessionSummary 会话的前端呈现摘要。
@@ -793,6 +762,11 @@ type workbenchFrontendResponse struct {
 	// Created / CreateMsg createTasks 的创建结论：已提交作品数与用户可读摘要。
 	Created  int    `json:"created,omitempty"`
 	CreateMsg string `json:"createMsg,omitempty"`
+	// RulesView getRules 与规则管理族动作随答返回的规则管理视图（档案条目+
+	// 内置表+禁用清单+备份态），前端每次动作后整份刷新。
+	RulesView *rulesAdminView `json:"rulesView,omitempty"`
+	// RolledBack rollbackProfile 的回退结论（真=已回退一代）。
+	RolledBack bool `json:"rolledBack,omitempty"`
 }
 
 // workbenchSessionDecisionsView 会话决策态投影（元素7 的活数据——赋值/忽略/
@@ -1044,6 +1018,49 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		if sess, err := m.SessionOf(req.Root); err == nil {
 			resp.Decisions = decisionsViewOf(sess)
 		}
+	case workbenchActionGetRules:
+		view, err := m.RulesAdminView()
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulesView = view
+	case workbenchActionSaveRule:
+		view, err := m.ApplySaveRule(req.Rule)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulesView = view
+	case workbenchActionDeleteRule:
+		view, err := m.ApplyDeleteRule(req.RuleID)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulesView = view
+	case workbenchActionSetRuleEnabled:
+		view, err := m.ApplySetRuleEnabled(req.RuleID, req.Enabled)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulesView = view
+	case workbenchActionSetBuiltinDisabled:
+		view, err := m.ApplySetBuiltinDisabled(req.BuiltinID, req.Disabled)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulesView = view
+	case workbenchActionRollbackProfile:
+		view, err := m.ApplyRollbackProfile()
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulesView = view
+		resp.RolledBack = true
 	default:
 		resp.OK, resp.Error = false, fmt.Sprintf("未知的工作台请求动作 %q", req.Action)
 	}

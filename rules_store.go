@@ -1,5 +1,6 @@
 // 规则档案的存取层：KV 最小接口与插件上下文适配器、档案载入（坏规则逐条跳过）、
-// 档案保存（多态 JSON 落库），以及用户规则与内置规则的求值顺序合并。
+// 档案保存（多态 JSON 落库 + 写前单代备份与回退），以及用户规则与内置规则
+//（含内置禁用清单）的求值顺序合并。
 package main
 
 import (
@@ -10,6 +11,10 @@ import (
 
 // RuleProfileKVKey 为全库单份规则档案在插件 KV 存储中的键。
 const RuleProfileKVKey = "rule-profile"
+
+// RuleProfileBackupKVKey 为档案单代备份键：每次覆写档案前，现行档案原文先存入
+// 本键（写前备份），误删或覆写中断可回退一代（RollbackProfile）。
+const RuleProfileBackupKVKey = "rule-profile.backup"
 
 // ProfileStore 为规则档案读写所需的最小存储方法集；签名与 SDK 的
 // dto.KVStore 同名方法一致，按需收窄依赖以避免触碰无关能力。
@@ -72,6 +77,8 @@ func LoadProfile(store ProfileStore) (*RuleProfile, []error) {
 }
 
 // SaveProfile 把规则档案序列化为多态 JSON 后写入 KV；档案为 nil 时按空档案写入。
+// 写入前先把现行档案原文存入单代备份键（写前备份）：现行档案缺席（首次写入）时
+// 不产生备份；备份写入失败即中止保存——覆写前恒有一代档案可回退。
 func SaveProfile(store ProfileStore, p *RuleProfile) error {
 	if store == nil {
 		return fmt.Errorf("规则档案存储不可用，无法保存档案")
@@ -84,27 +91,92 @@ func SaveProfile(store ProfileStore, p *RuleProfile) error {
 	if err != nil {
 		return fmt.Errorf("规则档案序列化失败: %w", err)
 	}
+	if err := backupProfileBeforeOverwrite(store); err != nil {
+		return err
+	}
 	if err := store.SetValue(RuleProfileKVKey, string(data)); err != nil {
 		return fmt.Errorf("写入规则档案（键 %q）失败: %w", RuleProfileKVKey, err)
 	}
 	return nil
 }
 
+// backupProfileBeforeOverwrite 写前备份：把现行档案原文存入单代备份键；现行
+// 档案缺席（键不存在或明文为空）时不产生备份。
+func backupProfileBeforeOverwrite(store ProfileStore) error {
+	current, err := store.GetValue(RuleProfileKVKey)
+	if err != nil {
+		return fmt.Errorf("读取现行规则档案（写前备份）失败: %w", err)
+	}
+	if current == nil || current.Value == "" {
+		return nil
+	}
+	if err := store.SetValue(RuleProfileBackupKVKey, current.Value); err != nil {
+		return fmt.Errorf("写入规则档案备份（键 %q）失败: %w", RuleProfileBackupKVKey, err)
+	}
+	return nil
+}
+
+// RollbackProfile 回退一代档案：把备份键内容写回档案键，同时把覆写前的现行档案
+// 换位存入备份键（回退本身可再回退一次撤销）。备份缺席（从未产生过覆写）时返回
+// 错误；回退直接以原文写键，不经 SaveProfile（其写前备份会与换位重复）。
+func RollbackProfile(store ProfileStore) error {
+	if store == nil {
+		return fmt.Errorf("规则档案存储不可用，无法回退档案")
+	}
+	backup, err := store.GetValue(RuleProfileBackupKVKey)
+	if err != nil {
+		return fmt.Errorf("读取规则档案备份（键 %q）失败: %w", RuleProfileBackupKVKey, err)
+	}
+	if backup == nil || backup.Value == "" {
+		return fmt.Errorf("无可回退的规则档案备份（尚未产生过覆写）")
+	}
+	current, err := store.GetValue(RuleProfileKVKey)
+	if err != nil {
+		return fmt.Errorf("读取现行规则档案失败: %w", err)
+	}
+	if err := store.SetValue(RuleProfileKVKey, backup.Value); err != nil {
+		return fmt.Errorf("回写规则档案（键 %q）失败: %w", RuleProfileKVKey, err)
+	}
+	if current != nil && current.Value != "" {
+		if err := store.SetValue(RuleProfileBackupKVKey, current.Value); err != nil {
+			return fmt.Errorf("更新规则档案备份（键 %q）失败: %w", RuleProfileBackupKVKey, err)
+		}
+	}
+	return nil
+}
+
+// ProfileBackupExists 备份键是否有可回退的一代档案内容。
+func ProfileBackupExists(store ProfileStore) bool {
+	if store == nil {
+		return false
+	}
+	backup, err := store.GetValue(RuleProfileBackupKVKey)
+	return err == nil && backup != nil && backup.Value != ""
+}
+
 // EffectiveRules 返回参与求值的规则序列：用户档案中启用的规则在前、内置规则表中
 // 启用的规则在后（两段内部各自保持原有顺序）。同一对象同时命中用户规则与内置规则
-// 时，用户规则优先由「用户在前」的求值顺序承载，执行面的顺序接线在流水阶段完成；
-// user 为 nil 时仅返回内置规则。
+// 时，用户规则优先由「用户在前」的求值顺序承载，执行面的顺序接线在流水阶段完成。
+// 档案的内置禁用清单（DisabledBuiltinIDs）在此合并点应用——清单内的内置规则不
+// 参与求值；user 为 nil 时仅返回内置规则（无档案即无禁用信息）。
 func EffectiveRules(user *RuleProfile) []RuleEntry {
 	rules := make([]RuleEntry, 0)
+	var disabledBuiltin map[string]bool
 	if user != nil {
 		for _, rule := range user.Rules {
 			if rule.Enabled {
 				rules = append(rules, rule)
 			}
 		}
+		if len(user.DisabledBuiltinIDs) > 0 {
+			disabledBuiltin = make(map[string]bool, len(user.DisabledBuiltinIDs))
+			for _, id := range user.DisabledBuiltinIDs {
+				disabledBuiltin[id] = true
+			}
+		}
 	}
 	for _, rule := range BuiltinRules() {
-		if rule.Enabled {
+		if rule.Enabled && !disabledBuiltin[rule.ID] {
 			rules = append(rules, rule)
 		}
 	}

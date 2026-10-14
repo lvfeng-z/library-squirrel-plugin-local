@@ -84,7 +84,7 @@
       {
         "id": "workbench-rules",
         "name": "规则管理",
-        "description": "规则档案的列表/启停/删除/编辑（骨架占位，维护面属后续阶段）",
+        "description": "规则档案的列表/启停/删除/编辑：常用字段表单化、模式与提取动作以 JSON 片段编辑；内置规则启停（档案禁用清单）与档案备份回退一代",
         "kind": "view",
         "content": {
           "contentType": "precompiled",

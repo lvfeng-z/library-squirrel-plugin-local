@@ -344,6 +344,12 @@ type RuleProfile struct {
 	SchemaVersion int `json:"schemaVersion"`
 	// Rules 为档案内的规则列表。
 	Rules []RuleEntry `json:"rules"`
+	// DisabledBuiltinIDs 为内置规则禁用清单：内置规则在代码内置表、不入档案
+	// 条目，其禁用态由本清单承载——清单内的内置规则 ID 在合并求值点
+	//（EffectiveRules）被排除、不参与求值。字段可选（omitempty），旧档案缺省
+	// 为空清单即全部内置参与求值；清单中不在内置表的 ID 原样保留、无匹配即
+	// 无效果。
+	DisabledBuiltinIDs []string `json:"disabledBuiltinIDs,omitempty"`
 }
 
 // 模式 JSON 的 kind 判别值。
@@ -407,6 +413,8 @@ type ruleEntryJSON struct {
 type ruleProfileJSON struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Rules         []ruleEntryJSON `json:"rules"`
+	// DisabledBuiltinIDs 为内置规则禁用清单（可选字段，语义见 RuleProfile 同名字段）。
+	DisabledBuiltinIDs []string `json:"disabledBuiltinIDs,omitempty"`
 }
 
 // patternToJSON 把模式树递归转为多态中间表示；nil 模式转为 nil。
@@ -889,7 +897,10 @@ func collectPatternCaptures(p Pattern, out map[string]bool) {
 
 // MarshalJSON 把档案序列化为带 kind 判别字段的多态 JSON。
 func (p RuleProfile) MarshalJSON() ([]byte, error) {
-	out := ruleProfileJSON{SchemaVersion: p.SchemaVersion, Rules: make([]ruleEntryJSON, 0, len(p.Rules))}
+	out := ruleProfileJSON{
+		SchemaVersion: p.SchemaVersion, Rules: make([]ruleEntryJSON, 0, len(p.Rules)),
+		DisabledBuiltinIDs: p.DisabledBuiltinIDs,
+	}
 	for _, rule := range p.Rules {
 		rj, err := ruleToJSON(rule)
 		if err != nil {
@@ -907,7 +918,10 @@ func (p *RuleProfile) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &in); err != nil {
 		return fmt.Errorf("规则档案反序列化失败: %w", err)
 	}
-	profile := RuleProfile{SchemaVersion: in.SchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules))}
+	profile := RuleProfile{
+		SchemaVersion: in.SchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules)),
+		DisabledBuiltinIDs: in.DisabledBuiltinIDs,
+	}
 	for i := range in.Rules {
 		rule, err := ruleFromJSON(&in.Rules[i])
 		if err != nil {
@@ -941,7 +955,10 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 	case in.SchemaVersion != CurrentSchemaVersion && !legacySchemaVersions[in.SchemaVersion]:
 		return nil, []error{fmt.Errorf("规则档案结构版本为 %d，与当前支持的版本 %d 不一致", in.SchemaVersion, CurrentSchemaVersion)}
 	}
-	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules))}
+	profile := &RuleProfile{
+		SchemaVersion: CurrentSchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules)),
+		DisabledBuiltinIDs: in.DisabledBuiltinIDs,
+	}
 	for i := range in.Rules {
 		rj := &in.Rules[i]
 		rule, err := ruleFromJSON(rj)

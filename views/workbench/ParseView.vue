@@ -114,7 +114,7 @@ const ROUTE_BASE = '#/com.lvfeng.localImport/'
 const subpageDefs = [
   { key: 'workbench-panorama', title: '识别全景', note: '全量识别与七类元素' },
   { key: 'workbench-manual-parse', title: '手动解析', note: '赋值·泛化·裁决' },
-  { key: 'workbench-rules', title: '规则管理', note: '骨架占位' },
+  { key: 'workbench-rules', title: '规则管理', note: '列表·编辑·内置启停·备份回退' },
   { key: 'workbench-observation', title: '解析观测', note: '建设中' }
 ]
 const subpages = computed(() => {
