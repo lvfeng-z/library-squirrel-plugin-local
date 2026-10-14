@@ -197,25 +197,38 @@ func (nilValueStore) GetValue(string) (*sdkdto.StorageValue, error) { return nil
 // SetValue 为占位实现，测试中不会被调用。
 func (nilValueStore) SetValue(string, string) error { return nil }
 
-// TestLoadProfileBrokenData JSON 损坏或结构版本不符时返回 nil 档案与错误。
+// TestLoadProfileBrokenData JSON 损坏或未知历史版本时返回 nil 档案与单个错误；
+// 未来更高版本不中断：返回非 nil 档案（尽力解析）与单条版本告警。
 func TestLoadProfileBrokenData(t *testing.T) {
 	cases := []struct {
-		name  string
-		value string
+		name    string
+		value   string
+		wantNil bool
 	}{
-		{name: "JSON 截断", value: `{"schemaVersion":1,"rules":[`},
-		{name: "非 JSON 文本", value: "不是 JSON"},
-		{name: "版本不符", value: `{"schemaVersion":99,"rules":[]}`},
+		{name: "JSON 截断", value: `{"schemaVersion":1,"rules":[`, wantNil: true},
+		{name: "非 JSON 文本", value: "不是 JSON", wantNil: true},
+		{name: "未知历史版本", value: `{"schemaVersion":0,"rules":[]}`, wantNil: true},
+		{name: "未来更高版本", value: `{"schemaVersion":99,"rules":[]}`, wantNil: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: tc.value}}
 			loaded, errs := LoadProfile(store)
-			if loaded != nil {
-				t.Fatalf("数据不可用时档案应为 nil，实际: %+v", loaded)
+			if tc.wantNil {
+				if loaded != nil {
+					t.Fatalf("数据不可用时档案应为 nil，实际: %+v", loaded)
+				}
+				if len(errs) != 1 {
+					t.Fatalf("数据不可用时应返回单个错误，实际 %d 个: %v", len(errs), errs)
+				}
+				return
 			}
-			if len(errs) != 1 {
-				t.Fatalf("数据不可用时应返回单个错误，实际 %d 个: %v", len(errs), errs)
+			// 未来更高版本：告警且不中断（空规则档案照常可用）
+			if loaded == nil {
+				t.Fatal("未来更高版本应尽力解析返回非 nil 档案，不中断整体")
+			}
+			if len(errs) != 1 || !strings.Contains(errs[0].Error(), "高于当前支持的版本") {
+				t.Fatalf("未来更高版本应返回单条版本告警，实际: %v", errs)
 			}
 		})
 	}

@@ -217,18 +217,12 @@ func TestAdjudicateConditionalGeneratesPredicateStrategy(t *testing.T) {
 			t.Fatalf("条件动作 %d 应为 title 裁决常量: %+v", i, action)
 		}
 	}
-	if present.When == nil || len(present.When.Present) != 1 || len(present.When.Absent) != 0 {
-		t.Fatalf("在场分支条件应恰一条在场谓词（最简形式）: %+v", present.When)
+	if present.When == nil || present.When.Kind != ExprPredicate ||
+		present.When.Source != SourceDir || present.When.Dimension != DimAuthor {
+		t.Fatalf("在场分支条件应为恰一条在场谓词节点（最简形式）: %+v", present.When)
 	}
-	pred := present.When.Present[0]
-	if pred.Source != SourceDir || pred.Dimension != DimAuthor {
-		t.Fatalf("在场谓词应为 (dir, author): %+v", pred)
-	}
-	if absent.When == nil || len(absent.When.Absent) != 1 || len(absent.When.Present) != 0 {
-		t.Fatalf("缺席分支条件应恰一条缺席谓词（最简形式）: %+v", absent.When)
-	}
-	if absent.When.Absent[0] != pred {
-		t.Fatalf("两分支谓词应同体: %+v vs %+v", absent.When.Absent[0], pred)
+	if absent.When == nil || absent.When.Kind != ExprNot || !equalCondExpr(absent.When.Inner, present.When) {
+		t.Fatalf("缺席分支条件应为在场谓词节点的取反（最简形式）: %+v", absent.When)
 	}
 
 	// 非法谓词的构造期校验（中文错误 + 拒绝生成）
@@ -256,9 +250,9 @@ func TestConditionalExtractionEvaluation(t *testing.T) {
 		Pattern: mustRegexPattern(t, `^.+\.jpg$`, nil),
 		Extractions: []ExtractionAction{
 			{Dimension: DimTitle, From: FromAdjudication, Constant: "在场值",
-				When: &SynthCondition{Present: []DeclPredicate{{Source: SourceDir, Dimension: DimAuthor}}}},
+				When: predicateExpr(DeclPredicate{Source: SourceDir, Dimension: DimAuthor})},
 			{Dimension: DimTitle, From: FromAdjudication, Constant: "缺席值",
-				When: &SynthCondition{Absent: []DeclPredicate{{Source: SourceDir, Dimension: DimAuthor}}}},
+				When: &CondExpr{Kind: ExprNot, Inner: predicateExpr(DeclPredicate{Source: SourceDir, Dimension: DimAuthor})}},
 		},
 	}
 	files := []ScanFile{
@@ -659,8 +653,8 @@ func TestComputeSnapshotDiff(t *testing.T) {
 
 // —— 档案版本兼容与条件构造期校验 ——
 
-// TestProfileSchemaV1Compat v1 档案（无条件形态）向后兼容载入并升格 v2；
-// 高于当前版本的档案仍拒绝。
+// TestProfileSchemaV1Compat v1 档案（无条件形态）向后兼容载入并升格当前版本；
+// 未知历史版本仍拒绝（未来更高版本的尽力解析另行由 rule_condition_test 覆盖）。
 func TestProfileSchemaV1Compat(t *testing.T) {
 	store := newFakeSessionStore()
 	v1 := `{"schemaVersion":1,"rules":[{"id":"legacy","description":"旧版规则","source":"manual","enabled":true,` +

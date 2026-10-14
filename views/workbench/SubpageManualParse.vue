@@ -42,6 +42,12 @@
         <el-alert v-if="actionError" class="li-manual-banner" type="error" :closable="false" show-icon :title="actionError" />
         <div v-if="recognizing" class="li-manual-busy">验证轮重识别进行中……完成后下方差异区自动刷新</div>
 
+        <!-- 条件策略生成物透出：条件 JSON（档案 v3 表达式树，进阶手写参照） -->
+        <div v-if="lastCondition" class="li-manual-condjson">
+          <div class="li-manual-condjson-head">条件策略生成物（条件 JSON，与规则档案同构的表达式片段）</div>
+          <pre class="li-manual-condjson-body">{{ lastCondition }}</pre>
+        </div>
+
         <!-- 一、单次赋值（会话态知识，不升格规则） -->
         <section class="li-manual-card">
           <h3 class="li-manual-card-title">单次赋值 <span class="li-manual-card-note">特异性结果留会话 · 跨重识别持续生效</span></h3>
@@ -299,6 +305,7 @@ interface GeneratedRuleView {
   description: string
   source: string
   pattern: string
+  condition?: string
 }
 
 interface WorkbenchResponse {
@@ -345,6 +352,8 @@ const diff = ref<SnapDiff | null>(null)
 const notice = ref('')
 const actionError = ref('')
 const recognizing = ref(false)
+// 最近一次条件策略生成的条件 JSON（档案 v3 表达式树，生成物透出）
+const lastCondition = ref('')
 
 let seq = 0
 let offResponse: (() => void) | null = null
@@ -572,6 +581,7 @@ async function doGeneralize(): Promise<void> {
   generalizing.value = true
   notice.value = ''
   actionError.value = ''
+  lastCondition.value = ''
   const resp = await request('generalize', {
     root: session.value.rootPath,
     relPath: genTarget.value,
@@ -625,6 +635,7 @@ function toggleConditional(i: number): void {
   }
   notice.value = ''
   actionError.value = ''
+  lastCondition.value = ''
 }
 
 async function doAdjudicatePick(p: SnapPending, i: number): Promise<void> {
@@ -636,6 +647,7 @@ async function doAdjudicatePick(p: SnapPending, i: number): Promise<void> {
   adjudicating.value = true
   notice.value = ''
   actionError.value = ''
+  lastCondition.value = ''
   const resp = await request('adjudicate', {
     root: session.value.rootPath,
     relPath: p.relPath,
@@ -673,6 +685,7 @@ async function doAdjudicateConditional(p: SnapPending, i: number): Promise<void>
     return
   }
   notice.value = `已生成条件策略 ${resp.rule.id}（${resp.rule.description}）；验证轮重识别已启动，差异见下方`
+  lastCondition.value = resp.rule.condition || ''
   condOpen.value[i] = false
   recognizing.value = true
 }
@@ -1143,6 +1156,30 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.li-manual-condjson {
+  border: 1px solid var(--app-border-color-light);
+  border-radius: var(--app-radius-sm);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.li-manual-condjson-head {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+.li-manual-condjson-body {
+  margin: 0;
+  font-family: var(--app-font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .li-manual-cond-row {

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -39,6 +40,9 @@ type GeneratedRuleView struct {
 	Source      string `json:"source"`
 	// Pattern 模式的人话摘要（如「文件名匹配 ^【…」或「A 与 B」组合形态）。
 	Pattern string `json:"pattern"`
+	// Condition 为条件动作生成物的条件 JSON 数组（各条件动作的 When 依次序列
+	// 化，无压缩单行；无条件动作为空）——手写条件 JSON 片段的进阶参照入口。
+	Condition string `json:"condition,omitempty"`
 }
 
 // GenerationResult 生成动作的结果：入档的规则摘要与验证轮启动结论。
@@ -455,12 +459,13 @@ func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDim
 			return nil, err
 		}
 		pred := DeclPredicate{Source: in.PredicateSource, Dimension: in.PredicateDimension}
-		// 最简充分形式：两分支各恰一条谓词（在场/缺席）
+		// 最简充分形式：两分支各恰一条谓词节点（在场 / 在场取反）
+		presentWhen := predicateExpr(pred)
 		extractions = []ExtractionAction{
 			{Dimension: dim, From: FromAdjudication, Constant: presentValue,
-				When: &SynthCondition{Present: []DeclPredicate{pred}}},
+				When: presentWhen},
 			{Dimension: dim, From: FromAdjudication, Constant: absentValue,
-				When: &SynthCondition{Absent: []DeclPredicate{pred}}},
+				When: &CondExpr{Kind: ExprNot, Inner: presentWhen}},
 		}
 	default:
 		return nil, fmt.Errorf("未知的裁决方式 %q（可用：%s / %s）", in.Mode, adjudicateModePick, adjudicateModeConditional)
@@ -663,14 +668,30 @@ func snapshotFileOf(snap *RecognitionSnapshot, relPath string) *SnapFile {
 	return nil
 }
 
-// generatedRuleViewOf 规则 → 前端呈现摘要。
+// generatedRuleViewOf 规则 → 前端呈现摘要（条件动作的 When 逐条序列化为
+// JSON 后拼为数组形态透出）。
 func generatedRuleViewOf(rule *RuleEntry) *GeneratedRuleView {
-	return &GeneratedRuleView{
+	view := &GeneratedRuleView{
 		ID:          rule.ID,
 		Description: rule.Description,
 		Source:      string(rule.Source),
 		Pattern:     patternSummary(rule.Pattern),
 	}
+	conds := make([]string, 0, 2)
+	for i := range rule.Extractions {
+		if rule.Extractions[i].When == nil {
+			continue
+		}
+		data, err := json.Marshal(rule.Extractions[i].When)
+		if err != nil {
+			continue
+		}
+		conds = append(conds, string(data))
+	}
+	if len(conds) > 0 {
+		view.Condition = "[" + strings.Join(conds, ", ") + "]"
+	}
+	return view
 }
 
 // patternSummary 模式的人话摘要（生成结果呈现用）。

@@ -99,10 +99,11 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // 为空的规则），并依序执行该规则的 Extractions，产出声明追加进
 // decision.Declarations；来源缺失的动作不产出声明，不中断其余动作。
 //
-// 带生效条件（When）的动作两遍执行：第一遍只跑无条件动作（全部规则按序），
-// 第二遍按规则序补跑条件动作——条件对求值时点已产出的声明集求值（见
-// SynthCondition.Holds），两遍执行使条件可见全部无条件声明（裁决生成的条件
-// 规则居档案尾，其条件谓词引用的声明在第一遍已全部在场）。
+// 带生效条件（When，通用条件表达式树）的动作两遍执行：第一遍只跑无条件动作
+//（全部规则按序），第二遍按规则序补跑条件动作——条件对该规则命中时的解析
+// 上下文与求值时点已产出的声明集求值（见 CondExpr.Holds），两遍执行使条件
+// 可见全部无条件声明（裁决生成的条件规则居档案尾，其条件谓词引用的声明在
+// 第一遍已全部在场）。
 func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) {
 	type ruleMatch struct {
 		rule    *RuleEntry
@@ -138,7 +139,7 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 			if action.When == nil {
 				continue
 			}
-			if !action.When.Holds(decision.Declarations) {
+			if !action.When.Holds(match.context, decision.Declarations) {
 				continue
 			}
 			if decl, ok := action.Apply(match.rule.ID, match.context); ok {
@@ -160,6 +161,10 @@ func hasConditionalAction(actions []ExtractionAction) bool {
 
 // Holds 对求值时点已产出的声明集求值：Present 内谓词须全部在场、Absent 内
 // 谓词须全部缺席（谓词的 And 组合），两列表皆空为恒真。
+//
+// 本方法为 v2 谓词组合形态的直读求值，保留作旧语义的等价性参照：载入侧
+// 映射产出的表达式树（legacyConditionExpr）与本方法在相同声明集上的求值
+// 结果恒等，由单测锚定。运行期求值统一走 CondExpr.Holds。
 func (c *SynthCondition) Holds(decls []MetadataDeclaration) bool {
 	if c == nil {
 		return true
@@ -185,6 +190,120 @@ func (p DeclPredicate) Holds(decls []MetadataDeclaration) bool {
 		}
 	}
 	return false
+}
+
+// Holds 对解析上下文与求值时点已产出的声明集求值条件表达式树：nil 恒真。
+// 操作数取值不可用（捕获组未绑定、非群组成员的群组字段）时含该操作数的
+// 相等/不等/区间比较一律为假——条件无法确立则动作不产出（保守取向）；
+// 未知判别类别在构造期已被拦截，此处防御性为假。
+func (e *CondExpr) Holds(ctx *ParseContext, decls []MetadataDeclaration) bool {
+	if e == nil {
+		return true
+	}
+	switch e.Kind {
+	case ExprPredicate:
+		return DeclPredicate{Source: e.Source, Dimension: e.Dimension}.Holds(decls)
+	case ExprEqual, ExprNotEqual:
+		left := conditionOperandValue(e.Left, ctx)
+		right := conditionOperandValue(e.Right, ctx)
+		if !left.ok || !right.ok {
+			return false
+		}
+		var equal bool
+		if isTextOperand(e.Left) {
+			equal = left.text == right.text
+		} else {
+			equal = left.num == right.num
+		}
+		if e.Kind == ExprNotEqual {
+			return !equal
+		}
+		return equal
+	case ExprRange:
+		operand := conditionOperandValue(e.Operand, ctx)
+		if !operand.ok {
+			return false
+		}
+		if e.Min != nil && operand.num < *e.Min {
+			return false
+		}
+		if e.Max != nil && operand.num > *e.Max {
+			return false
+		}
+		return true
+	case ExprAnd:
+		for _, sub := range e.Subs {
+			if !sub.Holds(ctx, decls) {
+				return false
+			}
+		}
+		return true
+	case ExprOr:
+		for _, sub := range e.Subs {
+			if sub.Holds(ctx, decls) {
+				return true
+			}
+		}
+		return false
+	case ExprNot:
+		if e.Inner == nil {
+			return false
+		}
+		return !e.Inner.Holds(ctx, decls)
+	default:
+		return false
+	}
+}
+
+// condOperand 为比较类操作数的求值产出：文本与数值双轨（按操作数判别类别
+// 其一有效），ok 为 false 表示取值不可用（捕获组未绑定 / 非群组成员的群组
+// 字段）。
+type condOperand struct {
+	text string
+	num  float64
+	ok   bool
+}
+
+// conditionOperandValue 求值比较类操作数（capture / depth / groupSize /
+// groupSeq / 字面量）；其余判别类别（谓词、比较、逻辑）不是操作数，返回不可用。
+func conditionOperandValue(e *CondExpr, ctx *ParseContext) condOperand {
+	if e == nil {
+		return condOperand{}
+	}
+	switch e.Kind {
+	case ExprCapture:
+		if ctx == nil {
+			return condOperand{}
+		}
+		value, ok := ctx.Capture(e.CaptureName)
+		return condOperand{text: value, ok: ok}
+	case ExprDepth:
+		if ctx == nil {
+			return condOperand{}
+		}
+		return condOperand{num: float64(ctx.Depth), ok: true}
+	case ExprGroupSize:
+		if ctx == nil || ctx.Group == nil {
+			return condOperand{}
+		}
+		return condOperand{num: float64(ctx.Group.Size), ok: true}
+	case ExprGroupSeq:
+		if ctx == nil || ctx.Group == nil {
+			return condOperand{}
+		}
+		return condOperand{num: float64(ctx.Group.Seq), ok: true}
+	case ExprString:
+		return condOperand{text: e.Str, ok: true}
+	case ExprNumber:
+		return condOperand{num: e.Num, ok: true}
+	default:
+		return condOperand{}
+	}
+}
+
+// isTextOperand 判定比较操作数是否走文本轨（构造期已保证相等比较两侧同型）。
+func isTextOperand(e *CondExpr) bool {
+	return e != nil && (e.Kind == ExprCapture || e.Kind == ExprString)
 }
 
 // PendingItem 为合成段的待裁决项：策略无法自动裁决的声明组合。不静默丢弃，

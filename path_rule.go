@@ -220,9 +220,9 @@ func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMe
 			continue
 		}
 		for _, action := range rule.Extractions {
-			// 条件动作对本回放语境下已产出的声明集求值（与提取段同语义），
-			// 条件不满足的动作不产出含义
-			if !action.When.Holds(decls) {
+			// 条件动作对该回放语境下的解析上下文与已产出声明集求值（与提取段
+			// 同语义），条件不满足的动作不产出含义
+			if !action.When.Holds(ctx, decls) {
 				continue
 			}
 			decl, ok := action.Apply(rule.ID, ctx)

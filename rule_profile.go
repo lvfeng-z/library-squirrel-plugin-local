@@ -105,8 +105,7 @@ type MetadataDeclaration struct {
 }
 
 // DeclPredicate 声明谓词：某来源载体在某含义维度上的声明是否在场
-//（合成策略条件绑定的最小操作数，完整表达式树属后续泛化——本谓词即表达式树的
-// 叶节点子集）。
+//（条件表达式树的布尔叶节点，也是 v2 谓词组合形态的最小操作数）。
 type DeclPredicate struct {
 	// Source 为待判定的声明来源载体。
 	Source SourceKind `json:"source"`
@@ -114,15 +113,106 @@ type DeclPredicate struct {
 	Dimension MetadataDimension `json:"dimension"`
 }
 
-// SynthCondition 声明在场/缺席谓词组合（合成策略条件绑定的最小承载）：
-// Present 内谓词须全部在场、Absent 内谓词须全部缺席——两列表按「全部满足」
-// 求值，即谓词的 And 组合（最简充分形式通常为单谓词单列表）；两列表皆空为
-// 恒真。求值点见 pipeline.go 的提取段：对求值时点已产出的声明集判定。
+// SynthCondition 声明在场/缺席谓词组合（档案 v2 的条件承载）：Present 内谓词
+// 须全部在场、Absent 内谓词须全部缺席——即谓词的 And 组合（最简充分形式通常
+// 为单谓词单列表），两列表皆空为恒真。v3 起条件统一为通用表达式树（CondExpr），
+// 本类型降为旧档案 JSON 的兼容读中间表示与等价性参照：载入时经
+// legacyConditionExpr 映射为等价表达式树，直读求值（Holds）保留供等价性锚定。
 type SynthCondition struct {
 	// Present 为须在场的声明谓词列表。
 	Present []DeclPredicate `json:"present,omitempty"`
 	// Absent 为须缺席的声明谓词列表。
 	Absent []DeclPredicate `json:"absent,omitempty"`
+}
+
+// ExprKind 为条件表达式节点的判别类别。
+type ExprKind string
+
+const (
+	// ExprPredicate 声明在场谓词操作数：某来源在某含义维度上的声明是否在场。
+	ExprPredicate ExprKind = "predicate"
+	// ExprCapture 命名捕获组操作数：取该捕获组名最后一次命中的捕获文本。
+	ExprCapture ExprKind = "capture"
+	// ExprDepth 目录深度操作数：条目所在目录的深度（DirNames 长度，根直下为 0）。
+	ExprDepth ExprKind = "depth"
+	// ExprGroupSize 群组产物操作数：所属群组的成员总数；非群组成员时取值不可用。
+	ExprGroupSize ExprKind = "groupSize"
+	// ExprGroupSeq 群组产物操作数：本条目在群组内的序号（从 1 起）；非群组成员时取值不可用。
+	ExprGroupSeq ExprKind = "groupSeq"
+	// ExprString 字符串字面量操作数。
+	ExprString ExprKind = "string"
+	// ExprNumber 数值字面量操作数。
+	ExprNumber ExprKind = "number"
+	// ExprEqual 相等比较：两侧操作数同型（字符串或数值）且取值相等。
+	ExprEqual ExprKind = "equal"
+	// ExprNotEqual 不等比较：相等比较的否定。
+	ExprNotEqual ExprKind = "notEqual"
+	// ExprRange 数值区间比较：操作数落在 [min, max] 闭区间内，单边界的另一侧无界。
+	ExprRange ExprKind = "range"
+	// ExprAnd 逻辑与：全部子表达式为真。
+	ExprAnd ExprKind = "and"
+	// ExprOr 逻辑或：任一子表达式为真。
+	ExprOr ExprKind = "or"
+	// ExprNot 逻辑非：内层表达式取反。
+	ExprNot ExprKind = "not"
+)
+
+// CondExpr 通用条件表达式树节点（合成策略条件绑定的语义层，档案 v3 起承载）：
+// 按 Kind 判别共用一个节点结构——操作数（声明谓词 / 命名捕获组 / 目录深度 /
+// 群组产物字段 / 字面量）与运算符（比较 equal / notEqual / range，逻辑 and /
+// or / not）。求值输入 = 解析上下文 + 求值时点已产出的声明集（见 pipeline.go
+// 的 Holds）；构造期静态校验（引用存在性 / 类型匹配）见 validateExpr。v2 的
+// 谓词组合（SynthCondition）是本树的节点子集，载入时映射为等价表达式树。
+type CondExpr struct {
+	// Kind 为节点判别类别。
+	Kind ExprKind `json:"kind"`
+	// Source / Dimension 为 predicate 的声明来源载体与含义维度。
+	Source    SourceKind        `json:"source,omitempty"`
+	Dimension MetadataDimension `json:"dimension,omitempty"`
+	// CaptureName 为 capture 引用的命名捕获组名（构造期静态校验存在于
+	// 规则模式声明的捕获组名列表内）。
+	CaptureName string `json:"captureName,omitempty"`
+	// Str 为 string 字面量的值。
+	Str string `json:"str,omitempty"`
+	// Num 为 number 字面量的值。
+	Num float64 `json:"num,omitempty"`
+	// Left / Right 为 equal / notEqual 的两侧操作数。
+	Left  *CondExpr `json:"left,omitempty"`
+	Right *CondExpr `json:"right,omitempty"`
+	// Operand 为 range 的被比较操作数。
+	Operand *CondExpr `json:"operand,omitempty"`
+	// Min / Max 为 range 的闭区间界，nil 表示该侧无界。
+	Min *float64 `json:"min,omitempty"`
+	Max *float64 `json:"max,omitempty"`
+	// Inner 为 not 的内层表达式。
+	Inner *CondExpr `json:"inner,omitempty"`
+	// Subs 为 and / or 的子表达式列表。
+	Subs []*CondExpr `json:"subs,omitempty"`
+}
+
+// predicateExpr 声明谓词 → 在场谓词叶节点。
+func predicateExpr(pred DeclPredicate) *CondExpr {
+	return &CondExpr{Kind: ExprPredicate, Source: pred.Source, Dimension: pred.Dimension}
+}
+
+// legacyConditionExpr v2 谓词组合 → 等价表达式树：Present 各谓词原样合取、
+// Absent 各谓词取反后合取（p₁∧…∧¬a₁∧…）；单谓词归一为裸节点（最简形式），
+// 两列表皆空的恒真形态归一为无条件（nil）。
+func legacyConditionExpr(c SynthCondition) *CondExpr {
+	subs := make([]*CondExpr, 0, len(c.Present)+len(c.Absent))
+	for _, pred := range c.Present {
+		subs = append(subs, predicateExpr(pred))
+	}
+	for _, pred := range c.Absent {
+		subs = append(subs, &CondExpr{Kind: ExprNot, Inner: predicateExpr(pred)})
+	}
+	if len(subs) == 0 {
+		return nil
+	}
+	if len(subs) == 1 {
+		return subs[0]
+	}
+	return &CondExpr{Kind: ExprAnd, Subs: subs}
 }
 
 // ExtractionAction 为一条提取动作：规则命中后从解析上下文取值并声明到某含义维度。
@@ -137,9 +227,10 @@ type ExtractionAction struct {
 	Constant string `json:"constant"`
 	// RoleName 为声明级角色绑定，可为空；原样透传到产出声明。
 	RoleName string `json:"roleName"`
-	// When 为可选生效条件（声明在场/缺席谓词组合）：条件不满足时该动作不产出
-	// 声明（规则照常命中计数）。缺席裁决的最简承载。
-	When *SynthCondition `json:"when,omitempty"`
+	// When 为可选生效条件（通用条件表达式树）：条件不满足时该动作不产出声明
+	//（规则照常命中计数）。v2 谓词组合形态的 JSON 在载入时映射为等价表达式树
+	//（parseConditionJSON），内存中恒为表达式树单一形态。
+	When *CondExpr `json:"when,omitempty"`
 }
 
 // Apply 在解析上下文 ctx 上执行提取动作，产出归属规则 ruleID 的声明；
@@ -238,13 +329,14 @@ type RuleEntry struct {
 }
 
 // CurrentSchemaVersion 为规则档案当前的结构版本。
-// v2：提取动作新增可选生效条件（SynthCondition，声明在场/缺席谓词组合——
-// 缺席裁决的条件承载）；v1 档案可载入（无条件形态，读侧向后兼容），重写后
-// 升格为 v2。
-const CurrentSchemaVersion = 2
+// v3：提取动作的生效条件升级为通用条件表达式树（CondExpr）；v2 的谓词组合
+// 形态与 v1 的无条件形态均可载入（读侧向后兼容，载入即映射/升格为 v3），重写
+// 后落盘为 v3。
+const CurrentSchemaVersion = 3
 
-// legacySchemaVersions 为可向后兼容载入的历史结构版本（v1=无条件形态）。
-var legacySchemaVersions = map[int]bool{1: true}
+// legacySchemaVersions 为可向后兼容载入的历史结构版本
+//（v1=无条件形态，v2=谓词组合条件形态——载入时映射为等价表达式树）。
+var legacySchemaVersions = map[int]bool{1: true, 2: true}
 
 // RuleProfile 为规则档案：一批规则的容器。
 type RuleProfile struct {
@@ -443,6 +535,134 @@ func patternsFromJSON(pjs []*patternJSON) ([]Pattern, error) {
 	return subs, nil
 }
 
+// conditionJSON 为条件字段的反序列化中间结构：kind 在场为 v3 表达式树节点；
+// kind 缺省且带 present / absent 列表为 v2 谓词组合形态（载入即映射为等价
+// 表达式树）。字段集与 CondExpr 的序列化标签一一对应。
+type conditionJSON struct {
+	// Kind 为 v3 表达式的判别类别（v2 形态缺省为空）。
+	Kind ExprKind `json:"kind,omitempty"`
+	// —— v3 表达式节点字段（与 CondExpr 同名同义）——
+	Source      SourceKind        `json:"source,omitempty"`
+	Dimension   MetadataDimension `json:"dimension,omitempty"`
+	CaptureName string            `json:"captureName,omitempty"`
+	Str         string            `json:"str,omitempty"`
+	Num         float64           `json:"num,omitempty"`
+	Left        *conditionJSON    `json:"left,omitempty"`
+	Right       *conditionJSON    `json:"right,omitempty"`
+	Operand     *conditionJSON    `json:"operand,omitempty"`
+	Min         *float64          `json:"min,omitempty"`
+	Max         *float64          `json:"max,omitempty"`
+	Inner       *conditionJSON    `json:"inner,omitempty"`
+	Subs        []*conditionJSON  `json:"subs,omitempty"`
+	// —— v2 谓词组合字段（兼容读）——
+	Present []DeclPredicate `json:"present,omitempty"`
+	Absent  []DeclPredicate `json:"absent,omitempty"`
+}
+
+// parseConditionJSON 解析提取动作的 when 字段：kind 在场为 v3 表达式树；kind
+// 缺省为 v2 谓词组合形态，映射为等价表达式树（两列表皆空的恒真形态归一为
+// 无条件）；null / 缺省字段为无条件（nil）。
+func parseConditionJSON(raw []byte) (*CondExpr, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var in conditionJSON
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("条件反序列化失败: %w", err)
+	}
+	if in.Kind == "" {
+		if len(in.Present) == 0 && len(in.Absent) == 0 {
+			return nil, nil
+		}
+		return legacyConditionExpr(SynthCondition{Present: in.Present, Absent: in.Absent}), nil
+	}
+	return condExprFromJSON(&in)
+}
+
+// condExprFromJSON 把条件中间结构递归构造回表达式树；子节点为 null 视为非法
+//（判别类别与引用的静态校验在 validateExpr 完成，此处只做结构装配）。
+func condExprFromJSON(in *conditionJSON) (*CondExpr, error) {
+	if in == nil {
+		return nil, fmt.Errorf("条件子表达式不能为空")
+	}
+	out := &CondExpr{
+		Kind:        in.Kind,
+		Source:      in.Source,
+		Dimension:   in.Dimension,
+		CaptureName: in.CaptureName,
+		Str:         in.Str,
+		Num:         in.Num,
+		Min:         in.Min,
+		Max:         in.Max,
+	}
+	child := func(field string, sub *conditionJSON) (*CondExpr, error) {
+		if sub == nil {
+			return nil, fmt.Errorf("表达式 %q 缺少 %s 子表达式", in.Kind, field)
+		}
+		return condExprFromJSON(sub)
+	}
+	var err error
+	if in.Left != nil {
+		if out.Left, err = child("left", in.Left); err != nil {
+			return nil, err
+		}
+	}
+	if in.Right != nil {
+		if out.Right, err = child("right", in.Right); err != nil {
+			return nil, err
+		}
+	}
+	if in.Operand != nil {
+		if out.Operand, err = child("operand", in.Operand); err != nil {
+			return nil, err
+		}
+	}
+	if in.Inner != nil {
+		if out.Inner, err = child("inner", in.Inner); err != nil {
+			return nil, err
+		}
+	}
+	for _, sub := range in.Subs {
+		node, err := child("subs", sub)
+		if err != nil {
+			return nil, err
+		}
+		out.Subs = append(out.Subs, node)
+	}
+	return out, nil
+}
+
+// UnmarshalJSON 从 JSON 载入提取动作：条件字段经 parseConditionJSON 兼容
+// v3 表达式树与 v2 谓词组合两形态（内存中恒为表达式树），其余字段直读；
+// 序列化方向直接按结构体标签展开，无自定义 MarshalJSON。
+func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
+	type extractionJSON struct {
+		Dimension   MetadataDimension `json:"dimension"`
+		From        ExtractionFrom    `json:"from"`
+		CaptureName string            `json:"captureName"`
+		Constant    string            `json:"constant"`
+		RoleName    string            `json:"roleName"`
+		When        json.RawMessage   `json:"when,omitempty"`
+	}
+	var in extractionJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return fmt.Errorf("提取动作反序列化失败: %w", err)
+	}
+	cond, err := parseConditionJSON(in.When)
+	if err != nil {
+		return err
+	}
+	*a = ExtractionAction{
+		Dimension:   in.Dimension,
+		From:        in.From,
+		CaptureName: in.CaptureName,
+		Constant:    in.Constant,
+		RoleName:    in.RoleName,
+		When:        cond,
+	}
+	return nil
+}
+
 // ruleToJSON 把规则转为序列化中间结构。
 func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 	pj, err := patternToJSON(rule.Pattern)
@@ -460,7 +680,8 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 	}, nil
 }
 
-// ruleFromJSON 把规则中间结构构造回 RuleEntry：模式缺失或构造校验失败返回中文错误。
+// ruleFromJSON 把规则中间结构构造回 RuleEntry：模式缺失或构造校验失败（含
+// 条件表达式的静态校验，捕获组存在性以构造出的模式树为据）返回中文错误。
 func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	if rj.Pattern == nil {
 		return nil, fmt.Errorf("规则 %q 缺少模式（pattern）", rj.ID)
@@ -469,7 +690,7 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("规则 %q 的模式非法: %w", rj.ID, err)
 	}
-	if err := validateExtractions(rj.ID, rj.Extractions); err != nil {
+	if err := validateExtractions(rj.ID, pat, rj.Extractions); err != nil {
 		return nil, err
 	}
 	return &RuleEntry{
@@ -493,10 +714,12 @@ var knownDimensions = map[MetadataDimension]bool{
 	DimAuthor: true, DimTag: true, DimTitle: true, DimCollection: true,
 }
 
-// validateExtractions 逐条校验提取动作的新承载字段（构造期静态校验，与正则
-// 编译同管线）：条件谓词引用的声明来源/含义维度不存在、裁决取值缺常量时
-// 返回含规则 ID 的中文错误。
-func validateExtractions(ruleID string, actions []ExtractionAction) error {
+// validateExtractions 逐条校验提取动作的承载字段（构造期静态校验，与正则
+// 编译同管线）：裁决取值缺常量、条件表达式引用不存在（谓词来源/维度、捕获组
+// 名不在模式声明内）或类型不匹配时返回含规则 ID 与动作序号的中文错误。
+// pattern 为该规则的模式树，供捕获组存在性校验。
+func validateExtractions(ruleID string, pattern Pattern, actions []ExtractionAction) error {
+	declared := declaredPatternCaptures(pattern)
 	for i := range actions {
 		action := &actions[i]
 		if action.From == FromAdjudication && action.Constant == "" {
@@ -505,16 +728,163 @@ func validateExtractions(ruleID string, actions []ExtractionAction) error {
 		if action.When == nil {
 			continue
 		}
-		for _, pred := range append(action.When.Present, action.When.Absent...) {
-			if !knownSourceKinds[pred.Source] {
-				return fmt.Errorf("规则 %q 的条件谓词引用了未知的声明来源 %q", ruleID, pred.Source)
-			}
-			if !knownDimensions[pred.Dimension] {
-				return fmt.Errorf("规则 %q 的条件谓词引用了未知的含义维度 %q", ruleID, pred.Dimension)
-			}
+		if _, err := validateExpr(ruleID, action.When, declared); err != nil {
+			return fmt.Errorf("规则 %q 的第 %d 条提取动作条件非法: %w", ruleID, i+1, err)
 		}
 	}
 	return nil
+}
+
+// exprValueType 为条件表达式操作数的静态取值类型（错误信息用人话标签）。
+type exprValueType string
+
+const (
+	exprTypeBool   exprValueType = "布尔"
+	exprTypeString exprValueType = "字符串"
+	exprTypeNumber exprValueType = "数值"
+)
+
+// validateExpr 构造期静态校验条件表达式树并推断其静态类型：判别类别未知、
+// 操作数引用不存在（谓词的来源/维度、捕获组名不在规则模式声明的捕获组名
+// 集合内）、运算符对操作数类型不匹配（如对字符串字面量做数值区间比较、
+// 逻辑组合接非布尔子式、相等比较两侧类型不一致）时返回中文错误。
+// declaredCaptures 为规则模式声明的捕获组名集合。
+func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool) (exprValueType, error) {
+	if e == nil {
+		return "", fmt.Errorf("规则 %q 的条件表达式不能为空", ruleID)
+	}
+	switch e.Kind {
+	case ExprPredicate:
+		if !knownSourceKinds[e.Source] {
+			return "", fmt.Errorf("规则 %q 的条件谓词引用了未知的声明来源 %q", ruleID, e.Source)
+		}
+		if !knownDimensions[e.Dimension] {
+			return "", fmt.Errorf("规则 %q 的条件谓词引用了未知的含义维度 %q", ruleID, e.Dimension)
+		}
+		return exprTypeBool, nil
+	case ExprCapture:
+		if e.CaptureName == "" {
+			return "", fmt.Errorf("规则 %q 的条件表达式引用捕获组但缺少捕获组名（captureName）", ruleID)
+		}
+		if !declaredCaptures[e.CaptureName] {
+			return "", fmt.Errorf("规则 %q 的条件表达式引用了规则模式未声明的捕获组名 %q", ruleID, e.CaptureName)
+		}
+		return exprTypeString, nil
+	case ExprDepth, ExprGroupSize, ExprGroupSeq:
+		return exprTypeNumber, nil
+	case ExprString:
+		return exprTypeString, nil
+	case ExprNumber:
+		return exprTypeNumber, nil
+	case ExprEqual, ExprNotEqual:
+		if e.Left == nil || e.Right == nil {
+			return "", fmt.Errorf("规则 %q 的比较表达式（%s）缺少左侧（left）或右侧（right）操作数", ruleID, e.Kind)
+		}
+		leftType, err := validateExpr(ruleID, e.Left, declaredCaptures)
+		if err != nil {
+			return "", err
+		}
+		rightType, err := validateExpr(ruleID, e.Right, declaredCaptures)
+		if err != nil {
+			return "", err
+		}
+		if leftType != rightType {
+			return "", fmt.Errorf("规则 %q 的比较表达式两侧类型不一致（%s 与 %s）", ruleID, leftType, rightType)
+		}
+		if leftType == exprTypeBool {
+			return "", fmt.Errorf("规则 %q 的比较表达式不能比较布尔谓词（布尔量用逻辑与/或/非组合）", ruleID)
+		}
+		return exprTypeBool, nil
+	case ExprRange:
+		if e.Operand == nil {
+			return "", fmt.Errorf("规则 %q 的数值区间比较缺少操作数（operand）", ruleID)
+		}
+		operandType, err := validateExpr(ruleID, e.Operand, declaredCaptures)
+		if err != nil {
+			return "", err
+		}
+		if operandType != exprTypeNumber {
+			return "", fmt.Errorf("规则 %q 的数值区间比较要求数值操作数，实际为%s操作数", ruleID, operandType)
+		}
+		if e.Min == nil && e.Max == nil {
+			return "", fmt.Errorf("规则 %q 的数值区间比较缺少区间界（min / max 至少其一）", ruleID)
+		}
+		if e.Min != nil && e.Max != nil && *e.Min > *e.Max {
+			return "", fmt.Errorf("规则 %q 的数值区间下界 %g 大于上界 %g", ruleID, *e.Min, *e.Max)
+		}
+		return exprTypeBool, nil
+	case ExprAnd, ExprOr:
+		if len(e.Subs) == 0 {
+			return "", fmt.Errorf("规则 %q 的逻辑组合（%s）至少需要一个子表达式（subs）", ruleID, e.Kind)
+		}
+		for _, sub := range e.Subs {
+			subType, err := validateExpr(ruleID, sub, declaredCaptures)
+			if err != nil {
+				return "", err
+			}
+			if subType != exprTypeBool {
+				return "", fmt.Errorf("规则 %q 的逻辑组合（%s）的子表达式须为布尔，实际为%s", ruleID, e.Kind, subType)
+			}
+		}
+		return exprTypeBool, nil
+	case ExprNot:
+		if e.Inner == nil {
+			return "", fmt.Errorf("规则 %q 的逻辑非表达式缺少内层表达式（inner）", ruleID)
+		}
+		innerType, err := validateExpr(ruleID, e.Inner, declaredCaptures)
+		if err != nil {
+			return "", err
+		}
+		if innerType != exprTypeBool {
+			return "", fmt.Errorf("规则 %q 的逻辑非的内层表达式须为布尔，实际为%s", ruleID, innerType)
+		}
+		return exprTypeBool, nil
+	default:
+		return "", fmt.Errorf("规则 %q 的条件表达式引用了未知的判别类别 %q", ruleID, e.Kind)
+	}
+}
+
+// declaredPatternCaptures 收集模式树内会绑定进解析上下文的命名捕获组名：
+// filename / relpath 目标的正则命中即绑定；dirname 目标只记目录层命中不绑定
+// 捕获组，LocationPattern 的 Ancestor 在临时上下文内求值（绑定不进主上下文），
+// 两者的捕获组声明不参与收集——条件引用这些组名会在构造期被存在性校验拒绝。
+func declaredPatternCaptures(p Pattern) map[string]bool {
+	out := map[string]bool{}
+	collectPatternCaptures(p, out)
+	return out
+}
+
+// collectPatternCaptures 递归收集会绑定进主解析上下文的捕获组名。
+func collectPatternCaptures(p Pattern, out map[string]bool) {
+	switch t := p.(type) {
+	case nil:
+	case *RegexPattern:
+		if t.Target == TargetFileName || t.Target == TargetRelPath {
+			for _, name := range t.Captures {
+				out[name] = true
+			}
+		}
+	case And:
+		for _, sub := range t {
+			collectPatternCaptures(sub, out)
+		}
+	case *And:
+		for _, sub := range *t {
+			collectPatternCaptures(sub, out)
+		}
+	case Or:
+		for _, sub := range t {
+			collectPatternCaptures(sub, out)
+		}
+	case *Or:
+		for _, sub := range *t {
+			collectPatternCaptures(sub, out)
+		}
+	case Not:
+		collectPatternCaptures(t.Inner, out)
+	case *Not:
+		collectPatternCaptures(t.Inner, out)
+	}
 }
 
 // MarshalJSON 把档案序列化为带 kind 判别字段的多态 JSON。
@@ -550,21 +920,28 @@ func (p *RuleProfile) UnmarshalJSON(data []byte) error {
 }
 
 // ParseProfile 从 JSON 数据载入规则档案：反序列化 + 逐条构造校验。
-// 数据不可解析、或结构版本超出可载入范围（高于当前版本、或低于已知历史版本）
-// 时返回 nil 档案与单个错误；历史版本（v1，无条件形态）兼容载入并在内存中
-// 升格为当前版本；个别规则构造校验失败（正则编译、深度约束、条件谓词引用
-// 不存在等）只产生含规则 ID 与描述的中文错误并跳过该规则，不阻塞其余规则
-// 载入；无错误时错误列表为空。
+// 数据不可解析、或结构版本低于已知历史版本时返回 nil 档案与单个错误；历史
+// 版本（v1 无条件形态 / v2 谓词组合条件形态）兼容载入并在内存中升格为当前
+// 版本（v2 条件映射为等价表达式树）；结构版本高于当前版本（未来版本）按尽力
+// 解析载入——记一条版本告警错误（调用方落日志）、未知字段忽略、无法构造的
+// 规则逐条跳过，不中断整体。个别规则构造校验失败（正则编译、深度约束、条件
+// 表达式引用不存在等）只产生含规则 ID 与描述的中文错误并跳过该规则，不阻塞
+// 其余规则载入；无错误时错误列表为空。
 func ParseProfile(data []byte) (*RuleProfile, []error) {
 	var in ruleProfileJSON
 	if err := json.Unmarshal(data, &in); err != nil {
 		return nil, []error{fmt.Errorf("规则档案反序列化失败: %w", err)}
 	}
-	if in.SchemaVersion != CurrentSchemaVersion && !legacySchemaVersions[in.SchemaVersion] {
+	var errs []error
+	switch {
+	case in.SchemaVersion > CurrentSchemaVersion:
+		errs = append(errs, fmt.Errorf(
+			"规则档案结构版本为 %d，高于当前支持的版本 %d，按尽力解析载入：未知字段将被忽略、无法解析的规则将被跳过，重写后落盘为版本 %d",
+			in.SchemaVersion, CurrentSchemaVersion, CurrentSchemaVersion))
+	case in.SchemaVersion != CurrentSchemaVersion && !legacySchemaVersions[in.SchemaVersion]:
 		return nil, []error{fmt.Errorf("规则档案结构版本为 %d，与当前支持的版本 %d 不一致", in.SchemaVersion, CurrentSchemaVersion)}
 	}
 	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules))}
-	var errs []error
 	for i := range in.Rules {
 		rj := &in.Rules[i]
 		rule, err := ruleFromJSON(rj)
