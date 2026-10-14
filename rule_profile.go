@@ -37,6 +37,10 @@ const (
 	// SourceAssignment 表示会话赋值：值来自用户在解析会话内对该文件的手工指定
 	//（特异性知识，合成后按维度覆盖档案求值结论，不参与合成择一）。
 	SourceAssignment SourceKind = "assignment"
+	// SourceAdjudication 表示裁决声明：值来自用户对声明冲突的裁决结果
+	//（经裁决生成的规则以常量动作产出，信任级高于全部规则推导来源，见
+	// pipeline.go 的 sourceTrust）。
+	SourceAdjudication SourceKind = "adjudication"
 )
 
 // ExtractionFrom 为提取动作的取值来源。
@@ -55,6 +59,9 @@ const (
 	FromPredicate ExtractionFrom = "predicate"
 	// FromConstant 表示取动作内声明的常量。
 	FromConstant ExtractionFrom = "constant"
+	// FromAdjudication 表示取动作内声明的裁决结果常量（冲突裁决生成规则的专用
+	// 取值来源，产出声明携带裁决来源，合成时压过全部规则推导来源）。
+	FromAdjudication ExtractionFrom = "adjudication"
 )
 
 // SynthStrategy 为同一含义维度多来源候选值的合成策略。
@@ -75,8 +82,12 @@ const (
 	RuleSourceBuiltin RuleSource = "builtin"
 	// RuleSourceManual 表示人工手写规则。
 	RuleSourceManual RuleSource = "manual"
-	// RuleSourceQna 表示问答向导生成的规则。
+	// RuleSourceQna 表示问答向导生成的规则；手动解析的泛化生成沿用此来源
+	//（「问答=规则生成器」语义：与用户交互产出规则的一切实入口同源标注）。
 	RuleSourceQna RuleSource = "qna"
+	// RuleSourceAdjudication 表示冲突裁决生成的规则（用户对声明冲突裁决后产出的
+	// 组合规则）。
+	RuleSourceAdjudication RuleSource = "adjudication"
 )
 
 // MetadataDeclaration 为提取产物：一条带来源载体与出处的元数据声明。
@@ -93,6 +104,27 @@ type MetadataDeclaration struct {
 	RuleID string `json:"ruleId"`
 }
 
+// DeclPredicate 声明谓词：某来源载体在某含义维度上的声明是否在场
+//（合成策略条件绑定的最小操作数，完整表达式树属后续泛化——本谓词即表达式树的
+// 叶节点子集）。
+type DeclPredicate struct {
+	// Source 为待判定的声明来源载体。
+	Source SourceKind `json:"source"`
+	// Dimension 为待判定的含义维度。
+	Dimension MetadataDimension `json:"dimension"`
+}
+
+// SynthCondition 声明在场/缺席谓词组合（合成策略条件绑定的最小承载）：
+// Present 内谓词须全部在场、Absent 内谓词须全部缺席——两列表按「全部满足」
+// 求值，即谓词的 And 组合（最简充分形式通常为单谓词单列表）；两列表皆空为
+// 恒真。求值点见 pipeline.go 的提取段：对求值时点已产出的声明集判定。
+type SynthCondition struct {
+	// Present 为须在场的声明谓词列表。
+	Present []DeclPredicate `json:"present,omitempty"`
+	// Absent 为须缺席的声明谓词列表。
+	Absent []DeclPredicate `json:"absent,omitempty"`
+}
+
 // ExtractionAction 为一条提取动作：规则命中后从解析上下文取值并声明到某含义维度。
 type ExtractionAction struct {
 	// Dimension 为声明到的含义维度。
@@ -101,10 +133,13 @@ type ExtractionAction struct {
 	From ExtractionFrom `json:"from"`
 	// CaptureName 为 From 为 capture 时的捕获组名。
 	CaptureName string `json:"captureName"`
-	// Constant 为 From 为 constant 时的常量值。
+	// Constant 为 From 为 constant / adjudication 时的常量值。
 	Constant string `json:"constant"`
 	// RoleName 为声明级角色绑定，可为空；原样透传到产出声明。
 	RoleName string `json:"roleName"`
+	// When 为可选生效条件（声明在场/缺席谓词组合）：条件不满足时该动作不产出
+	// 声明（规则照常命中计数）。缺席裁决的最简承载。
+	When *SynthCondition `json:"when,omitempty"`
 }
 
 // Apply 在解析上下文 ctx 上执行提取动作，产出归属规则 ruleID 的声明；
@@ -146,6 +181,8 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 		value, source = ctx.PredHits[len(ctx.PredHits)-1].Name, SourcePredicate
 	case FromConstant:
 		value, source = a.Constant, SourceConstant
+	case FromAdjudication:
+		value, source = a.Constant, SourceAdjudication
 	default:
 		return MetadataDeclaration{}, false
 	}
@@ -201,7 +238,13 @@ type RuleEntry struct {
 }
 
 // CurrentSchemaVersion 为规则档案当前的结构版本。
-const CurrentSchemaVersion = 1
+// v2：提取动作新增可选生效条件（SynthCondition，声明在场/缺席谓词组合——
+// 缺席裁决的条件承载）；v1 档案可载入（无条件形态，读侧向后兼容），重写后
+// 升格为 v2。
+const CurrentSchemaVersion = 2
+
+// legacySchemaVersions 为可向后兼容载入的历史结构版本（v1=无条件形态）。
+var legacySchemaVersions = map[int]bool{1: true}
 
 // RuleProfile 为规则档案：一批规则的容器。
 type RuleProfile struct {
@@ -426,6 +469,9 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("规则 %q 的模式非法: %w", rj.ID, err)
 	}
+	if err := validateExtractions(rj.ID, rj.Extractions); err != nil {
+		return nil, err
+	}
 	return &RuleEntry{
 		ID:          rj.ID,
 		Description: rj.Description,
@@ -435,6 +481,40 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 		Extractions: rj.Extractions,
 		Synthesis:   rj.Synthesis,
 	}, nil
+}
+
+// knownSourceKinds / knownDimensions 为提取动作构造期校验用的合法取值集。
+var knownSourceKinds = map[SourceKind]bool{
+	SourceDir: true, SourceFilename: true, SourceConstant: true, SourceGroup: true,
+	SourcePredicate: true, SourceAssignment: true, SourceAdjudication: true,
+}
+
+var knownDimensions = map[MetadataDimension]bool{
+	DimAuthor: true, DimTag: true, DimTitle: true, DimCollection: true,
+}
+
+// validateExtractions 逐条校验提取动作的新承载字段（构造期静态校验，与正则
+// 编译同管线）：条件谓词引用的声明来源/含义维度不存在、裁决取值缺常量时
+// 返回含规则 ID 的中文错误。
+func validateExtractions(ruleID string, actions []ExtractionAction) error {
+	for i := range actions {
+		action := &actions[i]
+		if action.From == FromAdjudication && action.Constant == "" {
+			return fmt.Errorf("规则 %q 的第 %d 条提取动作为裁决取值但缺少常量（constant）", ruleID, i+1)
+		}
+		if action.When == nil {
+			continue
+		}
+		for _, pred := range append(action.When.Present, action.When.Absent...) {
+			if !knownSourceKinds[pred.Source] {
+				return fmt.Errorf("规则 %q 的条件谓词引用了未知的声明来源 %q", ruleID, pred.Source)
+			}
+			if !knownDimensions[pred.Dimension] {
+				return fmt.Errorf("规则 %q 的条件谓词引用了未知的含义维度 %q", ruleID, pred.Dimension)
+			}
+		}
+	}
+	return nil
 }
 
 // MarshalJSON 把档案序列化为带 kind 判别字段的多态 JSON。
@@ -470,15 +550,17 @@ func (p *RuleProfile) UnmarshalJSON(data []byte) error {
 }
 
 // ParseProfile 从 JSON 数据载入规则档案：反序列化 + 逐条构造校验。
-// 数据不可解析、或结构版本与当前版本不一致时返回 nil 档案与单个错误；
-// 个别规则构造校验失败（正则编译、深度约束等）只产生含规则 ID 与描述的
-// 中文错误并跳过该规则，不阻塞其余规则载入；无错误时错误列表为空。
+// 数据不可解析、或结构版本超出可载入范围（高于当前版本、或低于已知历史版本）
+// 时返回 nil 档案与单个错误；历史版本（v1，无条件形态）兼容载入并在内存中
+// 升格为当前版本；个别规则构造校验失败（正则编译、深度约束、条件谓词引用
+// 不存在等）只产生含规则 ID 与描述的中文错误并跳过该规则，不阻塞其余规则
+// 载入；无错误时错误列表为空。
 func ParseProfile(data []byte) (*RuleProfile, []error) {
 	var in ruleProfileJSON
 	if err := json.Unmarshal(data, &in); err != nil {
 		return nil, []error{fmt.Errorf("规则档案反序列化失败: %w", err)}
 	}
-	if in.SchemaVersion != CurrentSchemaVersion {
+	if in.SchemaVersion != CurrentSchemaVersion && !legacySchemaVersions[in.SchemaVersion] {
 		return nil, []error{fmt.Errorf("规则档案结构版本为 %d，与当前支持的版本 %d 不一致", in.SchemaVersion, CurrentSchemaVersion)}
 	}
 	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules))}

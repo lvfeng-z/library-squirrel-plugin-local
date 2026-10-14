@@ -98,8 +98,19 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // 顺序逐条求值，命中即把规则 ID 追加进 decision.MatchedRuleIDs（含 Extractions
 // 为空的规则），并依序执行该规则的 Extractions，产出声明追加进
 // decision.Declarations；来源缺失的动作不产出声明，不中断其余动作。
+//
+// 带生效条件（When）的动作两遍执行：第一遍只跑无条件动作（全部规则按序），
+// 第二遍按规则序补跑条件动作——条件对求值时点已产出的声明集求值（见
+// SynthCondition.Holds），两遍执行使条件可见全部无条件声明（裁决生成的条件
+// 规则居档案尾，其条件谓词引用的声明在第一遍已全部在场）。
 func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) {
-	for _, rule := range rules {
+	type ruleMatch struct {
+		rule    *RuleEntry
+		context *ParseContext
+	}
+	var conditional []ruleMatch
+	for i := range rules {
+		rule := &rules[i]
 		if !rule.Enabled || rule.Pattern == nil {
 			continue
 		}
@@ -110,12 +121,70 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 			continue
 		}
 		decision.MatchedRuleIDs = append(decision.MatchedRuleIDs, rule.ID)
+		if hasConditionalAction(rule.Extractions) {
+			conditional = append(conditional, ruleMatch{rule: rule, context: ctx})
+		}
 		for _, action := range rule.Extractions {
+			if action.When != nil {
+				continue
+			}
 			if decl, ok := action.Apply(rule.ID, ctx); ok {
 				decision.Declarations = append(decision.Declarations, decl)
 			}
 		}
 	}
+	for _, match := range conditional {
+		for _, action := range match.rule.Extractions {
+			if action.When == nil {
+				continue
+			}
+			if !action.When.Holds(decision.Declarations) {
+				continue
+			}
+			if decl, ok := action.Apply(match.rule.ID, match.context); ok {
+				decision.Declarations = append(decision.Declarations, decl)
+			}
+		}
+	}
+}
+
+// hasConditionalAction 判定动作序列是否含带生效条件者（两遍执行的分拣依据）。
+func hasConditionalAction(actions []ExtractionAction) bool {
+	for _, action := range actions {
+		if action.When != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// Holds 对求值时点已产出的声明集求值：Present 内谓词须全部在场、Absent 内
+// 谓词须全部缺席（谓词的 And 组合），两列表皆空为恒真。
+func (c *SynthCondition) Holds(decls []MetadataDeclaration) bool {
+	if c == nil {
+		return true
+	}
+	for _, pred := range c.Present {
+		if !pred.Holds(decls) {
+			return false
+		}
+	}
+	for _, pred := range c.Absent {
+		if pred.Holds(decls) {
+			return false
+		}
+	}
+	return true
+}
+
+// Holds 判定该声明谓词（某来源在某含义维度上的声明）是否在声明集内在场。
+func (p DeclPredicate) Holds(decls []MetadataDeclaration) bool {
+	for _, decl := range decls {
+		if decl.Source == p.Source && decl.Dimension == p.Dimension {
+			return true
+		}
+	}
+	return false
 }
 
 // PendingItem 为合成段的待裁决项：策略无法自动裁决的声明组合。不静默丢弃，
@@ -134,14 +203,17 @@ type PendingItem struct {
 // 集合双门槛，比纯文件名解析多一道确证；group 低于 filename：群组公共前缀是
 // 兄弟文件名的结构推断，未经任何内容解析；assignment 为会话赋值（用户手工
 // 指定的特异性结果），高于全部规则推导来源——赋值经合成后按维度覆盖，不参与
-// 择一，此处登记信任级仅防赋值声明被再次喂入合成时被误降级。
+// 择一，此处登记信任级仅防赋值声明被再次喂入合成时被误降级；adjudication 为
+// 裁决声明（用户对冲突的裁决结果），压过全部规则推导来源（含 dir），使裁决
+// 生成规则的常量声明在 highTrust 维度上稳定胜出、原冲突双方声明落选。
 var sourceTrust = map[SourceKind]int{
-	SourceDir:        5,
-	SourcePredicate:  4,
-	SourceFilename:   3,
-	SourceGroup:      2,
-	SourceConstant:   1,
-	SourceAssignment: 6,
+	SourceDir:         5,
+	SourcePredicate:   4,
+	SourceFilename:    3,
+	SourceGroup:       2,
+	SourceConstant:    1,
+	SourceAssignment:  6,
+	SourceAdjudication: 6,
 }
 
 // defaultDimStrategies 为含义维度未配置策略时的缺省策略：标题多候选并存会

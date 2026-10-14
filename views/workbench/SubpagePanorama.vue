@@ -70,6 +70,15 @@
           <el-button size="small" :loading="starting" @click="startRecognition">重新识别</el-button>
         </section>
 
+        <!-- 重识别差异（生成规则后的强制验证轮高亮：变更行标记） -->
+        <section v-if="diff && diffTotal > 0" class="li-pano-diffbar">
+          <span class="li-pano-diff-title">重识别差异（生成规则后的验证轮）：</span>
+          <span class="li-pano-diff-chip is-changed">变更 {{ diff.changed ? diff.changed.length : 0 }}</span>
+          <span class="li-pano-diff-chip is-added">新增 {{ diff.added ? diff.added.length : 0 }}</span>
+          <span class="li-pano-diff-chip is-removed">消失 {{ diff.removed ? diff.removed.length : 0 }}</span>
+          <span class="li-pano-diff-note">过窄＝差异里仍有未覆盖、过泛＝差异里错套——请在下方清单核对标色行</span>
+        </section>
+
         <!-- 元素1：目录结构（层含义状态） -->
         <section class="li-pano-card">
           <h3 class="li-pano-card-title">目录结构 <span class="li-pano-card-note">{{ (snapshot.dirs || []).length }} 层 · 含义覆盖 {{ coveredDirCount }}/{{ dirNodes.length }}</span></h3>
@@ -103,10 +112,12 @@
               v-for="row in visibleFiles"
               :key="row.relPath"
               class="li-pano-row"
+              :class="diffMark(row.relPath) ? `is-diff-${diffMark(row.relPath)}` : ''"
               :style="{ transform: `translateY(${row.index * ROW_H}px)` }"
             >
               <span class="li-pano-row-state" :class="`is-${row.state}`" :title="stateLabel(row.state)">{{ stateDot(row.state) }}</span>
               <span class="li-pano-row-path" :title="row.relPath">{{ row.relPath }}</span>
+              <span v-if="diffMark(row.relPath)" class="li-pano-row-diff" :class="`is-${diffMark(row.relPath)}`">{{ diffMark(row.relPath) === 'changed' ? 'Δ变更' : diffMark(row.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
               <span class="li-pano-row-meta">
                 <template v-if="row.final && row.final.length">
                   <span v-for="(d, i) in row.final" :key="i" class="li-pano-row-decl">{{ declLabel(d) }}</span>
@@ -297,6 +308,19 @@ interface DecisionsView {
   selection?: string[]
 }
 
+// 重识别差异集（生成规则后的强制验证轮高亮载荷）
+interface SnapDiff {
+  changed: { relPath: string; before?: DiffConclusion; after?: DiffConclusion }[]
+  added: { relPath: string; before?: DiffConclusion; after?: DiffConclusion }[]
+  removed: { relPath: string; before?: DiffConclusion; after?: DiffConclusion }[]
+}
+
+interface DiffConclusion {
+  state: string
+  final?: SnapDecl[]
+  pendingDims?: string[]
+}
+
 interface WorkbenchResponse {
   seq: number
   ok: boolean
@@ -308,6 +332,7 @@ interface WorkbenchResponse {
   running?: boolean
   panorama?: PanoramaSnapshot
   decisions?: DecisionsView
+  diff?: SnapDiff
 }
 
 interface WorkbenchEvent {
@@ -346,6 +371,7 @@ function decodePayload<T>(raw: unknown): T | null {
 const session = ref<SessionSummary | null>(null)
 const snapshot = ref<PanoramaSnapshot | null>(null)
 const decisions = ref<DecisionsView | null>(null)
+const diff = ref<SnapDiff | null>(null)
 const loadError = ref('')
 const recognizing = ref(false)
 const starting = ref(false)
@@ -432,10 +458,12 @@ async function loadPanorama(root: string): Promise<void> {
   }
   snapshot.value = summary.panorama
   decisions.value = summary.decisions || null
+  diff.value = summary.diff || null
   // 文件级清单大库单独分节拉取（概览先渲染）
   const files = await request('getPanorama', { root: root, section: 'files' })
   if (files.ok && files.panorama) {
     snapshot.value = { ...snapshot.value, files: files.panorama.files, groups: files.panorama.groups, pending: files.panorama.pending }
+    if (files.diff) diff.value = files.diff
   }
 }
 
@@ -565,6 +593,10 @@ const sourceLabel = (source: string): string => {
     case 'group': return '群组前缀'
     case 'predicate': return '库内命中'
     case 'assignment': return '手工赋值'
+    case 'adjudication': return '裁决'
+    case 'qna': return '泛化'
+    case 'builtin': return '内置'
+    case 'manual': return '手写'
     default: return source
   }
 }
@@ -600,6 +632,26 @@ const fileNameOf = (relPath: string): string => {
   const idx = relPath.lastIndexOf('/')
   return idx >= 0 ? relPath.slice(idx + 1) : relPath
 }
+
+// —— 重识别差异高亮（生成规则后的强制验证轮：过窄=仍有未覆盖、过泛=错套） ——
+
+const diffIndex = computed<Map<string, string>>(() => {
+  const index = new Map<string, string>()
+  const d = diff.value
+  if (!d) return index
+  for (const entry of d.changed || []) index.set(entry.relPath, 'changed')
+  for (const entry of d.added || []) index.set(entry.relPath, 'added')
+  for (const entry of d.removed || []) if (!index.has(entry.relPath)) index.set(entry.relPath, 'removed')
+  return index
+})
+
+const diffMark = (relPath: string): string => diffIndex.value.get(relPath) || ''
+
+const diffTotal = computed(() => {
+  const d = diff.value
+  if (!d) return 0
+  return (d.changed ? d.changed.length : 0) + (d.added ? d.added.length : 0) + (d.removed ? d.removed.length : 0)
+})
 const formatTime = (ms: number): string => {
   const date = new Date(ms)
   const pad = (n: number) => `${n}`.padStart(2, '0')
@@ -878,6 +930,85 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--app-text-primary);
+}
+
+/* 重识别差异高亮：变更/新增行底色标记（消失行不在当前清单，经差异条计数与手动解析页明细呈现） */
+.li-pano-row.is-diff-changed {
+  background: var(--app-tag-warning-bg);
+}
+
+.li-pano-row.is-diff-added {
+  background: var(--app-tag-success-bg);
+}
+
+.li-pano-row.is-diff-removed {
+  background: var(--app-tag-danger-bg);
+}
+
+.li-pano-row-diff {
+  flex: none;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: var(--app-radius-sm);
+}
+
+.li-pano-row-diff.is-changed {
+  background: var(--app-tag-warning-bg);
+  color: var(--app-tag-warning-text);
+}
+
+.li-pano-row-diff.is-added {
+  background: var(--app-tag-success-bg);
+  color: var(--app-tag-success-text);
+}
+
+.li-pano-row-diff.is-removed {
+  background: var(--app-tag-danger-bg);
+  color: var(--app-tag-danger-text);
+}
+
+/* 差异摘要条（验证轮高亮入口） */
+.li-pano-diffbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--app-border-color-light);
+  border-radius: var(--app-radius);
+  background: var(--app-bg-surface);
+}
+
+.li-pano-diff-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.li-pano-diff-chip {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: var(--app-radius-sm);
+}
+
+.li-pano-diff-chip.is-changed {
+  background: var(--app-tag-warning-bg);
+  color: var(--app-tag-warning-text);
+}
+
+.li-pano-diff-chip.is-added {
+  background: var(--app-tag-success-bg);
+  color: var(--app-tag-success-text);
+}
+
+.li-pano-diff-chip.is-removed {
+  background: var(--app-tag-danger-bg);
+  color: var(--app-tag-danger-text);
+}
+
+.li-pano-diff-note {
+  font-size: 12px;
+  color: var(--app-text-secondary);
 }
 
 .li-pano-row-meta {

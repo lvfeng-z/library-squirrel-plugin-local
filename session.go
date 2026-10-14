@@ -85,6 +85,11 @@ type WorkbenchSession struct {
 	// ProfileDigest 最近一次会话写时点的规则档案指纹：恢复会话时与档案当前
 	// 指纹比对，不一致即档案在会话外被变更，提示重新识别。
 	ProfileDigest string `json:"profileDigest"`
+	// AssignRevision 会话赋值修订号：每次赋值写（新增/修改/清除）递增。识别
+	// 快照记录其求值所依据的修订号，重识别的增量资格按修订号一致判定——赋值
+	// 被清除后其目录不再由赋值集锚定，修订号闸门保证清除前的结论不被 mtime
+	// 游标复用（赋值变更一律全量重算）。
+	AssignRevision int64 `json:"assignRevision,omitempty"`
 	// PendingWorkbenchCreate 工作台发起创建的标记：工作台在调用 CreateTask 前
 	// 置位，Create 按此分派到「过滤产出」分支（只产出所选作品，防递归确认），
 	// 分派时消费。接线属后续阶段，本阶段仅分支骨架读取。
@@ -92,6 +97,9 @@ type WorkbenchSession struct {
 	// Snapshot 识别全景快照（裁剪形态，识别干跑完成时写入；含按目录 mtime 的
 	// 重识别增量游标）。
 	Snapshot *RecognitionSnapshot `json:"snapshot,omitempty"`
+	// LastDiff 最近一次重识别的差异集（与上一份快照的文件级结论对比；生成规则
+	// 后的强制验证轮据此高亮——重识别完成时覆写，会话恢复后仍可呈现）。
+	LastDiff *SnapDiff `json:"lastDiff,omitempty"`
 	// Assignments 会话赋值（特异性手工解析结果，相对库根的 '/' 路径寻址）。
 	// 赋值创建交互属后续阶段，本阶段承载其数据模型与求值消费。
 	Assignments map[string]SessionAssignment `json:"assignments,omitempty"`
@@ -453,11 +461,18 @@ func (m *SessionManager) MarkRecognized(root string) (*WorkbenchSession, error) 
 	})
 }
 
-// CompleteRecognition 全量识别完成落库：识别全景快照入会话与状态迁移在锁内
-// 单次写完成——首次识别迁移 created→recognized；重识别（已 recognized）只覆写
-// 快照，状态不回退。会话的档案指纹同步为快照依据指纹（识别时点基准，后续
-// 档案外部变更仍可对账检出）。
+// CompleteRecognition 全量识别完成落库（无差异集形态）：识别全景快照入会话与
+// 状态迁移在锁内单次写完成——首次识别迁移 created→recognized；重识别（已
+// recognized）只覆写快照，状态不回退。会话的档案指纹同步为快照依据指纹
+//（识别时点基准，后续档案外部变更仍可对账检出）。生产路径经
+// CompleteRecognitionWithDiff（携带验证轮差异集）。
 func (m *SessionManager) CompleteRecognition(root string, snapshot *RecognitionSnapshot) (*WorkbenchSession, error) {
+	return m.CompleteRecognitionWithDiff(root, snapshot, nil)
+}
+
+// CompleteRecognitionWithDiff 全量识别完成落库：快照、状态迁移与重识别差异集
+// 在锁内单次写完成（差异集随每次重识别覆写——首轮识别无前序快照，差异置空）。
+func (m *SessionManager) CompleteRecognitionWithDiff(root string, snapshot *RecognitionSnapshot, diff *SnapDiff) (*WorkbenchSession, error) {
 	if snapshot == nil {
 		return nil, errors.New("识别快照为空，无法落库")
 	}
@@ -470,6 +485,7 @@ func (m *SessionManager) CompleteRecognition(root string, snapshot *RecognitionS
 		}
 		sess.Snapshot = snapshot
 		sess.ProfileDigest = snapshot.ProfileDigest
+		sess.LastDiff = diff
 		return nil
 	})
 }
@@ -500,6 +516,81 @@ func (m *SessionManager) ConsumeWorkbenchCreateMarker(root string) bool {
 		return false
 	}
 	return true
+}
+
+// —— 会话赋值与忽略项写 API（经 mutateSession 与档案写同一锁串行）——
+
+// SetAssignment 写入单文件的手工解析赋值（特异性知识，会话态）：显式维度
+// 覆盖档案求值的同维度终选；不指定任何维度的空赋值等价于清除该文件的赋值。
+// 相对路径规范化为 '/' 形态后寻址（与识别快照的 relPath 同键）。
+func (m *SessionManager) SetAssignment(root, relPath string, assign SessionAssignment) (*WorkbenchSession, error) {
+	relPath = filepath.ToSlash(relPath)
+	if relPath == "" {
+		return nil, errors.New("相对路径为空，无法写入赋值")
+	}
+	return m.mutateSession(root, func(sess *WorkbenchSession) error {
+		if sess.Assignments == nil {
+			sess.Assignments = make(map[string]SessionAssignment)
+		}
+		if len(assign.coveredDimensions()) == 0 {
+			// 空赋值=清除（含已泛化标记一并移除）；修订号递增驱动增量闸门失效
+			if _, existed := sess.Assignments[relPath]; existed {
+				sess.AssignRevision++
+			}
+			delete(sess.Assignments, relPath)
+			return nil
+		}
+		// 赋值含切片字段不可整体比较，写路径一律视为变更：修订号递增
+		assign.UpdatedAtMs = time.Now().UnixMilli()
+		sess.AssignRevision++
+		sess.Assignments[relPath] = assign
+		return nil
+	})
+}
+
+// ClearAssignment 清除单文件的会话赋值（幂等：无赋值亦成功）。
+func (m *SessionManager) ClearAssignment(root, relPath string) (*WorkbenchSession, error) {
+	return m.SetAssignment(root, relPath, SessionAssignment{})
+}
+
+// MarkAssignmentGeneralized 置赋值的已泛化标记（元素7：已泛化的赋值其档案规则
+// 亦会产出同值声明，标记供呈现与清理提示）。
+func (m *SessionManager) MarkAssignmentGeneralized(root, relPath string, generalized bool) (*WorkbenchSession, error) {
+	relPath = filepath.ToSlash(relPath)
+	return m.mutateSession(root, func(sess *WorkbenchSession) error {
+		assign, ok := sess.Assignments[relPath]
+		if !ok {
+			return fmt.Errorf("文件 %s 无会话赋值，无法标记泛化", relPath)
+		}
+		assign.Generalized = generalized
+		assign.UpdatedAtMs = time.Now().UnixMilli()
+		sess.Assignments[relPath] = assign
+		return nil
+	})
+}
+
+// SetIgnored 登记或解除文件的忽略项（元素7：已忽略项不再参与后续解析关注；
+// 幂等）。ignored 为假时移除登记。
+func (m *SessionManager) SetIgnored(root, relPath string, ignored bool) (*WorkbenchSession, error) {
+	relPath = filepath.ToSlash(relPath)
+	if relPath == "" {
+		return nil, errors.New("相对路径为空，无法登记忽略项")
+	}
+	return m.mutateSession(root, func(sess *WorkbenchSession) error {
+		pos := -1
+		for i, item := range sess.Ignored {
+			if item == relPath {
+				pos = i
+				break
+			}
+		}
+		if ignored && pos < 0 {
+			sess.Ignored = append(sess.Ignored, relPath)
+		} else if !ignored && pos >= 0 {
+			sess.Ignored = append(sess.Ignored[:pos], sess.Ignored[pos+1:]...)
+		}
+		return nil
+	})
 }
 
 // UpdateProfile 档案单点串行读改写：全部档案写（泛化/裁决生成/规则编辑面三入口）
@@ -591,6 +682,12 @@ const (
 	workbenchActionConfirmAnswer    = "confirmAnswer"
 	workbenchActionStartRecognition = "startRecognition"
 	workbenchActionGetPanorama      = "getPanorama"
+	workbenchActionAssign           = "assign"        // 单次赋值（会话态知识写入）
+	workbenchActionClearAssignment  = "clearAssignment" // 清除单文件赋值
+	workbenchActionSetIgnored       = "setIgnored"    // 登记或解除忽略项
+	workbenchActionGeneralize       = "generalize"    // 泛化成规则（档案写+验证轮）
+	workbenchActionAdjudicate       = "adjudicate"    // 冲突裁决生成组合规则
+	workbenchActionGetDiff          = "getDiff"       // 最近一次重识别差异集
 )
 
 // getPanorama 的分节拉取词汇。
@@ -607,10 +704,41 @@ type workbenchFrontendRequest struct {
 	// Root 会话寻址的库根（createSession 为新建库根输入）。
 	Root string `json:"root,omitempty"`
 	// ConfirmSeq / Accepted 入口确认答复的配对序号与采纳结果。
-	ConfirmSeq int64 `json:"confirmSeq,omitempty"`
-	Accepted   bool  `json:"accepted,omitempty"`
+	ConfirmSeq int64  `json:"confirmSeq,omitempty"`
+	Accepted   bool   `json:"accepted,omitempty"`
 	// Section getPanorama 的分节拉取（缺省=全量投影）。
 	Section string `json:"section,omitempty"`
+
+	// —— 手动解析族载荷（relPath 为相对库根的 '/' 路径）——
+	// RelPath 赋值/泛化/裁决/忽略的目标文件相对路径。
+	RelPath string `json:"relPath,omitempty"`
+	// Author / AuthorRole / Title / Tags / Collection 单次赋值的各维度指定
+	//（assign 动作；空维度不覆盖档案结论）。
+	Author     string   `json:"author,omitempty"`
+	AuthorRole string   `json:"authorRole,omitempty"`
+	Title      string   `json:"title,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	Collection string   `json:"collection,omitempty"`
+	// Ignored setIgnored 的登记方向（真=登记忽略，假=解除）。
+	Ignored bool `json:"ignored,omitempty"`
+	// GeneralizeMode generalize 的泛化维度：filename（按文件名形态）/
+	// dirLayer（按目录层）/ sequence（按序列形态）。
+	GeneralizeMode string `json:"generalizeMode,omitempty"`
+	// Dimension adjudicate 的裁决维度（待裁决项寻址）。
+	Dimension string `json:"dimension,omitempty"`
+	// AdjudicateMode adjudicate 的裁决方式：pick（双命中择一）/ conditional
+	//（单侧缺席改绑=谓词条件策略）。
+	AdjudicateMode string `json:"adjudicateMode,omitempty"`
+	// PickIndex pick 模式采纳的候选下标（待裁决项 candidates 序）。
+	PickIndex int `json:"pickIndex,omitempty"`
+	// PredicateSource / PredicateDimension conditional 模式的条件谓词
+	//（某来源在某维度上的声明是否在场）。
+	PredicateSource    string `json:"predicateSource,omitempty"`
+	PredicateDimension string `json:"predicateDimension,omitempty"`
+	// PresentIndex / AbsentIndex conditional 模式谓词在场/缺席时分别采纳的
+	// 候选下标。
+	PresentIndex int `json:"presentIndex,omitempty"`
+	AbsentIndex  int `json:"absentIndex,omitempty"`
 }
 
 // workbenchSessionSummary 会话的前端呈现摘要。
@@ -643,6 +771,13 @@ type workbenchFrontendResponse struct {
 	Panorama *RecognitionSnapshot `json:"panorama,omitempty"`
 	// Decisions getPanorama 附带的会话决策态（元素7：赋值/忽略/选择集的活数据）。
 	Decisions *workbenchSessionDecisionsView `json:"decisions,omitempty"`
+	// Diff getPanorama/getDiff 附带的最近一次重识别差异集（生成规则后强制
+	// 验证轮的高亮载荷）。
+	Diff *SnapDiff `json:"diff,omitempty"`
+	// Assignment assign/clearAssignment 后该文件的赋值呈现（清除后为空）。
+	Assignment *workbenchAssignmentView `json:"assignment,omitempty"`
+	// Rule generalize/adjudicate 生成的规则摘要（已入档案并触发验证轮）。
+	Rule *GeneratedRuleView `json:"rule,omitempty"`
 }
 
 // workbenchSessionDecisionsView 会话决策态投影（元素7 的活数据——赋值/忽略/
@@ -810,6 +945,70 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		}
 		resp.Panorama = &view
 		resp.Decisions = decisionsViewOf(sess)
+		resp.Diff = sess.LastDiff
+	case workbenchActionAssign:
+		sess, view, err := m.ApplyAssignment(req.Root, req.RelPath, SessionAssignment{
+			Author: req.Author, AuthorRole: req.AuthorRole, Title: req.Title,
+			Tags: req.Tags, Collection: req.Collection,
+		})
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Session = summarizeSession(sess)
+		resp.Assignment = view
+	case workbenchActionClearAssignment:
+		sess, view, err := m.ApplyAssignment(req.Root, req.RelPath, SessionAssignment{})
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Session = summarizeSession(sess)
+		resp.Assignment = view
+	case workbenchActionSetIgnored:
+		if _, err := m.SetIgnored(req.Root, req.RelPath, req.Ignored); err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		if sess, err := m.SessionOf(req.Root); err == nil {
+			resp.Decisions = decisionsViewOf(sess)
+		}
+	case workbenchActionGeneralize:
+		result, err := m.ApplyGeneralization(req.Root, req.RelPath, req.GeneralizeMode)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Rule = result.Rule
+		resp.Started = result.VerificationStarted
+	case workbenchActionAdjudicate:
+		result, err := m.ApplyAdjudication(req.Root, req.RelPath, MetadataDimension(req.Dimension), adjudicationInput{
+			Mode:               req.AdjudicateMode,
+			PickIndex:          req.PickIndex,
+			PredicateSource:    SourceKind(req.PredicateSource),
+			PredicateDimension: MetadataDimension(req.PredicateDimension),
+			PresentIndex:       req.PresentIndex,
+			AbsentIndex:        req.AbsentIndex,
+		})
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Rule = result.Rule
+		resp.Started = result.VerificationStarted
+	case workbenchActionGetDiff:
+		sess, err := m.SessionOf(req.Root)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		if sess.LastDiff == nil {
+			// 未重识别过（首轮识别后无差异上下文）：空差异集（非 nil 序列化契约）
+			sess.LastDiff = &SnapDiff{
+				Changed: []SnapDiffEntry{}, Added: []SnapDiffEntry{}, Removed: []SnapDiffEntry{},
+			}
+		}
+		resp.Diff = sess.LastDiff
 	default:
 		resp.OK, resp.Error = false, fmt.Sprintf("未知的工作台请求动作 %q", req.Action)
 	}

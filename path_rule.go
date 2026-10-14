@@ -201,6 +201,7 @@ func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMe
 	dirNames[depth] = dirName
 	in := &MatchInput{DirNames: dirNames}
 	var meanings []PathMeaning
+	var decls []MetadataDeclaration
 	seen := make(map[PathMeaning]bool)
 	for _, rule := range rules {
 		if !rule.Enabled || rule.Pattern == nil {
@@ -219,10 +220,16 @@ func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMe
 			continue
 		}
 		for _, action := range rule.Extractions {
+			// 条件动作对本回放语境下已产出的声明集求值（与提取段同语义），
+			// 条件不满足的动作不产出含义
+			if !action.When.Holds(decls) {
+				continue
+			}
 			decl, ok := action.Apply(rule.ID, ctx)
 			if !ok {
 				continue
 			}
+			decls = append(decls, decl)
 			answer, ok := qnaAnswerOf[decl.Dimension]
 			if !ok {
 				continue

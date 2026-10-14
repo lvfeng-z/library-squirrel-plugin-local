@@ -360,8 +360,12 @@ type RecognitionSnapshot struct {
 	GeneratedAtMs int64 `json:"generatedAtMs"`
 	// RootPath 库根原始输入。
 	RootPath string `json:"rootPath"`
-	// ProfileDigest 生成本快照所依据的规则档案指纹（重识别的增量资格判定）。
-	ProfileDigest string `json:"profileDigest"`
+	// ProfileDigest 生成本快照所依据的规则档案指纹（重识别的增量资格判定）；
+	// AssignmentRevision 求值依据的会话赋值修订号——赋值被清除后其目录不再由
+	// 赋值集锚定，修订号闸门保证旧结论不被 mtime 游标复用（赋值变更一律全量
+	// 重算）。
+	ProfileDigest     string `json:"profileDigest"`
+	AssignmentRevision int64 `json:"assignmentRevision"`
 
 	// Dirs 目录结构（元素1）：层含义覆盖状态随目录树节点呈现。
 	Dirs []SnapDir `json:"dirs"`
@@ -510,8 +514,9 @@ type aggregateInput struct {
 	prevSkipped map[string]bool
 	// assigns 会话赋值（死路径判定与元素7 标记）。
 	assigns map[string]SessionAssignment
-	// profileDigest 本轮档案指纹。
+	// profileDigest 本轮档案指纹；assignRevision 本轮会话赋值修订号。
 	profileDigest string
+	assignRevision int64
 }
 
 // aggregatePanorama 把合并求值结论聚合为识别全景快照（七类元素）：
@@ -529,7 +534,7 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		SchemaVersion: recognitionSnapshotSchemaVersion,
 		GeneratedAtMs: time.Now().UnixMilli(),
 		RootPath:      in.root,
-		ProfileDigest: in.profileDigest,
+		ProfileDigest: in.profileDigest, AssignmentRevision: in.assignRevision,
 		DirMtimes:     in.enumRes.DirMtimes,
 		// 序列化契约：快照经 JSON 落会话 KV 并直接驱动前端渲染，切片字段
 		// 一律非 nil（nil 序列化为 null，前端 .length 即崩）；Pending 与
@@ -896,6 +901,116 @@ func panoramaViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 	return view
 }
 
+// —— 识别快照差异集（生成规则后的强制验证轮差异高亮载荷）——
+
+// SnapConclusion 文件级结论摘要（差异对比的比较单元）：呈现状态 + 终选声明 +
+// 待裁决维度。终选声明的对比不含 RuleID（声明出处是溯源信息，同值换源不构成
+// 用户可见的结论变化）。
+type SnapConclusion struct {
+	// State 呈现状态：identified / clueful / plain。
+	State string `json:"state"`
+	// Final 终选声明紧凑形态。
+	Final []SnapDecl `json:"final,omitempty"`
+	// PendingDims 待裁决维度。
+	PendingDims []string `json:"pendingDims,omitempty"`
+}
+
+// SnapDiffEntry 单文件的结论差异条目：Before/After 为前后快照的结论摘要
+//（Before 为 nil=新增文件，After 为 nil=消失文件，双全=结论变化）。
+type SnapDiffEntry struct {
+	RelPath string          `json:"relPath"`
+	Before  *SnapConclusion `json:"before,omitempty"`
+	After   *SnapConclusion `json:"after,omitempty"`
+}
+
+// SnapDiff 重识别差异集：文件级结论变化分类——过窄（差异里仍有未覆盖）与过泛
+//（差异里错套同类）经本差异集呈现给用户核验。
+type SnapDiff struct {
+	// Changed 结论变化的文件（状态/终选声明/待裁决维度任一变化）。
+	Changed []SnapDiffEntry `json:"changed"`
+	// Added 新出现文件（前快照无此文件）；Removed 消失文件（新快照无此文件）。
+	Added   []SnapDiffEntry `json:"added"`
+	Removed []SnapDiffEntry `json:"removed"`
+}
+
+// conclusionOf 文件记录 → 结论摘要。
+func conclusionOf(f SnapFile) *SnapConclusion {
+	return &SnapConclusion{State: f.State, Final: f.Final, PendingDims: f.PendingDims}
+}
+
+// conclusionKey 结论摘要的规范比较键（状态 + 排序后的终选声明与待裁决维度）。
+func conclusionKey(c *SnapConclusion) string {
+	decls := make([]string, 0, len(c.Final))
+	for _, decl := range c.Final {
+		decls = append(decls, fmt.Sprintf("%s|%s|%s|%s", decl.Dimension, decl.Value, decl.Source, decl.RoleName))
+	}
+	sort.Strings(decls)
+	dims := append([]string(nil), c.PendingDims...)
+	sort.Strings(dims)
+	return c.State + "\x00" + strings.Join(decls, "\x01") + "\x00" + strings.Join(dims, "\x01")
+}
+
+// ComputeSnapshotDiff 计算两份快照的文件级结论差异集（prev vs curr）：结论变化/
+// 新增/消失三分类，条目按相对路径稳定排序；prev 为 nil 时返回全量新增形态
+//（首轮识别无前序可差异）。切片字段一律非 nil（前端序列化契约）。
+func ComputeSnapshotDiff(prev, curr *RecognitionSnapshot) *SnapDiff {
+	diff := &SnapDiff{
+		Changed: make([]SnapDiffEntry, 0),
+		Added:   make([]SnapDiffEntry, 0),
+		Removed: make([]SnapDiffEntry, 0),
+	}
+	if prev == nil {
+		for _, f := range curr.Files {
+			diff.Added = append(diff.Added, SnapDiffEntry{RelPath: f.RelPath, After: conclusionOf(f)})
+		}
+		return diff
+	}
+	prevByPath := make(map[string]SnapFile, len(prev.Files))
+	for _, f := range prev.Files {
+		prevByPath[f.RelPath] = f
+	}
+	currByPath := make(map[string]SnapFile, len(curr.Files))
+	for _, f := range curr.Files {
+		currByPath[f.RelPath] = f
+	}
+	for _, f := range curr.Files {
+		before, ok := prevByPath[f.RelPath]
+		if !ok {
+			diff.Added = append(diff.Added, SnapDiffEntry{RelPath: f.RelPath, After: conclusionOf(f)})
+			continue
+		}
+		afterKey := conclusionKey(conclusionOf(f))
+		beforeKey := conclusionKey(conclusionOf(before))
+		if afterKey == beforeKey {
+			continue
+		}
+		b, a := conclusionOf(before), conclusionOf(f)
+		diff.Changed = append(diff.Changed, SnapDiffEntry{RelPath: f.RelPath, Before: b, After: a})
+	}
+	for _, f := range prev.Files {
+		if _, ok := currByPath[f.RelPath]; !ok {
+			diff.Removed = append(diff.Removed, SnapDiffEntry{RelPath: f.RelPath, Before: conclusionOf(f)})
+		}
+	}
+	sortDiffEntries(diff.Changed)
+	sortDiffEntries(diff.Added)
+	sortDiffEntries(diff.Removed)
+	return diff
+}
+
+// sortDiffEntries 差异条目按相对路径稳定排序。
+func sortDiffEntries(entries []SnapDiffEntry) {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].RelPath < entries[j].RelPath })
+}
+
+// diffCounts 差异集的三分类计数（事件摘要用）。
+func diffCounts(diff *SnapDiff) (changed, added, removed int) {
+	if diff == nil {
+		return 0, 0, 0
+	}
+	return len(diff.Changed), len(diff.Added), len(diff.Removed)
+}
+
 // —— 识别干跑编排 ——
 
 // 识别事件种类（workbenchTopicEvent 通道的 kind 词汇）。
@@ -991,9 +1106,12 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		}
 	}
 
-	// 增量资格：上次快照的档案指纹与当前一致才可按目录 mtime 游标跳过
+	// 增量资格：上次快照的档案指纹与当前一致、且会话赋值修订号未变（赋值
+	// 新增/修改/清除都会改修订号——赋值清除后其目录不再由赋值集锚定，靠修订号
+	// 闸门防止旧结论被 mtime 游标复用）才可按目录 mtime 游标跳过
 	prev := sess.Snapshot
-	incremental := prev != nil && prev.ProfileDigest == digest && digest != ""
+	incremental := prev != nil && prev.ProfileDigest == digest && digest != "" &&
+		prev.AssignmentRevision == sess.AssignRevision
 	prevMtimes := map[string]int64(nil)
 	if incremental {
 		prevMtimes = prev.DirMtimes
@@ -1048,22 +1166,31 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		root: root, enumRes: enumRes,
 		enabledRules: enabledRules, allRules: allRules, lib: lib,
 		conclusions: conclusions, prev: prev, prevSkipped: prevSkipped,
-		assigns: sess.Assignments, profileDigest: digest,
+		assigns: sess.Assignments, profileDigest: digest, assignRevision: sess.AssignRevision,
 	})
 
-	if _, err := m.CompleteRecognition(root, snapshot); err != nil {
+	// 差异集：与上一份快照的文件级结论对比（prev 为 nil 时为全量新增形态）——
+	// 生成规则后的强制验证轮据此高亮「过窄仍有未覆盖、过泛错套」的差异
+	var diff *SnapDiff
+	if prev != nil {
+		diff = ComputeSnapshotDiff(prev, snapshot)
+	}
+
+	if _, err := m.CompleteRecognitionWithDiff(root, snapshot, diff); err != nil {
 		return err
 	}
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseSave,
 		Done: snapshot.Stats.TotalFiles, Total: snapshot.Stats.TotalFiles,
 	})
+	changed, added, removed := diffCounts(diff)
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionDone, Root: root, Success: true,
 		Done: snapshot.Stats.TotalFiles, Total: snapshot.Stats.TotalFiles,
-		Message: fmt.Sprintf("识别完成：共 %d 个文件（已识别 %d、有线索 %d、无线索 %d），序列群 %d，待裁决文件 %d",
+		Message: fmt.Sprintf("识别完成：共 %d 个文件（已识别 %d、有线索 %d、无线索 %d），序列群 %d，待裁决文件 %d；与上次差异：变更 %d、新增 %d、消失 %d",
 			snapshot.Stats.TotalFiles, snapshot.Stats.Identified, snapshot.Stats.Clueful,
-			snapshot.Stats.Plain, snapshot.Stats.GroupCount, snapshot.Stats.PendingFiles),
+			snapshot.Stats.Plain, snapshot.Stats.GroupCount, snapshot.Stats.PendingFiles,
+			changed, added, removed),
 	})
 	return nil
 }

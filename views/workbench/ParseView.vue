@@ -44,8 +44,9 @@
     <section class="li-parse-body">
       <template v-if="session">
         <p class="li-parse-desc">
-          解析视图已就绪：识别全景（全量识别干跑与七类元素呈现）可用，手动解析
-          （赋值/泛化/裁决）、资源选择与任务创建将在后续阶段逐面填充。
+          解析视图已就绪：识别全景（全量识别干跑与七类元素呈现）与手动解析
+          （单次赋值/泛化成规则/冲突裁决生成）可用，资源选择与任务创建将在
+          后续阶段填充。
         </p>
       </template>
       <el-empty
@@ -112,7 +113,7 @@ const ROUTE_BASE = '#/com.lvfeng.localImport/'
 // 子页导航（携带库根，子页免二次寻址）
 const subpageDefs = [
   { key: 'workbench-panorama', title: '识别全景', note: '全量识别与七类元素' },
-  { key: 'workbench-manual-parse', title: '手动解析', note: '骨架占位' },
+  { key: 'workbench-manual-parse', title: '手动解析', note: '赋值·泛化·裁决' },
   { key: 'workbench-rules', title: '规则管理', note: '骨架占位' },
   { key: 'workbench-observation', title: '解析观测', note: '建设中' }
 ]
