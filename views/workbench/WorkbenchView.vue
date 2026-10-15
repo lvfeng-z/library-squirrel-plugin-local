@@ -249,9 +249,25 @@ function enterParse(root: string): void {
   location.hash = `${PARSE_ROUTE}?root=${encodeURIComponent(root)}`
 }
 
+// 进入时地址携 root 查询参数（创建流确认弹窗的落点形态）：取走参数并自动进入
+// 对应会话。参数剥离发生在下钻导航之前——历史记录里本页条目不带查询串，从解析
+// 视图后退（Alt+←）回到本页时不会再次自动进入
+function consumeRootParam(): string | null {
+  const hash = location.hash || ''
+  const queryIdx = hash.indexOf('?')
+  if (queryIdx < 0) return null
+  const root = new URLSearchParams(hash.slice(queryIdx + 1)).get('root')
+  if (!root) return null
+  // 保留 vue-router 写入的 history.state（页面位置簿记），只改写 URL 剥掉查询串
+  history.replaceState(history.state, '', `${location.pathname}${location.search}${hash.slice(0, queryIdx)}`)
+  return root
+}
+
 onMounted(() => {
   offResponse = Events.On(TOPIC_RESPONSE, onResponse)
+  const rootParam = consumeRootParam()
   void refresh()
+  if (rootParam) enterParse(rootParam)
 })
 </script>
 

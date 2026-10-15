@@ -39,8 +39,8 @@ import { Events } from '@wailsio/runtime'
 const TOPIC_REQUEST = 'plugin:local-import:workbench:request'
 const TOPIC_EVENT = 'plugin:local-import:workbench:event'
 
-// 本插件 view 路由复合键前缀（publicId=插件 id）
-const PARSE_ROUTE = '#/com.lvfeng.localImport/workbench-parse'
+// 本插件一级 view 路由（工作台会话列表页；publicId=插件 id，宿主按 publicId/extensionId 注册路由）
+const WORKBENCH_ROUTE = '#/com.lvfeng.localImport/workbench'
 
 interface WorkbenchEvent {
   kind: string
@@ -89,8 +89,10 @@ function onEvent(event: { data?: unknown }) {
   }
 }
 
-// 回答复核确认（采纳/取消）并关窗；采纳时导航至解析视图（带库根），会话由插件侧
-// 在收到答复后建立——解析视图对刚建立的会话做短暂重试，无需在此等待应答
+// 回答复核确认（采纳/取消）并关窗；采纳时跨页跳转落工作台会话列表（一级页），
+// 携库根参数由列表页自动进入对应会话——二级解析页由列表页内动作下钻，跨页跳转
+// 不直落二级页。会话由插件侧在收到答复后建立——解析视图对刚建立的会话做短暂
+// 重试，无需在此等待应答
 function answer(accepted: boolean): void {
   const q = question.value
   visible.value = false
@@ -102,7 +104,7 @@ function answer(accepted: boolean): void {
     JSON.stringify({ seq: emitSeq, action: 'confirmAnswer', confirmSeq: q.seq, accepted: accepted })
   )
   if (accepted && q.root) {
-    location.hash = `${PARSE_ROUTE}?root=${encodeURIComponent(q.root)}`
+    location.hash = `${WORKBENCH_ROUTE}?root=${encodeURIComponent(q.root)}`
   }
 }
 
