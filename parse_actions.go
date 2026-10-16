@@ -24,6 +24,7 @@ const (
 	generalizeModeFilename = "filename"  // 按文件名形态：从文件名提取模式（如方括号作者）
 	generalizeModeDirLayer = "dirLayer"  // 按目录层：目录含义规则
 	generalizeModeSequence = "sequence"  // 按序列形态：定群规则
+	generalizeModeStruct   = "struct"    // 按结构映射：赋值线索出处→组合规则（规则总结器的确认入档动作）
 )
 
 // 裁决方式词汇（adjudicate 动作的模式分支）。
@@ -45,9 +46,11 @@ type GeneratedRuleView struct {
 	Condition string `json:"condition,omitempty"`
 }
 
-// GenerationResult 生成动作的结果：入档的规则摘要与验证轮启动结论。
+// GenerationResult 生成动作的结果：入档的规则摘要与验证轮启动结论。Rules 为
+// 组合规则（结构映射维度）的全部入档条目；单规则维度仅填 Rule。
 type GenerationResult struct {
 	Rule                 *GeneratedRuleView
+	Rules                []*GeneratedRuleView
 	VerificationStarted bool
 }
 
@@ -68,6 +71,8 @@ func (m *SessionManager) ApplyAssignment(root, relPath string, assign SessionAss
 		return sess, &workbenchAssignmentView{
 			RelPath: relPath, Author: current.Author, AuthorRole: current.AuthorRole,
 			Title: current.Title, Tags: current.Tags, Collection: current.Collection,
+			AuthorClueRef: current.AuthorClueRef, TitleClueRef: current.TitleClueRef,
+			CollectionClueRef: current.CollectionClueRef, TagClueRefs: current.TagClueRefs,
 			Generalized: current.Generalized, UpdatedAtMs: current.UpdatedAtMs,
 		}, nil
 	}
@@ -113,9 +118,11 @@ func (m *SessionManager) ApplyGeneralization(root, relPath, mode string) (*Gener
 		rule, entry, err = buildDirLayerRule(relPath, fileRec.DirRelKey, &assign)
 	case generalizeModeSequence:
 		rule, entry, err = buildSequenceRule(relPath, fileRec.GroupKey)
+	case generalizeModeStruct:
+		return m.applyStructGeneralization(sess, relPath, fileRec, &assign)
 	default:
-		return nil, fmt.Errorf("未知的泛化维度 %q（可用：%s / %s / %s）", mode,
-			generalizeModeFilename, generalizeModeDirLayer, generalizeModeSequence)
+		return nil, fmt.Errorf("未知的泛化维度 %q（可用：%s / %s / %s / %s）", mode,
+			generalizeModeFilename, generalizeModeDirLayer, generalizeModeSequence, generalizeModeStruct)
 	}
 	if err != nil {
 		return nil, err
@@ -132,6 +139,30 @@ func (m *SessionManager) ApplyGeneralization(root, relPath, mode string) (*Gener
 		Rule:                generatedRuleViewOf(&rule),
 		VerificationStarted: started,
 	}, nil
+}
+
+// applyStructGeneralization 结构映射维度的泛化落地：规则总结器构造的组合规则
+//（与 summarizeRule 建议所见一致——同构造器）逐条经档案写单点入档（ID 去重
+// 后在位追加），置赋值的已泛化标记并启动验证轮——「用户确认才入档」的入档侧。
+func (m *SessionManager) applyStructGeneralization(sess *WorkbenchSession, relPath string, fileRec *SnapFile, assign *SessionAssignment) (*GenerationResult, error) {
+	_, rules, err := buildStructMapRules(sess.RootPath, relPath, fileRec.FileName, assign)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rules {
+		if err := m.commitGeneratedRule(ArchiveWriteGeneralize, &rules[i]); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := m.MarkAssignmentGeneralized(sess.RootPath, relPath, true); err != nil {
+		m.warnf("置已泛化标记失败（规则已入档）: %v", err)
+	}
+	started := m.scheduleRecognitionRefresh(sess.RootPath)
+	views := make([]*GeneratedRuleView, 0, len(rules))
+	for i := range rules {
+		views = append(views, generatedRuleViewOf(&rules[i]))
+	}
+	return &GenerationResult{Rule: views[0], Rules: views, VerificationStarted: started}, nil
 }
 
 // buildFilenameShapeRule 按文件名形态泛化：赋值各维度的指定值在文件名（去末段

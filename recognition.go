@@ -38,6 +38,15 @@ type SessionAssignment struct {
 	Tags []string `json:"tags,omitempty"`
 	// Collection 指定的作品集名（覆盖 collection 维度，即集归属）。
 	Collection string `json:"collection,omitempty"`
+	// AuthorClueRef / TitleClueRef / CollectionClueRef 各维度赋值的线索出处引用
+	//（clueRef，结构分段线索集的稳定标识：rootName / dirLevel[n] /
+	// dirLevelStripped[n] / filenameSeg[i] / tailCode）：纯溯源簿记，不参与
+	// 求值覆盖语义；规则总结器据此推导结构映射（手填无引用时以值=某段兜底）。
+	// TagClueRefs 与 Tags 逐位平行（空串=该标签无出处）。
+	AuthorClueRef     string   `json:"authorClueRef,omitempty"`
+	TitleClueRef      string   `json:"titleClueRef,omitempty"`
+	CollectionClueRef string   `json:"collectionClueRef,omitempty"`
+	TagClueRefs       []string `json:"tagClueRefs,omitempty"`
 	// Generalized 该赋值是否已泛化为档案规则（全景呈现标记：已泛化的赋值其
 	// 档案规则亦会产出同值声明，保留标记供清理提示）。
 	Generalized bool `json:"generalized,omitempty"`
@@ -435,6 +444,10 @@ type SnapFile struct {
 	GroupSeq int    `json:"groupSeq,omitempty"`
 	// Clues 疑似线索（元素3）：类别 + 呈现摘要。
 	Clues []SnapClue `json:"clues,omitempty"`
+	// StructClues 结构分段线索集（结构直连规则构造）：库根名 / 目录层 / 剥壳
+	// 变体 / 文件名分隔段 / 尾部码——纯路径推导，在 getPanorama 投影时展开
+	// （不入持久快照，快照只存原始寻址三件）。
+	StructClues []SnapStructClue `json:"structClues,omitempty"`
 	// Assigned 本文件存在会话赋值（元素7 标记；赋值明细为会话活数据不入快照）。
 	Assigned bool `json:"assigned,omitempty"`
 }
@@ -910,10 +923,19 @@ func firstMeaningRuleID(rules []RuleEntry, level int, dirName string) string {
 	return ""
 }
 
-// panoramaViewOf 快照的前端投影：游标表为后端增量态，不出前端载荷。
+// panoramaViewOf 快照的前端投影：游标表为后端增量态，不出前端载荷；文件级
+// 记录附加结构分段线索集（纯路径推导的呈现态数据，不入持久快照）。
 func panoramaViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 	view := *snap
 	view.DirMtimes = nil
+	if len(snap.Files) > 0 {
+		files := make([]SnapFile, len(snap.Files))
+		for i, f := range snap.Files {
+			f.StructClues = StructCluesOf(snap.RootPath, f.RelPath, f.FileName)
+			files[i] = f
+		}
+		view.Files = files
+	}
 	return view
 }
 

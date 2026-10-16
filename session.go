@@ -635,7 +635,8 @@ const (
 	workbenchActionAssign           = "assign"        // 单次赋值（会话态知识写入）
 	workbenchActionClearAssignment  = "clearAssignment" // 清除单文件赋值
 	workbenchActionSetIgnored       = "setIgnored"    // 登记或解除忽略项
-	workbenchActionGeneralize       = "generalize"    // 泛化成规则（档案写+验证轮）
+	workbenchActionGeneralize       = "generalize"    // 泛化成规则（档案写+验证轮；mode=struct 为结构映射组合规则的确认入档）
+	workbenchActionSummarizeRule    = "summarizeRule" // 规则总结器：赋值线索出处→组合规则建议（人话+命中预览+样例；不写档案）
 	workbenchActionAdjudicate       = "adjudicate"    // 冲突裁决生成组合规则
 	workbenchActionGetDiff          = "getDiff"       // 最近一次重识别差异集
 	workbenchActionSetSelection     = "setSelection"  // 全量替换资源选择集（作品键）
@@ -679,6 +680,15 @@ type workbenchFrontendRequest struct {
 	Title      string   `json:"title,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	Collection string   `json:"collection,omitempty"`
+	// AuthorClueRef / TitleClueRef / CollectionClueRef / TagClueRefs assign 各
+	//维度可携带的线索出处引用（结构分段线索集的稳定标识：rootName /
+	// dirLevel[n] / dirLevelStripped[n] / filenameSeg[i] / tailCode；TagClueRefs
+	// 与 Tags 逐位平行）：随赋值入会话存储，供「自 一级目录(剥壳)」来源小字与
+	// 规则总结器；缺省=无出处（旧调用行为不变）。
+	AuthorClueRef     string   `json:"authorClueRef,omitempty"`
+	TitleClueRef      string   `json:"titleClueRef,omitempty"`
+	CollectionClueRef string   `json:"collectionClueRef,omitempty"`
+	TagClueRefs       []string `json:"tagClueRefs,omitempty"`
 	// Ignored setIgnored 的登记方向（真=登记忽略，假=解除）。
 	Ignored bool `json:"ignored,omitempty"`
 	// GeneralizeMode generalize 的泛化维度：filename（按文件名形态）/
@@ -756,6 +766,12 @@ type workbenchFrontendResponse struct {
 	Assignment *workbenchAssignmentView `json:"assignment,omitempty"`
 	// Rule generalize/adjudicate 生成的规则摘要（已入档案并触发验证轮）。
 	Rule *GeneratedRuleView `json:"rule,omitempty"`
+	// Rules generalize（mode=struct）入档的组合规则摘要序列（单规则维度仍填
+	// Rule，Rules 含全部条目）。
+	Rules []*GeneratedRuleView `json:"rules,omitempty"`
+	// RuleSuggestion summarizeRule 的总结器产物（建议卡载荷：人话规则+逐维度
+	// 映射+命中预览统计+样例应用；未入档，确认走 generalize mode=struct）。
+	RuleSuggestion *RuleSuggestion `json:"ruleSuggestion,omitempty"`
 	// Domain getPanorama 附带的资源选择域（阶段4：作品原子结构+集视图，前端
 	// 选择交互与选择集键的单一推导源）。
 	Domain *WorkDomain `json:"domain,omitempty"`
@@ -790,6 +806,13 @@ type workbenchAssignmentView struct {
 	Collection  string   `json:"collection,omitempty"`
 	Generalized bool     `json:"generalized,omitempty"`
 	UpdatedAtMs int64    `json:"updatedAtMs,omitempty"`
+	// AuthorClueRef / TitleClueRef / CollectionClueRef / TagClueRefs 各维度赋值
+	//的线索出处引用（结构分段线索集稳定标识）：赋值表单「自 一级目录(剥壳)」
+	// 来源小字的数据源；TagClueRefs 与 Tags 逐位平行。
+	AuthorClueRef     string   `json:"authorClueRef,omitempty"`
+	TitleClueRef      string   `json:"titleClueRef,omitempty"`
+	CollectionClueRef string   `json:"collectionClueRef,omitempty"`
+	TagClueRefs       []string `json:"tagClueRefs,omitempty"`
 }
 
 // decisionsViewOf 会话 → 决策态投影（按路径稳定序呈现）。
@@ -800,6 +823,8 @@ func decisionsViewOf(sess *WorkbenchSession) *workbenchSessionDecisionsView {
 		view.Assignments = append(view.Assignments, workbenchAssignmentView{
 			RelPath: relPath, Author: assign.Author, AuthorRole: assign.AuthorRole,
 			Title: assign.Title, Tags: assign.Tags, Collection: assign.Collection,
+			AuthorClueRef: assign.AuthorClueRef, TitleClueRef: assign.TitleClueRef,
+			CollectionClueRef: assign.CollectionClueRef, TagClueRefs: assign.TagClueRefs,
 			Generalized: assign.Generalized, UpdatedAtMs: assign.UpdatedAtMs,
 		})
 	}
@@ -941,6 +966,8 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		sess, view, err := m.ApplyAssignment(req.Root, req.RelPath, SessionAssignment{
 			Author: req.Author, AuthorRole: req.AuthorRole, Title: req.Title,
 			Tags: req.Tags, Collection: req.Collection,
+			AuthorClueRef: req.AuthorClueRef, TitleClueRef: req.TitleClueRef,
+			CollectionClueRef: req.CollectionClueRef, TagClueRefs: req.TagClueRefs,
 		})
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
@@ -971,7 +998,15 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			break
 		}
 		resp.Rule = result.Rule
+		resp.Rules = result.Rules
 		resp.Started = result.VerificationStarted
+	case workbenchActionSummarizeRule:
+		sugg, err := m.ApplyStructSummary(req.Root, req.RelPath)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RuleSuggestion = sugg
 	case workbenchActionAdjudicate:
 		result, err := m.ApplyAdjudication(req.Root, req.RelPath, MetadataDimension(req.Dimension), adjudicationInput{
 			Mode:               req.AdjudicateMode,

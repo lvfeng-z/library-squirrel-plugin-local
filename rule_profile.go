@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // MetadataDimension 为元数据的含义维度：同一份声明值在不同维度下语义不同。
@@ -227,6 +228,11 @@ type ExtractionAction struct {
 	Constant string `json:"constant"`
 	// RoleName 为声明级角色绑定，可为空；原样透传到产出声明。
 	RoleName string `json:"roleName"`
+	// StripPrefix / StripSuffix 取值后的剥壳变换（结构映射泛化产物使用）：值
+	// 具有该前缀/后缀时剥离（如 ancestorDir 取得 "Artist[X]" 剥为 "X"）；空=
+	// 不剥。逐侧独立 Trim，值不具该侧时为无操作，旧规则（双空）行为不变。
+	StripPrefix string `json:"stripPrefix,omitempty"`
+	StripSuffix string `json:"stripSuffix,omitempty"`
 	// When 为可选生效条件（通用条件表达式树）：条件不满足时该动作不产出声明
 	//（规则照常命中计数）。v2 谓词组合形态的 JSON 在载入时映射为等价表达式树
 	//（parseConditionJSON），内存中恒为表达式树单一形态。
@@ -276,6 +282,12 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 		value, source = a.Constant, SourceAdjudication
 	default:
 		return MetadataDeclaration{}, false
+	}
+	if a.StripPrefix != "" {
+		value = strings.TrimPrefix(value, a.StripPrefix)
+	}
+	if a.StripSuffix != "" {
+		value = strings.TrimSuffix(value, a.StripSuffix)
 	}
 	return MetadataDeclaration{
 		Dimension: a.Dimension,
@@ -650,6 +662,8 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 		CaptureName string            `json:"captureName"`
 		Constant    string            `json:"constant"`
 		RoleName    string            `json:"roleName"`
+		StripPrefix string            `json:"stripPrefix"`
+		StripSuffix string            `json:"stripSuffix"`
 		When        json.RawMessage   `json:"when,omitempty"`
 	}
 	var in extractionJSON
@@ -666,6 +680,8 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 		CaptureName: in.CaptureName,
 		Constant:    in.Constant,
 		RoleName:    in.RoleName,
+		StripPrefix: in.StripPrefix,
+		StripSuffix: in.StripSuffix,
 		When:        cond,
 	}
 	return nil

@@ -117,7 +117,24 @@
             <section class="li-ws-card">
               <h3 class="li-ws-card-title">
                 资源清单
-                <span class="li-ws-card-note">{{ filteredFiles.length }} 项 · 虚拟滚动 · 点击行联动右栏解析面板</span>
+                <!-- 剧本F F1：清单浏览模式切换「▦ 清单 / ⛁ 目录树」，默认目录树（决策2），会话内记忆不持久化 -->
+                <span class="li-ws-mode-toggle">
+                  <button
+                    type="button"
+                    class="li-ws-filter-btn li-ws-mode-btn"
+                    :class="{ 'is-active': listMode === 'tree' }"
+                    title="目录树模式：库根 → 目录 → 文件层级归属"
+                    @click="listMode = 'tree'"
+                  >⛁ 目录树</button>
+                  <button
+                    type="button"
+                    class="li-ws-filter-btn li-ws-mode-btn"
+                    :class="{ 'is-active': listMode === 'flat' }"
+                    title="平铺清单模式：全量文件平铺"
+                    @click="listMode = 'flat'"
+                  >▦ 清单</button>
+                </span>
+                <span class="li-ws-card-note">{{ filteredFiles.length }} 项 · {{ listMode === 'tree' ? '目录树' : '平铺虚拟滚动' }} · 点击行联动右栏解析面板</span>
               </h3>
               <div class="li-ws-combos">
                 <div class="li-ws-filter">
@@ -148,7 +165,8 @@
                   >« 展开解析面板</button>
                 </div>
               </div>
-              <div ref="listViewport" class="li-ws-list" @scroll="onListScroll">
+              <!-- 平铺模式（现状保留：虚拟滚动切片渲染；模式切换时过滤与选择集保持） -->
+              <div v-show="listMode === 'flat'" ref="listViewport" class="li-ws-list" @scroll="onListScroll">
                 <div class="li-ws-list-spacer" :style="{ height: `${filteredFiles.length * ROW_H}px` }"></div>
                 <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 声明/线索摘要 + 差异标 + 已赋值标；
                      行点击 = 选中联动右栏（选中键 = 文件相对路径），与复选不互斥 -->
@@ -184,35 +202,60 @@
                 </div>
                 <p v-if="filteredFiles.length === 0" class="li-ws-empty">当前过滤条件下无文件</p>
               </div>
-            </section>
-
-            <!-- 区4 目录结构折叠区（层含义状态；组合①：按目录递选子树作品；默认收起、会话内记忆） -->
-            <section class="li-ws-fold">
-              <button type="button" class="li-ws-fold-head" :aria-expanded="!folded.dirs" @click="folded.dirs = !folded.dirs">
-                <span class="li-ws-fold-arrow" :class="{ 'is-open': !folded.dirs }">▸</span>
-                <span class="li-ws-fold-title">目录结构</span>
-                <span class="li-ws-fold-note">{{ (snapshot.dirs || []).length }} 层 · 含义覆盖 {{ coveredDirCount }}/{{ dirNodes.length }} · 递选已选 {{ dirTreeSelectedText('') }}</span>
-              </button>
-              <div v-show="!folded.dirs" class="li-ws-fold-body">
-                <div class="li-ws-dirlist">
-                  <div v-for="dir in dirNodes" :key="dir.relKey" class="li-ws-dir-row" :style="{ paddingLeft: `${dir.depth * 16 + 8}px` }">
+              <!-- 树模式（剧本F F1/F2：库根 → 目录 → 文件全量渲染，246 行级数据量不虚拟化）；
+                   目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录说明卡）
+                   + 文件数 + 含义覆盖标记（复用旧「目录结构」折叠区数据源）；文件行 = 平铺同款，点行 = 现有联动 -->
+              <div v-show="listMode === 'tree'" class="li-ws-tree">
+                <template v-for="row in treeRows" :key="row.key">
+                  <div v-if="row.kind === 'dir' && row.dir" class="li-ws-tree-dir" :style="{ paddingLeft: `${row.depth * 16 + 4}px` }">
+                    <button
+                      type="button"
+                      class="li-ws-tree-arrow"
+                      :class="{ 'is-open': treeExpanded.has(row.dir.relKey) }"
+                      :title="treeExpanded.has(row.dir.relKey) ? '收起目录' : '展开目录'"
+                      @click="toggleTreeDir(row.dir.relKey)"
+                    >▸</button>
                     <el-checkbox
                       class="li-ws-dir-cb"
-                      :model-value="dirTreeChecked(dir.relKey)"
-                      :indeterminate="dirTreeIndeterminate(dir.relKey)"
-                      @change="(v) => setDirTreeSelected(dir.relKey, !!v)"
-                    >{{ dir.name }}</el-checkbox>
-                    <span class="li-ws-dir-files">{{ dir.fileCount }} 文件</span>
-                    <span class="li-ws-dir-pick">已选 {{ dirTreeSelectedText(dir.relKey) }}</span>
-                    <template v-if="dir.meanings && dir.meanings.length">
-                      <span v-for="(m, i) in dir.meanings" :key="i" class="li-ws-dir-meaning">{{ meaningLabel(m) }}</span>
+                      :model-value="dirTreeChecked(row.dir.relKey)"
+                      :indeterminate="dirTreeIndeterminate(row.dir.relKey)"
+                      :title="`子树递选（按作品聚合）· 已选 ${dirTreeSelectedText(row.dir.relKey)}`"
+                      @change="(v) => setDirTreeSelected(row.dir.relKey, !!v)"
+                    />
+                    <span class="li-ws-tree-name" :title="`${row.dir.relKey}（点看目录说明卡）`" @click="showDirCard(row.dir.relKey)">{{ row.dir.name }}</span>
+                    <span class="li-ws-dir-files">{{ row.dir.fileCount }} 文件</span>
+                    <template v-if="row.dir.meanings && row.dir.meanings.length">
+                      <span v-for="(m, mi) in row.dir.meanings" :key="mi" class="li-ws-dir-meaning">{{ meaningLabel(m) }}</span>
                     </template>
-                    <span v-else-if="dir.depth > 0" class="li-ws-dir-uncovered">未覆盖</span>
+                    <span v-else-if="row.depth > 0" class="li-ws-dir-uncovered">未覆盖</span>
                   </div>
-                </div>
+                  <div
+                    v-else-if="row.kind === 'file' && row.file"
+                    class="li-ws-tree-file"
+                    :class="row.file.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.file.relPath) ? `is-diff-${diffMark(row.file.relPath)}` : '')"
+                    :style="{ paddingLeft: `${row.depth * 16 + 30}px` }"
+                    @click="selectFile(row.file.relPath)"
+                  >
+                    <span class="li-ws-row-state" :class="`is-${row.file.state}`" :title="stateLabel(row.file.state)">{{ stateDot(row.file.state) }}</span>
+                    <span class="li-ws-tree-fname" :title="row.file.relPath">{{ row.file.fileName }}</span>
+                    <span v-if="diffMark(row.file.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.file.relPath)}`">{{ diffMark(row.file.relPath) === 'changed' ? 'Δ变更' : diffMark(row.file.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
+                    <span class="li-ws-row-meta">
+                      <template v-if="row.file.final && row.file.final.length">
+                        <span v-for="(d, di) in row.file.final" :key="di" class="li-ws-row-decl">{{ declLabel(d) }}</span>
+                      </template>
+                      <template v-if="row.file.clues && row.file.clues.length">
+                        <span v-for="(c, ci) in row.file.clues" :key="ci" class="li-ws-row-clue">{{ clueLabel(c) }}</span>
+                      </template>
+                      <span v-if="row.file.pendingDims && row.file.pendingDims.length" class="li-ws-row-pending">待裁决:{{ row.file.pendingDims.join('/') }}</span>
+                      <span v-if="row.file.assigned" class="li-ws-row-assigned">已赋值</span>
+                    </span>
+                  </div>
+                </template>
+                <p v-if="treeRows.length === 0" class="li-ws-empty">当前过滤条件下无文件</p>
               </div>
             </section>
 
+            <!-- 区4 目录结构折叠区已退役（剧本F：层含义/递选/覆盖标记能力已被清单树模式吸收） -->
             <!-- 区6 序列群折叠区（兄弟群：前缀/组大小/序号形态/成群落单） -->
             <section class="li-ws-fold">
               <button type="button" class="li-ws-fold-head" :aria-expanded="!folded.groups" @click="folded.groups = !folded.groups">
@@ -371,8 +414,31 @@
               <button type="button" class="li-ws-panel-btn" title="收起面板" @click="rightCollapsed = true">收起 »</button>
             </div>
             <div class="li-ws-panel-body">
+              <!-- 剧本F F4：目录说明卡（点树中目录名联动；名/层级/覆盖结论+来源规则名/文件统计，不联动文件表单） -->
+              <div v-if="selectedDirNode" class="li-ws-panel-dircard">
+                <div class="li-ws-file-head">
+                  <span class="li-ws-panel-path">{{ selectedDirNode.name }}</span>
+                  <button type="button" class="li-ws-panel-btn" @click="selectedDirKey = ''">返回文件面板</button>
+                </div>
+                <p class="li-ws-sec-line">层级：{{ dirLevelLabel(selectedDirNode.depth) }} · 相对路径 {{ selectedDirNode.relKey || '（库根）' }}</p>
+                <div class="li-ws-sec">
+                  <h4 class="li-ws-sec-title">目录含义覆盖</h4>
+                  <template v-if="selectedDirNode.meanings && selectedDirNode.meanings.length">
+                    <div v-for="(m, i) in selectedDirNode.meanings" :key="i" class="li-ws-decl">
+                      <span class="li-ws-decl-main">{{ meaningLabel(m) }}</span>
+                      <span class="li-ws-decl-src">目录结构结论<template v-if="selectedDirNode.meaningRuleId"> · 来源规则 {{ selectedDirNode.meaningRuleId }}</template></span>
+                    </div>
+                  </template>
+                  <p v-else class="li-ws-empty">未覆盖（该目录暂无含义结论）</p>
+                </div>
+                <div class="li-ws-sec">
+                  <h4 class="li-ws-sec-title">文件统计</h4>
+                  <p class="li-ws-sec-line">直挂文件 {{ selectedDirNode.fileCount }} · 子目录 {{ selectedDirNode.children.length }} · 子树作品 {{ worksUnderDirTree(selectedDirNode.relKey).length }}（已选 {{ dirTreeSelectedText(selectedDirNode.relKey) }}）</p>
+                </div>
+                <p class="li-ws-sec-note">目录说明卡不联动文件表单；点树中任意文件行即回到该文件的解析面板。</p>
+              </div>
               <!-- 边界：右栏空态引导 -->
-              <div v-if="!selectedRelPath" class="li-ws-panel-guide">
+              <div v-else-if="!selectedRelPath" class="li-ws-panel-guide">
                 <p class="li-ws-panel-guide-title">未选中文件</p>
                 <p class="li-ws-panel-guide-text">
                   点击左栏清单中任意文件行，此处将呈现该文件的解析面板：
@@ -403,13 +469,6 @@
                   <p v-else class="li-ws-empty">无终选声明</p>
                 </div>
                 <div class="li-ws-sec">
-                  <h4 class="li-ws-sec-title">线索</h4>
-                  <template v-if="selectedFile.clues && selectedFile.clues.length">
-                    <div v-for="(c, i) in selectedFile.clues" :key="i" class="li-ws-clue">{{ clueLabel(c) }}</div>
-                  </template>
-                  <p v-else class="li-ws-empty">无线索</p>
-                </div>
-                <div class="li-ws-sec">
                   <h4 class="li-ws-sec-title">所属序列群</h4>
                   <div v-if="selectedGroup" class="li-ws-sec-block">
                     <p class="li-ws-sec-line">集 {{ selectedGroup.key || '（空前缀）' }} · {{ selectedGroup.dirRelKey || '根目录' }} · {{ selectedGroup.size }} 成员 · {{ selectedGroup.ruleId || '结构' }}</p>
@@ -417,8 +476,9 @@
                   </div>
                   <p v-else class="li-ws-empty">不属于任何序列群</p>
                 </div>
-                <!-- 阶段3：待裁决就地双路裁决 + 赋值表单（五字段预填）/ 仅保存赋值 / 保存并泛化成规则（内联维度三选）/
-                     忽略 / 清除赋值 / 泛化结果与差异提示；请求走本组件唯一通道，忽略后仅重取全景 -->
+                <!-- 阶段3 · 剧本G：线索集胶囊陈列（结构分段+既有库名命中/pixiv，含旧「线索」区职能）+
+                     选给五字段+出处小字 → 保存 → 规则建议卡（泛化成规则/仅保留本次赋值）+
+                     待裁决就地双路裁决 / 忽略 / 清除赋值 / 生成规则与差异提示；请求走本组件唯一通道 -->
                 <ParsePanel
                   :root="session ? session.rootPath : ''"
                   :file="selectedFile"
@@ -483,6 +543,8 @@ interface SnapFile {
   groupKey?: string
   groupSeq?: number
   clues?: { kind: string; detail: string }[]
+  // 剧本G：结构分段线索集（getPanorama 每文件投影；ParsePanel 线索胶囊区消费）
+  structClues?: { ref: string; kind: string; label: string; value: string }[]
   assigned?: boolean
 }
 
@@ -532,8 +594,9 @@ interface PanoramaSnapshot {
 }
 
 interface DecisionsView {
-  // assignments 元素为后端 workbenchAssignmentView 全量投影（五字段供右栏表单预填）
-  assignments?: { relPath: string; author?: string; authorRole?: string; title?: string; tags?: string[]; collection?: string; generalized?: boolean; updatedAtMs?: number }[]
+  // assignments 元素为后端 workbenchAssignmentView 全量投影（五字段供右栏表单预填；
+  // 剧本G 各维度线索出处引用随赋值回透，供来源小字恢复——tagClueRefs 与 tags 逐位平行）
+  assignments?: { relPath: string; author?: string; authorRole?: string; title?: string; tags?: string[]; collection?: string; generalized?: boolean; updatedAtMs?: number; authorClueRef?: string; titleClueRef?: string; collectionClueRef?: string; tagClueRefs?: string[] }[]
   ignored?: string[]
   selection?: string[]
 }
@@ -630,9 +693,12 @@ const recognError = ref('')
 const progress = ref({ phase: '', done: 0, total: 0 })
 
 // —— 双栏布局态（会话内记忆，不持久化） ——
-// 右栏收起态与折叠区开合态：默认右栏展开、折叠区全收起
+// 右栏收起态与折叠区开合态：默认右栏展开、折叠区全收起（目录结构区已退役，能力并入清单树模式）
 const rightCollapsed = ref(false)
-const folded = ref({ dirs: true, groups: true, pending: true, rules: true, decisions: true })
+const folded = ref({ groups: true, pending: true, rules: true, decisions: true })
+
+// —— 清单浏览模式（剧本F：平铺 ↔ 目录树；默认=目录树〔决策2〕，会话内记忆不持久化） ——
+const listMode = ref<'tree' | 'flat'>('tree')
 
 // —— 右栏选中态（主从联动） ——
 // 选中键 = 文件相对路径：自动刷新（重识别）后快照重排，选中态凭键保持；
@@ -900,6 +966,8 @@ function onListScroll(e: Event): void {
 //    复选改选择集不改行选中） —— //
 
 function selectFile(relPath: string): void {
+  // 点文件行 = 现有联动（F5）；同时让出目录说明卡（F4 与文件面板互斥，文件优先）
+  selectedDirKey.value = ''
   selectedRelPath.value = relPath
 }
 
@@ -1097,6 +1165,141 @@ function setDirTreeSelected(relKey: string, on: boolean): void {
   addWorks(worksUnderDirTree(relKey), on)
 }
 
+// —— 清单树模式（剧本F：库根 → 目录 → 文件；骨架复用 snapshot.dirs，递选复用上方子树语义） —— //
+
+interface TreeDirNode {
+  relKey: string
+  name: string
+  depth: number
+  fileCount: number
+  meanings: { type: string; id?: string; name?: string }[]
+  meaningRuleId?: string
+  files: SnapFile[]
+  children: TreeDirNode[]
+}
+
+// 树行（拍平渲染模型）：kind 判别 + 预生成 key；目录/文件字段按 kind 二选一存在
+interface TreeRow {
+  kind: 'dir' | 'file'
+  key: string
+  depth: number
+  dir?: TreeDirNode
+  file?: SnapFile
+}
+
+// 目录树骨架：snapshot.dirs（旧「目录结构」折叠区同一数据源）按 relKey 前缀挂接父子；
+// 文件按当前过滤条件分桶进各目录（模式切换时过滤保持）；快照目录清单缺位的路径防御性补全
+const dirRoots = computed<TreeDirNode[]>(() => {
+  const filesByDir = new Map<string, SnapFile[]>()
+  for (const f of filteredFiles.value) {
+    const list = filesByDir.get(f.dirRelKey)
+    if (list) list.push(f)
+    else filesByDir.set(f.dirRelKey, [f])
+  }
+  type DirRow = PanoramaSnapshot['dirs'][number]
+  const nodeByRel = new Map<string, TreeDirNode>()
+  const ensure = (relKey: string, row?: DirRow): TreeDirNode => {
+    const found = nodeByRel.get(relKey)
+    if (found) {
+      if (row) {
+        found.name = row.name
+        found.depth = row.depth
+        found.fileCount = row.fileCount
+        found.meanings = row.meanings || []
+        found.meaningRuleId = row.meaningRuleId
+      }
+      return found
+    }
+    const segs = relKey.split('/')
+    const node: TreeDirNode = {
+      relKey: relKey,
+      name: row ? row.name : segs[segs.length - 1],
+      depth: row ? row.depth : segs.length,
+      fileCount: row ? row.fileCount : 0,
+      meanings: (row && row.meanings) || [],
+      meaningRuleId: row ? row.meaningRuleId : undefined,
+      files: [],
+      children: []
+    }
+    nodeByRel.set(relKey, node)
+    return node
+  }
+  for (const d of (snapshot.value ? snapshot.value.dirs : null) || []) ensure(d.relKey, d)
+  for (const key of filesByDir.keys()) {
+    let cur = key
+    while (cur) {
+      ensure(cur)
+      const cut = cur.lastIndexOf('/')
+      cur = cut >= 0 ? cur.slice(0, cut) : ''
+    }
+  }
+  const roots: TreeDirNode[] = []
+  for (const node of nodeByRel.values()) {
+    node.files = filesByDir.get(node.relKey) || []
+    const cut = node.relKey.lastIndexOf('/')
+    const parent = cut >= 0 ? nodeByRel.get(node.relKey.slice(0, cut)) : undefined
+    if (parent) parent.children.push(node)
+    else roots.push(node)
+  }
+  return roots
+})
+
+const dirByKey = computed<Map<string, TreeDirNode>>(() => {
+  const index = new Map<string, TreeDirNode>()
+  const walk = (nodes: TreeDirNode[]): void => {
+    for (const n of nodes) {
+      index.set(n.relKey, n)
+      walk(n.children)
+    }
+  }
+  walk(dirRoots.value)
+  return index
+})
+
+// 展开态（会话内记忆不持久化；默认全收起，进入只见一级目录行）
+const treeExpanded = ref<Set<string>>(new Set())
+
+function toggleTreeDir(relKey: string): void {
+  const next = new Set(treeExpanded.value)
+  if (next.has(relKey)) next.delete(relKey)
+  else next.add(relKey)
+  treeExpanded.value = next
+}
+
+// 库根直挂文件（dirRelKey 为空）：置顶平铺，避免树外丢失
+const rootLevelFiles = computed<SnapFile[]>(() => filteredFiles.value.filter((f) => !f.dirRelKey))
+
+// 树可见行序列：展开目录的内容行（子目录在前、文件在后）；全量渲染不虚拟化（246 行级数据量）
+const treeRows = computed<TreeRow[]>(() => {
+  const rows: TreeRow[] = []
+  for (const f of rootLevelFiles.value) rows.push({ kind: 'file', key: `f:${f.relPath}`, depth: 0, file: f })
+  const emit = (node: TreeDirNode): void => {
+    rows.push({ kind: 'dir', key: `d:${node.relKey}`, depth: node.depth, dir: node })
+    if (treeExpanded.value.has(node.relKey)) {
+      for (const child of node.children) emit(child)
+      for (const f of node.files) rows.push({ kind: 'file', key: `f:${f.relPath}`, depth: node.depth + 1, file: f })
+    }
+  }
+  for (const root of dirRoots.value) emit(root)
+  return rows
+})
+
+// —— 右栏目录说明卡（F4：点目录名联动；不触碰文件表单与文件选中键） —— //
+const selectedDirKey = ref('')
+const selectedDirNode = computed<TreeDirNode | null>(() =>
+  selectedDirKey.value ? dirByKey.value.get(selectedDirKey.value) || null : null
+)
+
+function showDirCard(relKey: string): void {
+  selectedDirKey.value = relKey
+}
+
+const dirLevelLabel = (depth: number): string => {
+  if (depth <= 0) return '一级目录'
+  if (depth === 1) return '二级目录'
+  return `第 ${depth + 1} 级目录`
+}
+
 // 悬空选择键（重识别后选择集引用了已不存在的作品）提示
 const danglingSelection = computed<number>(() => {
   let count = 0
@@ -1138,9 +1341,6 @@ async function createTasks(): Promise<void> {
 }
 
 // —— 呈现辅助 —— //
-
-const coveredDirCount = computed(() => dirNodes.value.filter((d) => d.meanings && d.meanings.length).length)
-const dirNodes = computed(() => (snapshot.value ? snapshot.value.dirs : null) || [])
 
 const stateLabel = (state: string): string => {
   switch (state) {
@@ -1717,23 +1917,102 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-/* —— 区4 目录结构 —— */
+/* —— 区5 清单模式切换（剧本F：▦ 清单 ↔ ⛁ 目录树） —— */
 
-.li-ws-dirlist {
-  max-height: 280px;
+.li-ws-mode-toggle {
+  display: inline-flex;
+  gap: 4px;
+}
+
+/* —— 区5 目录树模式（剧本F：全量渲染）；目录行复用旧目录结构区的含义覆盖标记样式 —— */
+
+.li-ws-tree {
+  height: 420px;
   overflow: auto;
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius-sm);
   padding: 4px 0;
 }
 
-.li-ws-dir-row {
+.li-ws-tree-dir,
+.li-ws-tree-file {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   padding: 2px 8px;
   white-space: nowrap;
+  overflow: hidden;
+}
+
+.li-ws-tree-arrow {
+  flex: none;
+  width: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.15s ease;
+}
+
+.li-ws-tree-arrow.is-open {
+  transform: rotate(90deg);
+}
+
+.li-ws-tree-name {
+  color: var(--app-text-primary);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.li-ws-tree-name:hover {
+  color: var(--app-color-primary);
+}
+
+.li-ws-tree-file {
+  height: 30px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.li-ws-tree-file:hover {
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.li-ws-tree-file.is-selected {
+  box-shadow: inset 2px 0 0 var(--app-color-primary);
+  background: var(--app-fill-color);
+}
+
+.li-ws-tree-file.is-diff-changed {
+  background: var(--app-tag-warning-bg);
+}
+
+.li-ws-tree-file.is-diff-added {
+  background: var(--app-tag-success-bg);
+}
+
+.li-ws-tree-file.is-diff-removed {
+  background: var(--app-tag-danger-bg);
+}
+
+.li-ws-tree-fname {
+  flex: none;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--app-text-primary);
+}
+
+/* —— 右栏目录说明卡（剧本F F4） —— */
+
+.li-ws-panel-dircard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .li-ws-dir-cb {
@@ -1743,11 +2022,6 @@ onUnmounted(() => {
 
 .li-ws-dir-files {
   color: var(--app-text-secondary);
-}
-
-.li-ws-dir-pick {
-  font-size: 11px;
-  color: var(--app-text-regular);
 }
 
 .li-ws-dir-meaning {
