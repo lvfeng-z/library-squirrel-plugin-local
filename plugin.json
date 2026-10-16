@@ -46,6 +46,7 @@
         "name": "本地导入工作台",
         "description": "侧栏入口，直达本地导入工作台会话列表",
         "kind": "menu",
+        "order": 43,
         "content": {"viewId": "workbench", "icon": "ep:MessageBox"}
       },
       {
