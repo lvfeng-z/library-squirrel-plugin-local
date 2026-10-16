@@ -830,3 +830,88 @@ func TestSessionLastDiffRoundTrip(t *testing.T) {
 		t.Fatalf("空差异分类应为非 nil 切片: %+v", back.LastDiff)
 	}
 }
+
+// —— 自动刷新通路：赋值/清除成功后自动排定识别刷新（解析视图重构阶段1）——
+
+// finalHasDecl 终选是否含指定维度/值/来源的声明。
+func finalHasDecl(f *SnapFile, dim MetadataDimension, value string, source SourceKind) bool {
+	for _, decl := range f.Final {
+		if decl.Dimension == string(dim) && decl.Value == value && decl.Source == string(source) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitAssignmentRefresh 轮询快照直至赋值/清除触发的自动识别刷新完成、该文件
+// 终选满足断言（退出标准：快照最终反映变更，无需任何再发的识别请求）。
+func waitAssignmentRefresh(t *testing.T, m *SessionManager, root, relPath string, check func(*SnapFile) bool) *SnapFile {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		sess, err := m.SessionOf(root)
+		if err == nil && sess.Snapshot != nil {
+			if file := snapshotFileOf(sess.Snapshot, relPath); file != nil && check(file) {
+				return file
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("等待赋值触发的自动识别刷新超时")
+	return nil
+}
+
+// TestApplyAssignmentSchedulesRecognitionRefresh 赋值成功后自动排定增量重识别：
+// 不再发任何识别请求，快照终选最终出现该赋值的 assignment 源声明。
+func TestApplyAssignmentSchedulesRecognitionRefresh(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newAdjudicationFixture(t, root)
+
+	sess, view, err := m.ApplyAssignment(root, "顶层说明.txt", SessionAssignment{Author: "手动作者"})
+	if err != nil {
+		t.Fatalf("单次赋值失败: %v", err)
+	}
+	if view == nil || view.Author != "手动作者" {
+		t.Fatalf("赋值呈现不符: %+v", view)
+	}
+	// 前置：首轮识别快照在场，且尚未含该赋值声明（plain 文件）
+	if sess.Snapshot == nil {
+		t.Fatal("前置首轮识别快照缺失")
+	}
+	if before := snapshotFileOf(sess.Snapshot, "顶层说明.txt"); before == nil ||
+		finalHasDecl(before, DimAuthor, "手动作者", SourceAssignment) {
+		t.Fatalf("赋值前快照不应已含该作者声明: %+v", before)
+	}
+
+	file := waitAssignmentRefresh(t, m, root, "顶层说明.txt", func(f *SnapFile) bool {
+		return finalHasDecl(f, DimAuthor, "手动作者", SourceAssignment)
+	})
+	if len(file.PendingDims) != 0 {
+		t.Fatalf("赋值文件不应处于待裁决态: %+v", file.PendingDims)
+	}
+}
+
+// TestClearAssignmentSchedulesRecognitionRefresh 清除（空维度赋值等价清除）同样
+// 自动排定刷新：快照终选最终不再含该赋值声明（修订号闸门防旧结论被复用）。
+func TestClearAssignmentSchedulesRecognitionRefresh(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newAdjudicationFixture(t, root)
+
+	if _, _, err := m.ApplyAssignment(root, "顶层说明.txt", SessionAssignment{Author: "手动作者"}); err != nil {
+		t.Fatalf("单次赋值失败: %v", err)
+	}
+	waitAssignmentRefresh(t, m, root, "顶层说明.txt", func(f *SnapFile) bool {
+		return finalHasDecl(f, DimAuthor, "手动作者", SourceAssignment)
+	})
+
+	_, view, err := m.ApplyAssignment(root, "顶层说明.txt", SessionAssignment{})
+	if err != nil {
+		t.Fatalf("清除赋值失败: %v", err)
+	}
+	if view != nil {
+		t.Fatalf("清除后赋值呈现应为 nil，实际 %+v", view)
+	}
+	waitAssignmentRefresh(t, m, root, "顶层说明.txt", func(f *SnapFile) bool {
+		return !finalHasDecl(f, DimAuthor, "手动作者", SourceAssignment)
+	})
+}

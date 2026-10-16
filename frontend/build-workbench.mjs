@@ -5,8 +5,6 @@ import { build } from 'vite'
 const entries = [
   'workbench',
   'parse',
-  'panorama',
-  'manual-parse',
   'rules',
   'observation',
   'entry-confirm'

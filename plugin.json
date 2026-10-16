@@ -52,34 +52,12 @@
       {
         "id": "workbench-parse",
         "name": "解析视图",
-        "description": "解析会话的工作页（二级页面）：会话恢复与档案对账提示、子页导航",
+        "description": "解析工作区（双栏主从）：左栏资源清单全景（统计/差异/目录树/序列群/规则与决策态），右栏解析面板（赋值/泛化/裁决/忽略），点行联动",
         "kind": "view",
         "content": {
           "contentType": "precompiled",
           "source": {"js": "views/workbench/parse.js", "css": "views/workbench/parse.css"},
           "parent": "workbench"
-        }
-      },
-      {
-        "id": "workbench-panorama",
-        "name": "识别全景",
-        "description": "全量识别干跑后的识别全景呈现：七类元素分节与全库资源级清单虚拟滚动",
-        "kind": "view",
-        "content": {
-          "contentType": "precompiled",
-          "source": {"js": "views/workbench/panorama.js", "css": "views/workbench/panorama.css"},
-          "parent": "workbench-parse"
-        }
-      },
-      {
-        "id": "workbench-manual-parse",
-        "name": "手动解析",
-        "description": "未识别/识别错资源的手动指定：单次赋值、泛化成规则、冲突裁决（骨架占位，三动作属后续阶段）",
-        "kind": "view",
-        "content": {
-          "contentType": "precompiled",
-          "source": {"js": "views/workbench/manual-parse.js", "css": "views/workbench/manual-parse.css"},
-          "parent": "workbench-parse"
         }
       },
       {

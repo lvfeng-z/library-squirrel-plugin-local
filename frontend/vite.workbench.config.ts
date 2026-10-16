@@ -20,8 +20,6 @@ import { defineConfig, type Plugin } from 'vite'
 const WORKBENCH_ENTRIES: Record<string, string> = {
   workbench: 'src/workbench/entry-workbench.ts',
   parse: 'src/workbench/entry-parse.ts',
-  panorama: 'src/workbench/entry-panorama.ts',
-  'manual-parse': 'src/workbench/entry-manual-parse.ts',
   rules: 'src/workbench/entry-rules.ts',
   observation: 'src/workbench/entry-observation.ts',
   'entry-confirm': 'src/workbench/entry-entry-confirm.ts'

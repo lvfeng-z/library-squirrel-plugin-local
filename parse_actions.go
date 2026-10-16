@@ -1,8 +1,8 @@
 // 手动解析三动作：单次赋值（会话态知识写入，不升格规则）、泛化成规则（按
 // 文件名形态/目录层/序列形态三维度选择）、冲突裁决生成（双命中 And 组合/单侧
 // 缺席改绑的谓词条件策略）。生成物一律为最简充分形式——不生成超出必要的模式
-// 复杂度与条件复杂度；每次生成规则后立即触发强制验证轮（重识别+差异集高亮，
-// 过窄=差异里仍有未覆盖、过泛=差异里错套）。档案写一律经会话管理器
+// 复杂度与条件复杂度；每次生成规则或赋值变更后经识别刷新调度自动排定一轮
+// 重识别（差异集高亮，过窄=差异里仍有未覆盖、过泛=差异里错套）。档案写一律经会话管理器
 // UpdateProfile 单点串行，会话赋值写经 mutateSession 同点串行。
 package main
 
@@ -54,13 +54,15 @@ type GenerationResult struct {
 // —— 单次赋值 ——
 
 // ApplyAssignment 单次赋值动作（经 SetAssignment 同点串行）：显式维度覆盖该文件
-// 档案求值的同维度终选、跨重识别持续生效；不指定任何维度时等价清除。返回会话
-// 与该文件的赋值呈现（清除后为 nil）。
+// 档案求值的同维度终选、跨重识别持续生效；不指定任何维度时等价清除。成功后经
+// 识别刷新调度自动排定一轮重识别（同库根在途则等其结束后补启动），快照最终
+// 反映变更、无需前端再发识别请求。返回会话与该文件的赋值呈现（清除后为 nil）。
 func (m *SessionManager) ApplyAssignment(root, relPath string, assign SessionAssignment) (*WorkbenchSession, *workbenchAssignmentView, error) {
 	sess, err := m.SetAssignment(root, relPath, assign)
 	if err != nil {
 		return nil, nil, err
 	}
+	m.scheduleRecognitionRefresh(root)
 	relPath = filepath.ToSlash(relPath)
 	if current, ok := sess.Assignments[relPath]; ok {
 		return sess, &workbenchAssignmentView{
@@ -125,7 +127,7 @@ func (m *SessionManager) ApplyGeneralization(root, relPath, mode string) (*Gener
 	if _, err := m.MarkAssignmentGeneralized(root, relPath, true); err != nil {
 		m.warnf("置已泛化标记失败（规则已入档）: %v", err)
 	}
-	started := m.startVerificationRound(root)
+	started := m.scheduleRecognitionRefresh(root)
 	return &GenerationResult{
 		Rule:                generatedRuleViewOf(&rule),
 		VerificationStarted: started,
@@ -482,47 +484,48 @@ func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDim
 	if err := m.commitGeneratedRule(ArchiveWriteAdjudicate, &rule); err != nil {
 		return nil, err
 	}
-	started := m.startVerificationRound(root)
+	started := m.scheduleRecognitionRefresh(root)
 	return &GenerationResult{
 		Rule:                generatedRuleViewOf(&rule),
 		VerificationStarted: started,
 	}, nil
 }
 
-// startVerificationRound 生成规则后的强制验证轮入口：立即启动重识别；若同库根
-// 已有识别在途（其装载的可能是旧档案），后台等其在途结束后补启动一轮，保证
-// 新规则的效果与差异集必然入快照（不阻塞生成动作的应答）。返回验证轮是否已
-// 启动或已排定。
-func (m *SessionManager) startVerificationRound(root string) bool {
+// scheduleRecognitionRefresh 识别刷新调度（规则生成与赋值变更共用入口）：立即
+// 启动一轮重识别；若同库根已有识别在途（其装载的可能是旧档案/旧赋值集），后台
+// 等其在途结束后补启动一轮，保证新规则/新赋值的效果与差异集必然入快照（不阻塞
+// 调用方的应答；在途识别受修订号闸门约束不会用旧赋值复用结论，补启动轮必然
+// 装载最新赋值集）。返回刷新轮是否已启动或已排定。
+func (m *SessionManager) scheduleRecognitionRefresh(root string) bool {
 	started, running, err := m.StartRecognition(root)
 	if err != nil {
-		m.warnf("验证轮启动失败（规则已入档，可手动重新识别）: %v", err)
+		m.warnf("识别刷新启动失败（变更已落盘，可手动重新识别）: %v", err)
 		return false
 	}
 	if !running {
 		return started
 	}
 	go func() {
-		deadline := time.Now().Add(verificationFollowupTimeout)
+		deadline := time.Now().Add(recognitionFollowupTimeout)
 		for time.Now().Before(deadline) {
 			m.recogMu.Lock()
 			idle := !m.recogRunning[root]
 			m.recogMu.Unlock()
 			if idle {
 				if _, _, err := m.StartRecognition(root); err != nil {
-					m.warnf("验证轮补启动失败: %v", err)
+					m.warnf("识别刷新补启动失败: %v", err)
 				}
 				return
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		m.warnf("验证轮补启动等待在途识别超时（root=%s）", root)
+		m.warnf("识别刷新补启动等待在途识别超时（root=%s）", root)
 	}()
 	return true
 }
 
-// verificationFollowupTimeout 在途识别等待补启动的上限。
-const verificationFollowupTimeout = 30 * time.Second
+// recognitionFollowupTimeout 在途识别等待补启动的上限。
+const recognitionFollowupTimeout = 30 * time.Second
 
 // combinePatterns 候选规则模式的最简组合：单一模式原样返回，多个模式 And 组合
 //（全部命中才命中——双命中冲突的锚定形态）。
