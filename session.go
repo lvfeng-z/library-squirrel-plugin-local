@@ -198,6 +198,13 @@ type SessionManager struct {
 	//（长跑不阻塞会话读写，落库时经 mutateSession 短暂加锁）。
 	recogMu      sync.Mutex
 	recogRunning map[string]bool
+
+	// createCarryMu 保护工作台创建的进程内传值槽（任务名暂存与批次摘要回写；
+	// 语义与用法见 selection.go「创建编排与过滤产出之间的进程内传值」——不落
+	// 会话存储，重启即弃）。
+	createCarryMu   sync.Mutex
+	stagedTaskNames map[string]string             // 库根 → 编排动作暂存的创建任务名原文
+	batchSummaries  map[string]createBatchSummary // 库根 → 过滤产出回写的批次摘要
 }
 
 // NewSessionManager 创建会话管理器；ctx 为 nil 时可构造但读写报错（单测经
@@ -704,6 +711,9 @@ type workbenchFrontendRequest struct {
 	// Works setSelection 的作品键全集（全量替换：集聚合/树递选/过滤全选等批量
 	// 组合由前端按选择域展开为成员作品键后整体提交）。
 	Works []string `json:"works,omitempty"`
+	// TaskName createTasks 的自定义任务名（可选，空/全空白=后端默认名兜底；
+	// 前端阶段2 的名称确认对话框接入，本阶段先通后端链路）。
+	TaskName string `json:"taskName,omitempty"`
 
 	// —— 规则管理族载荷（规则子页）——
 	// Rule saveRule 的完整规则条目 JSON（ruleEntryJSON 形态：pattern 与
@@ -1074,7 +1084,7 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		}
 		resp.Decisions = decisionsViewOf(sess)
 	case workbenchActionCreateTasks:
-		outcome, err := m.ApplyCreateTasks(req.Root)
+		outcome, err := m.ApplyCreateTasks(req.Root, req.TaskName)
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -369,8 +370,95 @@ func displayDirKey(dirRelKey string) string {
 
 // —— 创建编排动作 ——
 
+// defaultCreateTaskName 默认任务名：本地导入 · <库根名> · N 件作品（库根名=库根
+// basename；N=选择集作品数）。前端名称确认对话框的预填与后端空名兜底共用本规则。
+func defaultCreateTaskName(root string, workCount int) string {
+	return fmt.Sprintf("本地导入 · %s · %d 件作品", filepath.Base(root), workCount)
+}
+
+// resolveCreateTaskName 任务名裁决：空白输入（空串/全空白）按默认名兜底，非空白
+// 输入裁剪首尾空白后采用——编排侧（通知文案）与过滤产出侧（父行命名）共用本
+// 函数，单一裁决点（两侧行为不漂移）。
+func resolveCreateTaskName(taskName, root string, workCount int) string {
+	if name := strings.TrimSpace(taskName); name != "" {
+		return name
+	}
+	return defaultCreateTaskName(root, workCount)
+}
+
+// —— 创建编排与过滤产出之间的进程内传值 ——
+//
+// 宿主 CreateTask RPC 同步覆盖完整产出流（过滤产出分支的流式应答被宿主消费完才
+// 返回），编排动作据此在调用前暂存任务名原文、调用后读取批次摘要——两侧值在 RPC
+// 返回时均已就绪，无需跨请求持久化（传值槽不落会话存储，重启即弃）。
+
+// stageCreateTaskName 暂存创建任务名原文（ApplyCreateTasks 在宿主 CreateTask 调
+// 用前置入）并重置该库根的批次摘要槽（防上一次残留被本次编排误读）。
+func (m *SessionManager) stageCreateTaskName(root, taskName string) {
+	m.createCarryMu.Lock()
+	defer m.createCarryMu.Unlock()
+	if m.stagedTaskNames == nil {
+		m.stagedTaskNames = make(map[string]string)
+	}
+	m.stagedTaskNames[root] = taskName
+	delete(m.batchSummaries, root)
+}
+
+// takeStagedCreateTaskName 取出并清除暂存的创建任务名（过滤产出分支消费；缺席=
+// 空串——直驱路径经 resolveCreateTaskName 按默认名兜底）。
+func (m *SessionManager) takeStagedCreateTaskName(root string) string {
+	m.createCarryMu.Lock()
+	defer m.createCarryMu.Unlock()
+	name := m.stagedTaskNames[root]
+	delete(m.stagedTaskNames, root)
+	return name
+}
+
+// recordCreateBatchSummary 记录一次过滤产出的批次摘要（emitSelectedWorks 产出
+// 完成时回写）。
+func (m *SessionManager) recordCreateBatchSummary(root string, summary createBatchSummary) {
+	m.createCarryMu.Lock()
+	defer m.createCarryMu.Unlock()
+	if m.batchSummaries == nil {
+		m.batchSummaries = make(map[string]createBatchSummary)
+	}
+	m.batchSummaries[root] = summary
+}
+
+// takeCreateBatchSummary 取出并清除批次摘要（编排动作在宿主 CreateTask 返回后
+// 读取；缺席=零值——宿主桩直答等无产出路径无摘要，文案不追加站点组附注）。
+func (m *SessionManager) takeCreateBatchSummary(root string) createBatchSummary {
+	m.createCarryMu.Lock()
+	defer m.createCarryMu.Unlock()
+	summary := m.batchSummaries[root]
+	delete(m.batchSummaries, root)
+	return summary
+}
+
+// createBatchSummary 一次工作台创建的批次应答组摘要（emitSelectedWorks 产出完成
+// 时记录、编排动作在宿主 CreateTask 返回后读取）：组数与非 local 组文件计数供
+// 通知文案的站点组附注。
+type createBatchSummary struct {
+	// groups 产出的应答组数（含 local 组）。
+	groups int
+	// nonLocalSiteNames 非 local 组的站点展示名（首见序去重）。
+	nonLocalSiteNames []string
+	// nonLocalFiles 非 local 组文件数合计。
+	nonLocalFiles int
+}
+
+// addNonLocal 记录一个非 local 组的站点展示名与文件数。
+func (s *createBatchSummary) addNonLocal(siteName string, files int) {
+	if !slices.Contains(s.nonLocalSiteNames, siteName) {
+		s.nonLocalSiteNames = append(s.nonLocalSiteNames, siteName)
+	}
+	s.nonLocalFiles += files
+}
+
 // CreateTasksOutcome 创建编排动作的结果。
 type CreateTasksOutcome struct {
+	// TaskName 生效的任务名（用户名或默认名兜底后的裁决值）。
+	TaskName string
 	// Works 本次创建提交的作品数（选择集口径）。
 	Works int
 	// Tasks 宿主落库的任务计数（叶子+子任务，父容器不计——宿主 AddedQuantity 口径）。
@@ -379,12 +467,25 @@ type CreateTasksOutcome struct {
 	Message string
 }
 
+// buildCreateTasksMessage 创建完成的通知文案：已创建任务「名」：N 件作品（M 个
+// 子任务，Created 待手动开始）；批次按站点多组产出时追加「另有 <站点名> 组 n 件」
+//（n=非 local 组文件数合计——契约约束的机械分组，合理性议题归 todo#94，仅如实
+// 告知）。
+func buildCreateTasksMessage(taskName string, works, tasks int, summary createBatchSummary) string {
+	message := fmt.Sprintf("已创建任务「%s」：%d 件作品（%d 个子任务，Created 待手动开始）", taskName, works, tasks)
+	if summary.groups > 1 && len(summary.nonLocalSiteNames) > 0 {
+		message += fmt.Sprintf("；另有 %s 组 %d 件", strings.Join(summary.nonLocalSiteNames, "、"), summary.nonLocalFiles)
+	}
+	return message
+}
+
 // ApplyCreateTasks 创建编排动作：选择集解析 → 创建前对账（磁盘存在性/目录 mtime
-// 游标 + 档案指纹与会话赋值修订号对快照基准一致）→ 置工作台发起标记 → 经宿主
-// CreateTask 一次调用走 Create 过滤产出分支（只产出所选作品、集父行按所选成员
-// 生成、任务级赋值快照固化）→ 清理选择集（赋值与快照保留）。任一守卫未过即
-// 阻断，零任务零标记残留。
-func (m *SessionManager) ApplyCreateTasks(root string) (*CreateTasksOutcome, error) {
+// 游标 + 档案指纹与会话赋值修订号对快照基准一致）→ 置工作台发起标记并暂存任务名
+// 原文 → 经宿主 CreateTask 一次调用走 Create 过滤产出分支（批次应答组：按站点
+// 分组的单父多子行、任务级赋值快照固化；产出侧回写批次摘要）→ 清理选择集（赋值
+// 与快照保留）。taskName 为可选自定义任务名（空/全空白=默认名兜底）。任一守卫
+// 未过即阻断，零任务零标记残留。
+func (m *SessionManager) ApplyCreateTasks(root, taskName string) (*CreateTasksOutcome, error) {
 	sess, err := m.loadSession(root)
 	if err != nil {
 		return nil, err
@@ -412,16 +513,23 @@ func (m *SessionManager) ApplyCreateTasks(root string) (*CreateTasksOutcome, err
 	if m.ctx == nil {
 		return nil, fmt.Errorf("插件上下文不可用，无法发起创建")
 	}
+	// 任务名裁决（空/全空白=默认名）：编排侧文案与过滤产出侧父行命名共用同一函数
+	resolvedName := resolveCreateTaskName(taskName, root, len(works))
 	if err := m.BeginWorkbenchCreate(root); err != nil {
 		return nil, err
 	}
+	// 暂存任务名原文并重置摘要槽：过滤产出分支经宿主 CreateTask RPC 同步递归消费
+	// 暂存名、产出完成后回写批次摘要——RPC 返回时两侧均已就绪
+	m.stageCreateTaskName(root, taskName)
 	resp, err := m.ctx.CreateTask("local://" + root)
 	if err != nil {
 		m.ConsumeWorkbenchCreateMarker(root)
+		m.takeStagedCreateTaskName(root)
 		return nil, fmt.Errorf("宿主创建任务失败: %w", err)
 	}
 	if resp == nil || !resp.Succeed {
 		m.ConsumeWorkbenchCreateMarker(root)
+		m.takeStagedCreateTaskName(root)
 		msg := "宿主未说明原因"
 		if resp != nil {
 			msg = resp.Msg
@@ -434,14 +542,15 @@ func (m *SessionManager) ApplyCreateTasks(root string) (*CreateTasksOutcome, err
 	}); err != nil {
 		m.warnf("创建完成后清理选择集失败（任务已产出）: %v", err)
 	}
+	summary := m.takeCreateBatchSummary(root)
 	tasks := 0
 	if resp != nil {
 		tasks = int(resp.AddedQuantity)
 	}
 	return &CreateTasksOutcome{
-		Works: len(works),
-		Tasks: tasks,
-		Message: fmt.Sprintf("已创建 %d 件作品的导入任务（共 %d 个任务，Created 状态待手动开始）",
-			len(works), tasks),
+		TaskName: resolvedName,
+		Works:    len(works),
+		Tasks:    tasks,
+		Message:  buildCreateTasksMessage(resolvedName, len(works), tasks, summary),
 	}, nil
 }

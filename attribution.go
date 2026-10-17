@@ -74,6 +74,16 @@ type attributedFile struct {
 	attr  workAttribution
 }
 
+// siteDisplayName 站点键的展示名：identity 注册表权威名（键一经发布不可变、名纯
+// 展示），未注册键回退站点键本身（站点名不可得时退站点键——批次应答组的命名
+// 后缀与通知文案附注共用）。
+func siteDisplayName(siteKey string) string {
+	if site, ok := identity.Lookup(siteKey); ok && site.Name != "" {
+		return site.Name
+	}
+	return siteKey
+}
+
 // partitionByAttribution 把同目录文件按归属裁决拆为 local 回退组与真实域组。
 // 同目录文件共享同一份路径含义（站点分类一致），真实域组内站点键恒一致。
 func partitionByAttribution(files []FileEntry, classifiedSiteKey string) (local, real []attributedFile) {

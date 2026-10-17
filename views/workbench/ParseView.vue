@@ -371,7 +371,8 @@
               </div>
             </section>
 
-            <!-- 区2 选择创建栏：作品级原子选择集 → 创建任务（含对账/创建结果横幅与悬空对账提示） -->
+            <!-- 区2 选择创建栏：作品级原子选择集 → 创建任务（剧本K：点按钮先弹名称确认
+                 对话框，确认后才走创建链路；含对账/创建结果横幅与悬空对账提示） -->
             <section class="li-ws-card">
               <div class="li-ws-createbar">
                 <span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">（可选 {{ selectableWorks.length }} 件 / 共 {{ allWorks.length }} 件）</span></span>
@@ -380,7 +381,7 @@
                   size="small"
                   :loading="creating"
                   :disabled="selectedWorks.size === 0"
-                  @click="createTasks"
+                  @click="openCreateDialog"
                 >创建任务</el-button>
                 <span class="li-ws-create-note">创建前经磁盘对账核验；创建后任务为 Created 状态，由任务管理手动开始</span>
               </div>
@@ -491,6 +492,29 @@
         </section>
       </template>
     </template>
+
+    <!-- 剧本K 创建任务名称确认对话框：任务名预填默认名（空=用默认，后端同规则兜底），
+         确认「创建」才走既有创建链路；「取消」= 关闭弹窗、无副作用 -->
+    <el-dialog
+      v-model="createDialogVisible"
+      title="创建导入任务"
+      width="420px"
+      append-to-body
+    >
+      <el-input
+        v-model="createTaskName"
+        maxlength="200"
+        clearable
+        :placeholder="`默认：${defaultTaskName}`"
+      />
+      <p class="li-ws-create-dialog-note">
+        一次创建为一个父任务，包含全部 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）；识别出站点归属的文件按站点分组为额外父行（罕见）
+      </p>
+      <template #footer>
+        <el-button @click="createDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="createTasks">创建</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -743,6 +767,9 @@ const selectedWorks = ref<Set<string>>(new Set())
 const creating = ref(false)
 const createError = ref('')
 const createSummary = ref('')
+// 剧本K 名称确认对话框：开窗态 + 任务名输入（每次打开预填默认名，清空=用默认）
+const createDialogVisible = ref(false)
+const createTaskName = ref('')
 const rulePick = ref('')
 const authorPick = ref('')
 
@@ -1360,9 +1387,51 @@ const danglingSelection = computed<number>(() => {
   return count
 })
 
+// —— 剧本K 创建任务名称确认：预填默认名 → 确认后走既有创建链路 —— //
+
+// 库根名 = rootPath 末段（兼容 / 与 \ 分隔、吞尾部分隔符，对齐后端 filepath.Base）
+const libraryRootName = computed<string>(() => {
+  const root = (session.value && session.value.rootPath) || ''
+  const parts = root.split(/[\\/]+/).filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : root
+})
+
+// 默认任务名「本地导入 · <库根名> · N 件作品」——与后端空名兜底同规则（方案 §3.2），
+// 前端仅作输入框预填，最终裁决以后端 resolveCreateTaskName 为准
+const defaultTaskName = computed<string>(
+  () => `本地导入 · ${libraryRootName.value} · ${selectedWorks.value.size} 件作品`
+)
+
+// 框下小字的 M：选择集作品文件总数（按选择集聚合各作品 files 数求和；
+// 悬空选择键不在 workIndex 内、无文件数可计按 0——悬空本身另有创建栏提示拦阻）
+const selectedFileCount = computed<number>(() => {
+  let count = 0
+  for (const id of selectedWorks.value) {
+    const work = workIndex.value.get(id)
+    if (work) count += (work.files && work.files.length) || 0
+  }
+  return count
+})
+
+// 剧本K1：点「创建任务」→ 弹名称确认对话框（预填默认名，可编辑，空=用默认）；
+// 空选择守卫与原直驱路径一致（按钮 disabled 之外的二道防线）
+function openCreateDialog(): void {
+  if (!session.value) return
+  if (selectedWorks.value.size === 0) {
+    createError.value = '未选择任何作品：请在清单勾选要导入的作品后再创建'
+    return
+  }
+  createTaskName.value = defaultTaskName.value
+  createDialogVisible.value = true
+}
+
 // —— 创建任务：选择集整集落库 → 创建编排（对账→CreateTask→清理） —— //
 
+// 剧本K2：确认「创建」→ 弹窗关闭、创建按钮转 loading、走既有链路；taskName 随输入
+// 原样上送（清空/全空白由后端默认名兜底）；失败态（K2b）弹窗已关、红横幅语义与
+// 现状一致、选择集保留可重试
 async function createTasks(): Promise<void> {
+  createDialogVisible.value = false
   if (!session.value) return
   if (selectedWorks.value.size === 0) {
     createError.value = '未选择任何作品：请在清单勾选要导入的作品后再创建'
@@ -1378,7 +1447,7 @@ async function createTasks(): Promise<void> {
       return
     }
     if (sel.decisions) decisions.value = sel.decisions
-    const resp = await request('createTasks', { root: session.value.rootPath })
+    const resp = await request('createTasks', { root: session.value.rootPath, taskName: createTaskName.value })
     if (!resp.ok) {
       createError.value = resp.error || '任务创建失败'
       return
@@ -2322,6 +2391,14 @@ onUnmounted(() => {
   margin: 0;
   font-size: 12px;
   color: var(--app-color-warning);
+}
+
+/* 剧本K 名称确认对话框：输入框下说明小字（append-to-body 后 scoped 属性仍随模板元素携带） */
+.li-ws-create-dialog-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-text-secondary);
 }
 
 /* —— 右栏解析面板 —— */

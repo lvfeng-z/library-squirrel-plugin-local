@@ -18,6 +18,7 @@ import (
 	"time"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
+	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
 
 // currentPluginDataVersion 当前插件支持的 task PluginData 格式版本
@@ -204,15 +205,17 @@ func (h *LocalImportWorkFetcher) CreateWithHeartbeat(url string, reporter sdkdto
 }
 
 // createWorkbenchFiltered 工作台发起创建的过滤产出分支：从会话识别快照推导
-// 选择域（作品原子结构——集成员单文件作品/目录聚合多轨作品），按选择集只产出
-// 所选作品；集父行按所选成员生成（部分选择的集其父行只含所选成员）；所选文件
-// 依赖的会话赋值固化为任务级赋值快照（FilePluginData.Assignment，执行期重算
-// 优先消费）；目录含义取快照规则回放结论（dirMeaningChains），全程零弹问——
-// 对 ClassifyDir 结构性零调用。作品结构（分组归属）以识别快照为求值基面（干跑
-// MergedRecognition 注入索引与赋值的结论缓存，创建前经编排动作对账核验磁盘与
-// 档案/赋值修订一致）；最终元数据在执行期重算（recomputeFileDecision 注入同一
-// 索引与赋值快照）产出——三点同一谓词与合并基面（风险12/13 闭环）。
-// 流式逐作品产出（内容哈希只对所选作品计算，未选资源零哈希零任务）。
+// 选择域（作品原子结构——集成员单文件作品/目录聚合多轨作品），按选择集产出批次
+// 应答组（emitSelectedWorks——按站点分组的单父多子行，一次创建=一个父任务）；
+// 任务名取编排动作暂存的原文（ApplyCreateTasks 经宿主 CreateTask RPC 递归进入本
+// 分支时在位），缺省/全空白按默认名兜底（与编排侧同一裁决函数，前端预填与后端
+// 兜底同规则）；所选文件依赖的会话赋值固化为任务级赋值快照（FilePluginData.
+// Assignment，执行期重算优先消费）；目录含义取快照规则回放结论（dirMeaningChains），
+// 全程零弹问——对 ClassifyDir 结构性零调用。作品结构（分组归属）以识别快照为
+// 求值基面（干跑 MergedRecognition 注入索引与赋值的结论缓存，创建前经编排动作
+// 对账核验磁盘与档案/赋值修订一致）；最终元数据在执行期重算（recomputeFileDecision
+// 注入同一索引与赋值快照）产出——三点同一谓词与合并基面（风险12/13 闭环）。
+// 流式逐组产出（内容哈希只对所选作品计算，未选资源零哈希零任务）。
 func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string) (*sdkdto.TaskCreateResult, error) {
 	sess, err := h.sessions.SessionOf(root)
 	if err != nil {
@@ -236,24 +239,49 @@ func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string) (*sdk
 		return result, nil
 	}
 
+	// 任务名：编排动作暂存的原文经本分支消费（宿主 CreateTask RPC 同步递归覆盖）；
+	// 缺席（测试直驱等未暂存路径）或空白按默认名兜底——单一裁决点见 resolveCreateTaskName
+	taskName := resolveCreateTaskName(h.sessions.takeStagedCreateTaskName(root), root, len(works))
+
 	ch := make(chan *sdkdto.TaskCreateResponse, 16)
 	go func() {
 		defer close(ch)
-		h.emitSelectedWorks(root, sess, works, ch)
+		h.emitSelectedWorks(root, sess, works, taskName, ch)
 	}()
 	return sdkdto.StreamResult(ch), nil
 }
 
-// emitSelectedWorks 按选择集流式产出任务应答（确定序：目录按选择域序〔快照序=
-// 字典序〕，目录内先目录聚合作品、后各集〔分组键序〕，集内成员按集内序）：
-//   - 目录聚合作品：全部轨道为一件原子作品——任一轨道不可访问（stat/哈希失败）
-//     即整件跳过（半作品结构性不产出），走目录组声明（多文件=父容器+子任务，
-//     单文件=叶任务）；
-//   - 集（序列群）父行按所选成员生成：同集所选成员合并为一条父行应答（单个
-//     成员=叶任务），成员内按归属裁决拆分应答；
-//   - 混合归属（真实域/local 回退）按 partitionByAttribution 拆为各自站点键的
-//     应答（子任务站点继承父应答）。
-func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchSession, works []*SelectableWork, ch chan<- *sdkdto.TaskCreateResponse) {
+// batchFileItem 批次应答组的子行素材：带归属裁决的文件与其所属目录的含义链。
+// v1 按目录/集父应答时含义链由父应答统一携带并下探全部子行；v2 批次父行纯容器
+//（R2：目录含义链不再呈现于父行），含义链随子行各自的目录走。
+type batchFileItem struct {
+	af       attributedFile
+	metadata []PathMeaning
+}
+
+// emitSelectedWorks 按选择集产出批次应答组（v2：一次创建=一个父任务，废除按
+// 目录/集的父应答切分）：文件按选择域确定序（目录按域序，目录内先目录聚合作品
+// 后集成员〔域序=集内序〕）逐个归集进站点组——local 回退一组 + 各真实站点键各
+// 一组（宿主契约：子行站点键继承父应答 SiteKey，单一父应答只能承载一个站点；
+// 分组是契约约束下的机械行为，「本地插件产出非本地站点作品是否合理」另立 todo#94）。
+// 每组一条 TaskCreateResponse（parent+children 不折叠，单文件亦父行）：
+//   - PluginTaskId=local-batch-<unix毫秒>（真实组追加 @siteKey 保批内组间唯一；
+//     宿主按应答建树不依赖跨批唯一——同批二次创建产生新批次行，R3）；
+//   - TaskName=用户名（多组时真实组追加「 · 站点名」后缀、local 组用裸名；
+//     站点名取 identity 注册表权威名，不可得退站点键）；
+//   - SiteKey=组站点键（local 组=identity.Local.Key。方案文档原文「local 组=空」
+//     按宿主契约修正：fillTaskFromResponse 对空 SiteKey 一律拒收 ErrSiteKeyRequired，
+//     v1 的 local 应答即携 local 键，此处保持）；
+//   - children=组内全部文件子行（逐文件形态、FilePluginData、赋值快照与确定序
+//     保持 v1 形态——子行构造复用 buildChildResponses）；
+//   - 父 PluginData=DirPluginData 纯容器（DirRelPath 空、无含义链——执行语义
+//     全在子行）。
+//
+// 任一作品全部轨道不可访问（stat/哈希失败）即整件跳过（半作品结构性不产出，
+// v1 口径）。产出完成后向会话管理器记录批次摘要（组数与非 local 组文件计数，
+// 编排动作通知文案的数据源——宿主 CreateTask RPC 同步消费完整产出流后才返回，
+// 记录必先于编排读取）。
+func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchSession, works []*SelectableWork, taskName string, ch chan<- *sdkdto.TaskCreateResponse) {
 	chains := dirMeaningChains(sess.Snapshot)
 
 	// 按目录组织产出计划：目录聚合作品与集成员分桶，目录序=选择域序
@@ -277,76 +305,87 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		}
 	}
 
+	// 站点组归集：组键=文件归属站点键（local 回退=identity.Local.Key），组内子行
+	// 按确定序（目录序内先目录聚合作品后集成员）分拣进组
+	groups := make(map[string][]batchFileItem)
+	var groupOrder []string
+	collect := func(files []attributedFile, metadata []PathMeaning) {
+		for _, af := range files {
+			key := af.attr.SiteKey
+			if _, seen := groups[key]; !seen {
+				groups[key] = nil
+				groupOrder = append(groupOrder, key)
+			}
+			groups[key] = append(groups[key], batchFileItem{af: af, metadata: metadata})
+		}
+	}
 	for _, dirKey := range dirOrder {
 		plan := plans[dirKey]
 		metadata := chains[dirKey]
 		// 站点分类含义 → 子树归属站点键（快照回放含义不含 site 型——site 仅经
 		// 目录问答产生，会话模式问答不可达，此处恒走文件名形态归属裁决）
 		classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
-		taskName := fmt.Sprintf("导入【%s】", displayDirKey2(root, dirKey))
 
 		if plan.dirWork != nil {
 			// 目录聚合作品：全轨道 all-or-nothing 哈希
-			files, ok := h.hashWorkFilesAllOrNothing(root, plan.dirWork)
-			if !ok {
-				continue
-			}
-			local, real := partitionByAttribution(files, classifiedSiteKey)
-			if resp := buildDirGroupResponse(root, dirKey, taskName, metadata, local, sess.Assignments); resp != nil {
-				ch <- resp
-			}
-			if resp := buildDirGroupResponse(root, dirKey, taskName, metadata, real, sess.Assignments); resp != nil {
-				ch <- resp
+			if files, ok := h.hashWorkFilesAllOrNothing(root, plan.dirWork); ok {
+				local, real := partitionByAttribution(files, classifiedSiteKey)
+				collect(local, metadata)
+				collect(real, metadata)
 			}
 		}
-
-		// 集成员按集归组（保持选择域序内的首见集序，成员按域序=集内序）
-		bySet := make(map[string][]FileEntry)
-		var setOrder []string
+		// 集成员：单轨同口径（任一轨道失败仅弃该成员自身），成员按域序=集内序进组
 		for _, member := range plan.setMembers {
-			entries, ok := h.hashWorkFilesAllOrNothing(root, member)
-			if !ok {
-				continue
-			}
-			if _, seen := bySet[member.SetKey]; !seen {
-				setOrder = append(setOrder, member.SetKey)
-			}
-			bySet[member.SetKey] = append(bySet[member.SetKey], entries...)
-		}
-		for _, setKey := range setOrder {
-			entries := bySet[setKey]
-			_, groupKey := splitWorkSetKey(setKey)
-			setName := groupKey
-			if setName == "" {
-				setName = "（空前缀集）"
-			}
-			local, real := partitionByAttribution(entries, classifiedSiteKey)
-			for _, part := range [][]attributedFile{local, real} {
-				if len(part) == 0 {
-					continue
-				}
-				parentID := fmt.Sprintf("local-set-%s/%s", dirKey, groupKey)
-				if part[0].attr.isReal() {
-					parentID = parentID + "@" + part[0].attr.SiteKey
-				}
-				resp := buildTaskGroupResponse(parentID, dirKey, setName,
-					"local://"+filepath.Join(root, filepath.FromSlash(dirKey)),
-					part[0].attr.SiteKey, metadata, part, sess.Assignments)
-				if resp != nil {
-					ch <- resp
-				}
+			if files, ok := h.hashWorkFilesAllOrNothing(root, member); ok {
+				local, real := partitionByAttribution(files, classifiedSiteKey)
+				collect(local, metadata)
+				collect(real, metadata)
 			}
 		}
 	}
-}
 
-// displayDirKey2 目录聚合作品的任务名寻址段：库根直下作品用库根路径，子目录
-// 作品用目录键（相对库根的可读形态）。
-func displayDirKey2(root, dirRelKey string) string {
-	if dirRelKey == "" {
-		return root
+	// 组产出序：local 组在前（契约约束的回退组），真实组按首见序——与方案
+	//「local 回退一组 + 各真实站点键各一组」的阅读序一致；组内子行构造（全部
+	// 文件不可访问的空组不产出，v1 口径）
+	order := make([]string, 0, len(groupOrder))
+	if _, hasLocal := groups[identity.Local.Key]; hasLocal {
+		order = append(order, identity.Local.Key)
 	}
-	return dirRelKey
+	for _, key := range groupOrder {
+		if key != identity.Local.Key {
+			order = append(order, key)
+		}
+	}
+	type emittedGroup struct {
+		siteKey  string
+		children []*sdkdto.TaskCreateChildResponse
+	}
+	emitted := make([]emittedGroup, 0, len(order))
+	for _, siteKey := range order {
+		children := buildChildResponses(groups[siteKey], sess.Assignments)
+		if len(children) == 0 {
+			continue
+		}
+		emitted = append(emitted, emittedGroup{siteKey: siteKey, children: children})
+	}
+
+	batchMs := time.Now().UnixMilli()
+	multiGroup := len(emitted) > 1
+	summary := createBatchSummary{groups: len(emitted)}
+	for _, group := range emitted {
+		parentID := fmt.Sprintf("local-batch-%d", batchMs)
+		name := taskName
+		if group.siteKey != identity.Local.Key {
+			siteName := siteDisplayName(group.siteKey)
+			parentID += "@" + group.siteKey
+			if multiGroup {
+				name += " · " + siteName
+			}
+			summary.addNonLocal(siteName, len(group.children))
+		}
+		ch <- buildBatchParentResponse(parentID, name, "local://"+root, group.siteKey, group.children)
+	}
+	h.sessions.recordCreateBatchSummary(root, summary)
 }
 
 // hashWorkFilesAllOrNothing 对作品全部轨道计算内容哈希：任一轨道 stat/哈希失败
@@ -440,31 +479,15 @@ func groupEntriesByDir(files []FileEntry) []scanFileGroup {
 	return groups
 }
 
-// buildDirGroupResponse 目录组形态的任务应答构造：parentID=local-dir-{dirRelPath}
-//（真实域追加 @siteKey）、parentURL=local://{path}/{dirRelPath}；任务名与目录含义
-// 链由调用方给定（目录聚合作品与集父行共用底层 buildTaskGroupResponse）。
-func buildDirGroupResponse(path, dirRelPath, taskName string, metadata []PathMeaning, files []attributedFile, assigns map[string]SessionAssignment) *sdkdto.TaskCreateResponse {
-	if len(files) == 0 {
-		return nil
-	}
-	siteKey := files[0].attr.SiteKey
-	parentID := fmt.Sprintf("local-dir-%s", dirRelPath)
-	if files[0].attr.isReal() {
-		parentID = parentID + "@" + siteKey
-	}
-	return buildTaskGroupResponse(parentID, dirRelPath, taskName,
-		"local://"+filepath.Join(path, dirRelPath), siteKey, metadata, files, assigns)
-}
-
-// buildTaskGroupResponse 为同归属的一组文件构造任务应答（单文件=叶任务〔身份=
-// 该文件的作品 ID〕，多文件=父容器+子任务）：parentID/taskName/parentURL/siteKey
-// 由调用方给定（目录组与集父行两形态，dirRelPath 供父任务 PluginData）；assigns
-// 携带各文件的任务级赋值快照（工作台创建固化进 FilePluginData，nil=不固化——
-// 旧路径无快照）。全部文件不可访问（os.Stat 失败）时返回 nil。
-func buildTaskGroupResponse(parentID, dirRelPath, taskName, parentURL, siteKey string, metadata []PathMeaning, files []attributedFile, assigns map[string]SessionAssignment) *sdkdto.TaskCreateResponse {
-
-	children := make([]*sdkdto.TaskCreateChildResponse, 0, len(files))
-	for _, af := range files {
+// buildChildResponses 批次应答组的子行构造（v1 buildTaskGroupResponse 的子行
+// 能力抽出，逐文件形态保持不变）：作品身份真实域=解析出的页级作品 ID、local
+// 回退=文件内容哈希；FilePluginData 携带该文件所属目录的含义链（item.metadata）
+// 与任务级赋值快照（assigns——工作台创建固化进任务载荷，nil=不固化）。不可访问
+// 文件（os.Stat 失败）逐个跳过。
+func buildChildResponses(items []batchFileItem, assigns map[string]SessionAssignment) []*sdkdto.TaskCreateChildResponse {
+	children := make([]*sdkdto.TaskCreateChildResponse, 0, len(items))
+	for _, item := range items {
+		af := item.af
 		fi, err := os.Stat(af.entry.FullPath)
 		if err != nil {
 			continue
@@ -478,7 +501,7 @@ func buildTaskGroupResponse(parentID, dirRelPath, taskName, parentURL, siteKey s
 			RelPath:       af.entry.RelPath,
 			Hash:          af.entry.Hash,
 			Size:          fi.Size(),
-			Metadata:      metadata,
+			Metadata:      item.metadata,
 		}
 		if af.attr.isReal() {
 			workID = af.attr.PageWorkID
@@ -501,28 +524,17 @@ func buildTaskGroupResponse(parentID, dirRelPath, taskName, parentURL, siteKey s
 			ResourceType: classifyResourceType(af.entry.FullPath),
 		})
 	}
+	return children
+}
 
-	if len(children) == 0 {
-		return nil
-	}
-
-	if len(children) == 1 {
-		return &sdkdto.TaskCreateResponse{
-			PluginTaskId: children[0].SiteWorkId,
-			TaskName:     children[0].TaskName,
-			SiteWorkId:   children[0].SiteWorkId,
-			Url:          children[0].Url,
-			PluginData:   children[0].PluginData,
-			SiteKey:      siteKey,
-			ResourceType: children[0].ResourceType,
-		}
-	}
-
-	dp := &DirPluginData{
-		SchemaVersion: currentPluginDataVersion,
-		DirRelPath:    dirRelPath,
-		Metadata:      metadata,
-	}
+// buildBatchParentResponse 批次应答组的父行构造：纯容器——PluginData=
+// DirPluginData{SchemaVersion, DirRelPath:"", Metadata:nil}（R2：目录含义链不再
+// 呈现于父行，执行语义全在子行）；单子行亦为父行（「一次创建为一个父任务」，
+// 对齐宿主「有 Children→parent+children 不折叠」契约——v1 单文件叶任务折叠随
+// 批次形态废除）。parentID/taskName/parentURL/siteKey 由调用方给定（emitSelectedWorks
+// 的分组与命名裁决）。
+func buildBatchParentResponse(parentID, taskName, parentURL, siteKey string, children []*sdkdto.TaskCreateChildResponse) *sdkdto.TaskCreateResponse {
+	dp := &DirPluginData{SchemaVersion: currentPluginDataVersion}
 	dpJSON, _ := json.Marshal(dp)
 
 	return &sdkdto.TaskCreateResponse{

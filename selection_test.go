@@ -1,17 +1,21 @@
 // 资源选择与任务创建（阶段4）的单元测试：作品原子选择域推导与可选性校验、
-// 选择集持久化（未识别/待裁决不可选）、工作台发起创建的过滤产出（只产出所选
-// 作品、集父行按所选成员生成、任务级赋值快照固化、零弹问）、创建编排动作
-//（磁盘对账阻断、CreateTask 一次调用、选择集清理）与执行期重算的同源断言
-//（干跑/创建/重算三点注入同一谓词索引与合并实现——风险12/13 闭环）。
+// 选择集持久化（未识别/待裁决不可选）、工作台发起创建的过滤产出（批次应答组：
+// 按站点分组的单父多子行、一次创建=一个父任务；任务级赋值快照固化、零弹问）、
+// 任务名裁决与默认名兜底、创建编排动作（磁盘对账阻断、CreateTask 一次调用、
+// 选择集清理、通知文案）与执行期重算的同源断言（干跑/创建/重算三点注入同一谓词
+// 索引与合并实现——风险12/13 闭环）。
 package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
+	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
 
 // createTaskCalls CreateTask 桩调用计数。
@@ -265,10 +269,13 @@ func TestSetSelectionValidatesSelectability(t *testing.T) {
 
 // —— 退出标准 1/6：会话模式只产出所选作品（集父行按所选成员生成）+ 零弹问 —— //
 
-// collectWorkbenchCreate 经发起标记驱动 Create 的过滤产出分支并收集全部应答。
-func collectWorkbenchCreate(t *testing.T, m *SessionManager, ctx *workbenchTestCtx, root string) []*sdkdto.TaskCreateResponse {
+// collectWorkbenchCreate 经发起标记驱动 Create 的过滤产出分支并收集全部应答；
+// taskName 模拟编排动作暂存的创建任务名原文（空串=默认名兜底路径——与真实
+// 编排 ApplyCreateTasks 的暂存行为同构）。
+func collectWorkbenchCreate(t *testing.T, m *SessionManager, ctx *workbenchTestCtx, root, taskName string) []*sdkdto.TaskCreateResponse {
 	t.Helper()
 	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx}
+	m.stageCreateTaskName(root, taskName)
 	if err := m.BeginWorkbenchCreate(root); err != nil {
 		t.Fatalf("置位发起标记失败: %v", err)
 	}
@@ -286,7 +293,7 @@ func collectWorkbenchCreate(t *testing.T, m *SessionManager, ctx *workbenchTestC
 	return out
 }
 
-// responseChildNames 应答的子任务文件名集合（集父行按所选成员生成的断言载体）。
+// responseChildNames 应答的子任务文件名集合（批次父行子行形态的断言载体）。
 func responseChildNames(resp *sdkdto.TaskCreateResponse) []string {
 	names := make([]string, 0, len(resp.Children))
 	for _, child := range resp.Children {
@@ -295,22 +302,13 @@ func responseChildNames(resp *sdkdto.TaskCreateResponse) []string {
 	return names
 }
 
-// findResponseByParent 按父任务身份定位应答（未命中 nil）。
-func findResponseByParent(resps []*sdkdto.TaskCreateResponse, parentID string) *sdkdto.TaskCreateResponse {
-	for _, r := range resps {
-		if r.PluginTaskId == parentID {
-			return r
-		}
-	}
-	return nil
-}
-
 // TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 会话模式 Create 过滤产出：
-// 选择=「d:多轨 双轨作品」+「集内 2/3 成员显式拆选」→ 只产出所选作品：目录聚合
-// 作品父行含全部双轨（原子），集父行按所选成员生成（仅 2 子任务），未选作品
-// （d:已识别、第三名集成员）零任务，未识别/待裁决作品即使混入选择集也非可选
-//（写入即拒）。全程零前端事件（零 ClassifyDir 弹问——目录含义取快照回放，
-// 结构性不触问答）。PluginData 携带内容哈希与赋值快照。
+// 选择=「d:多轨 双轨作品」+「集内 2/3 成员显式拆选」→ 只产出所选作品：纯 local
+// 批次=单应答单父（批次应答组），子行=组内全部所选文件（确定序：目录序内先目录
+// 聚合作品后集成员）；未选作品（d:已识别、第三名集成员）零任务，未识别/待裁决
+// 作品即使混入选择集也非可选（写入即拒）。任务名走默认名兜底（未暂存用户名）。
+// 全程零前端事件（零 ClassifyDir 弹问——目录含义取快照回放，结构性不触问答）。
+// PluginData 携带内容哈希与赋值快照；父行为纯容器（DirRelPath 空、无含义链）。
 func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, map[string]SessionAssignment{
 		"多轨/【作者C】标题3.jpg": {Title: "手工标题", UpdatedAtMs: 1},
@@ -320,21 +318,35 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 	}
 
 	before := ctx.publishedCount()
-	resps := collectWorkbenchCreate(t, m, ctx, root)
-	if len(resps) != 2 {
-		t.Fatalf("所选=双轨作品+缺员集（2 应答：目录父行+集父行），实得 %d 个: %+v", len(resps), resps)
+	resps := collectWorkbenchCreate(t, m, ctx, root, "")
+	if len(resps) != 1 {
+		t.Fatalf("纯 local 批次应为单应答单父（批次应答组），实得 %d 个: %+v", len(resps), resps)
+	}
+	batch := resps[0]
+
+	// 批次父行：默认名兜底（本地导入 · 库根名 · N 件作品，N=选择集作品数〔3 作品
+	// 4 文件〕）、local-batch- 父身份、local 组站点键、纯容器 PluginData（DirRelPath
+	// 空、无含义链）
+	if want := fmt.Sprintf("本地导入 · %s · 3 件作品", filepath.Base(root)); batch.TaskName != want {
+		t.Fatalf("批次父行任务名应为默认名 %q，实际 %q", want, batch.TaskName)
+	}
+	if !strings.HasPrefix(batch.PluginTaskId, "local-batch-") || batch.SiteKey != identity.Local.Key {
+		t.Fatalf("批次父行身份应为 local-batch-<毫秒> 且 local 组站点键，实际 %q/%q", batch.PluginTaskId, batch.SiteKey)
+	}
+	var dp DirPluginData
+	if err := json.Unmarshal([]byte(batch.PluginData), &dp); err != nil {
+		t.Fatalf("解析父行 PluginData 失败: %v", err)
+	}
+	if dp.DirRelPath != "" || dp.Metadata != nil {
+		t.Fatalf("批次父行 PluginData 应为纯容器（DirRelPath 空、无含义链），实际 %+v", dp)
 	}
 
-	// 目录聚合作品：父行 + 全部双轨（原子，轨道不可拆）
-	dirResp := findResponseByParent(resps, "local-dir-多轨")
-	if dirResp == nil {
-		t.Fatalf("缺少目录聚合作品父行 local-dir-多轨（应答: %+v）", resps)
-	}
-	if len(dirResp.Children) != 2 || strings.Join(responseChildNames(dirResp), ",") != "【作者B】标题2.jpg,【作者C】标题3.jpg" {
-		t.Fatalf("目录聚合作品父行应含全部双轨，实际 %v", responseChildNames(dirResp))
+	// 子行=组内全部所选文件（原子轨道集 + 集成员按域序=集内序，确定序保持）
+	if want := "【作者B】标题2.jpg,【作者C】标题3.jpg,前缀名_001.jpg,前缀名_002.jpg"; strings.Join(responseChildNames(batch), ",") != want {
+		t.Fatalf("批次子行应按确定序含全部所选文件，实际 %v", responseChildNames(batch))
 	}
 	// 赋值快照固化：标题3 轨携带手工标题、标题2 轨无快照
-	for _, child := range dirResp.Children {
+	for _, child := range batch.Children {
 		var fp FilePluginData
 		if err := json.Unmarshal([]byte(child.PluginData), &fp); err != nil {
 			t.Fatalf("解析子任务 PluginData 失败: %v", err)
@@ -351,27 +363,10 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 		}
 	}
 
-	// 集父行按所选成员生成：3 员集选 2 → 父行恰含所选 2 员（序号序）
-	setResp := findResponseByParent(resps, "local-set-序列/前缀名")
-	if setResp == nil {
-		t.Fatalf("缺员集应生成集父行 local-set-序列/前缀名（应答: %+v）", resps)
-	}
-	if setResp.TaskName != "前缀名" {
-		t.Fatalf("集父行任务名应为集名候选（分组键），实际 %q", setResp.TaskName)
-	}
-	if strings.Join(responseChildNames(setResp), ",") != "前缀名_001.jpg,前缀名_002.jpg" {
-		t.Fatalf("集父行应按所选成员生成（2/3），实际 %v", responseChildNames(setResp))
-	}
-
-	// 未选项零任务：d:已识别 与 第三名集成员不在任何应答中
-	for _, r := range resps {
-		for _, name := range responseChildNames(r) {
-			if name == "【作者A】标题1.jpg" || name == "前缀名_003.jpg" {
-				t.Fatalf("未选作品出现在产出中: %s", name)
-			}
-		}
-		if r.PluginTaskId == "【作者A】标题1.jpg" {
-			t.Fatalf("未选单轨作品不应成叶任务")
+	// 未选项零任务：d:已识别 与 第三名集成员不在任何子行中
+	for _, name := range responseChildNames(batch) {
+		if name == "【作者A】标题1.jpg" || name == "前缀名_003.jpg" {
+			t.Fatalf("未选作品出现在产出中: %s", name)
 		}
 	}
 
@@ -382,19 +377,127 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 	}
 }
 
-// TestCreateWorkbenchFilteredLoneSetMemberLeaf 集内仅选一名成员：单文件成叶任务
-//（身份=内容哈希，落 local 域），不生成集父行。
-func TestCreateWorkbenchFilteredLoneSetMemberLeaf(t *testing.T) {
+// TestCreateWorkbenchFilteredLoneSetMemberSingleChild 集内仅选一名成员：批次应答组
+// 形态下仍为单父行+单子行（v1 的单文件叶任务折叠随批次父行纯容器化废除——一次
+// 创建恒为一个父任务），子行身份=内容哈希（local 回退）。
+func TestCreateWorkbenchFilteredLoneSetMemberSingleChild(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, nil)
 	if _, err := m.SetSelection(root, []string{"f:序列/前缀名_003.jpg"}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
-	resps := collectWorkbenchCreate(t, m, ctx, root)
-	if len(resps) != 1 || len(resps[0].Children) != 0 {
-		t.Fatalf("单名集成员应成一叶任务（1 应答零子任务），实得 %+v", resps)
+	resps := collectWorkbenchCreate(t, m, ctx, root, "单件批次")
+	if len(resps) != 1 {
+		t.Fatalf("单名集成员应产出一个批次应答（单父行），实得 %+v", resps)
 	}
-	if resps[0].TaskName != "前缀名_003.jpg" || resps[0].SiteWorkId == "" {
-		t.Fatalf("叶任务应为所选文件（哈希身份），实际 %+v", resps[0])
+	resp := resps[0]
+	if resp.TaskName != "单件批次" || len(resp.Children) != 1 {
+		t.Fatalf("批次父行应为用户名+单子行（不折叠为叶任务），实际 %+v", resp)
+	}
+	child := resp.Children[0]
+	if child.TaskName != "前缀名_003.jpg" || child.SiteWorkId == "" {
+		t.Fatalf("子行应为所选文件（哈希身份），实际 %+v", child)
+	}
+}
+
+// —— 批次应答组：纯 local 单组与混站点多组（emitSelectedWorks v2 直驱）—— //
+
+// emitFixture 构造直驱 emitSelectedWorks 的最小环境：临时库根 + 指定相对路径的
+// 文件集 + 空快照会话（快照无目录记录 → 含义链为空，归属裁决只走文件名形态）。
+func emitFixture(t *testing.T, relPaths []string) (string, *LocalImportWorkFetcher, *SessionManager, *WorkbenchSession) {
+	t.Helper()
+	root := t.TempDir()
+	for _, rel := range relPaths {
+		writeTestFile(t, root+"/"+rel, rel)
+	}
+	m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
+	h := &LocalImportWorkFetcher{sessions: m}
+	return root, h, m, &WorkbenchSession{Snapshot: &RecognitionSnapshot{}}
+}
+
+// collectEmitted 直驱 emitSelectedWorks 收集全部应答（同步调用，结束后收卷）。
+func collectEmitted(t *testing.T, h *LocalImportWorkFetcher, root string, sess *WorkbenchSession, works []*SelectableWork, taskName string) []*sdkdto.TaskCreateResponse {
+	t.Helper()
+	ch := make(chan *sdkdto.TaskCreateResponse, 16)
+	h.emitSelectedWorks(root, sess, works, taskName, ch)
+	close(ch)
+	var out []*sdkdto.TaskCreateResponse
+	for resp := range ch {
+		out = append(out, resp)
+	}
+	return out
+}
+
+// TestEmitSelectedWorksPureLocalSingleParent 纯 local 批次=单应答单父：一次创建
+// 的全部所选文件合入 local 回退组，子行数=文件数、确定序保持（目录序内先目录
+// 聚合作品后集成员〔域序=集内序〕）、用户名直用（默认名两式的另一式由
+// TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 的空名直驱路径覆盖）。
+func TestEmitSelectedWorksPureLocalSingleParent(t *testing.T) {
+	root, h, m, sess := emitFixture(t, []string{
+		"甲/【作者A】标题1.jpg",
+		"甲/【作者A】标题2.jpg",
+		"乙/集名_001.jpg",
+		"乙/集名_002.jpg",
+	})
+	works := []*SelectableWork{
+		{WorkID: "d:甲", Kind: WorkKindDirTracks, DirRelKey: "甲", Files: []string{"甲/【作者A】标题1.jpg", "甲/【作者A】标题2.jpg"}},
+		{WorkID: "f:乙/集名_001.jpg", Kind: WorkKindSetMember, DirRelKey: "乙", Files: []string{"乙/集名_001.jpg"}, SetKey: workSetKey("乙", "集名")},
+		{WorkID: "f:乙/集名_002.jpg", Kind: WorkKindSetMember, DirRelKey: "乙", Files: []string{"乙/集名_002.jpg"}, SetKey: workSetKey("乙", "集名")},
+	}
+	resps := collectEmitted(t, h, root, sess, works, "整批导入")
+	if len(resps) != 1 || resps[0].TaskName != "整批导入" {
+		t.Fatalf("纯 local 批次应为单应答（用户名直用），实得 %+v", resps)
+	}
+	resp := resps[0]
+	if want := "【作者A】标题1.jpg,【作者A】标题2.jpg,集名_001.jpg,集名_002.jpg"; strings.Join(responseChildNames(resp), ",") != want {
+		t.Fatalf("子行应按确定序含全部 4 文件，实际 %v", responseChildNames(resp))
+	}
+	if resp.SiteKey != identity.Local.Key || !strings.HasPrefix(resp.PluginTaskId, "local-batch-") {
+		t.Fatalf("local 组站点键与批次父身份形态，实际 %q/%q", resp.SiteKey, resp.PluginTaskId)
+	}
+	if summary := m.takeCreateBatchSummary(root); summary.groups != 1 || summary.nonLocalFiles != 0 {
+		t.Fatalf("纯 local 批次摘要应为 1 组、无非 local 件，实际 %+v", summary)
+	}
+}
+
+// TestEmitSelectedWorksMixedSiteGroups 混站点批次=按站点多应答：local 组裸名、
+// 真实组追加「 · 站点名」后缀（站点名取 identity 注册表权威名）；父身份批内组间
+// 唯一（真实组=local-batch-<毫秒>@siteKey）；子行站点继承父应答（宿主契约）；
+// 批次摘要回写（组数与非 local 组文件计数——通知文案数据源）。
+func TestEmitSelectedWorksMixedSiteGroups(t *testing.T) {
+	root, h, m, sess := emitFixture(t, []string{
+		"混合/【作者A】标题1.jpg",
+		"混合/11111111_p0.jpg",
+	})
+	works := []*SelectableWork{{
+		WorkID: "d:混合", Kind: WorkKindDirTracks, DirRelKey: "混合",
+		Files: []string{"混合/【作者A】标题1.jpg", "混合/11111111_p0.jpg"},
+	}}
+	resps := collectEmitted(t, h, root, sess, works, "混站批次")
+	if len(resps) != 2 {
+		t.Fatalf("混站点批次应按站点产出两应答（local 组+pixiv 组），实得 %d: %+v", len(resps), resps)
+	}
+	localResp, realResp := resps[0], resps[1]
+	if localResp.SiteKey != identity.Local.Key || localResp.TaskName != "混站批次" {
+		t.Fatalf("local 组应裸名+local 站点键，实际 %q/%q", localResp.TaskName, localResp.SiteKey)
+	}
+	if realResp.SiteKey != identity.Pixiv.Key || realResp.TaskName != "混站批次 · pixiv" {
+		t.Fatalf("真实组应带站点名后缀+站点键，实际 %q/%q", realResp.TaskName, realResp.SiteKey)
+	}
+	if !strings.HasPrefix(localResp.PluginTaskId, "local-batch-") ||
+		realResp.PluginTaskId != localResp.PluginTaskId+"@"+identity.Pixiv.Key {
+		t.Fatalf("组身份应为 local-batch-<毫秒> 且真实组追加 @siteKey，实际 %q / %q", localResp.PluginTaskId, realResp.PluginTaskId)
+	}
+	// 子行归属：local 组子行=回退文件（哈希身份）、真实组子行=页级作品 ID 身份
+	if len(localResp.Children) != 1 || localResp.Children[0].TaskName != "【作者A】标题1.jpg" {
+		t.Fatalf("local 组应含回退文件子行，实际 %+v", localResp.Children)
+	}
+	if len(realResp.Children) != 1 || realResp.Children[0].SiteWorkId != "11111111_p0" {
+		t.Fatalf("真实组子行身份应为页级作品 ID，实际 %+v", realResp.Children)
+	}
+	// 批次摘要：2 组、非 local 组 pixiv 1 件
+	summary := m.takeCreateBatchSummary(root)
+	if summary.groups != 2 || len(summary.nonLocalSiteNames) != 1 || summary.nonLocalSiteNames[0] != "pixiv" || summary.nonLocalFiles != 1 {
+		t.Fatalf("批次摘要应记 2 组与非 local 组 pixiv 1 件，实际 %+v", summary)
 	}
 }
 
@@ -406,7 +509,7 @@ func TestCreateWorkbenchFilteredLoneSetMemberLeaf(t *testing.T) {
 func TestApplyCreateTasksGuards(t *testing.T) {
 	t.Run("空选择集", func(t *testing.T) {
 		root, m, ctx := recognizedSelectionFixture(t, nil)
-		if _, err := m.ApplyCreateTasks(root); err == nil || !strings.Contains(err.Error(), "未选择") {
+		if _, err := m.ApplyCreateTasks(root, ""); err == nil || !strings.Contains(err.Error(), "未选择") {
 			t.Fatalf("空选择集应阻断，实际: %v", err)
 		}
 		if ctx.createTaskCalls() != 0 {
@@ -419,7 +522,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		writeTestFile(t, root+"/多轨/新文件.jpg", "x")
-		if _, err := m.ApplyCreateTasks(root); err == nil || !strings.Contains(err.Error(), "磁盘对账未通过") {
+		if _, err := m.ApplyCreateTasks(root, ""); err == nil || !strings.Contains(err.Error(), "磁盘对账未通过") {
 			t.Fatalf("识别后目录新增文件应对账阻断，实际: %v", err)
 		}
 		if ctx.createTaskCalls() != 0 {
@@ -434,7 +537,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 		if err := removeFile(t, root+"/多轨/【作者B】标题2.jpg"); err != nil {
 			t.Fatalf("删除所选文件失败: %v", err)
 		}
-		if _, err := m.ApplyCreateTasks(root); err == nil || !strings.Contains(err.Error(), "磁盘对账未通过") {
+		if _, err := m.ApplyCreateTasks(root, ""); err == nil || !strings.Contains(err.Error(), "磁盘对账未通过") {
 			t.Fatalf("所选文件被删除应对账阻断，实际: %v", err)
 		}
 		if ctx.createTaskCalls() != 0 {
@@ -449,7 +552,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 		if _, err := m.SetAssignment(root, "多轨/【作者B】标题2.jpg", SessionAssignment{Title: "识别后新赋值"}); err != nil {
 			t.Fatalf("识别后写入赋值失败: %v", err)
 		}
-		if _, err := m.ApplyCreateTasks(root); err == nil || !strings.Contains(err.Error(), "重新识别") {
+		if _, err := m.ApplyCreateTasks(root, ""); err == nil || !strings.Contains(err.Error(), "重新识别") {
 			t.Fatalf("赋值修订漂移应阻断并提示重新识别，实际: %v", err)
 		}
 		if ctx.createTaskCalls() != 0 {
@@ -466,10 +569,11 @@ func removeFile(t *testing.T, path string) error {
 
 // —— 创建编排动作：对账通过后一次 CreateTask + 选择集清理 —— //
 
-// TestApplyCreateTasksOrchestration 创建编排动作全链：对账通过 → 置发起标记 →
-// 经宿主 CreateTask 一次调用（local:// 库根）→ 按宿主结论回告创建数 → 清理
-// 选择集（赋值与快照保留）。CreateTask 由桩应答（真实 Create 过滤产出分支由
-// 前述用例直接驱动）。
+// TestApplyCreateTasksOrchestration 创建编排动作全链：对账通过 → 置发起标记+暂存
+// 任务名 → 经宿主 CreateTask 一次调用（local:// 库根）→ 按宿主结论回告创建数与
+// 通知文案（空任务名=默认名兜底；宿主桩不产出=无批次摘要，文案不追加站点组
+// 附注——真实 Create 过滤产出分支由前述用例直接驱动）→ 清理选择集（赋值与
+// 快照保留）。CreateTask 由桩应答。
 func TestApplyCreateTasksOrchestration(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, map[string]SessionAssignment{
 		"多轨/【作者C】标题3.jpg": {Title: "手工标题", UpdatedAtMs: 1},
@@ -477,12 +581,19 @@ func TestApplyCreateTasksOrchestration(t *testing.T) {
 	if _, err := m.SetSelection(root, []string{"d:多轨", "d:已识别", "f:序列/前缀名_001.jpg"}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
-	outcome, err := m.ApplyCreateTasks(root)
+	outcome, err := m.ApplyCreateTasks(root, "")
 	if err != nil {
 		t.Fatalf("创建编排失败: %v", err)
 	}
+	wantName := fmt.Sprintf("本地导入 · %s · 3 件作品", filepath.Base(root))
+	if outcome.TaskName != wantName {
+		t.Fatalf("空任务名应按默认名兜底，期望 %q 实际 %q", wantName, outcome.TaskName)
+	}
 	if outcome.Works != 3 || outcome.Tasks != 3 {
 		t.Fatalf("创建结论应为 3 作品/宿主 3 任务，实际 %+v", outcome)
+	}
+	if want := fmt.Sprintf("已创建任务「%s」：3 件作品（3 个子任务，Created 待手动开始）", wantName); outcome.Message != want {
+		t.Fatalf("通知文案应为批次任务形态，期望 %q 实际 %q", want, outcome.Message)
 	}
 	if got := ctx.createTaskURL(); got != "local://"+root {
 		t.Fatalf("CreateTask 应以 local:// 库根调用一次，实际 %q", got)
@@ -503,6 +614,55 @@ func TestApplyCreateTasksOrchestration(t *testing.T) {
 	// 发起标记仍为置位态：真实流由 Create 分派消费（桩不经 Create，此处核验标记在位）
 	if !m.ConsumeWorkbenchCreateMarker(root) {
 		t.Fatalf("CreateTask 前置位的发起标记应在位（真实流由 Create 分派消费）")
+	}
+}
+
+// TestApplyCreateTasksCustomName 自定义任务名：非空载荷（含首尾空白）裁剪后生效，
+// 不走默认名兜底。
+func TestApplyCreateTasksCustomName(t *testing.T) {
+	root, m, _ := recognizedSelectionFixture(t, nil)
+	if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		t.Fatalf("写入选择集失败: %v", err)
+	}
+	outcome, err := m.ApplyCreateTasks(root, "  我的批次  ")
+	if err != nil {
+		t.Fatalf("创建编排失败: %v", err)
+	}
+	if outcome.TaskName != "我的批次" {
+		t.Fatalf("自定义任务名应裁剪首尾空白后生效，实际 %q", outcome.TaskName)
+	}
+	if !strings.Contains(outcome.Message, "已创建任务「我的批次」") {
+		t.Fatalf("通知文案应携带生效任务名，实际 %q", outcome.Message)
+	}
+}
+
+// TestBuildCreateTasksMessageSiteSuffix 通知文案的站点组附注：单组无附注；多组
+// 追加「另有 <站点名> 组 n 件」（n=非 local 组文件数合计，多站点名按首见序、
+// 顿号连写）。
+func TestBuildCreateTasksMessageSiteSuffix(t *testing.T) {
+	single := buildCreateTasksMessage("本地导入 · 库 · 3 件作品", 3, 3, createBatchSummary{groups: 1})
+	if want := "已创建任务「本地导入 · 库 · 3 件作品」：3 件作品（3 个子任务，Created 待手动开始）"; single != want {
+		t.Fatalf("单组文案不追加附注，期望 %q 实际 %q", want, single)
+	}
+	multi := buildCreateTasksMessage("混站批次", 5, 5, createBatchSummary{
+		groups: 2, nonLocalSiteNames: []string{"pixiv"}, nonLocalFiles: 2,
+	})
+	if want := "已创建任务「混站批次」：5 件作品（5 个子任务，Created 待手动开始）；另有 pixiv 组 2 件"; multi != want {
+		t.Fatalf("多组文案应追加站点组附注，期望 %q 实际 %q", want, multi)
+	}
+}
+
+// TestResolveCreateTaskName 任务名裁决：空串/全空白=默认名兜底（本地导入 · 库根
+// 名 · N 件作品），非空白=裁剪首尾空白后采用。
+func TestResolveCreateTaskName(t *testing.T) {
+	if got := resolveCreateTaskName("", `D:\媒体库`, 3); got != `本地导入 · 媒体库 · 3 件作品` {
+		t.Fatalf("空任务名应兜底默认名，实际 %q", got)
+	}
+	if got := resolveCreateTaskName("  \t\n ", `D:\媒体库`, 3); got != `本地导入 · 媒体库 · 3 件作品` {
+		t.Fatalf("全空白任务名应兜底默认名，实际 %q", got)
+	}
+	if got := resolveCreateTaskName("  我的批次 ", `D:\媒体库`, 3); got != "我的批次" {
+		t.Fatalf("非空白任务名应裁剪后采用，实际 %q", got)
 	}
 }
 
@@ -575,13 +735,12 @@ func TestAssignmentSnapshotSelfContainedAfterSessionDeletion(t *testing.T) {
 	if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
-	resps := collectWorkbenchCreate(t, m, ctx, root)
-	dirResp := findResponseByParent(resps, "local-dir-多轨")
-	if dirResp == nil {
-		t.Fatalf("缺少目录聚合作品父行: %+v", resps)
+	resps := collectWorkbenchCreate(t, m, ctx, root, "")
+	if len(resps) != 1 {
+		t.Fatalf("纯 local 批次应为单应答单父，实得 %+v", resps)
 	}
 	var target *sdkdto.TaskCreateChildResponse
-	for _, child := range dirResp.Children {
+	for _, child := range resps[0].Children {
 		if child.TaskName == "【作者C】标题3.jpg" {
 			target = child
 		}
@@ -618,12 +777,12 @@ func TestPredicateConsistencyAcrossDryRunCreateAndRecompute(t *testing.T) {
 		t.Fatalf("谓词识别作品应在干跑结论下可选: %v", err)
 	}
 
-	// ② 创建侧：过滤产出该作品任务
-	resps := collectWorkbenchCreate(t, m, ctx, root)
-	if len(resps) != 1 || resps[0].TaskName != "库内作者名.jpg" {
-		t.Fatalf("所选谓词识别作品应产出单叶任务，实得 %+v", resps)
+	// ② 创建侧：过滤产出该作品任务（批次父行+子行形态）
+	resps := collectWorkbenchCreate(t, m, ctx, root, "")
+	if len(resps) != 1 || len(resps[0].Children) != 1 || resps[0].Children[0].TaskName != "库内作者名.jpg" {
+		t.Fatalf("所选谓词识别作品应产出批次父行+单子行，实得 %+v", resps)
 	}
-	leaf := resps[0]
+	leaf := resps[0].Children[0]
 
 	// ③ 重算侧：删除会话后 CreateWorkInfo 注入同一库内索引 → 谓词作者声明再现
 	if err := m.DeleteSession(root); err != nil {
@@ -648,8 +807,8 @@ func TestPredicateConsistencyAcrossDryRunCreateAndRecompute(t *testing.T) {
 // —— 前端动作分派：setSelection / createTasks —— //
 
 // TestWorkbenchSelectionActionsDispatch 前端事件协议的选择族动作分派：
-// setSelection 落库并回告决策态；createTasks 走编排（桩 CreateTask 成功）并
-// 回告创建数与摘要；未知动作回告错误。
+// setSelection 落库并回告决策态；createTasks 携可选 taskName 走编排（桩
+// CreateTask 成功）并回告创建数与摘要（任务名生效）；未知动作回告错误。
 func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, nil)
 
@@ -659,10 +818,13 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 		t.Fatalf("setSelection 应回告已落库决策态，实际 %+v", resp)
 	}
 
-	m.HandleFrontendRequest([]byte(`{"seq":42,"action":"createTasks","root":` + jsonQuote(root) + `}`))
+	m.HandleFrontendRequest([]byte(`{"seq":42,"action":"createTasks","root":` + jsonQuote(root) + `,"taskName":"命名批次"}`))
 	resp = ctx.lastResponse(t)
 	if !resp.OK || resp.Created != 2 || resp.CreateMsg == "" {
 		t.Fatalf("createTasks 应回告创建结论，实际 %+v", resp)
+	}
+	if !strings.Contains(resp.CreateMsg, "已创建任务「命名批次」") {
+		t.Fatalf("createTasks 摘要应携带生效任务名（taskName 载荷透传），实际 %q", resp.CreateMsg)
 	}
 	if resp.Decisions == nil || len(resp.Decisions.Selection) != 0 {
 		t.Fatalf("createTasks 后选择集应清理，实际 %+v", resp.Decisions)

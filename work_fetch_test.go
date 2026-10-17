@@ -378,31 +378,24 @@ func TestCreateWorkInfoLegacyPseudoFormDataConvertsByName(t *testing.T) {
 	}
 }
 
-// TestBuildDirGroupResponseRealParentIdentity 真实域多文件组：父任务身份加站点键后缀
-// （PluginTaskId 是同流应答的父任务合并键，同目录拆分的两组须可区分），子任务带页级 ID
-// 与归属字段；真实域单文件成叶任务（身份=页级 ID）
-func TestBuildDirGroupResponseRealParentIdentity(t *testing.T) {
+// TestBuildBatchParentResponseRealGroupIdentity 真实域组：父任务身份加站点键后缀
+//（PluginTaskId 是同流应答的父任务合并键，同批拆分的各组须可区分——批次组身份
+// 由 emitSelectedWorks 按 local-batch-<毫秒>@siteKey 生成），子任务带页级 ID 与
+// 归属字段；单子行亦为父行（批次父行纯容器——v1 的单文件叶任务折叠废除）；父
+// PluginData 为纯容器（DirRelPath 空、无含义链）。
+func TestBuildBatchParentResponseRealGroupIdentity(t *testing.T) {
 	dir := t.TempDir()
 	f1 := writeFile(t, filepath.Join(dir, "11111111_p0.jpg"), "a")
 	f2 := writeFile(t, filepath.Join(dir, "11111111_p1.jpg"), "b")
-	files := []attributedFile{
-		{entry: FileEntry{FullPath: f1, RelPath: "sub/11111111_p0.jpg", Hash: "h1"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p0"}},
-		{entry: FileEntry{FullPath: f2, RelPath: "sub/11111111_p1.jpg", Hash: "h2"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p1"}},
+	items := []batchFileItem{
+		{af: attributedFile{entry: FileEntry{FullPath: f1, RelPath: "sub/11111111_p0.jpg", Hash: "h1"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p0"}}},
+		{af: attributedFile{entry: FileEntry{FullPath: f2, RelPath: "sub/11111111_p1.jpg", Hash: "h2"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p1"}}},
 	}
-	resp := buildDirGroupResponse("root", "sub", "导入【root】", nil, files, nil)
-	if resp == nil {
-		t.Fatalf("应产出父任务应答")
+	children := buildChildResponses(items, nil)
+	if len(children) != 2 {
+		t.Fatalf("应产出 2 子行，实得 %d", len(children))
 	}
-	if resp.PluginTaskId != "local-dir-sub@"+identity.Pixiv.Key || resp.SiteWorkId != resp.PluginTaskId {
-		t.Fatalf("真实域父任务身份应为 local-dir-sub@pixiv，实得 %q/%q", resp.PluginTaskId, resp.SiteWorkId)
-	}
-	if resp.SiteKey != identity.Pixiv.Key {
-		t.Fatalf("真实域组应答站点键应为 pixiv，实得 %q", resp.SiteKey)
-	}
-	if len(resp.Children) != 2 {
-		t.Fatalf("应含 2 子任务，实得 %d", len(resp.Children))
-	}
-	for _, child := range resp.Children {
+	for _, child := range children {
 		var fp FilePluginData
 		if err := json.Unmarshal([]byte(child.PluginData), &fp); err != nil {
 			t.Fatalf("解析子任务 PluginData 失败: %v", err)
@@ -411,11 +404,24 @@ func TestBuildDirGroupResponseRealParentIdentity(t *testing.T) {
 			t.Fatalf("子任务 PluginData 应携带归属字段且与身份一致，实得 child=%q fp=%+v", child.SiteWorkId, fp)
 		}
 	}
-
-	single := []attributedFile{files[0]}
-	leaf := buildDirGroupResponse("root", "sub", "导入【root】", nil, single, nil)
-	if leaf == nil || leaf.Children != nil || leaf.PluginTaskId != "11111111_p0" || leaf.SiteWorkId != "11111111_p0" {
-		t.Fatalf("真实域单文件应成叶任务(身份=页级 ID)，实得 %+v", leaf)
+	resp := buildBatchParentResponse("local-batch-1700000000000@"+identity.Pixiv.Key, "批次 · pixiv", "local://root", identity.Pixiv.Key, children)
+	if resp.PluginTaskId != "local-batch-1700000000000@"+identity.Pixiv.Key || resp.SiteWorkId != resp.PluginTaskId {
+		t.Fatalf("真实域父任务身份应为 local-batch-<毫秒>@pixiv，实得 %q/%q", resp.PluginTaskId, resp.SiteWorkId)
+	}
+	if resp.SiteKey != identity.Pixiv.Key || resp.TaskName != "批次 · pixiv" {
+		t.Fatalf("真实域组应答站点键与任务名，实得 %q/%q", resp.SiteKey, resp.TaskName)
+	}
+	var dp DirPluginData
+	if err := json.Unmarshal([]byte(resp.PluginData), &dp); err != nil {
+		t.Fatalf("解析父行 PluginData 失败: %v", err)
+	}
+	if dp.DirRelPath != "" || dp.Metadata != nil {
+		t.Fatalf("批次父行 PluginData 应为纯容器（DirRelPath 空、无含义链），实际 %+v", dp)
+	}
+	// 单子行亦为父行（一次创建=一个父任务；宿主 parent+children 不折叠契约）
+	single := buildBatchParentResponse("local-batch-1700000000000", "单件", "local://root", identity.Local.Key, children[:1])
+	if len(single.Children) != 1 {
+		t.Fatalf("单子行组亦应为父行+单子行（不折叠为叶任务），实得 %+v", single)
 	}
 }
 
