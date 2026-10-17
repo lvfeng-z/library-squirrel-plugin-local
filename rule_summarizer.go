@@ -4,7 +4,7 @@ package main
 // 手填值无出处时以「值=某段」自动匹配兜底）推导结构映射，构造组合规则——
 // 目录层锚定+剥壳变换（LocationPattern MinDepth=层深-1）/ 文件名分隔段捕获
 //（RegexPattern）/ 尾部码丢弃（正则仅消费不捕获）/ 库根名常量。出参=人话
-// 规则+逐维度映射+命中预览统计+样例应用；仅总结不入档，用户确认
+// 规则+逐维度映射+全库命中预览统计+跨目录样例应用；仅总结不入档，用户确认
 //（generalize mode=struct）才经档案写单点（ArchiveWriteGeneralize）入档。
 
 import (
@@ -32,15 +32,19 @@ type structMappingSlot struct {
 type RuleSuggestionMapping struct {
 	// Dimension 含义维度（author/title/tag/collection）。
 	Dimension string `json:"dimension"`
-	// From 来源人话（如「一级目录(剥壳)」「文件名首段」「库根名」「手工指定」）。
+	// From 来源人话（如「一级目录剥壳」「文件名首段」「库根名」「手工指定」）。
 	From string `json:"from"`
 	// ClueRef 解析到的线索引用（手工指定为空）。
 	ClueRef string `json:"clueRef,omitempty"`
 }
 
-// RuleSuggestionSample 建议卡的样例应用：同目录其他文件按组合规则求值的结论。
+// RuleSuggestionSample 建议卡的样例应用：全库内被组合规则完整命中的其他文件
+// 按组合规则求值的结论。
 type RuleSuggestionSample struct {
 	FileName string `json:"fileName"`
+	// DirRelKey 样例文件所在目录键（相对库根的 '/' 目录路径，根直下为空串）：
+	// 全库预览的样例跨目录呈现。
+	DirRelKey string `json:"dirRelKey,omitempty"`
 	// Result 人话结论（如「作者=Jake--Jaccobus，作品名=2b」）。
 	Result string `json:"result"`
 }
@@ -57,11 +61,11 @@ type RuleSuggestion struct {
 	ManualDims []string `json:"manualDims,omitempty"`
 	// Rules 将入档的组合规则摘要（目录层/文件名/库根名条目序列）。
 	Rules []*GeneratedRuleView `json:"rules"`
-	// HitCount 命中预览：同目录其余文件中将被组合规则覆盖的数量；
-	// HitTotal 同目录文件总数（含自身）。
+	// HitCount 命中预览（全库）：除样本文件外将被组合规则完整覆盖的文件数；
+	// HitTotal 全库文件总数（含样本自身）。
 	HitCount int `json:"hitCount"`
 	HitTotal int `json:"hitTotal"`
-	// Samples 样例应用（同目录其余文件的前 3 个求值结论）。
+	// Samples 样例应用（全库内其余命中文件按快照序的前 3 个，附目录键）。
 	Samples []RuleSuggestionSample `json:"samples"`
 	// DropsTailCode 样例文件存在尾部码线索且被规则丢弃（人话提示用）。
 	DropsTailCode bool `json:"dropsTailCode,omitempty"`
@@ -80,6 +84,9 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 		byRef[clues[i].Ref] = &clues[i]
 	}
 	hasTail := byRef[structClueTailCode] != nil
+
+	// 文件名分段形态走查（v2：分隔符/括号感知构造与段降级判定的底座）。
+	segPlan, segPlanOK := structFilenamePlanOf(fileName, structSegValuesOf(clues))
 
 	slots := collectStructSlots(assign)
 	for i := range slots {
@@ -127,8 +134,18 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 			plan.slots = append(plan.slots, s)
 		case structClueFilenameSeg:
 			idx := structSegIndexOf(s.clue.Ref)
-			if idx < 0 || usedSegIdx[idx] || strings.Contains(s.clue.Value, "__") {
-				// 已被更早维度占用的段、含 __ 的已知名段（正则无法按段表达）→ 手工。
+			// 已被更早维度占用的段、形态走查失配的段 → 手工；段值含活跃分隔符的
+			// 段同样无法按段表达（_ 模式段类排除 _；__ 模式普通段排除 __，括号段
+			// 以闭括号为界不受限）。
+			bad := idx < 0 || usedSegIdx[idx] || !segPlanOK || idx >= len(segPlan.forms)
+			if !bad {
+				if segPlan.underscore {
+					bad = strings.Contains(s.clue.Value, "_")
+				} else if segPlan.forms[idx].bracket == nil {
+					bad = strings.Contains(s.clue.Value, "__")
+				}
+			}
+			if bad {
 				s.manual = true
 				continue
 			}
@@ -175,7 +192,7 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 
 	// 文件名条目（分隔段捕获，尾部码自然丢弃）。
 	if len(fileSlots) > 0 {
-		if rule, ok := buildStructFilenameRule(relPath, fileName, fileSlots); ok {
+		if rule, ok := buildStructFilenameRule(relPath, fileName, segPlan, fileSlots); ok {
 			rules = append(rules, rule)
 			for _, s := range fileSlots {
 				phrases = append(phrases, structFilePhrase(s))
@@ -323,11 +340,76 @@ func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 	return rule, true
 }
 
-// buildStructFilenameRule 构造文件名分隔段规则：各槽按段序展开——第 i 段前的
-// 段以非贪婪 `__` 前缀整体消费、值位为命名捕获组；末槽后的其余段与扩展名
-// 整体吞掉（尾部码丢弃），中间槽以 `__` 收界。自检：样例文件上各捕获值必须
-// 复现赋值值。
-func buildStructFilenameRule(relPath, fileName string, slots []*structMappingSlot) (RuleEntry, bool) {
+// structFilenamePlan 样例文件名的分段形态走查（buildStructFilenameRule v2 的
+// 底座）：段值依序在正文（去扩展名）中定位，重建每段的间隔原文与括号包裹；
+// underscore 为「含括号组且段间无 __」的单 _ 分隔模式。
+type structFilenamePlan struct {
+	forms      []structSegForm
+	underscore bool
+}
+
+// structSegForm 单段的构造形态：与前一段值之间的间隔原文（括号段已折出开
+// 括号）与包裹括号对（nil=普通段）。
+type structSegForm struct {
+	gap     string
+	bracket *bracketPair
+}
+
+// structFilenamePlanOf 走查样例文件名的分段形态；段值不按序出现等失配返回
+// false（调用方将文件名槽降级手工）。正文取与 splitFilenameSegments 同源的
+// 归一规则（等长时保留原文），段值必为正文切片、依序可寻。间隔中括号段前后
+// 的开/闭括号折入段自身（段类只裹内名）。
+func structFilenamePlanOf(fileName string, segs []string) (structFilenamePlan, bool) {
+	base := BaseNameWithoutExt(fileName)
+	src := base
+	if text := normalizeNameHint(base); len(text) != len(base) {
+		src = text
+	}
+	forms := make([]structSegForm, 0, len(segs))
+	pos, hasBracket, hasDouble := 0, false, false
+	for _, seg := range segs {
+		off := strings.Index(src[pos:], seg)
+		if off < 0 {
+			return structFilenamePlan{}, false
+		}
+		start, end := pos+off, pos+off+len(seg)
+		form := structSegForm{gap: src[pos:start]}
+		for _, p := range bracketPairs {
+			if strings.HasSuffix(form.gap, p.open) && strings.HasPrefix(src[end:], p.close) {
+				bracket := p
+				form.bracket = &bracket
+				form.gap = form.gap[:len(form.gap)-len(p.open)]
+				end += len(p.close)
+				break
+			}
+		}
+		hasBracket = hasBracket || form.bracket != nil
+		hasDouble = hasDouble || strings.Contains(form.gap, "__")
+		forms = append(forms, form)
+		pos = end
+	}
+	return structFilenamePlan{forms: forms, underscore: hasBracket && !hasDouble}, true
+}
+
+// structSegValuesOf 线索集 → 文件名段值序列（filenameSeg 线索按下标序生成，
+// 按出现序收集即得段序；尾部码线索不在其列）。
+func structSegValuesOf(clues []SnapStructClue) []string {
+	var segs []string
+	for i := range clues {
+		if clues[i].Kind == structClueFilenameSeg {
+			segs = append(segs, clues[i].Value)
+		}
+	}
+	return segs
+}
+
+// buildStructFilenameRule 构造文件名分隔段规则（v2：分隔符/括号感知）：按样例
+// 文件名的实际分段形态逐段展开——段间隔以字面连接，首个捕获组前的未捕获段
+// 逐一按形态消费；括号段以开/闭括号字面包裹、段类排除闭括号；_ 模式（含括号
+// 组且段间无 __）普通段用 `[^_]` 段类、末段后以 `(?:_.*)?` 吞余部，__ 模式维持
+// `[^_].*?`+`__` 既有形态。末槽后的其余段与扩展名整体吞掉（尾部码丢弃）。
+// 自检：样例文件上各捕获值必须复现赋值值。
+func buildStructFilenameRule(relPath, fileName string, plan structFilenamePlan, slots []*structMappingSlot) (RuleEntry, bool) {
 	sorted := make([]*structMappingSlot, len(slots))
 	copy(sorted, slots)
 	for i := 1; i < len(sorted); i++ {
@@ -341,11 +423,16 @@ func buildStructFilenameRule(relPath, fileName string, slots []*structMappingSlo
 	captures := make([]string, 0, len(sorted))
 	extractions := make([]ExtractionAction, 0, len(sorted))
 	for i, s := range sorted {
-		expr.WriteString(strings.Repeat(`(?:[^_].*?)__`, s.segIndex-prev))
+		for j := prev; j < s.segIndex; j++ {
+			writeStructSegForm(&expr, plan.forms[j], "", plan.underscore)
+		}
+		writeStructSegForm(&expr, plan.forms[s.segIndex], s.group, plan.underscore)
 		if i == len(sorted)-1 {
-			expr.WriteString("(?P<" + s.group + ">[^_].*?)(?:__.*)?(?:\\.[^.]*)?$")
-		} else {
-			expr.WriteString("(?P<" + s.group + ">[^_].*?)__")
+			if plan.underscore {
+				expr.WriteString("(?:_.*)?(?:\\.[^.]*)?$")
+			} else {
+				expr.WriteString("(?:__.*)?(?:\\.[^.]*)?$")
+			}
 		}
 		prev = s.segIndex + 1
 		captures = append(captures, s.group)
@@ -379,6 +466,63 @@ func buildStructFilenameRule(relPath, fileName string, slots []*structMappingSlo
 		}
 	}
 	return rule, true
+}
+
+// structBracketClassChars 括号对开（open=true）/闭括号字面集的字符类内容
+// （QuoteMeta 后可直接拼入 []）。_ 模式普通段的段类排除集：括号包裹视作同形
+// 装饰（可选消费），同形异值文件上该位置的括号不混入段值。
+func structBracketClassChars(open bool) string {
+	var b strings.Builder
+	for _, p := range bracketPairs {
+		c := p.close
+		if open {
+			c = p.open
+		}
+		b.WriteString(regexp.QuoteMeta(c))
+	}
+	return b.String()
+}
+
+var (
+	structOpenChars  = structBracketClassChars(true)
+	structCloseChars = structBracketClassChars(false)
+)
+
+// writeStructSegForm 写入单段正则形态：段间隔字面 + 括号段的开括号字面 + 捕获
+// （group 非空）或消费段类 + 闭括号字面。_ 模式段类排除活跃分隔符 _（括号段
+// 连闭括号一并排除），普通段以可选括号包裹容纳同形异值的装饰差异；__ 模式
+// 普通段维持 `[^_].*?` 既有形态、括号段仅排除闭括号（内名可含 _ / __，以闭
+// 括号收界）。
+func writeStructSegForm(b *strings.Builder, f structSegForm, group string, underscore bool) {
+	b.WriteString(regexp.QuoteMeta(f.gap))
+	if f.bracket == nil {
+		if underscore {
+			b.WriteString("(?:[" + structOpenChars + "])?")
+			if group == "" {
+				b.WriteString("[^" + structOpenChars + structCloseChars + "_]*")
+			} else {
+				b.WriteString("(?P<" + group + ">[^" + structOpenChars + structCloseChars + "_]+?)")
+			}
+			b.WriteString("(?:[" + structCloseChars + "])?")
+			return
+		}
+		if group == "" {
+			b.WriteString("(?:[^_].*?)")
+		} else {
+			b.WriteString("(?P<" + group + ">[^_].*?)")
+		}
+		return
+	}
+	excl := regexp.QuoteMeta(f.bracket.close)
+	if underscore {
+		excl += "_"
+	}
+	if group == "" {
+		b.WriteString(regexp.QuoteMeta(f.bracket.open) + "[^" + excl + "]*")
+	} else {
+		b.WriteString(regexp.QuoteMeta(f.bracket.open) + "(?P<" + group + ">[^" + excl + "]+?)")
+	}
+	b.WriteString(regexp.QuoteMeta(f.bracket.close))
 }
 
 // —— 纯辅助 ——
@@ -513,7 +657,7 @@ func structFilePhrase(s *structMappingSlot) string {
 func structFromLabel(s *structMappingSlot) string {
 	switch s.clue.Kind {
 	case structClueDirLevelStripped:
-		return dirLevelLabel(structClueLevelOf(s.clue.Ref)) + "(剥壳)"
+		return dirLevelLabel(structClueLevelOf(s.clue.Ref)) + "剥壳"
 	case structClueDirLevel:
 		return dirLevelLabel(structClueLevelOf(s.clue.Ref))
 	case structClueRootName:
@@ -547,14 +691,34 @@ func escapeForClass(c rune) string {
 
 // —— 会话动作 ——
 
-// ApplyStructSummary 规则总结器动作（summarizeRule）：从赋值与线索出处推导
-// 组合规则建议（人话规则+命中预览+样例应用），不写档案、不触发重识别——
-// 用户确认走 generalize（mode=struct）才入档。
+// ApplyStructSummary 规则总结器动作（summarizeRule，单文件寻址）：从赋值与线索
+// 出处推导组合规则建议（人话规则+全库命中预览+样例应用），不写档案、不触发
+// 重识别——用户确认走 generalize（mode=struct）才入档。
 func (m *SessionManager) ApplyStructSummary(root, relPath string) (*RuleSuggestion, error) {
+	return m.applyStructSummary(root, relPath, "")
+}
+
+// ApplyDirStructSummary 规则总结器动作（summarizeRule，目录寻址）：样本文件取
+// 子树内首个有赋值的文件；建议卡 RelPath 呈现目录键（供前端目录面板呈现，
+// 确认入档走 generalize 的目录寻址）。
+func (m *SessionManager) ApplyDirStructSummary(root, dirRelKey string) (*RuleSuggestion, error) {
+	return m.applyStructSummary(root, "", dirRelKey)
+}
+
+// applyStructSummary 规则总结器落地单一实现：relPath 非空=单文件寻址；空=
+// 目录寻址（dirRelKey 子树，样本=首个有赋值的文件）。
+func (m *SessionManager) applyStructSummary(root, relPath, dirRelKey string) (*RuleSuggestion, error) {
 	relPath = filepath.ToSlash(relPath)
+	dirAddressed := relPath == ""
 	sess, err := m.loadSession(root)
 	if err != nil {
 		return nil, err
+	}
+	if dirAddressed {
+		_, relPath, err = dirScopedFiles(sess, dirRelKey, "总结规则")
+		if err != nil {
+			return nil, err
+		}
 	}
 	assign, ok := sess.Assignments[relPath]
 	if !ok {
@@ -575,21 +739,20 @@ func (m *SessionManager) ApplyStructSummary(root, relPath string) (*RuleSuggesti
 		return nil, err
 	}
 	sugg.HitCount, sugg.HitTotal, sugg.Samples = previewStructRules(rules, sess.Snapshot, relPath)
+	if dirAddressed {
+		sugg.RelPath = dirRelKey
+	}
 	return sugg, nil
 }
 
-// previewStructRules 命中预览：同目录文件逐一经组合规则求值（各规则独立
-// 上下文，与流水线逐规则求值同构），全部命中才算覆盖；统计其余文件命中数
-// 与前 3 个样例结论。
+// previewStructRules 命中预览（全库）：全库文件逐一经组合规则求值（各规则独立
+// 上下文，与流水线逐规则求值同构），全部命中才算覆盖；统计除样本文件外的命中
+// 数与全库文件总数，样例取跨目录（快照序）前 3 个求值结论（附目录键）。
 func previewStructRules(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPath string) (int, int, []RuleSuggestionSample) {
-	dirRelKey := strings.Join(ExtractDirLevels(selfRelPath), "/")
 	hitCount, hitTotal := 0, 0
 	var samples []RuleSuggestionSample
 	for i := range snap.Files {
 		f := &snap.Files[i]
-		if f.DirRelKey != dirRelKey {
-			continue
-		}
 		hitTotal++
 		in := &MatchInput{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath}
 		var decls []MetadataDeclaration
@@ -619,7 +782,7 @@ func previewStructRules(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPat
 				parts = append(parts, qnaDimensionLabel(decl.Dimension)+"="+decl.Value)
 			}
 			samples = append(samples, RuleSuggestionSample{
-				FileName: f.FileName, Result: strings.Join(parts, "，"),
+				FileName: f.FileName, DirRelKey: f.DirRelKey, Result: strings.Join(parts, "，"),
 			})
 		}
 	}

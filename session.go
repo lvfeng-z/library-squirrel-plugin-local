@@ -555,22 +555,6 @@ func (m *SessionManager) ClearAssignment(root, relPath string) (*WorkbenchSessio
 	return m.SetAssignment(root, relPath, SessionAssignment{})
 }
 
-// MarkAssignmentGeneralized 置赋值的已泛化标记（元素7：已泛化的赋值其档案规则
-// 亦会产出同值声明，标记供呈现与清理提示）。
-func (m *SessionManager) MarkAssignmentGeneralized(root, relPath string, generalized bool) (*WorkbenchSession, error) {
-	relPath = filepath.ToSlash(relPath)
-	return m.mutateSession(root, func(sess *WorkbenchSession) error {
-		assign, ok := sess.Assignments[relPath]
-		if !ok {
-			return fmt.Errorf("文件 %s 无会话赋值，无法标记泛化", relPath)
-		}
-		assign.Generalized = generalized
-		assign.UpdatedAtMs = time.Now().UnixMilli()
-		sess.Assignments[relPath] = assign
-		return nil
-	})
-}
-
 // SetIgnored 登记或解除文件的忽略项（元素7：已忽略项不再参与后续解析关注；
 // 幂等）。ignored 为假时移除登记。
 func (m *SessionManager) SetIgnored(root, relPath string, ignored bool) (*WorkbenchSession, error) {
@@ -624,23 +608,25 @@ func (m *SessionManager) UpdateProfile(entry ArchiveWriteEntry, mutate func(p *R
 
 // 前端请求动作词汇。
 const (
-	workbenchActionListSessions     = "listSessions"
-	workbenchActionCreateSession    = "createSession"
-	workbenchActionReplaceSession   = "replaceSession"
-	workbenchActionDeleteSession    = "deleteSession"
-	workbenchActionActivateSession  = "activateSession"
-	workbenchActionConfirmAnswer    = "confirmAnswer"
-	workbenchActionStartRecognition = "startRecognition"
-	workbenchActionGetPanorama      = "getPanorama"
-	workbenchActionAssign           = "assign"        // 单次赋值（会话态知识写入）
-	workbenchActionClearAssignment  = "clearAssignment" // 清除单文件赋值
-	workbenchActionSetIgnored       = "setIgnored"    // 登记或解除忽略项
-	workbenchActionGeneralize       = "generalize"    // 泛化成规则（档案写+验证轮；mode=struct 为结构映射组合规则的确认入档）
-	workbenchActionSummarizeRule    = "summarizeRule" // 规则总结器：赋值线索出处→组合规则建议（人话+命中预览+样例；不写档案）
-	workbenchActionAdjudicate       = "adjudicate"    // 冲突裁决生成组合规则
-	workbenchActionGetDiff          = "getDiff"       // 最近一次重识别差异集
-	workbenchActionSetSelection     = "setSelection"  // 全量替换资源选择集（作品键）
-	workbenchActionCreateTasks      = "createTasks"   // 创建编排（对账→CreateTask→清理选择集）
+	workbenchActionListSessions        = "listSessions"
+	workbenchActionCreateSession       = "createSession"
+	workbenchActionReplaceSession      = "replaceSession"
+	workbenchActionDeleteSession       = "deleteSession"
+	workbenchActionActivateSession     = "activateSession"
+	workbenchActionConfirmAnswer       = "confirmAnswer"
+	workbenchActionStartRecognition    = "startRecognition"
+	workbenchActionGetPanorama         = "getPanorama"
+	workbenchActionAssign              = "assign"              // 单次赋值（会话态知识写入）
+	workbenchActionAssignDir           = "assignDir"           // 目录赋值（子树展开逐文件合并写；dirRelKey 寻址）
+	workbenchActionClearAssignment     = "clearAssignment"     // 清除单文件赋值
+	workbenchActionClearDirAssignments = "clearDirAssignments" // 清除目录子树全部赋值
+	workbenchActionSetIgnored          = "setIgnored"          // 登记或解除忽略项
+	workbenchActionGeneralize          = "generalize"          // 泛化成规则（档案写+验证轮；mode=struct 为结构映射组合规则的确认入档）
+	workbenchActionSummarizeRule       = "summarizeRule"       // 规则总结器：赋值线索出处→组合规则建议（人话+全库命中预览+样例；不写档案）
+	workbenchActionAdjudicate          = "adjudicate"          // 冲突裁决生成组合规则
+	workbenchActionGetDiff             = "getDiff"             // 最近一次重识别差异集
+	workbenchActionSetSelection        = "setSelection"        // 全量替换资源选择集（作品键）
+	workbenchActionCreateTasks         = "createTasks"         // 创建编排（对账→CreateTask→清理选择集）
 
 	// —— 规则管理族（规则子页）——
 	workbenchActionGetRules           = "getRules"           // 规则管理视图（档案条目+内置表+禁用清单+备份态）
@@ -673,6 +659,10 @@ type workbenchFrontendRequest struct {
 	// —— 手动解析族载荷（relPath 为相对库根的 '/' 路径）——
 	// RelPath 赋值/泛化/裁决/忽略的目标文件相对路径。
 	RelPath string `json:"relPath,omitempty"`
+	// DirRelKey 目录寻址键（相对库根的 '/' 目录路径，根直下为空串）：assignDir /
+	// clearDirAssignments 的目标子树（空串=库根全树）；generalize / summarizeRule
+	// 的目录寻址（relPath 缺省时生效，样本文件取子树内首个有赋值的文件）。
+	DirRelKey string `json:"dirRelKey,omitempty"`
 	// Author / AuthorRole / Title / Tags / Collection 单次赋值的各维度指定
 	//（assign 动作；空维度不覆盖档案结论）。
 	Author     string   `json:"author,omitempty"`
@@ -764,6 +754,9 @@ type workbenchFrontendResponse struct {
 	Diff *SnapDiff `json:"diff,omitempty"`
 	// Assignment assign/clearAssignment 后该文件的赋值呈现（清除后为空）。
 	Assignment *workbenchAssignmentView `json:"assignment,omitempty"`
+	// Affected assignDir/clearDirAssignments 的生效文件计数（目录赋值合并写
+	// 触及的子树文件数 / 清除的赋值数）。
+	Affected int `json:"affected,omitempty"`
 	// Rule generalize/adjudicate 生成的规则摘要（已入档案并触发验证轮）。
 	Rule *GeneratedRuleView `json:"rule,omitempty"`
 	// Rules generalize（mode=struct）入档的组合规则摘要序列（单规则维度仍填
@@ -788,7 +781,8 @@ type workbenchFrontendResponse struct {
 // workbenchSessionDecisionsView 会话决策态投影（元素7 的活数据——赋值/忽略/
 // 选择集随用户操作即时变化，不入识别快照）。
 type workbenchSessionDecisionsView struct {
-	// Assignments 已手动解析项（含是否已泛化标记）。
+	// Assignments 已手动解析项（泛化即接管后仅残存未消费维度的赋值在场，
+	// 含已泛化标记）。
 	Assignments []workbenchAssignmentView `json:"assignments,omitempty"`
 	// Ignored 已忽略项；Selection 已选定为任务的作品键集合（两类前缀见
 	// selection.go——作品原子，半作品不可表达）。
@@ -983,6 +977,29 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		}
 		resp.Session = summarizeSession(sess)
 		resp.Assignment = view
+	case workbenchActionAssignDir:
+		sess, affected, err := m.ApplyDirAssignment(req.Root, req.DirRelKey, SessionAssignment{
+			Author: req.Author, AuthorRole: req.AuthorRole, Title: req.Title,
+			Tags: req.Tags, Collection: req.Collection,
+			AuthorClueRef: req.AuthorClueRef, TitleClueRef: req.TitleClueRef,
+			CollectionClueRef: req.CollectionClueRef, TagClueRefs: req.TagClueRefs,
+		})
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Session = summarizeSession(sess)
+		resp.Decisions = decisionsViewOf(sess)
+		resp.Affected = affected
+	case workbenchActionClearDirAssignments:
+		sess, affected, err := m.ClearDirAssignments(req.Root, req.DirRelKey)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Session = summarizeSession(sess)
+		resp.Decisions = decisionsViewOf(sess)
+		resp.Affected = affected
 	case workbenchActionSetIgnored:
 		if _, err := m.SetIgnored(req.Root, req.RelPath, req.Ignored); err != nil {
 			resp.OK, resp.Error = false, err.Error()
@@ -992,7 +1009,14 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.Decisions = decisionsViewOf(sess)
 		}
 	case workbenchActionGeneralize:
-		result, err := m.ApplyGeneralization(req.Root, req.RelPath, req.GeneralizeMode)
+		// relPath 缺省=目录寻址（dirRelKey 子树，样本=首个有赋值的文件）。
+		var result *GenerationResult
+		var err error
+		if req.RelPath == "" {
+			result, err = m.ApplyDirGeneralization(req.Root, req.DirRelKey, req.GeneralizeMode)
+		} else {
+			result, err = m.ApplyGeneralization(req.Root, req.RelPath, req.GeneralizeMode)
+		}
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break
@@ -1001,7 +1025,14 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.Rules = result.Rules
 		resp.Started = result.VerificationStarted
 	case workbenchActionSummarizeRule:
-		sugg, err := m.ApplyStructSummary(req.Root, req.RelPath)
+		// relPath 缺省=目录寻址（建议卡 RelPath 呈现目录键）。
+		var sugg *RuleSuggestion
+		var err error
+		if req.RelPath == "" {
+			sugg, err = m.ApplyDirStructSummary(req.Root, req.DirRelKey)
+		} else {
+			sugg, err = m.ApplyStructSummary(req.Root, req.RelPath)
+		}
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break

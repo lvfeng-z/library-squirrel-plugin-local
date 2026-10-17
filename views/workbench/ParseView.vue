@@ -17,7 +17,7 @@
       </span>
     </header>
 
-    <!-- 横幅区：加载失败 / 档案外变 / 会话恢复 -->
+    <!-- 横幅区：加载失败 / 档案外变（仅异常态占位，常态不占行） -->
     <el-alert
       v-if="loadError"
       class="li-ws-banner"
@@ -36,15 +36,6 @@
       show-icon
       title="规则档案在会话外被变更"
       description="既有识别结论可能与最新规则不一致，建议重新识别。"
-    />
-    <el-alert
-      v-else-if="session"
-      class="li-ws-banner"
-      type="success"
-      :closable="false"
-      show-icon
-      :title="`已恢复解析会话（${session.rootPath}）`"
-      description="会话进度与赋值均从插件持久化存储恢复，可继续解析工作。"
     />
 
     <!-- 空会话态 -->
@@ -90,30 +81,19 @@
       />
 
       <template v-if="snapshot">
-        <!-- 区1 统计徽章行（含增量跳过目录统计） -->
-        <section class="li-ws-stats">
-          <span class="li-ws-stat">文件 {{ snapshot.stats.totalFiles }}</span>
-          <span class="li-ws-stat li-ws-stat-ok">已识别 {{ snapshot.stats.identified }}</span>
-          <span class="li-ws-stat li-ws-stat-clue">有线索 {{ snapshot.stats.clueful }}</span>
-          <span class="li-ws-stat">无线索 {{ snapshot.stats.plain }}</span>
-          <span class="li-ws-stat">序列群 {{ snapshot.stats.groupCount }}</span>
-          <span class="li-ws-stat li-ws-stat-warn">待裁决 {{ snapshot.stats.pendingFiles }}</span>
-          <span v-if="snapshot.stats.skippedDirs > 0" class="li-ws-stat">增量跳过目录 {{ snapshot.stats.skippedDirs }}</span>
-        </section>
-
-        <!-- 区3 重识别差异条（生成规则后的强制验证轮高亮：过窄＝仍有未覆盖、过泛＝错套） -->
-        <section v-if="diff && diffTotal > 0" class="li-ws-diffbar">
-          <span class="li-ws-diff-title">重识别差异（生成规则后的验证轮）：</span>
+        <!-- 区3 重识别差异行（H5：单行小字，验证轮提示语并入同行，不占独立卡片） -->
+        <p v-if="diff && diffTotal > 0" class="li-ws-diffline">
+          重识别差异（生成规则后的验证轮）：
           <span class="li-ws-diff-chip is-changed">变更 {{ diff.changed ? diff.changed.length : 0 }}</span>
           <span class="li-ws-diff-chip is-added">新增 {{ diff.added ? diff.added.length : 0 }}</span>
           <span class="li-ws-diff-chip is-removed">消失 {{ diff.removed ? diff.removed.length : 0 }}</span>
-          <span class="li-ws-diff-note">过窄＝差异里仍有未覆盖、过泛＝差异里错套——请在清单核对标色行</span>
-        </section>
+          <span>过窄＝差异里仍有未覆盖、过泛＝差异里错套——请在清单核对标色行</span>
+        </p>
 
         <!-- 双栏主从主体：左栏自适应（保底 ~480px），右栏固定 ~400px 可收起 -->
         <section class="li-ws-main">
           <div class="li-ws-left">
-            <!-- 区5 资源清单：过滤器行（状态/待裁决/已赋值/差异标）+ 组合选择 + 虚拟滚动清单 -->
+            <!-- 区5 资源清单：统计并入标题行（H2）+ 过滤与组合操作单行（H3）+ 虚拟滚动/树体（H4 体高自适应） -->
             <section class="li-ws-card">
               <h3 class="li-ws-card-title">
                 资源清单
@@ -134,39 +114,44 @@
                     @click="listMode = 'flat'"
                   >▦ 清单</button>
                 </span>
-                <span class="li-ws-card-note">{{ filteredFiles.length }} 项 · {{ listMode === 'tree' ? '目录树' : '平铺虚拟滚动' }} · 点击行联动右栏解析面板</span>
+                <!-- H2：识别统计随快照刷新；增量跳过目录>0 时串内追加 -->
+                <span class="li-ws-card-stats">文件 {{ snapshot.stats.totalFiles }} · 已识别 {{ snapshot.stats.identified }} · 有线索 {{ snapshot.stats.clueful }} · 无线索 {{ snapshot.stats.plain }} · 序列群 {{ snapshot.stats.groupCount }} · 待裁决 {{ snapshot.stats.pendingFiles }}<template v-if="snapshot.stats.skippedDirs > 0"> · 增量跳过目录 {{ snapshot.stats.skippedDirs }}</template></span>
               </h3>
+              <!-- H3：过滤器与批量/组合操作合并单行（flex-wrap，窄窗自然折行） -->
               <div class="li-ws-combos">
-                <div class="li-ws-filter">
-                  <button
-                    v-for="f in fileFilters"
-                    :key="f.key"
-                    class="li-ws-filter-btn"
-                    :class="{ 'is-active': fileFilter === f.key }"
-                    @click="fileFilter = f.key"
-                  >{{ f.label }}</button>
-                </div>
-                <div class="li-ws-combo-actions">
-                  <button class="li-ws-filter-btn" @click="selectAllVisible">全选可见</button>
-                  <button class="li-ws-filter-btn" @click="invertVisible">反选可见</button>
-                  <select v-model="rulePick" class="li-ws-combo-select" @change="onRulePick">
-                    <option value="">按规则命中选…</option>
-                    <option v-for="r in ruleOptions" :key="r.id" :value="r.id">{{ r.id }}（命中 {{ r.hitCount }}）</option>
-                  </select>
-                  <select v-model="authorPick" class="li-ws-combo-select" @change="onAuthorPick">
-                    <option value="">按作者声明选…</option>
-                    <option v-for="a in authorOptions" :key="a" :value="a">{{ a }}</option>
-                  </select>
-                  <button class="li-ws-filter-btn" @click="clearSelection">清空选择</button>
-                  <button
-                    v-if="rightCollapsed"
-                    class="li-ws-filter-btn li-ws-panel-reopen"
-                    @click="rightCollapsed = false"
-                  >« 展开解析面板</button>
-                </div>
+                <button
+                  v-for="f in fileFilters"
+                  :key="f.key"
+                  class="li-ws-filter-btn"
+                  :class="{ 'is-active': fileFilter === f.key }"
+                  @click="fileFilter = f.key"
+                >{{ f.label }}</button>
+                <button class="li-ws-filter-btn" @click="selectAllVisible">全选可见</button>
+                <button class="li-ws-filter-btn" @click="invertVisible">反选可见</button>
+                <select v-model="rulePick" class="li-ws-combo-select" @change="onRulePick">
+                  <option value="">按规则命中选…</option>
+                  <option v-for="r in ruleOptions" :key="r.id" :value="r.id">{{ r.id }}（命中 {{ r.hitCount }}）</option>
+                </select>
+                <select v-model="authorPick" class="li-ws-combo-select" @change="onAuthorPick">
+                  <option value="">按作者声明选…</option>
+                  <option v-for="a in authorOptions" :key="a" :value="a">{{ a }}</option>
+                </select>
+                <button class="li-ws-filter-btn" @click="clearSelection">清空选择</button>
+                <button
+                  v-if="rightCollapsed"
+                  class="li-ws-filter-btn li-ws-panel-reopen"
+                  @click="rightCollapsed = false"
+                >« 展开解析面板</button>
               </div>
-              <!-- 平铺模式（现状保留：虚拟滚动切片渲染；模式切换时过滤与选择集保持） -->
-              <div v-show="listMode === 'flat'" ref="listViewport" class="li-ws-list" @scroll="onListScroll">
+              <!-- 平铺模式（虚拟滚动切片渲染；H4：体高随视口剩余空间自适应，切片窗口随容器尺寸持续同步；
+                    模式切换时过滤与选择集保持） -->
+              <div
+                v-show="listMode === 'flat'"
+                ref="listViewport"
+                class="li-ws-list"
+                :style="{ height: `${listBodyH}px` }"
+                @scroll="onListScroll"
+              >
                 <div class="li-ws-list-spacer" :style="{ height: `${filteredFiles.length * ROW_H}px` }"></div>
                 <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 声明/线索摘要 + 差异标 + 已赋值标；
                      行点击 = 选中联动右栏（选中键 = 文件相对路径），与复选不互斥 -->
@@ -202,10 +187,16 @@
                 </div>
                 <p v-if="filteredFiles.length === 0" class="li-ws-empty">当前过滤条件下无文件</p>
               </div>
-              <!-- 树模式（剧本F F1/F2：库根 → 目录 → 文件全量渲染，246 行级数据量不虚拟化）；
-                   目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录说明卡）
-                   + 文件数 + 含义覆盖标记（复用旧「目录结构」折叠区数据源）；文件行 = 平铺同款，点行 = 现有联动 -->
-              <div v-show="listMode === 'tree'" class="li-ws-tree">
+              <!-- 树模式（剧本F F1/F2：库根 → 目录 → 文件全量渲染，246 行级数据量不虚拟化；H4：体高与平铺同享自适应）；
+                   目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录解析面板，剧本J）
+                   + 文件数 + 含义覆盖标记（复用旧「目录结构」折叠区数据源）；
+                   文件行 = 行首作品级复选（H6：勾选/禁用语义同平铺，目录行全选/半选态由选择集派生）+ 平铺同款元数据，点行 = 现有联动 -->
+              <div
+                v-show="listMode === 'tree'"
+                ref="treeViewport"
+                class="li-ws-tree"
+                :style="{ height: `${listBodyH}px` }"
+              >
                 <template v-for="row in treeRows" :key="row.key">
                   <div v-if="row.kind === 'dir' && row.dir" class="li-ws-tree-dir" :style="{ paddingLeft: `${row.depth * 16 + 4}px` }">
                     <button
@@ -222,7 +213,7 @@
                       :title="`子树递选（按作品聚合）· 已选 ${dirTreeSelectedText(row.dir.relKey)}`"
                       @change="(v) => setDirTreeSelected(row.dir.relKey, !!v)"
                     />
-                    <span class="li-ws-tree-name" :title="`${row.dir.relKey}（点看目录说明卡）`" @click="showDirCard(row.dir.relKey)">{{ row.dir.name }}</span>
+                    <span class="li-ws-tree-name" :title="`${row.dir.relKey || '（库根）'}（点开目录解析面板）`" @click="showDirCard(row.dir.relKey)">{{ row.dir.name }}</span>
                     <span class="li-ws-dir-files">{{ row.dir.fileCount }} 文件</span>
                     <template v-if="row.dir.meanings && row.dir.meanings.length">
                       <span v-for="(m, mi) in row.dir.meanings" :key="mi" class="li-ws-dir-meaning">{{ meaningLabel(m) }}</span>
@@ -236,6 +227,15 @@
                     :style="{ paddingLeft: `${row.depth * 16 + 30}px` }"
                     @click="selectFile(row.file.relPath)"
                   >
+                    <!-- H6：行首复选走作品级选择集通路（与平铺行同款），阻止冒泡以免触发行选中联动 -->
+                    <el-checkbox
+                      class="li-ws-cb"
+                      :model-value="isWorkSelected(workIdOf(row.file.relPath))"
+                      :disabled="!isWorkSelectable(row.file.relPath)"
+                      :title="workHintOf(row.file.relPath)"
+                      @click.stop
+                      @change="() => toggleWorkAt(row.file.relPath)"
+                    />
                     <span class="li-ws-row-state" :class="`is-${row.file.state}`" :title="stateLabel(row.file.state)">{{ stateDot(row.file.state) }}</span>
                     <span class="li-ws-tree-fname" :title="row.file.relPath">{{ row.file.fileName }}</span>
                     <span v-if="diffMark(row.file.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.file.relPath)}`">{{ diffMark(row.file.relPath) === 'changed' ? 'Δ变更' : diffMark(row.file.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
@@ -407,36 +407,31 @@
           </div>
 
           <!-- 右栏解析面板（固定 ~400px、可收起）：随选中联动显示文件路径与状态，
-               赋值表单/泛化/裁决完整交互见 ParsePanel.vue（阶段3接入） -->
+               赋值表单/泛化/裁决完整交互见 ParsePanel.vue（阶段3接入）；目录解析
+               面板（阶段4 剧本J：点树中目录名进入）亦由 ParsePanel 目录模式承载 -->
           <aside v-if="!rightCollapsed" class="li-ws-right">
             <div class="li-ws-panel-head">
               <span class="li-ws-panel-title">解析面板</span>
               <button type="button" class="li-ws-panel-btn" title="收起面板" @click="rightCollapsed = true">收起 »</button>
             </div>
             <div class="li-ws-panel-body">
-              <!-- 剧本F F4：目录说明卡（点树中目录名联动；名/层级/覆盖结论+来源规则名/文件统计，不联动文件表单） -->
-              <div v-if="selectedDirNode" class="li-ws-panel-dircard">
-                <div class="li-ws-file-head">
-                  <span class="li-ws-panel-path">{{ selectedDirNode.name }}</span>
-                  <button type="button" class="li-ws-panel-btn" @click="selectedDirKey = ''">返回文件面板</button>
-                </div>
-                <p class="li-ws-sec-line">层级：{{ dirLevelLabel(selectedDirNode.depth) }} · 相对路径 {{ selectedDirNode.relKey || '（库根）' }}</p>
-                <div class="li-ws-sec">
-                  <h4 class="li-ws-sec-title">目录含义覆盖</h4>
-                  <template v-if="selectedDirNode.meanings && selectedDirNode.meanings.length">
-                    <div v-for="(m, i) in selectedDirNode.meanings" :key="i" class="li-ws-decl">
-                      <span class="li-ws-decl-main">{{ meaningLabel(m) }}</span>
-                      <span class="li-ws-decl-src">目录结构结论<template v-if="selectedDirNode.meaningRuleId"> · 来源规则 {{ selectedDirNode.meaningRuleId }}</template></span>
-                    </div>
-                  </template>
-                  <p v-else class="li-ws-empty">未覆盖（该目录暂无含义结论）</p>
-                </div>
-                <div class="li-ws-sec">
-                  <h4 class="li-ws-sec-title">文件统计</h4>
-                  <p class="li-ws-sec-line">直挂文件 {{ selectedDirNode.fileCount }} · 子目录 {{ selectedDirNode.children.length }} · 子树作品 {{ worksUnderDirTree(selectedDirNode.relKey).length }}（已选 {{ dirTreeSelectedText(selectedDirNode.relKey) }}）</p>
-                </div>
-                <p class="li-ws-sec-note">目录说明卡不联动文件表单；点树中任意文件行即回到该文件的解析面板。</p>
-              </div>
+              <!-- 剧本J 目录解析面板（卡+解析合一，保存作用子树）：目录头信息+线索胶囊+
+                   五字段表单+目录保存/清除+建议卡，全部由 ParsePanel 目录模式承载
+                  （dir 上下文由本组件组装传入）；与文件面板互斥——点树中文件行切回
+                   文件面板、点目录名回来，不联动文件表单（J7） -->
+              <ParsePanel
+                v-if="dirPanelContext"
+                :root="session ? session.rootPath : ''"
+                :dir="dirPanelContext"
+                :assignments="assignmentList"
+                :ignored="false"
+                :pending-items="[]"
+                :diff="diff"
+                :recognizing="recognizing"
+                :request="request"
+                @refresh="onPanelRefresh"
+                @exit-dir="selectedDirKey = null"
+              />
               <!-- 边界：右栏空态引导 -->
               <div v-else-if="!selectedRelPath" class="li-ws-panel-guide">
                 <p class="li-ws-panel-guide-title">未选中文件</p>
@@ -500,7 +495,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { Events } from '@wailsio/runtime'
 import ParsePanel from './ParsePanel.vue'
 
@@ -575,6 +570,9 @@ interface PanoramaSnapshot {
     fileCount: number
     meanings?: { type: string; id?: string; name?: string }[]
     meaningRuleId?: string
+    // 阶段4 剧本J：目录级结构分段线索集（库根名/各级目录名/剥壳变体，无文件名段；
+    // getPanorama 投影时展开的呈现态数据）——目录面板赋值表单的出处引用数据源
+    structClues?: { ref: string; kind: string; label: string; value: string }[]
   }[]
   files: SnapFile[]
   groups: SnapGroup[]
@@ -932,8 +930,11 @@ const fileFilters = [
 const fileFilter = ref('all')
 
 const listViewport = ref<HTMLDivElement | null>(null)
+const treeViewport = ref<HTMLDivElement | null>(null)
 const scrollTop = ref(0)
 const viewportH = ref(420)
+// H4：清单/树体高度（视口剩余空间实测，保底 240px；初值 420 供首帧渲染，挂载后同步）
+const listBodyH = ref(420)
 
 const pendingRelSet = computed<Set<string>>(() => {
   const set = new Set<string>()
@@ -966,8 +967,8 @@ function onListScroll(e: Event): void {
 //    复选改选择集不改行选中） —— //
 
 function selectFile(relPath: string): void {
-  // 点文件行 = 现有联动（F5）；同时让出目录说明卡（F4 与文件面板互斥，文件优先）
-  selectedDirKey.value = ''
+  // 点文件行 = 现有联动（F5/J7）；同时让出目录解析面板（目录与文件面板互斥，文件优先）
+  selectedDirKey.value = null
   selectedRelPath.value = relPath
 }
 
@@ -1174,6 +1175,8 @@ interface TreeDirNode {
   fileCount: number
   meanings: { type: string; id?: string; name?: string }[]
   meaningRuleId?: string
+  // 剧本J2：目录级结构分段线索集（snapshot.dirs 投影携带；防御性补全节点无值→空集）
+  structClues: { ref: string; kind: string; label: string; value: string }[]
   files: SnapFile[]
   children: TreeDirNode[]
 }
@@ -1207,6 +1210,7 @@ const dirRoots = computed<TreeDirNode[]>(() => {
         found.fileCount = row.fileCount
         found.meanings = row.meanings || []
         found.meaningRuleId = row.meaningRuleId
+        found.structClues = row.structClues || []
       }
       return found
     }
@@ -1218,6 +1222,7 @@ const dirRoots = computed<TreeDirNode[]>(() => {
       fileCount: row ? row.fileCount : 0,
       meanings: (row && row.meanings) || [],
       meaningRuleId: row ? row.meaningRuleId : undefined,
+      structClues: (row && row.structClues) || [],
       files: [],
       children: []
     }
@@ -1284,21 +1289,67 @@ const treeRows = computed<TreeRow[]>(() => {
   return rows
 })
 
-// —— 右栏目录说明卡（F4：点目录名联动；不触碰文件表单与文件选中键） —— //
-const selectedDirKey = ref('')
+// —— 右栏目录解析面板（剧本J：卡+解析合一，保存作用子树） —— //
+// 选中键三态：null=文件面板；''=库根目录（assignDir/clearDirAssignments 的
+// 全树寻址）；非空=子目录键。点目录名进入、点文件行/「返回文件面板」让出（J7）
+const selectedDirKey = ref<string | null>(null)
 const selectedDirNode = computed<TreeDirNode | null>(() =>
-  selectedDirKey.value ? dirByKey.value.get(selectedDirKey.value) || null : null
+  selectedDirKey.value === null ? null : dirByKey.value.get(selectedDirKey.value) || null
 )
 
 function showDirCard(relKey: string): void {
   selectedDirKey.value = relKey
 }
 
-const dirLevelLabel = (depth: number): string => {
-  if (depth <= 0) return '一级目录'
-  if (depth === 1) return '二级目录'
-  return `第 ${depth + 1} 级目录`
+// 剧本J 目录模式上下文（与 ParsePanel PanelDirContext 同构；ParsePanel 目录模式消费）
+interface DirPanelContext {
+  relKey: string
+  name: string
+  depth: number
+  meanings: { type: string; id?: string; name?: string }[]
+  meaningRuleId?: string
+  structClues: { ref: string; kind: string; label: string; value: string }[]
+  subtreeFileCount: number
+  subdirCount: number
 }
+
+// 剧本J1/J3：子树文件数从 snapshot.files 按 dirRelKey 前缀统计（''=全库）——
+// 树节点的文件聚合受清单过滤影响，不可作计数源
+function subtreeFileCountOf(relKey: string): number {
+  const files = (snapshot.value ? snapshot.value.files : null) || []
+  if (!relKey) return files.length
+  const prefix = relKey + '/'
+  let count = 0
+  for (const f of files) {
+    if (f.dirRelKey === relKey || f.dirRelKey.startsWith(prefix)) count += 1
+  }
+  return count
+}
+
+// 子目录数从 snapshot.dirs 前缀统计（不含自身；库根=全部目录减根条目）
+function subdirCountOf(relKey: string): number {
+  const dirs = (snapshot.value ? snapshot.value.dirs : null) || []
+  if (!relKey) return dirs.filter((d) => d.relKey !== '').length
+  const prefix = relKey + '/'
+  return dirs.filter((d) => d.relKey.startsWith(prefix)).length
+}
+
+// 目录面板上下文组装：随快照/选中目录重算；对象每次重建但 relKey 稳定，
+// ParsePanel 侧仅凭 relKey 变化复位（刷新不清目录表单）
+const dirPanelContext = computed<DirPanelContext | null>(() => {
+  const node = selectedDirNode.value
+  if (!node) return null
+  return {
+    relKey: node.relKey,
+    name: node.name,
+    depth: node.depth,
+    meanings: node.meanings || [],
+    meaningRuleId: node.meaningRuleId,
+    structClues: node.structClues || [],
+    subtreeFileCount: subtreeFileCountOf(node.relKey),
+    subdirCount: subdirCountOf(node.relKey)
+  }
+})
 
 // 悬空选择键（重识别后选择集引用了已不存在的作品）提示
 const danglingSelection = computed<number>(() => {
@@ -1441,24 +1492,77 @@ const formatTime = (ms: number): string => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+// —— H4 清单体高自适应与切片窗口持续同步 —— //
+
+const LIST_MIN_H = 240
+const LIST_BOTTOM_PAD = 16
+
+let viewportRO: ResizeObserver | null = null
+let layoutRO: ResizeObserver | null = null
+
+// 平铺隐藏（树模式）时树体在同一位置，测可见者即可
+function visibleListEl(): HTMLElement | null {
+  const flat = listViewport.value
+  if (flat && flat.offsetParent !== null) return flat
+  return treeViewport.value
+}
+
+function syncListBodyH(): void {
+  const el = visibleListEl()
+  if (!el || el.offsetParent === null) return
+  // offsetTop 链求文档级顶部偏移：与滚动位置无关，高度不随滚动抖动
+  let top = 0
+  let node: HTMLElement | null = el
+  while (node) {
+    top += node.offsetTop
+    node = node.offsetParent as HTMLElement | null
+  }
+  listBodyH.value = Math.max(LIST_MIN_H, window.innerHeight - top - LIST_BOTTOM_PAD)
+}
+
+// 容器尺寸变化 → viewportH 同步（窗口缩放/体高调整/模式切换后切片窗口正确）；元素重建时重挂观察
+function bindViewportRO(): void {
+  const el = listViewport.value
+  if (!el) return
+  if (viewportRO) viewportRO.disconnect()
+  viewportRO = new ResizeObserver(() => {
+    if (listViewport.value) viewportH.value = listViewport.value.clientHeight || 420
+  })
+  viewportRO.observe(el)
+}
+
+// 快照晚到（挂载后才识别）时清单容器才出现，经模板 ref 变化接入体高同步与观察
+watch(listViewport, (el) => {
+  if (!el) return
+  syncListBodyH()
+  bindViewportRO()
+})
+
 onMounted(async () => {
   offResponse = Events.On(TOPIC_RESPONSE, onResponse)
   offEvent = Events.On(TOPIC_EVENT, onEvent)
+  // 体高同步三触发：窗口缩放、上游内容增减（body 尺寸变化改变清单顶部偏移）、清单容器出现
+  window.addEventListener('resize', syncListBodyH)
+  layoutRO = new ResizeObserver(syncListBodyH)
+  layoutRO.observe(document.body)
   const root = await restoreSession()
   if (root && session.value) {
     if (session.value.state === 'recognized') {
       await loadPanorama(root)
     }
     await nextTick()
-    if (listViewport.value) {
-      viewportH.value = listViewport.value.clientHeight || 420
-    }
+    syncListBodyH()
+    bindViewportRO()
   }
 })
 
 onUnmounted(() => {
   if (offResponse) offResponse()
   if (offEvent) offEvent()
+  // 断开观察与监听，防卸载后回调触达已失效节点
+  viewportRO?.disconnect()
+  layoutRO?.disconnect()
+  window.removeEventListener('resize', syncListBodyH)
 })
 </script>
 
@@ -1537,7 +1641,8 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
-.li-ws-card-note {
+/* H2：识别统计并入卡片标题行的小字串 */
+.li-ws-card-stats {
   font-size: 12px;
   font-weight: normal;
   color: var(--app-text-secondary);
@@ -1554,38 +1659,6 @@ onUnmounted(() => {
   margin: 0;
   font-size: 13px;
   color: var(--app-text-secondary);
-}
-
-/* —— 区1 统计徽章行 —— */
-
-.li-ws-stats {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.li-ws-stat {
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: var(--app-radius-sm);
-  background: var(--app-tag-neutral-bg);
-  color: var(--app-tag-neutral-text);
-}
-
-.li-ws-stat-ok {
-  background: var(--app-tag-success-bg);
-  color: var(--app-tag-success-text);
-}
-
-.li-ws-stat-clue {
-  background: var(--app-tag-warning-bg);
-  color: var(--app-tag-warning-text);
-}
-
-.li-ws-stat-warn {
-  background: var(--app-tag-danger-bg);
-  color: var(--app-tag-danger-text);
 }
 
 /* —— 识别中状态条 —— */
@@ -1615,23 +1688,16 @@ onUnmounted(() => {
   transition: width 0.2s ease;
 }
 
-/* —— 区3 差异条 —— */
+/* —— 区3 重识别差异行（H5：单行小字，无卡片外壳） —— */
 
-.li-ws-diffbar {
+.li-ws-diffline {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
-  padding: 8px 12px;
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius);
-  background: var(--app-bg-surface);
-}
-
-.li-ws-diff-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-text-primary);
 }
 
 .li-ws-diff-chip {
@@ -1655,11 +1721,6 @@ onUnmounted(() => {
   color: var(--app-tag-danger-text);
 }
 
-.li-ws-diff-note {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-}
-
 /* —— 双栏主从主体：左栏自适应（保底 ~480px），右栏固定 ~400px —— */
 
 .li-ws-main {
@@ -1676,18 +1737,13 @@ onUnmounted(() => {
   gap: 10px;
 }
 
-/* —— 过滤器与组合选择 —— */
+/* —— 过滤与组合选择（H3：合并单行，窄窗自然折行） —— */
 
 .li-ws-combos {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.li-ws-filter {
-  display: flex;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
 }
 
 .li-ws-filter-btn {
@@ -1705,13 +1761,6 @@ onUnmounted(() => {
   color: var(--app-color-primary);
 }
 
-.li-ws-combo-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
 .li-ws-combo-select {
   font-size: 12px;
   padding: 3px 8px;
@@ -1724,9 +1773,10 @@ onUnmounted(() => {
 
 /* —— 区5 资源清单（虚拟滚动） —— */
 
+/* H4：高度由 listBodyH 内联注入（视口剩余空间实测），此处只兜底最小高度 */
 .li-ws-list {
   position: relative;
-  height: 420px;
+  min-height: 240px;
   overflow: auto;
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius-sm);
@@ -1926,8 +1976,9 @@ onUnmounted(() => {
 
 /* —— 区5 目录树模式（剧本F：全量渲染）；目录行复用旧目录结构区的含义覆盖标记样式 —— */
 
+/* H4：体高与平铺清单同享 listBodyH 内联注入，此处只兜底最小高度 */
 .li-ws-tree {
-  height: 420px;
+  min-height: 240px;
   overflow: auto;
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius-sm);
@@ -2007,13 +2058,7 @@ onUnmounted(() => {
   color: var(--app-text-primary);
 }
 
-/* —— 右栏目录说明卡（剧本F F4） —— */
-
-.li-ws-panel-dircard {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
+/* —— 右栏目录解析面板（剧本J：呈现主体在 ParsePanel 目录模式） —— */
 
 .li-ws-dir-cb {
   margin-right: 0;

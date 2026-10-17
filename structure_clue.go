@@ -9,7 +9,8 @@ package main
 //   - rootName            库根基名（无下标）
 //   - dirLevel[n]         第 n 级目录名（n 从 1 起，如 dirLevel1）
 //   - dirLevelStripped[n] 第 n 级目录的剥壳变体（命中剥壳集时才有）
-//   - filenameSeg[i]      文件名分隔段（去扩展名正文按 __ 分段，i 从 0 起）
+//   - filenameSeg[i]      文件名分隔段（i 从 0 起；括号组内名与 __/_ 自适应
+//                         分段，见 splitFilenameSegments）
 //   - tailCode            尾部随机码（至多一条，末段且似随机时标注）
 
 import (
@@ -105,7 +106,7 @@ func StructCluesOf(rootPath, relPath, fileName string) []SnapStructClue {
 			clues = append(clues, SnapStructClue{
 				Ref:   fmt.Sprintf("%s%d", structClueDirLevelStripped, n),
 				Kind:  structClueDirLevelStripped,
-				Label: dirLevelLabel(n) + "(剥壳)", Value: inner,
+				Label: dirLevelLabel(n) + "剥壳", Value: inner,
 			})
 			hints = append(hints, inner)
 		}
@@ -133,6 +134,44 @@ func StructCluesOf(rootPath, relPath, fileName string) []SnapStructClue {
 	return clues
 }
 
+// DirStructCluesOf 展开单个目录的结构分段线索集（纯函数）：库根名 + dirRelKey
+// 各级目录名（dirLevel[n]）与剥壳变体（dirLevelStripped[n]，标签「N级目录
+// 剥壳」）——无文件名段与尾部码（目录面板的赋值出处引用与文件级共用同一
+// 标识空间）。dirRelKey 为相对库根的 '/' 目录路径（空串=库根，仅库根名线索）。
+func DirStructCluesOf(rootPath, dirRelKey string) []SnapStructClue {
+	var clues []SnapStructClue
+	rootName := ""
+	if rootPath != "" {
+		rootName = filepath.Base(filepath.Clean(filepath.ToSlash(rootPath)))
+	}
+	if rootName != "" && rootName != "." && rootName != "/" {
+		clues = append(clues, SnapStructClue{
+			Ref: structClueRootName, Kind: structClueRootName,
+			Label: "库根名", Value: rootName,
+		})
+	}
+	var levels []string
+	if dirRelKey = strings.Trim(filepath.ToSlash(dirRelKey), "/"); dirRelKey != "" {
+		levels = strings.Split(dirRelKey, "/")
+	}
+	for i, name := range levels {
+		n := i + 1
+		clues = append(clues, SnapStructClue{
+			Ref:   fmt.Sprintf("%s%d", structClueDirLevel, n),
+			Kind:  structClueDirLevel,
+			Label: dirLevelLabel(n), Value: name,
+		})
+		if _, inner, ok := stripShell(name); ok {
+			clues = append(clues, SnapStructClue{
+				Ref:   fmt.Sprintf("%s%d", structClueDirLevelStripped, n),
+				Kind:  structClueDirLevelStripped,
+				Label: dirLevelLabel(n) + "剥壳", Value: inner,
+			})
+		}
+	}
+	return clues
+}
+
 // dirLevelLabel 目录层的中文序数标签（一级目录 / 二级目录 / …，超表退化为
 // 「第 n 级目录」）。
 func dirLevelLabel(n int) string {
@@ -153,10 +192,14 @@ func normalizeNameHint(name string) string {
 	return hintReplacer.Replace(strings.ToLower(name))
 }
 
-// splitFilenameSegments 文件名正文（去扩展名）→ 分隔段序列：`__` 为段分隔、
-// `_` 为词内连接（作品名可含单下划线词）。已知名（库根名 / 目录名 / 剥壳变体
-// 归一化）在正文中出现时保持为一个整段——覆盖跨 `__` 边界的混合形态（如
-// by_jake__jaccobus_delithw 中的 jake__jaccobus：名字两侧以单个 `_` 粘接）。
+// splitFilenameSegments 文件名正文（去扩展名）→ 分隔段序列（v2）：
+//   - 括号组原子段：`[]`【】（）()「」『』包裹组按最外层计，内名为一段（括号
+//     本身只作分隔符，内名空则跳过该组）；
+//   - 段间正文自适应：含括号组的正文，片段含 `__` 时按 `__` 分段、否则按单个
+//     `_` 分段；无括号组的正文整体维持仅 `__` 分段（`_` 是词内连接）；
+//   - 已知名保持：库根名 / 目录名 / 剥壳变体（归一化）在段间正文内的跨分隔符
+//     出现区间保持整段（如 by_jake__jaccobus_delithw 中的 jake__jaccobus）；
+//     提示区间与括号组重叠时括号组优先。
 func splitFilenameSegments(base string, hints []string) []string {
 	// 归一化提示词，长名优先（避免子名遮蔽全名），过短提示词易误粘不入表。
 	norm := make([]string, 0, len(hints))
@@ -167,17 +210,25 @@ func splitFilenameSegments(base string, hints []string) []string {
 	}
 	sort.Slice(norm, func(i, j int) bool { return len(norm[i]) > len(norm[j]) })
 
-	// 归一化正文（与原文等长时按原文切段保留大小写；罕见不等长时退用归一化文）。
+	// 归一化正文（与原文等长时按原文取段值保留大小写；罕见不等长时退用归一化文）。
 	text := normalizeNameHint(base)
 	src := base
 	if len(text) != len(base) {
 		src = text
 	}
 
+	// 括号组先占位（提示区间与括号组重叠时括号组优先，组内不再匹配提示词）。
+	groups := findBracketGroups(text)
+	taken := make([]bool, len(text))
+	for _, g := range groups {
+		for k := g.start; k < g.end; k++ {
+			taken[k] = true
+		}
+	}
+
 	// 定位互不重叠的名字出现区间（长名优先、区间内左优先）。
 	type span struct{ start, end int }
 	var spans []span
-	taken := make([]bool, len(text))
 	for _, n := range norm {
 		for from := 0; from+len(n) <= len(text); from++ {
 			if taken[from] || text[from:from+len(n)] != n {
@@ -202,31 +253,124 @@ func splitFilenameSegments(base string, hints []string) []string {
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 
-	// 按 `__` 分段；名字区间为独立段，其两侧的单个 `_` 粘接符剥离。
+	// 依序输出原子段（括号组内名 + 名字区间），其间的正文片段按是否含括号组
+	// 选择分隔：无括号组时 `_` 为词内连接，维持仅 `__` 分段（现状行为）。
 	var segs []string
-	pos := 0
-	emit := func(piece string) {
-		piece = strings.TrimPrefix(piece, "__")
-		piece = strings.TrimSuffix(piece, "__")
-		if strings.HasPrefix(piece, "_") && len(piece) > 1 && !strings.HasPrefix(piece, "__") {
-			piece = piece[1:]
+	splitPiece := func(piece string) {
+		if len(groups) == 0 {
+			piece = strings.TrimPrefix(piece, "__")
+			piece = strings.TrimSuffix(piece, "__")
+			if strings.HasPrefix(piece, "_") && len(piece) > 1 && !strings.HasPrefix(piece, "__") {
+				piece = piece[1:]
+			}
+			if strings.HasSuffix(piece, "_") && len(piece) > 1 && !strings.HasSuffix(piece, "__") {
+				piece = piece[:len(piece)-1]
+			}
+			for _, s := range strings.Split(piece, "__") {
+				if s != "" {
+					segs = append(segs, s)
+				}
+			}
+			return
 		}
-		if strings.HasSuffix(piece, "_") && len(piece) > 1 && !strings.HasSuffix(piece, "__") {
-			piece = piece[:len(piece)-1]
+		// 含括号组：片段含 `__` 按 `__` 分、否则按单个 `_` 分；边缘 `_` 为粘接符剥离。
+		piece = strings.Trim(piece, "_")
+		sep := "_"
+		if strings.Contains(piece, "__") {
+			sep = "__"
 		}
-		for _, s := range strings.Split(piece, "__") {
+		for _, s := range strings.Split(piece, sep) {
 			if s != "" {
 				segs = append(segs, s)
 			}
 		}
 	}
-	for _, sp := range spans {
-		emit(text[pos:sp.start])
+	pos, gi, si := 0, 0, 0
+	for gi < len(groups) || si < len(spans) {
+		useGroup := si >= len(spans) || (gi < len(groups) && groups[gi].start < spans[si].start)
+		if useGroup {
+			g := groups[gi]
+			gi++
+			splitPiece(text[pos:g.start])
+			if inner := src[g.innerStart:g.innerEnd]; inner != "" {
+				segs = append(segs, inner)
+			}
+			pos = g.end
+			continue
+		}
+		sp := spans[si]
+		si++
+		splitPiece(text[pos:sp.start])
 		segs = append(segs, src[sp.start:sp.end])
 		pos = sp.end
 	}
-	emit(text[pos:])
+	splitPiece(text[pos:])
 	return segs
+}
+
+// bracketPair 分段用括号对（开/闭括号字面量）。
+type bracketPair struct{ open, close string }
+
+// bracketPairs 括号对表：正文中的包裹组按最外层计为一个原子段。
+var bracketPairs = []bracketPair{
+	{"[", "]"}, {"【", "】"}, {"（", "）"}, {"(", ")"}, {"「", "」"}, {"『", "』"},
+}
+
+// bracketGroup 正文中的括号组：含括号区间与内名区间（字节下标）。
+type bracketGroup struct {
+	start, end           int // 含括号 [start,end)
+	innerStart, innerEnd int // 内名 [innerStart,innerEnd)
+}
+
+// findBracketGroups 扫描正文中的括号组：同对嵌套按最外层计（内层字符留在
+// 内名里，不递归）；异对括号不干扰配对，同样留在内名里。无匹配闭括号的
+// 开括号视作普通字符。返回区间按出现顺序排列。
+func findBracketGroups(text string) []bracketGroup {
+	var groups []bracketGroup
+	for i := 0; i < len(text); {
+		var pair bracketPair
+		found := false
+		for _, p := range bracketPairs {
+			if strings.HasPrefix(text[i:], p.open) {
+				pair, found = p, true
+				break
+			}
+		}
+		if !found {
+			i++
+			continue
+		}
+		// 同对嵌套计数，找与开括号匹配的闭括号。
+		j, depth := i+len(pair.open), 1
+		closed := false
+	scan:
+		for j < len(text) {
+			switch {
+			case strings.HasPrefix(text[j:], pair.close):
+				j += len(pair.close)
+				depth--
+				if depth == 0 {
+					closed = true
+					break scan
+				}
+			case strings.HasPrefix(text[j:], pair.open):
+				j += len(pair.open)
+				depth++
+			default:
+				j++
+			}
+		}
+		if !closed {
+			i += len(pair.open)
+			continue
+		}
+		groups = append(groups, bracketGroup{
+			start: i, end: j,
+			innerStart: i + len(pair.open), innerEnd: j - len(pair.close),
+		})
+		i = j
+	}
+	return groups
 }
 
 // looksLikeTailCode 尾部随机码启发式（保守标注）：段为 5..16 位纯字母数字、

@@ -1,8 +1,9 @@
-// 手动解析三动作的单元测试：冲突裁决双模式的最简充分形式生成物结构断言
-//（双命中 And 组合 / 单侧缺席改绑的谓词条件策略）、泛化规则按维度三态生成、
-// 会话赋值写 API 与合并求值生效链路、已泛化标记、生成入口的档案写并发无丢失、
-// 差异集计算三分类、条件求值（提取段两遍执行）、档案版本向后兼容与条件构造期
-// 校验，以及前端协议的 assign / generalize / adjudicate / getDiff 分派。
+// 手动解析动作族的单元测试：冲突裁决双模式的最简充分形式生成物结构断言
+//（双命中 And 组合 / 单侧缺席改绑的谓词条件策略，生成物不消费赋值）、泛化
+// 规则按维度三态生成与泛化即接管的消费剥离、会话赋值写 API 与合并求值生效
+// 链路、生成入口的档案写并发无丢失、差异集计算三分类、条件求值（提取段两遍
+// 执行）、档案版本向后兼容与条件构造期校验，以及前端协议的 assign /
+// generalize / adjudicate / getDiff 分派。
 package main
 
 import (
@@ -340,10 +341,19 @@ func TestGeneralizeFilenameShape(t *testing.T) {
 		t.Fatalf("泛化规则来源应为 qna: %+v", rule)
 	}
 
-	// 已泛化标记（元素7）
+	// 泛化即接管（元素7）：规则完整复现赋值两维（作者+标题捕获）→ 赋值被全量
+	// 消费删除；后续验证轮终选声明改由档案规则承载（无赋值源声明）。
 	sess := waitForVerificationRound(t, m, root)
-	if assign := sess.Assignments[rel]; !assign.Generalized {
-		t.Fatalf("泛化后赋值应带已泛化标记: %+v", assign)
+	if _, still := sess.Assignments[rel]; still {
+		t.Fatalf("全消费的赋值应被删除（规则已完整复现）: %+v", sess.Assignments[rel])
+	}
+	file := waitAssignmentRefresh(t, m, root, rel, func(f *SnapFile) bool {
+		return !finalHasDecl(f, DimAuthor, "作者A", SourceAssignment) &&
+			!finalHasDecl(f, DimTitle, "标题1", SourceAssignment)
+	})
+	if !finalHasDecl(file, DimAuthor, "作者A", SourceFilename) ||
+		!finalHasDecl(file, DimTitle, "标题1", SourceFilename) {
+		t.Fatalf("消费后终选应由规则声明承载: %+v", file.Final)
 	}
 
 	// 未出现在文件名中的维度不烧入文件名形态规则（由赋值承载）

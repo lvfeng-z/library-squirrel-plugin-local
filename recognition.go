@@ -47,8 +47,9 @@ type SessionAssignment struct {
 	TitleClueRef      string   `json:"titleClueRef,omitempty"`
 	CollectionClueRef string   `json:"collectionClueRef,omitempty"`
 	TagClueRefs       []string `json:"tagClueRefs,omitempty"`
-	// Generalized 该赋值是否已泛化为档案规则（全景呈现标记：已泛化的赋值其
-	// 档案规则亦会产出同值声明，保留标记供清理提示）。
+	// Generalized 该赋值是否已参与泛化（泛化即接管语义：新入档规则完整复现的
+	// 维度已从赋值剥离、全维度剥空的赋值已删除——标记仅对有残存未消费维度的
+	// 赋值保留意义，供残存维度的清理提示）。
 	Generalized bool `json:"generalized,omitempty"`
 	// UpdatedAtMs 最近更新时间（Unix 毫秒）。
 	UpdatedAtMs int64 `json:"updatedAtMs,omitempty"`
@@ -423,6 +424,10 @@ type SnapDir struct {
 	// 为产出含义的规则（首个命中）。
 	Meanings      []PathMeaning `json:"meanings,omitempty"`
 	MeaningRuleID string        `json:"meaningRuleId,omitempty"`
+	// StructClues 目录级结构分段线索集（库根名/目录层/剥壳变体，无文件名段）：
+	// 纯路径推导的呈现态数据，getPanorama 投影时展开（不入持久快照，与文件级
+	// 同约定）——目录面板赋值表单的出处引用数据源。
+	StructClues []SnapStructClue `json:"structClues,omitempty"`
 }
 
 // SnapFile 文件级记录。
@@ -923,8 +928,8 @@ func firstMeaningRuleID(rules []RuleEntry, level int, dirName string) string {
 	return ""
 }
 
-// panoramaViewOf 快照的前端投影：游标表为后端增量态，不出前端载荷；文件级
-// 记录附加结构分段线索集（纯路径推导的呈现态数据，不入持久快照）。
+// panoramaViewOf 快照的前端投影：游标表为后端增量态，不出前端载荷；文件级与
+// 目录级记录分别附加结构分段线索集（纯路径推导的呈现态数据，不入持久快照）。
 func panoramaViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 	view := *snap
 	view.DirMtimes = nil
@@ -935,6 +940,14 @@ func panoramaViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 			files[i] = f
 		}
 		view.Files = files
+	}
+	if len(snap.Dirs) > 0 {
+		dirs := make([]SnapDir, len(snap.Dirs))
+		for i, d := range snap.Dirs {
+			d.StructClues = DirStructCluesOf(snap.RootPath, d.RelKey)
+			dirs[i] = d
+		}
+		view.Dirs = dirs
 	}
 	return view
 }

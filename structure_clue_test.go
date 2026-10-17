@@ -1,8 +1,9 @@
 package main
 
 // 结构分段线索集的单元测试：真实样例分段（含 Artist[...] 剥壳变体 / __ 分隔段 /
-// 已知名跨段混合形态 / 尾部码标记的保守判别）与剥壳集表驱动形态。
+// 括号组原子段 / 已知名跨段混合形态 / 尾部码标记的保守判别）与剥壳集表驱动形态。
 import (
+	"fmt"
 	"testing"
 )
 
@@ -32,14 +33,14 @@ func TestStructCluesOfRealSample(t *testing.T) {
 		Label string
 		Value string
 	}{
-		"rootName":         {"库根名", "big belly"},
-		"dirLevel1":        {"一级目录", "Artist[Jake--Jaccobus]"},
-		"dirLevelStripped1": {"一级目录(剥壳)", "Jake--Jaccobus"},
-		"filenameSeg0":     {"文件名段", "atago"},
-		"filenameSeg1":     {"文件名段", "commission"},
-		"filenameSeg2":     {"文件名段", "by"},
-		"filenameSeg3":     {"文件名段", "jake__jaccobus"},
-		"tailCode":         {"尾部码", "delithw"},
+		"rootName":          {"库根名", "big belly"},
+		"dirLevel1":         {"一级目录", "Artist[Jake--Jaccobus]"},
+		"dirLevelStripped1": {"一级目录剥壳", "Jake--Jaccobus"},
+		"filenameSeg0":      {"文件名段", "atago"},
+		"filenameSeg1":      {"文件名段", "commission"},
+		"filenameSeg2":      {"文件名段", "by"},
+		"filenameSeg3":      {"文件名段", "jake__jaccobus"},
+		"tailCode":          {"尾部码", "delithw"},
 	}
 	for ref, w := range want {
 		c, ok := clueByRef(clues, ref)
@@ -73,6 +74,60 @@ func TestStructCluesMixedUnderscoreForm(t *testing.T) {
 	}
 	if _, ok := clueByRef(clues, "filenameSeg2"); ok {
 		t.Fatalf("尾部码不应重复计为文件名段: %v", clues)
+	}
+}
+
+// TestStructCluesBracketAtomicSegments 括号组原子段：目录 Artist[路灯后辈] +
+// [路灯后辈]_[136715041]_无题_[01].png → 括号内名各成段、段间正文（无 `__`）
+// 按单个 `_` 分段，恰四段 路灯后辈/136715041/无题/01；剥壳线索值=路灯后辈且
+// 标签=「一级目录剥壳」；末段 01 长度<5 不判尾部码。
+func TestStructCluesBracketAtomicSegments(t *testing.T) {
+	file := "[路灯后辈]_[136715041]_无题_[01].png"
+	clues := StructCluesOf("E:/libs/图库", "Artist[路灯后辈]/"+file, file)
+	for ref, want := range map[string]string{
+		"filenameSeg0": "路灯后辈",
+		"filenameSeg1": "136715041",
+		"filenameSeg2": "无题",
+		"filenameSeg3": "01",
+	} {
+		if c, ok := clueByRef(clues, ref); !ok || c.Value != want || c.Label != "文件名段" {
+			t.Fatalf("线索 %s 应为 %q，实际 %+v（全集 %v）", ref, want, c, clues)
+		}
+	}
+	if _, ok := clueByRef(clues, "filenameSeg4"); ok {
+		t.Fatalf("分段应恰四段: %v", clues)
+	}
+	if c, ok := clueByRef(clues, "dirLevelStripped1"); !ok || c.Value != "路灯后辈" || c.Label != "一级目录剥壳" {
+		t.Fatalf("剥壳线索应为 路灯后辈/「一级目录剥壳」: %+v", c)
+	}
+	if _, ok := clueByRef(clues, "tailCode"); ok {
+		t.Fatalf("末段 01 长度<5 不应判尾部码: %v", clues)
+	}
+}
+
+// TestStructCluesBracketMixedForms 混合形态：括号内名成段（内名取原文保留
+// 大小写、段间正文取归一化形态——与既有 `__` 分段一致）；内层异对括号留在
+// 内名不递归；含括号组的正文片段含 `__` 时仍按 `__` 分段。
+func TestStructCluesBracketMixedForms(t *testing.T) {
+	cases := []struct {
+		file string
+		segs []string
+	}{
+		{"Artist[X]_pic_01.png", []string{"artist", "X", "pic", "01"}},
+		{"[作者(画师)]_标题.png", []string{"作者(画师)", "标题"}},
+		{"[画师集]_a__b__c.png", []string{"画师集", "a", "b", "c"}},
+	}
+	for _, c := range cases {
+		clues := StructCluesOf("E:/libs/root", "目录/"+c.file, c.file)
+		for i, want := range c.segs {
+			ref := fmt.Sprintf("filenameSeg%d", i)
+			if got, ok := clueByRef(clues, ref); !ok || got.Value != want {
+				t.Fatalf("%s 线索 %s 应为 %q，实际 %+v（全集 %v）", c.file, ref, want, got, clues)
+			}
+		}
+		if extra, ok := clueByRef(clues, fmt.Sprintf("filenameSeg%d", len(c.segs))); ok {
+			t.Fatalf("%s 分段应恰 %d 段，多出 %q: %v", c.file, len(c.segs), extra.Value, clues)
+		}
 	}
 }
 
@@ -131,5 +186,65 @@ func TestStripShellTable(t *testing.T) {
 	}
 	if _, _, ok := stripShell("普通目录"); ok {
 		t.Fatal("普通目录名不应命中剥壳")
+	}
+}
+
+// TestDirStructCluesOf 目录线索集：库根名 + 各级目录名与剥壳变体（标签
+//「N级目录剥壳」），无文件名段与尾部码；库根（空目录键）仅库根名线索。
+func TestDirStructCluesOf(t *testing.T) {
+	clues := DirStructCluesOf("E:/libs/big belly", "Artist[Jake--Jaccobus]/子层")
+	if len(clues) != 4 {
+		t.Fatalf("线索数 = %d（%v），期望 4（库根名1+目录层2+剥壳1）", len(clues), clues)
+	}
+	want := map[string]struct{ Label, Value string }{
+		"rootName":          {"库根名", "big belly"},
+		"dirLevel1":         {"一级目录", "Artist[Jake--Jaccobus]"},
+		"dirLevelStripped1": {"一级目录剥壳", "Jake--Jaccobus"},
+		"dirLevel2":         {"二级目录", "子层"},
+	}
+	for ref, w := range want {
+		c, ok := clueByRef(clues, ref)
+		if !ok || c.Label != w.Label || c.Value != w.Value {
+			t.Fatalf("线索 %s 不符: %+v（期望 %q %q）", ref, c, w.Label, w.Value)
+		}
+	}
+	for _, c := range clues {
+		if c.Kind == structClueFilenameSeg || c.Kind == structClueTailCode {
+			t.Fatalf("目录线索集不应含文件名段/尾部码: %+v", c)
+		}
+	}
+
+	// 库根：仅库根名；无剥壳目录不再多出线索。
+	rootOnly := DirStructCluesOf("E:/libs/图库", "")
+	if len(rootOnly) != 1 || rootOnly[0].Ref != "rootName" || rootOnly[0].Value != "图库" {
+		t.Fatalf("库根目录线索集应仅库根名: %+v", rootOnly)
+	}
+	// 目录键两端斜杠容忍
+	same := DirStructCluesOf("E:/libs/图库", "/Artist[X]/")
+	if len(same) != 3 {
+		t.Fatalf("带斜杠目录键应归一: %+v", same)
+	}
+}
+
+// TestPanoramaViewFillsDirStructClues 全景投影的目录条目填充结构线索集：
+// 纯呈现态（持久快照记录不带），根节点仅库根名。
+func TestPanoramaViewFillsDirStructClues(t *testing.T) {
+	snap := &RecognitionSnapshot{
+		RootPath: "E:/libs/图库",
+		Dirs: []SnapDir{
+			{RelKey: "", Name: "图库", Depth: 0},
+			{RelKey: "Artist[X]", Name: "Artist[X]", Depth: 1, FileCount: 1},
+		},
+		Files: []SnapFile{{RelPath: "Artist[X]/a.png", FileName: "a.png", DirRelKey: "Artist[X]", State: snapStatePlain}},
+	}
+	view := panoramaViewOf(snap)
+	if c, ok := clueByRef(view.Dirs[1].StructClues, "dirLevelStripped1"); !ok || c.Value != "X" {
+		t.Fatalf("目录条目应透出剥壳线索: %+v", view.Dirs[1].StructClues)
+	}
+	if len(view.Dirs[0].StructClues) != 1 || view.Dirs[0].StructClues[0].Ref != "rootName" {
+		t.Fatalf("根目录条目应仅库根名线索: %+v", view.Dirs[0].StructClues)
+	}
+	if snap.Dirs[0].StructClues != nil || snap.Dirs[1].StructClues != nil {
+		t.Fatalf("持久快照的目录记录不应被写入线索集: %+v", snap.Dirs)
 	}
 }

@@ -13,11 +13,23 @@
         <el-button size="small" type="primary" :loading="generalizing" @click="retryGeneralize">重试泛化</el-button>
         <el-button size="small" @click="halfState = null">保留赋值，暂不泛化</el-button>
       </div>
-      <p class="li-pp-hint">赋值不回滚：该文件的会话态覆盖已生效，重识别后按赋值呈现</p>
+      <p class="li-pp-hint">赋值不回滚：本次赋值的会话态覆盖已生效，重识别后按赋值呈现</p>
     </div>
 
-    <!-- 待裁决：选中文件冲突维度就地双路裁决（左栏待裁决折叠区保留只读总览） -->
-    <div v-if="pendingItems.length" class="li-pp-sec">
+    <!-- 剧本J1 目录面板头（目录模式）：最上目录名 + 两三行信息——层级/相对路径、
+         含义覆盖（meanings+meaningRuleId，无则「未覆盖」）、子树文件统计 -->
+    <div v-if="dir" class="li-pp-sec">
+      <div class="li-pp-dir-head">
+        <span class="li-pp-dir-name" :title="dir.relKey || '（库根）'">{{ dir.name }}</span>
+        <button type="button" class="li-pp-dir-back" @click="exitDirPanel">返回文件面板</button>
+      </div>
+      <p class="li-pp-hint">层级：{{ dirLevelText }} · 相对路径 {{ dir.relKey || '（库根）' }}</p>
+      <p class="li-pp-hint">含义覆盖：{{ dirMeaningText }}</p>
+      <p class="li-pp-hint">子树 {{ dir.subtreeFileCount }} 个文件（含子目录 {{ dir.subdirCount }} 个）</p>
+    </div>
+
+    <!-- 待裁决：选中文件冲突维度就地双路裁决（左栏待裁决折叠区保留只读总览）；目录模式无此项 -->
+    <div v-if="!dir && pendingItems.length" class="li-pp-sec">
       <h4 class="li-pp-sec-title">待裁决冲突 <span class="li-pp-sec-note">{{ pendingItems.length }} 维 · 就地双路裁决</span></h4>
       <div v-for="p in pendingItems" :key="p.dimension" class="li-pp-pending">
         <div class="li-pp-pending-head">
@@ -82,8 +94,10 @@
       </div>
     </div>
 
-    <!-- 剧本G1 线索区（赋值表单上方）：该文件结构分段线索集合的可点胶囊陈列
-         （未用=灰、已用=亮）；库名命中/pixiv 形态等既有线索若存在也一并陈列（只读） -->
+    <!-- 剧本G1 线索区（赋值表单上方）：结构分段线索集合的可点胶囊陈列
+         （未用=灰、已用=亮）；剧本J2 目录模式复用同通路——胶囊来自该目录
+         structClues（库根名/各级目录名/N级目录剥壳，无文件名段）；
+         库名命中/pixiv 形态等既有线索若存在也一并陈列（只读） -->
     <div v-if="structClueList.length || legacyClues.length" class="li-pp-sec">
       <h4 class="li-pp-sec-title">
         线索
@@ -160,16 +174,37 @@
           <span v-if="fieldSourceText('collection')" class="li-pp-field-src">{{ fieldSourceText('collection') }}</span>
         </div>
       </div>
-      <!-- 剧本G4：表单底部单「保存」——赋值入会话后紧随「规则建议」卡（summarizeRule）；
-           泛化维度不再前端三选，由线索出处总结器推导（泛化确认=generalize mode=struct） -->
+      <!-- 剧本J3：目录模式表单下作用域提示小字（N=子树文件数；0 文件=保存禁用并提示「该目录下没有文件」） -->
+      <p v-if="dir" class="li-pp-hint">
+        <template v-if="dir.subtreeFileCount > 0">保存将作用于 {{ dir.relKey || '库根' }} 下全部 {{ dir.subtreeFileCount }} 个文件（含子目录）</template>
+        <template v-else>该目录下没有文件</template>
+      </p>
+      <!-- 剧本J4：目录模式底部两钮——保存（assignDir 子树合并写）+ 清除目录赋值
+           （clearDirAssignments）；文件模式维持单「保存」（G4：赋值入会话后紧随
+           「规则建议」卡，泛化维度由线索出处总结器推导，泛化确认=generalize mode=struct） -->
       <div class="li-pp-row">
-        <el-button type="primary" size="small" :loading="assigning || summarizing" @click="doSave">保存</el-button>
+        <el-button
+          v-if="dir"
+          type="primary"
+          size="small"
+          :disabled="dir.subtreeFileCount === 0"
+          :loading="assigning || summarizing"
+          @click="doSave"
+        >保存</el-button>
+        <el-button
+          v-else
+          type="primary"
+          size="small"
+          :loading="assigning || summarizing"
+          @click="doSave"
+        >保存</el-button>
+        <el-button v-if="dir" size="small" :loading="assigning" @click="doClearDirAssign">清除目录赋值</el-button>
       </div>
-      <div class="li-pp-row">
+      <div v-if="!dir" class="li-pp-row">
         <el-button size="small" :loading="ignoring" @click="doIgnoreAction">{{ ignored ? '取消忽略' : '忽略此文件' }}</el-button>
         <el-button size="small" :loading="assigning" @click="doClearAssign">清除赋值</el-button>
       </div>
-      <p class="li-pp-hint">空维度不覆盖档案结论；全部留空即清除赋值。保存赋值后自动总结规则建议（手填值由后端按「值=某段」兜底匹配），确认泛化才入档；保存后后端自动排定增量重识别，完成后本面板与全景自动刷新</p>
+      <p v-if="!dir" class="li-pp-hint">空维度不覆盖档案结论；全部留空即清除赋值。保存赋值后自动总结规则建议（手填值由后端按「值=某段」兜底匹配），确认泛化才入档；保存后后端自动排定增量重识别，完成后本面板与全景自动刷新</p>
     </div>
 
     <!-- 剧本G4 规则建议卡：保存赋值后按选给出处总结（人话规则+命中预览+样例应用），
@@ -190,12 +225,13 @@
       <p v-if="suggestion.manualDims && suggestion.manualDims.length" class="li-pp-hint">
         手工指定（不参与泛化）：{{ manualDimsText }}
       </p>
+      <!-- 命中预览（文件与目录两路共用）：全库口径；样例行带目录键时文件名前呈目录键 -->
       <p class="li-pp-hint">
-        命中预览：将命中同目录其余 {{ suggestion.hitCount }} 个文件（同目录共 {{ suggestion.hitTotal }} 个）<template v-if="suggestion.dropsTailCode">；样例尾部码将被丢弃</template>
+        命中预览：将命中全库 {{ suggestion.hitCount }} 个文件（全库共 {{ suggestion.hitTotal }} 个）<template v-if="suggestion.dropsTailCode">；样例尾部码将被丢弃</template>
       </p>
       <div v-if="suggestion.samples && suggestion.samples.length" class="li-pp-sugg-samples">
         <div v-for="(s, i) in suggestion.samples" :key="i" class="li-pp-sugg-sample">
-          <span class="li-pp-sugg-file" :title="s.fileName">{{ s.fileName }}</span>
+          <span class="li-pp-sugg-file" :title="s.dirRelKey ? `${s.dirRelKey}/${s.fileName}` : s.fileName">{{ s.dirRelKey ? `${s.dirRelKey}/` : '' }}{{ s.fileName }}</span>
           <span class="li-pp-sugg-arrow">→</span>
           <span class="li-pp-sugg-result">{{ s.result }}</span>
         </div>
@@ -250,13 +286,18 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 
-// 右栏解析面板（阶段3 · 剧本G v2 赋值即映射）：线索集胶囊陈列（G1 未用灰/已用亮，
-// 含既有库名命中/pixiv 线索）→ 点线索弹维度选择选给五字段+来源小字（G2-G3，作者
-// 双来源标「与目录互证」；出处 clueRef 随 assign 载荷入会话）→ 保存后「规则建议」卡
-//（G4 summarizeRule：人话规则+命中预览+样例应用）→ 泛化成规则（G5 generalize
-// mode=struct 入档+验证轮）/ 仅保留本次赋值（G6 收起卡）；手填兼容=打字清出处、
-// 无出处值照常提交（后端按「值=某段」兜底匹配）。其余：忽略/清除、待裁决就地
-// 双路裁决、生成规则与差异提示。
+// 右栏解析面板（阶段3 · 剧本G v2 赋值即映射 + 阶段4 · 剧本J 目录模式）：
+// 文件模式——线索集胶囊陈列（G1 未用灰/已用亮，含既有库名命中/pixiv 线索）→
+// 点线索弹维度选择选给五字段+来源小字（G2-G3，作者双来源标「与目录互证」，
+// 互证仅在用户显式赋第二条跨族等值线索时点亮——剧本G修订；出处 clueRef 随
+// assign 载荷入会话）→ 保存后「规则建议」卡（G4 summarizeRule：人话规则+
+// 全库命中预览+样例应用）→ 泛化成规则（G5 generalize mode=struct 入档+
+// 验证轮）/ 仅保留本次赋值（G6 收起卡）；手填兼容=打字清出处、无出处值照常
+// 提交（后端按「值=某段」兜底匹配）。目录模式（剧本J，dir 上下文由 ParseView
+// 组装传入）——目录头信息（J1）+ 目录线索胶囊（J2）+ 五字段表单与子树作用域
+// 提示（J3）+ 保存 assignDir / 清除目录赋值 clearDirAssignments（J4）+ 建议
+// 卡泛化 generalize 目录寻址（J5）；与文件面板互斥使用、互不联动（J7）。
+// 其余：忽略/清除、待裁决就地双路裁决、生成规则与差异提示。
 // 请求经父组件 ParseView 的既有 workbench 请求通道（request 以 prop 注入，
 // 不另建事件通道，避免双通道序号错配）；识别事件（recognitionProgress/
 // recognitionDone）也由父组件统一监听并重取全景+决策态，本组件只消费
@@ -271,6 +312,21 @@ interface PanelFile {
   structClues?: PanelStructClue[]
   // 既有疑似线索（库名命中/pixiv 形态等；只读陈列，不支持选给）
   clues?: { kind: string; detail: string }[]
+}
+
+// 剧本J 目录模式上下文（ParseView 组装传入）：relKey 空串=库根（全树寻址）；
+// structClues 为该目录级结构分段线索集（库根名/各级目录名/剥壳变体，无文件名段）；
+// subtreeFileCount 按 snapshot.files 的 dirRelKey 前缀统计、subdirCount 按
+// snapshot.dirs 前缀统计（不含自身）——树节点聚合受清单过滤影响不可用
+interface PanelDirContext {
+  relKey: string
+  name: string
+  depth: number
+  meanings?: { type: string; id?: string; name?: string }[]
+  meaningRuleId?: string
+  structClues?: PanelStructClue[]
+  subtreeFileCount: number
+  subdirCount: number
 }
 
 // 结构分段线索（后端 SnapStructClue：ref/kind/label/value）
@@ -348,6 +404,8 @@ interface PanelResponse {
   rules?: PanelRule[]
   // 剧本G4：summarizeRule 的总结器产物（建议卡载荷；未入档）
   ruleSuggestion?: PanelRuleSuggestion
+  // 剧本J4：assignDir/clearDirAssignments 的生效文件计数（子树合并写触及数/清除数）
+  affected?: number
 }
 
 // 剧本G4 规则建议（后端 RuleSuggestion：人话规则+逐维度映射+命中预览+样例应用）
@@ -358,6 +416,8 @@ interface PanelRuleSuggestionMapping {
 }
 interface PanelRuleSuggestionSample {
   fileName: string
+  // 样例文件所在目录键（跨目录样例呈现：文件名前呈目录键；空=库根直下不呈前缀）
+  dirRelKey?: string
   result: string
 }
 interface PanelRuleSuggestion {
@@ -374,7 +434,10 @@ interface PanelRuleSuggestion {
 
 const props = defineProps<{
   root: string
-  file: PanelFile
+  // 文件模式上下文（目录模式实例缺省；两模式互斥使用）
+  file?: PanelFile | null
+  // 剧本J 目录模式上下文（文件模式实例缺省）
+  dir?: PanelDirContext | null
   assignments: PanelAssignment[]
   ignored: boolean
   pendingItems: PanelPending[]
@@ -383,7 +446,11 @@ const props = defineProps<{
   request: (action: string, payload: Record<string, unknown>) => Promise<PanelResponse>
 }>()
 
-const emit = defineEmits<{ (e: 'refresh'): void }>()
+const emit = defineEmits<{
+  (e: 'refresh'): void
+  // 剧本J7：目录面板「返回文件面板」（清目录选中态，互斥切回文件面板）
+  (e: 'exitDir'): void
+}>()
 
 // —— 反馈态 ——
 const notice = ref('')
@@ -439,8 +506,11 @@ function setForm(a: PanelAssignment | null): void {
   formDirty = false
 }
 
-// —— 剧本G1-G3：线索集投影与赋值出处（选给=值+clueRef 同时进表单与 assign 载荷） ——
-const structClueList = computed<PanelStructClue[]>(() => (props.file && props.file.structClues) || [])
+// —— 剧本G1-G3 + 剧本J2：线索集投影与赋值出处（选给=值+clueRef 同时进表单与 assign 载荷；
+//     目录模式取该目录 structClues，文件模式取该文件的——ref 空间两路共用） ——
+const structClueList = computed<PanelStructClue[]>(() =>
+  (props.dir ? props.dir.structClues : props.file && props.file.structClues) || []
+)
 const legacyClues = computed(() => (props.file && props.file.clues) || [])
 const clueByRef = computed<Map<string, PanelStructClue>>(() => {
   const m = new Map<string, PanelStructClue>()
@@ -464,16 +534,10 @@ function normalizeHint(v: string): string {
   return v.toLowerCase().replace(/[- ]/g, '_')
 }
 
-// 剧本G3：作者双来源互证——存在另一条跨族线索（目录族↔文件名族）值等价
-const authorCorroborated = computed(() => {
-  const primary = srcAuthor.value ? clueByRef.value.get(srcAuthor.value) : null
-  if (!primary) return false
-  const norm = normalizeHint(primary.value)
-  return structClueList.value.some((c) => {
-    if (c.ref === primary.ref || normalizeHint(c.value) !== norm) return false
-    return dirKindSet.has(primary.kind) !== dirKindSet.has(c.kind)
-  })
-})
+// 剧本G修订（互证时机）：互证仅当用户把第二条跨族等值线索显式赋给作者
+// （crossAuthorRefs 非空，由 applyClueToDim 的作者双来源分支登记）时为真；
+// 线索集自身的值等价不再自动点亮——单来源赋作者小字只有「自 <来源>」
+const authorCorroborated = computed(() => crossAuthorRefs.value.length > 0)
 
 function isClueUsed(ref: string): boolean {
   return (
@@ -642,7 +706,8 @@ const diffEntries = computed<{ kind: string; relPath: string; before?: PanelDiff
   return [...cap(d.changed, 'changed'), ...cap(d.added, 'added'), ...cap(d.removed, 'removed')]
 })
 
-// —— 面板复位：点行切换文件时表单与裁决/反馈态跟随重置并按现值预填 ——
+// —— 面板复位：点行切换文件/点目录名切换目录时表单与裁决/反馈态跟随重置
+//    （文件模式按现值预填；目录模式无单点赋值存储，从空表单起） ——
 function resetPanelState(): void {
   setForm(currentAssignment.value)
   notice.value = ''
@@ -669,11 +734,20 @@ watch(
   }
 )
 
-// 自动刷新落盘（assignments 投影更新）：表单未被用户改动时跟随预填现值（含已泛化标记随标记位刷新）
+// 剧本J7：点目录名切换目录面板目标（relKey 变化才复位；快照刷新重建 dir 上下文对象不触发）
+watch(
+  () => props.dir && props.dir.relKey,
+  () => {
+    resetPanelState()
+  }
+)
+
+// 自动刷新落盘（assignments 投影更新）：表单未被用户改动时跟随预填现值（含已泛化标记随标记位刷新）；
+// 目录模式无赋值预填源，刷新不覆写目录表单（保存后表单内容保留）
 watch(
   () => props.assignments,
   () => {
-    if (!formDirty) setForm(currentAssignment.value)
+    if (!formDirty && !props.dir) setForm(currentAssignment.value)
   }
 )
 
@@ -721,8 +795,13 @@ async function runAssign(): Promise<boolean> {
   return true
 }
 
-// 剧本G4 保存：赋值入会话 → 紧随「规则建议」卡（summarizeRule：人话规则+命中预览+样例）
+// 剧本G4 保存（文件）/ 剧本J4 保存（目录）：赋值入会话 → 紧随「规则建议」卡
+//（summarizeRule：人话规则+全库命中预览+样例）
 async function doSave(): Promise<void> {
+  if (props.dir) {
+    await doSaveDir()
+    return
+  }
   const ok = await runAssign()
   if (!ok) return
   formDirty = false
@@ -740,7 +819,7 @@ async function doSave(): Promise<void> {
   actionError.value = ''
   const resp = await props.request('summarizeRule', {
     root: props.root,
-    relPath: props.file.relPath
+    relPath: props.file ? props.file.relPath : ''
   })
   summarizing.value = false
   if (!resp.ok || !resp.ruleSuggestion) {
@@ -749,6 +828,75 @@ async function doSave(): Promise<void> {
     return
   }
   suggestion.value = resp.ruleSuggestion
+}
+
+// 剧本J4 保存（目录）：assignDir 子树合并写（非空维度覆盖、空维度不动）→
+// 成功通知用 affected（生效文件数）→ summarizeRule 目录寻址（relPath 缺省+
+// dirRelKey 在场，样本=子树首个有赋值文件）出建议卡；后端已排自动增量重识别，
+// 前端仅重取全景（不发识别请求——与 assign 同约定）。失败时动作 error 上浮
+// actionError，表单内容保留。
+async function doSaveDir(): Promise<void> {
+  const dir = props.dir
+  if (!props.root || !dir) {
+    actionError.value = '会话或目标目录缺失，无法保存赋值'
+    return
+  }
+  // 双保险：按钮已按 0 文件禁用（J3）
+  if (dir.subtreeFileCount <= 0) {
+    actionError.value = '该目录下没有文件'
+    return
+  }
+  const tags = formTagsText.value
+    .split(/[,，、]/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+  if (!formAuthor.value.trim() && !formAuthorRole.value.trim() && !formTitle.value.trim() && !formCollection.value.trim() && !tags.length) {
+    // 目录赋值无「全部留空=清除」语义（清除走「清除目录赋值」钮）；文案与后端拦截一致
+    actionError.value = '目录赋值未指定任何维度，无法应用'
+    return
+  }
+  assigning.value = true
+  notice.value = ''
+  actionError.value = ''
+  halfState.value = null
+  const payload: Record<string, unknown> = {
+    root: props.root,
+    dirRelKey: dir.relKey,
+    author: formAuthor.value.trim(),
+    authorRole: formAuthorRole.value.trim(),
+    title: formTitle.value.trim(),
+    tags: tags,
+    collection: formCollection.value.trim()
+  }
+  if (srcAuthor.value) payload.authorClueRef = srcAuthor.value
+  if (srcTitle.value) payload.titleClueRef = srcTitle.value
+  if (srcCollection.value) payload.collectionClueRef = srcCollection.value
+  if (tags.length && srcTags.value.length === tags.length && srcTags.value.some((r) => r)) {
+    payload.tagClueRefs = srcTags.value.slice()
+  }
+  const resp = await props.request('assignDir', payload)
+  assigning.value = false
+  if (!resp.ok) {
+    actionError.value = resp.error || '保存目录赋值失败'
+    return
+  }
+  formDirty = false
+  const affected = resp.affected || 0
+  notice.value = `已对 ${affected} 个文件保存赋值（重识别后生效）`
+  emit('refresh')
+  suggestion.value = null
+  summarizing.value = true
+  actionError.value = ''
+  const sresp = await props.request('summarizeRule', {
+    root: props.root,
+    dirRelKey: dir.relKey
+  })
+  summarizing.value = false
+  if (!sresp.ok || !sresp.ruleSuggestion) {
+    notice.value = `已对 ${affected} 个文件保存赋值；未产生规则建议（${sresp.error || '无可泛化内容'}）`
+    return
+  }
+  suggestion.value = sresp.ruleSuggestion
 }
 
 // 剧本G6 仅保留本次赋值：卡收起，现状单次赋值语义（不泛化=不发请求）
@@ -763,14 +911,22 @@ async function doGeneralizeStruct(): Promise<void> {
 }
 
 async function runGeneralize(mode: string): Promise<void> {
-  if (!props.root || !props.file) return
+  if (!props.root) return
+  // 剧本J5：目录模式=目录寻址（relPath 缺省+dirRelKey 在场，样本=子树首个有
+  // 赋值文件）；验证轮流程（verifyStarted/差异）两路共用不变
+  const target: Record<string, unknown> | null = props.dir
+    ? { dirRelKey: props.dir.relKey }
+    : props.file
+      ? { relPath: props.file.relPath }
+      : null
+  if (!target) return
   generalizing.value = true
   notice.value = ''
   actionError.value = ''
   const resp = await props.request('generalize', {
     root: props.root,
-    relPath: props.file.relPath,
-    generalizeMode: mode
+    generalizeMode: mode,
+    ...target
   })
   generalizing.value = false
   const rules = resp.rules && resp.rules.length ? resp.rules : resp.rule ? [resp.rule] : []
@@ -817,6 +973,33 @@ async function doClearAssign(): Promise<void> {
   lastGenRules.value = []
   suggestion.value = null
   notice.value = '已清除赋值（重识别后生效）'
+}
+
+// 剧本J4 清除目录赋值：clearDirAssignments 删子树全部文件赋值（含已泛化标记，
+// affected=清除数）→ 通知+重取全景；后端已排自动重识别，前端不发识别请求
+async function doClearDirAssign(): Promise<void> {
+  const dir = props.dir
+  if (!props.root || !dir) return
+  assigning.value = true
+  notice.value = ''
+  actionError.value = ''
+  halfState.value = null
+  const resp = await props.request('clearDirAssignments', {
+    root: props.root,
+    dirRelKey: dir.relKey
+  })
+  assigning.value = false
+  if (!resp.ok) {
+    actionError.value = resp.error || '清除目录赋值失败'
+    return
+  }
+  setForm(null)
+  lastGenRule.value = null
+  lastCondition.value = ''
+  lastGenRules.value = []
+  suggestion.value = null
+  notice.value = `已清除目录下 ${resp.affected || 0} 个文件的赋值（重识别后生效）`
+  emit('refresh')
 }
 
 // 忽略/取消忽略：忽略不触发识别，应答后仅请父组件重取全景（含决策态）
@@ -925,6 +1108,50 @@ const dimLabel = (dim: string): string => {
     default: return dim
   }
 }
+
+// —— 剧本J1 目录面板头呈现辅助 ——
+
+// 层级标签（depth 0=库根；n≥1 与后端 dirLevelLabel 的 1 基序数一致）
+const dirLevelText = computed(() => {
+  const d = props.dir
+  if (!d) return ''
+  if (d.depth <= 0) return '库根'
+  const words = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+  if (d.depth < words.length) return `${words[d.depth]}级目录`
+  return `第 ${d.depth} 级目录`
+})
+
+// 含义覆盖行：meanings 逐条人话 + 来源规则名；无则「未覆盖」（与 ParseView meaningLabel 同源）
+const dirMeaningText = computed(() => {
+  const d = props.dir
+  if (!d) return ''
+  const list = d.meanings || []
+  if (!list.length) return '未覆盖'
+  let text = list.map(meaningLabel).join('、')
+  if (d.meaningRuleId) text += `（来源规则 ${d.meaningRuleId}）`
+  return text
+})
+
+function meaningLabel(m: { type: string; name?: string }): string {
+  const labels: Record<string, string> = {
+    localAuthor: '作者',
+    siteAuthor: '站点作者',
+    localTag: '标签',
+    siteTag: '站点标签',
+    workName: '作品名',
+    workSet: '作品集',
+    site: '站点',
+    unknown: '未知'
+  }
+  const label = labels[m.type] || m.type
+  return m.name ? `${label}:${m.name}` : label
+}
+
+// 剧本J7：目录面板「返回文件面板」（互斥切回，由 ParseView 清目录选中态）
+function exitDirPanel(): void {
+  emit('exitDir')
+}
+
 // 剧本G1：既有线索（库名命中/pixiv 形态等）的陈列词条（与 ParseView clueLabel 同源）
 const legacyClueLabel = (c: { kind: string; detail: string }): string => {
   switch (c.kind) {
@@ -1056,6 +1283,32 @@ const conclusionSummary = (c?: PanelDiffConclusion | null): string => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* 剧本J1 目录面板头：目录名 + 返回文件面板 */
+.li-pp-dir-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.li-pp-dir-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+  word-break: break-all;
+}
+
+.li-pp-dir-back {
+  margin-left: auto;
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--app-color-primary);
 }
 
 /* 剧本G1 线索胶囊（未用=灰、已用=亮） */
