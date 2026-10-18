@@ -378,38 +378,47 @@ func TestCreateWorkInfoLegacyPseudoFormDataConvertsByName(t *testing.T) {
 	}
 }
 
-// TestBuildBatchParentResponseRealGroupIdentity 真实域组：父任务身份加站点键后缀
-//（PluginTaskId 是同流应答的父任务合并键，同批拆分的各组须可区分——批次组身份
-// 由 emitSelectedWorks 按 local-batch-<毫秒>@siteKey 生成），子任务带页级 ID 与
-// 归属字段；单子行亦为父行（批次父行纯容器——v1 的单文件叶任务折叠废除）；父
-// PluginData 为纯容器（DirRelPath 空、无含义链）。
-func TestBuildBatchParentResponseRealGroupIdentity(t *testing.T) {
+// TestBuildChildResponsesSiteKeyAndSingleParent 混归属子行构造与单父行形态：
+// 子行归属键与 FilePluginData 归属字段同构——真实域子行携 siteKey 与页级作品
+// ID 身份、local 回退子行键留空（继承父应答站点键）与哈希身份；父行为纯容器
+//（DirRelPath 空、无含义链），PluginTaskId=local-batch-<毫秒>（无组间后缀）、
+// 站点键=创建域 identity.Local.Key；单子行亦为父行（一次创建恒为一个父任务）。
+func TestBuildChildResponsesSiteKeyAndSingleParent(t *testing.T) {
 	dir := t.TempDir()
-	f1 := writeFile(t, filepath.Join(dir, "11111111_p0.jpg"), "a")
-	f2 := writeFile(t, filepath.Join(dir, "11111111_p1.jpg"), "b")
+	f1 := writeFile(t, filepath.Join(dir, "photo.png"), "a")
+	f2 := writeFile(t, filepath.Join(dir, "11111111_p0.jpg"), "b")
+	f3 := writeFile(t, filepath.Join(dir, "11111111_p1.jpg"), "c")
 	items := []batchFileItem{
-		{af: attributedFile{entry: FileEntry{FullPath: f1, RelPath: "sub/11111111_p0.jpg", Hash: "h1"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p0"}}},
-		{af: attributedFile{entry: FileEntry{FullPath: f2, RelPath: "sub/11111111_p1.jpg", Hash: "h2"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p1"}}},
+		{af: attributedFile{entry: FileEntry{FullPath: f1, RelPath: "sub/photo.png", Hash: "h0"}}},
+		{af: attributedFile{entry: FileEntry{FullPath: f2, RelPath: "sub/11111111_p0.jpg", Hash: "h1"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p0"}}},
+		{af: attributedFile{entry: FileEntry{FullPath: f3, RelPath: "sub/11111111_p1.jpg", Hash: "h2"}, attr: workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p1"}}},
 	}
 	children := buildChildResponses(items, nil)
-	if len(children) != 2 {
-		t.Fatalf("应产出 2 子行，实得 %d", len(children))
+	if len(children) != 3 {
+		t.Fatalf("应产出 3 子行，实得 %d", len(children))
 	}
-	for _, child := range children {
+	// 子行键分布：local 回退首行键空+哈希身份，真实域子行键=pixiv+页级 ID 身份
+	if children[0].SiteKey != "" || children[0].SiteWorkId != "h0" {
+		t.Fatalf("local 回退子行应键空+哈希身份，实际 %q/%q", children[0].SiteKey, children[0].SiteWorkId)
+	}
+	for _, child := range children[1:] {
+		if child.SiteKey != identity.Pixiv.Key {
+			t.Fatalf("真实域子行应携归属站点键，实际 %q", child.SiteKey)
+		}
 		var fp FilePluginData
 		if err := json.Unmarshal([]byte(child.PluginData), &fp); err != nil {
 			t.Fatalf("解析子任务 PluginData 失败: %v", err)
 		}
-		if !fp.hasRealAttribution() || fp.SiteKey != identity.Pixiv.Key || fp.SiteWorkId != child.SiteWorkId {
-			t.Fatalf("子任务 PluginData 应携带归属字段且与身份一致，实得 child=%q fp=%+v", child.SiteWorkId, fp)
+		if !fp.hasRealAttribution() || fp.SiteKey != child.SiteKey || fp.SiteWorkId != child.SiteWorkId {
+			t.Fatalf("子任务 PluginData 归属字段应与子行键同构，实得 child=%q fp=%+v", child.SiteWorkId, fp)
 		}
 	}
-	resp := buildBatchParentResponse("local-batch-1700000000000@"+identity.Pixiv.Key, "批次 · pixiv", "local://root", identity.Pixiv.Key, children)
-	if resp.PluginTaskId != "local-batch-1700000000000@"+identity.Pixiv.Key || resp.SiteWorkId != resp.PluginTaskId {
-		t.Fatalf("真实域父任务身份应为 local-batch-<毫秒>@pixiv，实得 %q/%q", resp.PluginTaskId, resp.SiteWorkId)
+	resp := buildBatchParentResponse("local-batch-1700000000000", "批次", "local://root", identity.Local.Key, children)
+	if resp.PluginTaskId != "local-batch-1700000000000" || resp.SiteWorkId != resp.PluginTaskId {
+		t.Fatalf("父任务身份应为 local-batch-<毫秒>（无组间后缀），实得 %q/%q", resp.PluginTaskId, resp.SiteWorkId)
 	}
-	if resp.SiteKey != identity.Pixiv.Key || resp.TaskName != "批次 · pixiv" {
-		t.Fatalf("真实域组应答站点键与任务名，实得 %q/%q", resp.SiteKey, resp.TaskName)
+	if resp.SiteKey != identity.Local.Key || resp.TaskName != "批次" {
+		t.Fatalf("父行应为创建域站点键与裸任务名，实得 %q/%q", resp.SiteKey, resp.TaskName)
 	}
 	var dp DirPluginData
 	if err := json.Unmarshal([]byte(resp.PluginData), &dp); err != nil {
@@ -419,9 +428,9 @@ func TestBuildBatchParentResponseRealGroupIdentity(t *testing.T) {
 		t.Fatalf("批次父行 PluginData 应为纯容器（DirRelPath 空、无含义链），实际 %+v", dp)
 	}
 	// 单子行亦为父行（一次创建=一个父任务；宿主 parent+children 不折叠契约）
-	single := buildBatchParentResponse("local-batch-1700000000000", "单件", "local://root", identity.Local.Key, children[:1])
+	single := buildBatchParentResponse("local-batch-1700000000001", "单件", "local://root", identity.Local.Key, children[:1])
 	if len(single.Children) != 1 {
-		t.Fatalf("单子行组亦应为父行+单子行（不折叠为叶任务），实得 %+v", single)
+		t.Fatalf("单子行批次亦应为父行+单子行（不折叠为叶任务），实得 %+v", single)
 	}
 }
 

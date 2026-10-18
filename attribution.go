@@ -1,7 +1,6 @@
 package main
 
 import (
-	"path/filepath"
 	"regexp"
 
 	"github.com/lvfeng-z/library-squirrel-sdk/identity"
@@ -82,19 +81,4 @@ func siteDisplayName(siteKey string) string {
 		return site.Name
 	}
 	return siteKey
-}
-
-// partitionByAttribution 把同目录文件按归属裁决拆为 local 回退组与真实域组。
-// 同目录文件共享同一份路径含义（站点分类一致），真实域组内站点键恒一致。
-func partitionByAttribution(files []FileEntry, classifiedSiteKey string) (local, real []attributedFile) {
-	for _, f := range files {
-		attr := resolveWorkAttribution(filepath.Base(f.FullPath), classifiedSiteKey)
-		af := attributedFile{entry: f, attr: attr}
-		if attr.isReal() {
-			real = append(real, af)
-		} else {
-			local = append(local, af)
-		}
-	}
-	return local, real
 }

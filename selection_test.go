@@ -304,7 +304,7 @@ func responseChildNames(resp *sdkdto.TaskCreateResponse) []string {
 
 // TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 会话模式 Create 过滤产出：
 // 选择=「d:多轨 双轨作品」+「集内 2/3 成员显式拆选」→ 只产出所选作品：纯 local
-// 批次=单应答单父（批次应答组），子行=组内全部所选文件（确定序：目录序内先目录
+// 批次=单应答单父（批次应答），子行=全部所选文件（确定序：目录序内先目录
 // 聚合作品后集成员）；未选作品（d:已识别、第三名集成员）零任务，未识别/待裁决
 // 作品即使混入选择集也非可选（写入即拒）。任务名走默认名兜底（未暂存用户名）。
 // 全程零前端事件（零 ClassifyDir 弹问——目录含义取快照回放，结构性不触问答）。
@@ -320,18 +320,18 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 	before := ctx.publishedCount()
 	resps := collectWorkbenchCreate(t, m, ctx, root, "")
 	if len(resps) != 1 {
-		t.Fatalf("纯 local 批次应为单应答单父（批次应答组），实得 %d 个: %+v", len(resps), resps)
+		t.Fatalf("纯 local 批次应为单应答单父（批次应答），实得 %d 个: %+v", len(resps), resps)
 	}
 	batch := resps[0]
 
 	// 批次父行：默认名兜底（本地导入 · 库根名 · N 件作品，N=选择集作品数〔3 作品
-	// 4 文件〕）、local-batch- 父身份、local 组站点键、纯容器 PluginData（DirRelPath
+	// 4 文件〕）、local-batch- 父身份、创建域站点键、纯容器 PluginData（DirRelPath
 	// 空、无含义链）
 	if want := fmt.Sprintf("本地导入 · %s · 3 件作品", filepath.Base(root)); batch.TaskName != want {
 		t.Fatalf("批次父行任务名应为默认名 %q，实际 %q", want, batch.TaskName)
 	}
 	if !strings.HasPrefix(batch.PluginTaskId, "local-batch-") || batch.SiteKey != identity.Local.Key {
-		t.Fatalf("批次父行身份应为 local-batch-<毫秒> 且 local 组站点键，实际 %q/%q", batch.PluginTaskId, batch.SiteKey)
+		t.Fatalf("批次父行身份应为 local-batch-<毫秒> 且创建域站点键，实际 %q/%q", batch.PluginTaskId, batch.SiteKey)
 	}
 	var dp DirPluginData
 	if err := json.Unmarshal([]byte(batch.PluginData), &dp); err != nil {
@@ -341,7 +341,7 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 		t.Fatalf("批次父行 PluginData 应为纯容器（DirRelPath 空、无含义链），实际 %+v", dp)
 	}
 
-	// 子行=组内全部所选文件（原子轨道集 + 集成员按域序=集内序，确定序保持）
+	// 子行=全部所选文件（原子轨道集 + 集成员按域序=集内序，确定序保持）
 	if want := "【作者B】标题2.jpg,【作者C】标题3.jpg,前缀名_001.jpg,前缀名_002.jpg"; strings.Join(responseChildNames(batch), ",") != want {
 		t.Fatalf("批次子行应按确定序含全部所选文件，实际 %v", responseChildNames(batch))
 	}
@@ -377,9 +377,9 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 	}
 }
 
-// TestCreateWorkbenchFilteredLoneSetMemberSingleChild 集内仅选一名成员：批次应答组
-// 形态下仍为单父行+单子行（v1 的单文件叶任务折叠随批次父行纯容器化废除——一次
-// 创建恒为一个父任务），子行身份=内容哈希（local 回退）。
+// TestCreateWorkbenchFilteredLoneSetMemberSingleChild 集内仅选一名成员：批次应答
+// 形态下为单父行+单子行（单文件叶任务不折叠——一次创建恒为一个父任务），
+// 子行身份=内容哈希（local 回退）。
 func TestCreateWorkbenchFilteredLoneSetMemberSingleChild(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, nil)
 	if _, err := m.SetSelection(root, []string{"f:序列/前缀名_003.jpg"}); err != nil {
@@ -399,7 +399,7 @@ func TestCreateWorkbenchFilteredLoneSetMemberSingleChild(t *testing.T) {
 	}
 }
 
-// —— 批次应答组：纯 local 单组与混站点多组（emitSelectedWorks v2 直驱）—— //
+// —— 批次应答：纯 local 与混归属单父（emitSelectedWorks 直驱）—— //
 
 // emitFixture 构造直驱 emitSelectedWorks 的最小环境：临时库根 + 指定相对路径的
 // 文件集 + 空快照会话（快照无目录记录 → 含义链为空，归属裁决只走文件名形态）。
@@ -428,9 +428,10 @@ func collectEmitted(t *testing.T, h *LocalImportWorkFetcher, root string, sess *
 }
 
 // TestEmitSelectedWorksPureLocalSingleParent 纯 local 批次=单应答单父：一次创建
-// 的全部所选文件合入 local 回退组，子行数=文件数、确定序保持（目录序内先目录
-// 聚合作品后集成员〔域序=集内序〕）、用户名直用（默认名两式的另一式由
-// TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 的空名直驱路径覆盖）。
+// 的全部所选文件为 local 回退子行（归属键留空=继承父应答站点键），子行数=文件
+// 数、确定序保持（目录序内先目录聚合作品后集成员〔域序=集内序〕）、用户名直用
+// （默认名两式的另一式由 TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 的
+// 空名直驱路径覆盖）。
 func TestEmitSelectedWorksPureLocalSingleParent(t *testing.T) {
 	root, h, m, sess := emitFixture(t, []string{
 		"甲/【作者A】标题1.jpg",
@@ -452,18 +453,24 @@ func TestEmitSelectedWorksPureLocalSingleParent(t *testing.T) {
 		t.Fatalf("子行应按确定序含全部 4 文件，实际 %v", responseChildNames(resp))
 	}
 	if resp.SiteKey != identity.Local.Key || !strings.HasPrefix(resp.PluginTaskId, "local-batch-") {
-		t.Fatalf("local 组站点键与批次父身份形态，实际 %q/%q", resp.SiteKey, resp.PluginTaskId)
+		t.Fatalf("批次父行应为创建域站点键与 local-batch-<毫秒> 身份形态，实际 %q/%q", resp.SiteKey, resp.PluginTaskId)
 	}
-	if summary := m.takeCreateBatchSummary(root); summary.groups != 1 || summary.nonLocalFiles != 0 {
-		t.Fatalf("纯 local 批次摘要应为 1 组、无非 local 件，实际 %+v", summary)
+	for _, child := range resp.Children {
+		if child.SiteKey != "" {
+			t.Fatalf("local 回退子行归属键应留空（继承父应答站点键），实际 %q", child.SiteKey)
+		}
+	}
+	if summary := m.takeCreateBatchSummary(root); summary.total != 4 || len(summary.nonLocalBySite) != 0 {
+		t.Fatalf("纯 local 批次摘要应为 4 子行、无归属分布，实际 %+v", summary)
 	}
 }
 
-// TestEmitSelectedWorksMixedSiteGroups 混站点批次=按站点多应答：local 组裸名、
-// 真实组追加「 · 站点名」后缀（站点名取 identity 注册表权威名）；父身份批内组间
-// 唯一（真实组=local-batch-<毫秒>@siteKey）；子行站点继承父应答（宿主契约）；
-// 批次摘要回写（组数与非 local 组文件计数——通知文案数据源）。
-func TestEmitSelectedWorksMixedSiteGroups(t *testing.T) {
+// TestEmitSelectedWorksMixedAttributionSingleParent 混归属批次=单应答单父：pixiv
+// 原图形态文件名与普通文件同批，全部子行进同一父应答（站点键=创建域
+// identity.Local.Key）；子行归属键分布——真实域子行携归属站点键与页级作品 ID
+// 身份、local 回退子行归属键留空（继承父应答站点键）与内容哈希身份；父行裸用
+// 用户名、父身份无组间后缀；批次摘要回写（子行总数与归属分布——通知文案数据源）。
+func TestEmitSelectedWorksMixedAttributionSingleParent(t *testing.T) {
 	root, h, m, sess := emitFixture(t, []string{
 		"混合/【作者A】标题1.jpg",
 		"混合/11111111_p0.jpg",
@@ -472,32 +479,47 @@ func TestEmitSelectedWorksMixedSiteGroups(t *testing.T) {
 		WorkID: "d:混合", Kind: WorkKindDirTracks, DirRelKey: "混合",
 		Files: []string{"混合/【作者A】标题1.jpg", "混合/11111111_p0.jpg"},
 	}}
-	resps := collectEmitted(t, h, root, sess, works, "混站批次")
-	if len(resps) != 2 {
-		t.Fatalf("混站点批次应按站点产出两应答（local 组+pixiv 组），实得 %d: %+v", len(resps), resps)
+	resps := collectEmitted(t, h, root, sess, works, "混归属批次")
+	if len(resps) != 1 {
+		t.Fatalf("混归属批次应为单应答单父（全部子行进同一父），实得 %d: %+v", len(resps), resps)
 	}
-	localResp, realResp := resps[0], resps[1]
-	if localResp.SiteKey != identity.Local.Key || localResp.TaskName != "混站批次" {
-		t.Fatalf("local 组应裸名+local 站点键，实际 %q/%q", localResp.TaskName, localResp.SiteKey)
+	resp := resps[0]
+	if resp.SiteKey != identity.Local.Key || resp.TaskName != "混归属批次" {
+		t.Fatalf("父行应为创建域站点键+裸用户名（无站点名后缀），实际 %q/%q", resp.TaskName, resp.SiteKey)
 	}
-	if realResp.SiteKey != identity.Pixiv.Key || realResp.TaskName != "混站批次 · pixiv" {
-		t.Fatalf("真实组应带站点名后缀+站点键，实际 %q/%q", realResp.TaskName, realResp.SiteKey)
+	if !strings.HasPrefix(resp.PluginTaskId, "local-batch-") || strings.Contains(resp.PluginTaskId, "@") {
+		t.Fatalf("父身份应为 local-batch-<毫秒>（无组间后缀），实际 %q", resp.PluginTaskId)
 	}
-	if !strings.HasPrefix(localResp.PluginTaskId, "local-batch-") ||
-		realResp.PluginTaskId != localResp.PluginTaskId+"@"+identity.Pixiv.Key {
-		t.Fatalf("组身份应为 local-batch-<毫秒> 且真实组追加 @siteKey，实际 %q / %q", localResp.PluginTaskId, realResp.PluginTaskId)
+	// 子行确定序：目录内文件原序（不按归属重排）
+	if want := "【作者A】标题1.jpg,11111111_p0.jpg"; strings.Join(responseChildNames(resp), ",") != want {
+		t.Fatalf("子行应按目录内原序排列，实际 %v", responseChildNames(resp))
 	}
-	// 子行归属：local 组子行=回退文件（哈希身份）、真实组子行=页级作品 ID 身份
-	if len(localResp.Children) != 1 || localResp.Children[0].TaskName != "【作者A】标题1.jpg" {
-		t.Fatalf("local 组应含回退文件子行，实际 %+v", localResp.Children)
+	localChild, realChild := resp.Children[0], resp.Children[1]
+	if localChild.SiteKey != "" || localChild.SiteWorkId == "11111111_p0" {
+		t.Fatalf("local 回退子行归属键应留空且身份=内容哈希，实际 %q/%q", localChild.SiteKey, localChild.SiteWorkId)
 	}
-	if len(realResp.Children) != 1 || realResp.Children[0].SiteWorkId != "11111111_p0" {
-		t.Fatalf("真实组子行身份应为页级作品 ID，实际 %+v", realResp.Children)
+	if realChild.SiteKey != identity.Pixiv.Key || realChild.SiteWorkId != "11111111_p0" {
+		t.Fatalf("真实域子行应携归属站点键与页级作品 ID 身份，实际 %q/%q", realChild.SiteKey, realChild.SiteWorkId)
 	}
-	// 批次摘要：2 组、非 local 组 pixiv 1 件
+	// 子行归属键与 FilePluginData 归属字段同构
+	var localFP, realFP FilePluginData
+	if err := json.Unmarshal([]byte(localChild.PluginData), &localFP); err != nil {
+		t.Fatalf("解析 local 子行 PluginData 失败: %v", err)
+	}
+	if err := json.Unmarshal([]byte(realChild.PluginData), &realFP); err != nil {
+		t.Fatalf("解析真实域子行 PluginData 失败: %v", err)
+	}
+	if localFP.hasRealAttribution() {
+		t.Fatalf("local 子行 PluginData 不应携带归属字段，实际 %+v", localFP)
+	}
+	if !realFP.hasRealAttribution() || realFP.SiteKey != realChild.SiteKey || realFP.SiteWorkId != realChild.SiteWorkId {
+		t.Fatalf("真实域子行 PluginData 归属字段应与子行键同构，实际 fp=%+v child=%+v", realFP, realChild)
+	}
+	// 批次摘要：2 子行、归属分布 pixiv 1 件
 	summary := m.takeCreateBatchSummary(root)
-	if summary.groups != 2 || len(summary.nonLocalSiteNames) != 1 || summary.nonLocalSiteNames[0] != "pixiv" || summary.nonLocalFiles != 1 {
-		t.Fatalf("批次摘要应记 2 组与非 local 组 pixiv 1 件，实际 %+v", summary)
+	if summary.total != 2 || len(summary.nonLocalBySite) != 1 ||
+		summary.nonLocalBySite[0].siteName != "pixiv" || summary.nonLocalBySite[0].files != 1 {
+		t.Fatalf("批次摘要应记 2 子行与 pixiv 1 件归属分布，实际 %+v", summary)
 	}
 }
 
@@ -571,7 +593,7 @@ func removeFile(t *testing.T, path string) error {
 
 // TestApplyCreateTasksOrchestration 创建编排动作全链：对账通过 → 置发起标记+暂存
 // 任务名 → 经宿主 CreateTask 一次调用（local:// 库根）→ 按宿主结论回告创建数与
-// 通知文案（空任务名=默认名兜底；宿主桩不产出=无批次摘要，文案不追加站点组
+// 通知文案（空任务名=默认名兜底；宿主桩不产出=无批次摘要，文案不追加归属
 // 附注——真实 Create 过滤产出分支由前述用例直接驱动）→ 清理选择集（赋值与
 // 快照保留）。CreateTask 由桩应答。
 func TestApplyCreateTasksOrchestration(t *testing.T) {
@@ -636,19 +658,27 @@ func TestApplyCreateTasksCustomName(t *testing.T) {
 	}
 }
 
-// TestBuildCreateTasksMessageSiteSuffix 通知文案的站点组附注：单组无附注；多组
-// 追加「另有 <站点名> 组 n 件」（n=非 local 组文件数合计，多站点名按首见序、
-// 顿号连写）。
-func TestBuildCreateTasksMessageSiteSuffix(t *testing.T) {
-	single := buildCreateTasksMessage("本地导入 · 库 · 3 件作品", 3, 3, createBatchSummary{groups: 1})
-	if want := "已创建任务「本地导入 · 库 · 3 件作品」：3 件作品（3 个子任务，Created 待手动开始）"; single != want {
-		t.Fatalf("单组文案不追加附注，期望 %q 实际 %q", want, single)
+// TestBuildCreateTasksMessageAttributionNote 通知文案的归属附注：无非 local 子行
+// 无附注；有则追加「其中 n 件归属 站点名」（按归属分布逐站点一段、顿号连写，
+// 多站点分别列出——文案按归属分布组织，与父行形态正交）。
+func TestBuildCreateTasksMessageAttributionNote(t *testing.T) {
+	pure := buildCreateTasksMessage("本地导入 · 库 · 3 件作品", 3, 3, createBatchSummary{total: 3})
+	if want := "已创建任务「本地导入 · 库 · 3 件作品」：3 件作品（3 个子任务，Created 待手动开始）"; pure != want {
+		t.Fatalf("纯 local 批次文案不追加附注，期望 %q 实际 %q", want, pure)
 	}
-	multi := buildCreateTasksMessage("混站批次", 5, 5, createBatchSummary{
-		groups: 2, nonLocalSiteNames: []string{"pixiv"}, nonLocalFiles: 2,
+	mixed := buildCreateTasksMessage("混归属批次", 5, 5, createBatchSummary{
+		total:          5,
+		nonLocalBySite: []siteFileCount{{siteName: "pixiv", files: 2}},
 	})
-	if want := "已创建任务「混站批次」：5 件作品（5 个子任务，Created 待手动开始）；另有 pixiv 组 2 件"; multi != want {
-		t.Fatalf("多组文案应追加站点组附注，期望 %q 实际 %q", want, multi)
+	if want := "已创建任务「混归属批次」：5 件作品（5 个子任务，Created 待手动开始）；其中 2 件归属 pixiv"; mixed != want {
+		t.Fatalf("混归属批次文案应追加归属附注，期望 %q 实际 %q", want, mixed)
+	}
+	multiSite := buildCreateTasksMessage("多站点批次", 4, 4, createBatchSummary{
+		total:          4,
+		nonLocalBySite: []siteFileCount{{siteName: "pixiv", files: 2}, {siteName: "bilibili", files: 1}},
+	})
+	if want := "已创建任务「多站点批次」：4 件作品（4 个子任务，Created 待手动开始）；其中 2 件归属 pixiv、1 件归属 bilibili"; multiSite != want {
+		t.Fatalf("多站点归属附注应逐站点分别列出，期望 %q 实际 %q", want, multiSite)
 	}
 }
 

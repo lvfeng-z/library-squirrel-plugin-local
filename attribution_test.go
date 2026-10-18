@@ -1,7 +1,6 @@
 package main
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/lvfeng-z/library-squirrel-sdk/identity"
@@ -97,30 +96,6 @@ func TestResolveClassifiedSiteKey(t *testing.T) {
 		if got := resolveClassifiedSiteKey(c.metadata, resolver); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
-	}
-}
-
-// TestPartitionByAttribution 同目录文件按归属裁决拆分：无分类时仅原图形态文件进真实域；
-// 分类在场时按分类站点裁决，解析不出真实 ID 的文件回退 local
-func TestPartitionByAttribution(t *testing.T) {
-	dir := t.TempDir()
-	pixivForm := FileEntry{FullPath: filepath.Join(dir, "12345678_p0.jpg"), RelPath: "12345678_p0.jpg", Hash: "h1"}
-	plain := FileEntry{FullPath: filepath.Join(dir, "photo.png"), RelPath: "photo.png", Hash: "h2"}
-
-	local, real := partitionByAttribution([]FileEntry{pixivForm, plain}, "")
-	if len(real) != 1 || real[0].attr.SiteKey != identity.Pixiv.Key || real[0].attr.PageWorkID != "12345678_p0" {
-		t.Fatalf("无分类时应仅原图形态文件进真实域(pixiv)，实得 %+v", real)
-	}
-	if len(local) != 1 || local[0].entry.Hash != "h2" || local[0].attr.isReal() {
-		t.Fatalf("无分类时普通文件应回退 local，实得 %+v", local)
-	}
-
-	local, real = partitionByAttribution([]FileEntry{pixivForm, plain}, identity.Bilibili.Key)
-	if len(real) != 1 || real[0].attr.SiteKey != identity.Bilibili.Key {
-		t.Fatalf("分类 bilibili 时原图形态文件应归 bilibili，实得 %+v", real)
-	}
-	if len(local) != 1 || local[0].attr.SiteKey != identity.Local.Key {
-		t.Fatalf("分类 bilibili 时普通文件应回退 local，实得 %+v", local)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -426,7 +425,7 @@ func (m *SessionManager) recordCreateBatchSummary(root string, summary createBat
 }
 
 // takeCreateBatchSummary 取出并清除批次摘要（编排动作在宿主 CreateTask 返回后
-// 读取；缺席=零值——宿主桩直答等无产出路径无摘要，文案不追加站点组附注）。
+// 读取；缺席=零值——宿主桩直答等无产出路径无摘要，文案不追加归属附注）。
 func (m *SessionManager) takeCreateBatchSummary(root string) createBatchSummary {
 	m.createCarryMu.Lock()
 	defer m.createCarryMu.Unlock()
@@ -435,24 +434,31 @@ func (m *SessionManager) takeCreateBatchSummary(root string) createBatchSummary 
 	return summary
 }
 
-// createBatchSummary 一次工作台创建的批次应答组摘要（emitSelectedWorks 产出完成
-// 时记录、编排动作在宿主 CreateTask 返回后读取）：组数与非 local 组文件计数供
-// 通知文案的站点组附注。
+// createBatchSummary 一次工作台创建的批次摘要（emitSelectedWorks 产出完成
+// 时记录、编排动作在宿主 CreateTask 返回后读取）：子行总数与非 local 子行的
+// 归属分布供通知文案的归属附注。
 type createBatchSummary struct {
-	// groups 产出的应答组数（含 local 组）。
-	groups int
-	// nonLocalSiteNames 非 local 组的站点展示名（首见序去重）。
-	nonLocalSiteNames []string
-	// nonLocalFiles 非 local 组文件数合计。
-	nonLocalFiles int
+	// total 产出的子行总数。
+	total int
+	// nonLocalBySite 非 local 子行的归属分布（站点展示名→件数，站点按首见序）。
+	nonLocalBySite []siteFileCount
 }
 
-// addNonLocal 记录一个非 local 组的站点展示名与文件数。
-func (s *createBatchSummary) addNonLocal(siteName string, files int) {
-	if !slices.Contains(s.nonLocalSiteNames, siteName) {
-		s.nonLocalSiteNames = append(s.nonLocalSiteNames, siteName)
+// siteFileCount 单站点的非 local 子行计数（批次内归属同一真实域站点的子行数）。
+type siteFileCount struct {
+	siteName string
+	files    int
+}
+
+// addNonLocal 记录一件非 local 子行的归属站点（按展示名归并计数）。
+func (s *createBatchSummary) addNonLocal(siteName string) {
+	for i := range s.nonLocalBySite {
+		if s.nonLocalBySite[i].siteName == siteName {
+			s.nonLocalBySite[i].files++
+			return
+		}
 	}
-	s.nonLocalFiles += files
+	s.nonLocalBySite = append(s.nonLocalBySite, siteFileCount{siteName: siteName, files: 1})
 }
 
 // CreateTasksOutcome 创建编排动作的结果。
@@ -468,13 +474,17 @@ type CreateTasksOutcome struct {
 }
 
 // buildCreateTasksMessage 创建完成的通知文案：已创建任务「名」：N 件作品（M 个
-// 子任务，Created 待手动开始）；批次按站点多组产出时追加「另有 <站点名> 组 n 件」
-//（n=非 local 组文件数合计——契约约束的机械分组，合理性议题归 todo#94，仅如实
-// 告知）。
+// 子任务，Created 待手动开始）；批次含非 local 归属子行时按归属分布追加
+//「其中 n 件归属 站点名」（逐站点一段、顿号连写）。文案按归属分布组织，与父行
+// 形态正交（归属附注分支不随父行分组形态变化）。
 func buildCreateTasksMessage(taskName string, works, tasks int, summary createBatchSummary) string {
 	message := fmt.Sprintf("已创建任务「%s」：%d 件作品（%d 个子任务，Created 待手动开始）", taskName, works, tasks)
-	if summary.groups > 1 && len(summary.nonLocalSiteNames) > 0 {
-		message += fmt.Sprintf("；另有 %s 组 %d 件", strings.Join(summary.nonLocalSiteNames, "、"), summary.nonLocalFiles)
+	parts := make([]string, 0, len(summary.nonLocalBySite))
+	for _, site := range summary.nonLocalBySite {
+		parts = append(parts, fmt.Sprintf("%d 件归属 %s", site.files, site.siteName))
+	}
+	if len(parts) > 0 {
+		message += "；其中 " + strings.Join(parts, "、")
 	}
 	return message
 }
