@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -480,6 +479,13 @@ type SnapGroup struct {
 	Size      int    `json:"size"`
 	// RuleID 定群规则。
 	RuleID string `json:"ruleId"`
+	// FormName / FormKeyExpr / FormSeqExpr 结构群携带的命中形态标识：形态名
+	// 与键/序号提取式原文（各自捕获组1 = 分群键/序号原文）；规则定群不带
+	// 形态。序列形态的规则泛化器据群携带的提取式构造兄弟群规则（提取式与
+	// SiblingPattern 的 KeyExpr/SeqExpr 同构）。
+	FormName    string `json:"formName,omitempty"`
+	FormKeyExpr string `json:"formKeyExpr,omitempty"`
+	FormSeqExpr string `json:"formSeqExpr,omitempty"`
 	// Members 成员（集内序号与原文——原文前导零体现零填充形态）。
 	Members []SnapGroupMember `json:"members"`
 }
@@ -833,22 +839,28 @@ func detectClues(c *FileConclusion, lib *LibraryIndex) []SnapClue {
 	return clues
 }
 
-// structuralSeqRe 结构性兄弟群的「公共前缀+尾缀序号」形态：前缀与序号间必须
-// 有分隔符（空格/_-·.．），纯数字名与前缀直连数字（如 v1）不视为序号群。
-var structuralSeqRe = regexp.MustCompile(`^(.+?)[ _\-·.．]+(\d{1,4})$`)
-
 // detectStructuralGroups 在全景聚合后探测规则无关的兄弟群结构（元素4「成群/
-// 落单」判定的结构面）：对未被规则定群（GroupKey 为空）的文件按目录与公共
-// 前缀分桶，桶内 ≥2 成员即成结构群（RuleID 留空=非规则产物，呈现层标注
-// 「结构」）；无终选声明且无线索冲突的成员补「群组前缀」线索并升格有线索
-// 态（元素3 集名候选）。已识别成员仅入群呈现，不加线索不升格。
+// 落单」判定的结构面）：对未被规则定群（GroupKey 为空）的文件按结构形态表
+// 提取「目录+命中形态+分群键」分桶，桶内 ≥2 成员即成结构群（RuleID 留空=非
+// 规则产物，呈现层标注「结构」；群携带命中形态标识——形态名与键/序号提取
+// 式，供规则泛化与呈现取用）；无终选声明且无线索冲突的成员补「群组前缀」
+// 线索并升格有线索态（元素3 集名候选）。已识别成员仅入群呈现，不加线索不
+// 升格。
 func detectStructuralGroups(snap *RecognitionSnapshot) {
 	type member struct {
 		relPath string
 		seq     int
 		seqText string
 	}
-	buckets := make(map[string][]member)
+	// 桶 = 同目录、同命中形态、同分群键的成员集合：桶键含形态名，不同形态
+	// 的同值键不合并（保证群携带的形态标识对全体成员成立）。
+	type bucket struct {
+		form    *structuralForm
+		dirKey  string
+		key     string
+		members []member
+	}
+	buckets := make(map[string]*bucket)
 	fileByPath := make(map[string]*SnapFile, len(snap.Files))
 	for i := range snap.Files {
 		f := &snap.Files[i]
@@ -856,30 +868,35 @@ func detectStructuralGroups(snap *RecognitionSnapshot) {
 		if f.GroupKey != "" {
 			continue
 		}
-		m := structuralSeqRe.FindStringSubmatch(BaseNameWithoutExt(f.FileName))
-		if m == nil {
+		key, seqText, form := matchStructuralForm(BaseNameWithoutExt(f.FileName))
+		if form == nil {
 			continue
 		}
-		seq, err := strconv.Atoi(m[2])
+		seq, err := strconv.Atoi(seqText)
 		if err != nil {
 			continue
 		}
-		key := f.DirRelKey + "\x00" + m[1]
-		buckets[key] = append(buckets[key], member{relPath: f.RelPath, seq: seq, seqText: m[2]})
+		bk := f.DirRelKey + "\x00" + form.name + "\x00" + key
+		b := buckets[bk]
+		if b == nil {
+			b = &bucket{form: form, dirKey: f.DirRelKey, key: key}
+			buckets[bk] = b
+		}
+		b.members = append(b.members, member{relPath: f.RelPath, seq: seq, seqText: seqText})
 	}
-	for key, members := range buckets {
-		if len(members) < 2 {
+	for _, b := range buckets {
+		if len(b.members) < 2 {
 			continue
 		}
-		dirKey, prefix, _ := strings.Cut(key, "\x00")
-		group := SnapGroup{DirRelKey: dirKey, Key: prefix, Size: len(members)}
-		for _, mem := range members {
+		group := SnapGroup{DirRelKey: b.dirKey, Key: b.key, Size: len(b.members),
+			FormName: b.form.name, FormKeyExpr: b.form.keyExpr, FormSeqExpr: b.form.seqExpr}
+		for _, mem := range b.members {
 			group.Members = append(group.Members, SnapGroupMember{RelPath: mem.relPath, Seq: mem.seq, SeqText: mem.seqText})
 			f := fileByPath[mem.relPath]
 			if f == nil || len(f.Final) > 0 {
 				continue
 			}
-			f.GroupKey = prefix
+			f.GroupKey = b.key
 			f.GroupSeq = mem.seq
 			dup := false
 			for _, c := range f.Clues {
@@ -889,7 +906,7 @@ func detectStructuralGroups(snap *RecognitionSnapshot) {
 				}
 			}
 			if !dup {
-				f.Clues = append(f.Clues, SnapClue{Kind: clueGroupPrefix, Detail: prefix})
+				f.Clues = append(f.Clues, SnapClue{Kind: clueGroupPrefix, Detail: b.key})
 			}
 			if f.State == snapStatePlain {
 				f.State = snapStateClueful

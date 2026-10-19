@@ -1,7 +1,7 @@
 // 全量识别引擎的单元测试：七类元素聚合（构造目录树：已识别/未识别有线索/
-// 序列成群落单/待裁决各形态齐备）、会话赋值按维度覆盖、谓词索引注入求值与
-// 分页拉全、死路径赋值报告、快照往返、目录 mtime 增量、以及前端协议的
-// startRecognition / getPanorama 分派。
+// 序列成群落单/待裁决各形态齐备）、结构形态表的形态判定与结构群聚合、
+// 会话赋值按维度覆盖、谓词索引注入求值与分页拉全、死路径赋值报告、快照
+// 往返、目录 mtime 增量、以及前端协议的 startRecognition / getPanorama 分派。
 package main
 
 import (
@@ -725,8 +725,8 @@ func TestHandleFrontendRequestRecognitionActions(t *testing.T) {
 
 
 // TestDetectStructuralGroups 验证规则无关的兄弟群结构探测（元素4 结构面与
-// 元素3 集名候选线索）：分隔符序号成群、v1 直连数字与纯数字名不成群、
-// 已识别成员入群不加线索、规则群成员不参与。
+// 元素3 集名候选线索）：尾缀数字形态成群、序号形态单成员不成群、已识别成员
+// 入群不加线索、规则群成员不参与。
 func TestDetectStructuralGroups(t *testing.T) {
 	snap := &RecognitionSnapshot{Files: []SnapFile{
 		{RelPath: "画集 01.jpg", FileName: "画集 01.jpg", DirRelKey: "d", State: snapStatePlain},
@@ -744,6 +744,9 @@ func TestDetectStructuralGroups(t *testing.T) {
 	if g.Key != "画集" || g.Size != 2 || g.RuleID != "" || len(g.Members) != 2 {
 		t.Fatalf("结构群字段不符：key=%q size=%d rule=%q members=%d", g.Key, g.Size, g.RuleID, len(g.Members))
 	}
+	if g.FormName != "尾缀数字" || g.FormKeyExpr != `^(.+?)[ _\-·.．]+\d{1,4}$` || g.FormSeqExpr != `(\d{1,4})$` {
+		t.Fatalf("结构群形态标识不符：name=%q keyExpr=%q seqExpr=%q", g.FormName, g.FormKeyExpr, g.FormSeqExpr)
+	}
 	if g.Members[0].SeqText != "01" || g.Members[0].Seq != 1 || g.Members[1].Seq != 2 {
 		t.Fatalf("成员序号形态不符：%+v", g.Members)
 	}
@@ -756,7 +759,7 @@ func TestDetectStructuralGroups(t *testing.T) {
 		t.Fatalf("群组成员线索/升格不符：%+v", f)
 	}
 	if p := byPath["作品甲 v1.jpg"]; p.GroupKey != "" || p.State != snapStatePlain {
-		t.Fatalf("v1 直连数字不应成群或升格：%+v", p)
+		t.Fatalf("直连序号形态单成员不应成群或升格：%+v", p)
 	}
 	if p := byPath["fill_0001.jpg"]; p.GroupKey != "" {
 		t.Fatalf("落单文件不应入群：%+v", p)
@@ -766,5 +769,213 @@ func TestDetectStructuralGroups(t *testing.T) {
 	}
 	if p := byPath["成书 01.jpg"]; p.State != snapStateIdentified || len(p.Clues) != 0 {
 		t.Fatalf("已识别成员仅入群呈现、不加线索：%+v", p)
+	}
+}
+
+// formBracketKey 乙（括号序号）样本的期望分群键（各成员剥尾 `_[NN]` 后一致）。
+const formBracketKey = "[くろニャン＠仕事募集中]_[100423498]_C100新刊告知"
+
+// formDirectKey 丙（直连序号）样本的期望分群键（`]` 后直连数字不入键）。
+const formDirectKey = "[Isel] [92242473] [瞬間的に絡み合う]"
+
+// formMidTitle 丁（中段序号）样本的期望分群键（page 前标题，随机码不入键）。
+const formMidTitle = "industrial_becca"
+
+// TestStructuralFormMatch 结构形态表逐条目的键/序号提取判定：各形态实测样本
+// 提取正确、排除样本零命中、同文件命中多形态时按表序（括号 → 中段 → 尾缀 →
+// 直连）取先者。
+func TestStructuralFormMatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		base    string
+		form    string // 期望命中的形态名；空串 = 零命中
+		key     string
+		seqText string
+	}{
+		{"括号序号零填充", formBracketKey + "_[01]", "括号序号", formBracketKey, "01"},
+		{"括号序号无下划线", "同族画集[12]", "括号序号", "同族画集", "12"},
+		{"中段序号", formMidTitle + "_page_10_by_jake__jaccobus_deq5g43", "中段序号", formMidTitle, "10"},
+		{"尾缀数字", "00133_73989691_p2_1", "尾缀数字", "00133_73989691_p2", "1"},
+		// 尾缀数字：键与序号间的分隔 run 吞并中段的 `...` 与 `_`（惰性键止于
+		// 首个可成分隔段的切分点）。
+		{"尾缀数字多分隔符", "[TsukijiTums]Finished 8$..._01", "尾缀数字", "[TsukijiTums]Finished 8$", "01"},
+		{"直连序号", formDirectKey + "0", "直连序号", formDirectKey, "0"},
+		{"直连序号两位", formDirectKey + "11", "直连序号", formDirectKey, "11"},
+
+		// 优先级：同一文件命中多形态时取表序先者。
+		{"中段先于直连", formMidTitle + "_page_10_by_jake__jaccobus_deq5g43", "中段序号", formMidTitle, "10"},
+		{"中段先于尾缀", "a_page_3_by_b_02", "中段序号", "a", "3"},
+		{"尾缀先于直连", "work_01", "尾缀数字", "work", "01"},
+
+		// 排除：浏览器重名冲突的圆括号序号（末字符 `)`）零命中。
+		{"圆括号序号", "(15)", "", "", ""},
+		{"圆括号序号二", "(38)", "", "", ""},
+		// 排除：纯数字名与尾部数字流超 4 位（直连键式要求前缀以非数字结尾）。
+		{"纯数字名", "12345", "", "", ""},
+		{"超长尾数流", "abc12345", "", "", ""},
+		// 页级流水号形态命中直连序号但键含流水号：不同流水号键不同，天然不成群
+		//（页级定群由内置规则负责）。
+		{"页级流水号一", "00001_72019841_p0", "直连序号", "00001_72019841_p", "0"},
+		{"页级流水号二", "00002_72019841_p1", "直连序号", "00002_72019841_p", "1"},
+	}
+	for _, tc := range cases {
+		key, seqText, form := matchStructuralForm(tc.base)
+		if tc.form == "" {
+			if form != nil {
+				t.Fatalf("%s：不应命中形态，实际 %s（key=%q seq=%q）", tc.name, form.name, key, seqText)
+			}
+			continue
+		}
+		if form == nil {
+			t.Fatalf("%s：应命中形态 %s，实际零命中", tc.name, tc.form)
+		}
+		if form.name != tc.form || key != tc.key || seqText != tc.seqText {
+			t.Fatalf("%s：提取不符 form=%s key=%q seq=%q，期望 form=%s key=%q seq=%q",
+				tc.name, form.name, key, seqText, tc.form, tc.key, tc.seqText)
+		}
+	}
+}
+
+// TestStructuralFormGroups 结构形态表驱动的结构群聚合：乙/丙/丁/戊四形态样本
+// 各自成群（群键、序号原文零填充、群携带形态标识），排除样本零成群。
+func TestStructuralFormGroups(t *testing.T) {
+	plain := func(relPath, dirKey string) SnapFile {
+		return SnapFile{RelPath: relPath, FileName: fileNameOfRel(relPath), DirRelKey: dirKey, State: snapStatePlain}
+	}
+	snap := &RecognitionSnapshot{Files: []SnapFile{
+		// 乙 括号序号：4 成员，零填充序号原文。
+		plain("乙/[くろニャン＠仕事募集中]_[100423498]_C100新刊告知_[01].jpg", "乙"),
+		plain("乙/[くろニャン＠仕事募集中]_[100423498]_C100新刊告知_[02].jpg", "乙"),
+		plain("乙/[くろニャン＠仕事募集中]_[100423498]_C100新刊告知_[03].jpg", "乙"),
+		plain("乙/[くろニャン＠仕事募集中]_[100423498]_C100新刊告知_[04].jpg", "乙"),
+		// 丙 直连序号：`]` 后直连数字，无分隔符。
+		plain("丙/"+formDirectKey+"0.jpg", "丙"),
+		plain("丙/"+formDirectKey+"1.jpg", "丙"),
+		plain("丙/"+formDirectKey+"11.jpg", "丙"),
+		// 丁 中段序号：尾部随机码各不相同，键取 page 前标题（若误取直连/尾缀
+		// 形态，随机码入键即散群，成群本身即中段形态胜出的证明）。
+		plain("丁/industrial_becca_page_10_by_jake__jaccobus_deq5g43.jpg", "丁"),
+		plain("丁/industrial_becca_page_11_by_jake__jaccobus_d7abc12.jpg", "丁"),
+		plain("丁/industrial_becca_page_16_by_jake__jaccobus_d9xyz98.jpg", "丁"),
+		// 戊 尾缀数字：用户手工加尾缀的副本对成群（语义上是同图手工副本，
+		// 成群可接受的既定边界）。
+		plain("戊/[TsukijiTums]Finished 8$..._01.jpg", "戊"),
+		plain("戊/[TsukijiTums]Finished 8$..._02.jpg", "戊"),
+		plain("戊/00133_73989691_p2_1.jpg", "戊"),
+		plain("戊/00133_73989691_p2_2.jpg", "戊"),
+
+		// 排除：浏览器重名冲突的圆括号序号（末字符 `)` 零命中）。
+		plain("排1/(15).jpg", "排1"),
+		plain("排1/(38).jpg", "排1"),
+		// 排除：DeviantArt 散图（无 `_page_N_` 中段序号，尾部随机码各不相同
+		// → 直连形态键各异，各自落单）。
+		plain("排2/landscape_by_jake__jaccobus_d8xq2v1.jpg", "排2"),
+		plain("排2/portrait_by_jake__jaccobus_d7hk3m9.jpg", "排2"),
+		// 排除：页级流水号（直连形态键含流水号 00001/00002 各异 → 天然不群；
+		// 页级成群由内置规则负责）。
+		plain("排3/00001_72019841_p0.jpg", "排3"),
+		plain("排3/00002_72019841_p1.jpg", "排3"),
+
+		// 直连形态的已知误群边界：无分隔符直连数字不做防误群守卫，`abc1` 与
+		// `abc12` 同键 abc 成一群；误群由用户在解析面板修正处理。
+		plain("边/abc1.jpg", "边"),
+		plain("边/abc12.jpg", "边"),
+	}}
+	detectStructuralGroups(snap)
+
+	groupByKey := make(map[string]*SnapGroup, len(snap.Groups))
+	for i := range snap.Groups {
+		groupByKey[snap.Groups[i].DirRelKey+"\x00"+snap.Groups[i].Key] = &snap.Groups[i]
+	}
+	mustGroup := func(dirKey, key string) *SnapGroup {
+		g := groupByKey[dirKey+"\x00"+key]
+		if g == nil {
+			t.Fatalf("目录 %s 缺少键为 %q 的结构群（现有群: %+v）", dirKey, key, snap.Groups)
+		}
+		return g
+	}
+
+	// 乙：键=剥尾 `_[NN]` 的全前缀，序号原文保留零填充，形态标识=括号序号。
+	bracket := mustGroup("乙", formBracketKey)
+	if bracket.Size != 4 || bracket.RuleID != "" || bracket.FormName != "括号序号" ||
+		bracket.FormKeyExpr != `^(.+?)_?\[\d{1,4}\]$` || bracket.FormSeqExpr != `\[(\d{1,4})\]$` {
+		t.Fatalf("乙形态群不符：%+v", bracket)
+	}
+	if want := []string{"01", "02", "03", "04"}; len(bracket.Members) != 4 {
+		t.Fatalf("乙形态群成员数 = %d，期望 4", len(bracket.Members))
+	} else {
+		for i, m := range bracket.Members {
+			if m.SeqText != want[i] || m.Seq != i+1 {
+				t.Fatalf("乙形态群成员 %d 序号不符：%+v（期望原文 %s）", i, m, want[i])
+			}
+		}
+	}
+
+	// 丙：键=直连数字前的全前缀，形态标识=直连序号。
+	direct := mustGroup("丙", formDirectKey)
+	if direct.Size != 3 || direct.FormName != "直连序号" ||
+		direct.FormKeyExpr != `^(.+?[^\d])\d{1,4}$` || direct.FormSeqExpr != `(\d{1,4})$` {
+		t.Fatalf("丙形态群不符：%+v", direct)
+	}
+	if len(direct.Members) != 3 || direct.Members[0].SeqText != "0" || direct.Members[2].SeqText != "11" {
+		t.Fatalf("丙形态群成员序号不符：%+v", direct.Members)
+	}
+
+	// 丁：键=page 前标题，形态标识=中段序号（成员按集内序排列）。
+	mid := mustGroup("丁", formMidTitle)
+	if mid.Size != 3 || mid.FormName != "中段序号" ||
+		mid.FormKeyExpr != `^(.+?)_page_` || mid.FormSeqExpr != `_page_(\d{1,4})_by_` {
+		t.Fatalf("丁形态群不符：%+v", mid)
+	}
+	if len(mid.Members) != 3 || mid.Members[0].SeqText != "10" || mid.Members[1].SeqText != "11" || mid.Members[2].SeqText != "16" {
+		t.Fatalf("丁形态群成员序号不符：%+v", mid.Members)
+	}
+
+	// 戊：两对手工副本各自成群，形态标识=尾缀数字（分隔 run 吞并 `..._`，键
+	// 止于首个可成分隔段的切分点）。
+	suffixSep := mustGroup("戊", "[TsukijiTums]Finished 8$")
+	if suffixSep.Size != 2 || suffixSep.FormName != "尾缀数字" ||
+		suffixSep.FormKeyExpr != `^(.+?)[ _\-·.．]+\d{1,4}$` || suffixSep.FormSeqExpr != `(\d{1,4})$` {
+		t.Fatalf("戊形态群（手工副本）不符：%+v", suffixSep)
+	}
+	if len(suffixSep.Members) != 2 || suffixSep.Members[0].SeqText != "01" || suffixSep.Members[1].SeqText != "02" {
+		t.Fatalf("戊形态群成员序号不符：%+v", suffixSep.Members)
+	}
+	if dup := mustGroup("戊", "00133_73989691_p2"); dup.Size != 2 || dup.FormName != "尾缀数字" {
+		t.Fatalf("戊形态群（页级手工副本对）不符：%+v", dup)
+	}
+
+	// 边界：直连形态把 `abc1`/`abc12` 聚为同键 abc 的一群（已知误群边界，
+	// 由用户在解析面板处理）。
+	abc := mustGroup("边", "abc")
+	if abc.Size != 2 || abc.FormName != "直连序号" {
+		t.Fatalf("直连误群边界不符：%+v", abc)
+	}
+
+	// 排除样本零成群。
+	if got := len(snap.Groups); got != 6 {
+		t.Fatalf("结构群总数 = %d，期望 6（乙/丙/丁/戊×2/边界；排除目录零成群）：%+v", got, snap.Groups)
+	}
+	byPath := make(map[string]SnapFile, len(snap.Files))
+	for _, f := range snap.Files {
+		byPath[f.RelPath] = f
+	}
+	for _, rel := range []string{
+		"排1/(15).jpg", "排1/(38).jpg",
+		"排2/landscape_by_jake__jaccobus_d8xq2v1.jpg", "排2/portrait_by_jake__jaccobus_d7hk3m9.jpg",
+		"排3/00001_72019841_p0.jpg", "排3/00002_72019841_p1.jpg",
+	} {
+		if p := byPath[rel]; p.GroupKey != "" || p.State != snapStatePlain {
+			t.Fatalf("排除样本 %s 不应入群或升格：%+v", rel, p)
+		}
+	}
+
+	// 成员侧效应：群组成员带「群组前缀=集名候选」线索并升格有线索态。
+	member := byPath["乙/"+formBracketKey+"_[01].jpg"]
+	if member.State != snapStateClueful || member.GroupKey != formBracketKey || member.GroupSeq != 1 {
+		t.Fatalf("群组成员归属/升格不符：%+v", member)
+	}
+	if len(member.Clues) != 1 || member.Clues[0].Kind != clueGroupPrefix || member.Clues[0].Detail != formBracketKey {
+		t.Fatalf("群组成员集名候选线索不符：%+v", member.Clues)
 	}
 }
