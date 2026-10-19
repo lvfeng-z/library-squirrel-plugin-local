@@ -231,22 +231,24 @@ type libraryIndexQuerySource interface {
 	QuerySiteAuthors(req *sdkdto.QuerySiteAuthorsRequest) (*sdkdto.QuerySiteAuthorsResponse, error)
 	QueryLocalTags(req *sdkdto.QueryLocalTagsRequest) (*sdkdto.QueryLocalTagsResponse, error)
 	QuerySiteTags(req *sdkdto.QuerySiteTagsRequest) (*sdkdto.QuerySiteTagsResponse, error)
+	QueryLocalWorkSets(req *sdkdto.QueryLocalWorkSetsRequest) (*sdkdto.QueryLocalWorkSetsResponse, error)
 }
 
 // libraryIndexPageSize 库查询分页大小（宿主数据库单连接与 UI 共享，取插件开发
 // 指南的上限指导值）。
 const libraryIndexPageSize = 200
 
-// BuildLibraryIndex 经只读库查询构造谓词索引：本地/站点两轨的作者名与标签名全集
-//（分页拉全）。任一轨查询失败时该轨按空集继续并告警（谓词规则对空集恒不命中，
-// 不阻断识别）；查询源不可用返回 nil 索引。
+// BuildLibraryIndex 经只读库查询构造谓词索引：本地/站点两轨的作者名与标签名全集、
+// 库内作品集名轨（分页拉全）。任一轨查询失败时该轨按空集继续并告警（谓词规则对
+// 空集恒不命中，不阻断识别）；查询源不可用返回 nil 索引。
 func BuildLibraryIndex(q libraryIndexQuerySource, warnf func(format string, args ...any)) *LibraryIndex {
 	if q == nil {
 		return nil
 	}
 	lib := &LibraryIndex{
-		AuthorNames: make(map[string]struct{}),
-		TagNames:    make(map[string]struct{}),
+		AuthorNames:  make(map[string]struct{}),
+		TagNames:     make(map[string]struct{}),
+		WorkSetNames: make(map[string]struct{}),
 	}
 	addNames := func(names []string, into map[string]struct{}) {
 		for _, name := range names {
@@ -307,10 +309,19 @@ func BuildLibraryIndex(q libraryIndexQuerySource, warnf func(format string, args
 		}
 		return siteTagNamesOf(resp.Items), nil
 	}, lib.TagNames)
+	pull("库内作品集", func(page int32) ([]string, error) {
+		resp, err := q.QueryLocalWorkSets(&sdkdto.QueryLocalWorkSetsRequest{
+			Page: &sdkdto.PageRequest{Page: page, PageSize: libraryIndexPageSize},
+		})
+		if err != nil {
+			return nil, err
+		}
+		return workSetNamesOf(resp.Items), nil
+	}, lib.WorkSetNames)
 	return lib
 }
 
-// authorNamesOf / tagNamesOf 等四函数把查询条目投影为名字集（空名剔除）。
+// authorNamesOf / tagNamesOf 等五函数把查询条目投影为名字集（空名剔除）。
 func authorNamesOf(items []*sdkdto.LocalAuthorDTO) []string {
 	names := make([]string, 0, len(items))
 	for _, item := range items {
@@ -351,6 +362,16 @@ func siteTagNamesOf(items []*sdkdto.SiteTagInfo) []string {
 	return names
 }
 
+func workSetNamesOf(items []*sdkdto.WorkSetNameEntry) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil && item.Name != "" {
+			names = append(names, item.Name)
+		}
+	}
+	return names
+}
+
 // —— 识别全景快照（会话 KV 裁剪形态）——
 
 // 识别全景文件记录的呈现状态类别。
@@ -369,6 +390,7 @@ const (
 	cluePredicateTag    = "predicate-tag"    // 文件名或群组前缀命中库内标签名（谓词原子）
 	cluePixivID         = "pixiv-id"         // pixiv 页级作品 ID 形态（内置惯例探测器）
 	clueGroupPrefix     = "group-prefix"     // 群组成员无元数据声明：公共前缀为集名候选
+	clueSetMatch        = "set-name-match"   // 序列群分群键命中库内既有集名——集名互证
 )
 
 // recognitionSnapshotSchemaVersion 快照结构版本（自管）。
@@ -564,7 +586,7 @@ type aggregateInput struct {
 //	1 目录结构：目录树节点 + 各层含义的规则回放（未覆盖呈现空）；
 //	2 已识别资源：终选声明（含 role）+ 分组归属（群组键/集内序/落单）；
 //	3 有价值未识别：谓词原子（文件名与群组前缀对库内名字）、pixiv ID 形态、
-//	  群组前缀（集名候选）三类线索；
+//	  群组前缀（集名候选）、集名互证（分群键命中库内既有集名）四类线索；
 //	4 序列：兄弟群的公共前缀/组大小/成员序号形态（零填充由原文前导零呈现）；
 //	5 待裁决项：合成层声明冲突的维度与候选对照；
 //	6 规则档案态：全部规则的来源/启用态/命中数；
@@ -697,6 +719,11 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		}
 		return snap.Groups[i].Key < snap.Groups[j].Key
 	})
+
+	// —— 集名互证（批次二阶段3）：全部序列群（规则定群与结构群——此时群集合已
+	// 完整）的分群键对库内作品集名全集精确匹配，命中的群全员补「集名互证」线索
+	//（plain 成员升格有线索态，统计在末段按终态汇总）——
+	attachSetNameCrossCheck(snap, in.lib)
 
 	// —— 元素6：规则命中统计（含禁用规则；复用文件的命中从旧记录累计）——
 	hitByID := make(map[string]int)
@@ -914,6 +941,45 @@ func detectStructuralGroups(snap *RecognitionSnapshot) {
 		}
 		sort.SliceStable(group.Members, func(i, j int) bool { return group.Members[i].Seq < group.Members[j].Seq })
 		snap.Groups = append(snap.Groups, group)
+	}
+}
+
+// attachSetNameCrossCheck 集名互证线索（批次二阶段3）：全部序列群（规则定群与结构群）
+// 的分群键与库内作品集名全集精确匹配，命中时向该群全部成员补「集名互证」线索
+//（去重：同文件已有同 Detail 的该类线索不重复加；lib 为 nil 或集名索引为空时零作为）。
+func attachSetNameCrossCheck(snap *RecognitionSnapshot, lib *LibraryIndex) {
+	if lib == nil || len(lib.WorkSetNames) == 0 {
+		return
+	}
+	fileByPath := make(map[string]*SnapFile, len(snap.Files))
+	for i := range snap.Files {
+		fileByPath[snap.Files[i].RelPath] = &snap.Files[i]
+	}
+	for _, g := range snap.Groups {
+		if _, ok := lib.WorkSetNames[g.Key]; !ok {
+			continue
+		}
+		for _, mem := range g.Members {
+			f := fileByPath[mem.RelPath]
+			if f == nil {
+				continue
+			}
+			dup := false
+			for _, c := range f.Clues {
+				if c.Kind == clueSetMatch && c.Detail == g.Key {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				f.Clues = append(f.Clues, SnapClue{Kind: clueSetMatch, Detail: g.Key})
+			}
+			// 无线索态（plain）升格有线索态；已识别/已有线索态仅补线索不动状态
+			//（Clueful/Plain 统计在 aggregatePanorama 末段按终态汇总，此处改态即联动）
+			if f.State == snapStatePlain {
+				f.State = snapStateClueful
+			}
+		}
 	}
 }
 
@@ -1268,7 +1334,7 @@ func indexSize(lib *LibraryIndex) int {
 	if lib == nil {
 		return 0
 	}
-	return len(lib.AuthorNames) + len(lib.TagNames)
+	return len(lib.AuthorNames) + len(lib.TagNames) + len(lib.WorkSetNames)
 }
 
 // allRulesWithBuiltins 全部规则（含禁用）：档案规则在前、内置规则在后，与

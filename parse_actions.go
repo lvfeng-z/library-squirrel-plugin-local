@@ -1088,8 +1088,11 @@ func patternSummary(p Pattern) string {
 		return fmt.Sprintf("兄弟群组：分组键 %s + 序号 %s", key, t.SeqExpr)
 	case *PredicatePattern:
 		kind := "作者"
-		if t.Kind == PredicateTag {
+		switch t.Kind {
+		case PredicateTag:
 			kind = "标签"
+		case PredicateWorkSet:
+			kind = "作品集"
 		}
 		return "库内" + kind + "名命中"
 	case And:

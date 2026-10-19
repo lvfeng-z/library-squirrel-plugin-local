@@ -17,13 +17,15 @@ import (
 
 // —— 库查询桩（谓词索引构造的分页数据源）——
 
-// libraryFixture 分页查询桩的数据集：四轨名字全集。
+// libraryFixture 分页查询桩的数据集：五轨名字全集。
 type libraryFixture struct {
-	localAuthors  []string
-	siteAuthors   []string
-	localTags     []string
-	siteTags      []string
-	failSiteTrack bool
+	localAuthors     []string
+	siteAuthors      []string
+	localTags        []string
+	siteTags         []string
+	localWorkSets    []string
+	failSiteTrack    bool
+	failWorkSetTrack bool
 }
 
 // errIndexTrackFailure 桩的失败轨错误。
@@ -96,6 +98,18 @@ func (c *workbenchTestCtx) QuerySiteTags(req *sdkdto.QuerySiteTagsRequest) (*sdk
 	return &sdkdto.QuerySiteTagsResponse{Items: items}, nil
 }
 
+func (c *workbenchTestCtx) QueryLocalWorkSets(req *sdkdto.QueryLocalWorkSetsRequest) (*sdkdto.QueryLocalWorkSetsResponse, error) {
+	if c.library.failWorkSetTrack {
+		return nil, errIndexTrackFailure
+	}
+	names := pageOf(c.library.localWorkSets, req.Page)
+	items := make([]*sdkdto.WorkSetNameEntry, 0, len(names))
+	for i, name := range names {
+		items = append(items, &sdkdto.WorkSetNameEntry{Id: int64(i) + 1, Name: name})
+	}
+	return &sdkdto.QueryLocalWorkSetsResponse{Items: items}, nil
+}
+
 // —— 测试用规则构造 ——
 
 // recognitionTestRules 构造识别测试的档案规则：兄弟群组定群（非下划线前缀 +
@@ -152,6 +166,8 @@ func newRecognitionFixture(t *testing.T, root string, assigns map[string]Session
 		localAuthors: []string{"库内作者名"},
 		siteAuthors:  []string{"站点作者甲"},
 		localTags:    []string{"风景"},
+		// 集名互证：与序列群分组键同名（群组键「库内作者名」同时是库内既有集名）
+		localWorkSets: []string{"库内作者名"},
 	}
 	m := NewSessionManagerWithStore(ctx, nil, store)
 
@@ -350,13 +366,16 @@ func TestRunFullRecognitionSevenElements(t *testing.T) {
 			t.Fatalf("成员 %s 序号原文 = %q，期望 %q（零填充形态）", member.RelPath, member.SeqText, wantText)
 		}
 	}
-	// 群组成员无元数据声明 → 群组前缀谓词命中 + 集名候选双线索
+	// 群组成员无元数据声明 → 群组前缀谓词命中 + 集名候选双线索；分组键命中库内
+	// 既有集名（互证索引）→ 集名互证线索（挂点验证：attachSetNameCrossCheck 在
+	// aggregatePanorama 内生效）
 	setMember := fileByRel["序列/库内作者名_001.jpg"]
 	if setMember.State != snapStateClueful {
 		t.Fatalf("群组成员状态 = %s，期望 clueful（线索: %+v）", setMember.State, setMember.Clues)
 	}
 	assertHasClue(setMember, cluePredicateAuthor)
 	assertHasClue(setMember, clueGroupPrefix)
+	assertHasClue(setMember, clueSetMatch)
 	if setMember.GroupKey != "库内作者名" || setMember.GroupSeq != 1 {
 		t.Fatalf("群组成员分组归属不符: key=%s seq=%d", setMember.GroupKey, setMember.GroupSeq)
 	}
@@ -632,11 +651,17 @@ func TestBuildLibraryIndexPagingAndFallback(t *testing.T) {
 	for i := range localAuthors {
 		localAuthors[i] = "作者" + string(rune('A'+i%26)) + string(rune('0'+i%10)) + string(rune('a'+i%26)) + string(rune('0'+(i/10)%10))
 	}
+	// 跨页：库内作品集 205 名（第五轨，页大小 200 → 2 页）
+	localWorkSets := make([]string, 205)
+	for i := range localWorkSets {
+		localWorkSets[i] = "作品集" + string(rune('A'+i%26)) + string(rune('0'+i%10)) + string(rune('a'+i%26)) + string(rune('0'+(i/10)%10))
+	}
 	ctx := &workbenchTestCtx{store: newFakeSessionStore()}
 	ctx.library = libraryFixture{
-		localAuthors: localAuthors,
-		localTags:    []string{"风景"},
-		siteAuthors:  []string{"站点作者甲"},
+		localAuthors:  localAuthors,
+		localTags:     []string{"风景"},
+		siteAuthors:   []string{"站点作者甲"},
+		localWorkSets: localWorkSets,
 		failSiteTrack: false,
 	}
 	lib := BuildLibraryIndex(ctx, nil)
@@ -649,13 +674,27 @@ func TestBuildLibraryIndexPagingAndFallback(t *testing.T) {
 	if _, ok := lib.TagNames["风景"]; !ok {
 		t.Fatal("本地标签未入索引")
 	}
+	if len(lib.WorkSetNames) != len(localWorkSets) {
+		t.Fatalf("跨页拉全后作品集名 = %d，期望 %d", len(lib.WorkSetNames), len(localWorkSets))
+	}
+	if _, ok := lib.WorkSetNames[localWorkSets[0]]; !ok {
+		t.Fatal("库内作品集名未入索引")
+	}
 
-	// 失败轨（站点作者）按空集降级：不污染其余轨道、不返回 nil
+	// 失败轨（站点作者 / 库内作品集）按空集降级：不污染其余轨道、不返回 nil
 	failCtx := &workbenchTestCtx{store: newFakeSessionStore()}
-	failCtx.library = libraryFixture{localAuthors: []string{"仅本地"}, failSiteTrack: true}
+	failCtx.library = libraryFixture{
+		localAuthors:     []string{"仅本地"},
+		localWorkSets:    []string{"不该出现的集名"},
+		failSiteTrack:    true,
+		failWorkSetTrack: true,
+	}
 	failLib := BuildLibraryIndex(failCtx, nil)
 	if failLib == nil || len(failLib.AuthorNames) != 1 {
 		t.Fatalf("失败轨降级形态不符: %+v", failLib.AuthorNames)
+	}
+	if len(failLib.WorkSetNames) != 0 {
+		t.Fatalf("作品集失败轨应按空集降级，实际: %+v", failLib.WorkSetNames)
 	}
 
 	// 查询源不可用 → nil 索引（谓词恒不命中）
@@ -769,6 +808,91 @@ func TestDetectStructuralGroups(t *testing.T) {
 	}
 	if p := byPath["成书 01.jpg"]; p.State != snapStateIdentified || len(p.Clues) != 0 {
 		t.Fatalf("已识别成员仅入群呈现、不加线索：%+v", p)
+	}
+}
+
+// newCrossCheckSnap 集名互证测试快照：规则群（键命中库内集名）、结构群（键未命中）、
+// 已识别成员的命中群三群与对应文件记录。
+func newCrossCheckSnap() *RecognitionSnapshot {
+	plain := func(relPath, dirKey string) SnapFile {
+		return SnapFile{RelPath: relPath, FileName: fileNameOfRel(relPath), DirRelKey: dirKey, State: snapStatePlain}
+	}
+	return &RecognitionSnapshot{
+		Files: []SnapFile{
+			plain("甲/既有画集_01.jpg", "甲"),
+			plain("甲/既有画集_02.jpg", "甲"),
+			plain("乙/新画集_01.jpg", "乙"),
+			plain("乙/新画集_02.jpg", "乙"),
+			{RelPath: "丙/既有画集_01.jpg", FileName: "既有画集_01.jpg", DirRelKey: "丙",
+				State: snapStateIdentified, Final: []SnapDecl{{Dimension: "title", Value: "x"}}},
+		},
+		Groups: []SnapGroup{
+			// 规则定群（RuleID 非空）：分群键命中库内集名
+			{DirRelKey: "甲", Key: "既有画集", RuleID: "rule-x", Members: []SnapGroupMember{
+				{RelPath: "甲/既有画集_01.jpg", Seq: 1, SeqText: "01"},
+				{RelPath: "甲/既有画集_02.jpg", Seq: 2, SeqText: "02"},
+			}},
+			// 结构群（RuleID 空）：分群键未命中
+			{DirRelKey: "乙", Key: "新画集", Members: []SnapGroupMember{
+				{RelPath: "乙/新画集_01.jpg", Seq: 1, SeqText: "01"},
+				{RelPath: "乙/新画集_02.jpg", Seq: 2, SeqText: "02"},
+			}},
+			// 已识别成员的命中群：补线索但不降格
+			{DirRelKey: "丙", Key: "既有画集", Members: []SnapGroupMember{
+				{RelPath: "丙/既有画集_01.jpg", Seq: 1, SeqText: "01"},
+			}},
+		},
+	}
+}
+
+// TestAttachSetNameCrossCheck 集名互证三态：a) 分群键命中库内集名 → 全员（规则群与
+// 结构群同权）补 set-name-match 线索、plain 升格 clueful、已识别成员补线索不降格、
+// 同 Detail 去重；b) 未命中 → 无线索零作为；c) lib 为 nil 或集名索引为空 → 零作为。
+func TestAttachSetNameCrossCheck(t *testing.T) {
+	lib := &LibraryIndex{WorkSetNames: map[string]struct{}{"既有画集": {}}}
+
+	// a) 命中
+	snap := newCrossCheckSnap()
+	attachSetNameCrossCheck(snap, lib)
+	byPath := make(map[string]SnapFile, len(snap.Files))
+	for _, f := range snap.Files {
+		byPath[f.RelPath] = f
+	}
+	for _, rel := range []string{"甲/既有画集_01.jpg", "甲/既有画集_02.jpg"} {
+		f := byPath[rel]
+		if f.State != snapStateClueful {
+			t.Fatalf("%s 应升格 clueful（plain 补线索），实际 %s（线索: %+v）", rel, f.State, f.Clues)
+		}
+		if len(f.Clues) != 1 || f.Clues[0].Kind != clueSetMatch || f.Clues[0].Detail != "既有画集" {
+			t.Fatalf("%s 集名互证线索不符: %+v", rel, f.Clues)
+		}
+	}
+	identified := byPath["丙/既有画集_01.jpg"]
+	if identified.State != snapStateIdentified || len(identified.Clues) != 1 || identified.Clues[0].Kind != clueSetMatch {
+		t.Fatalf("已识别成员应补线索不降格: state=%s clues=%+v", identified.State, identified.Clues)
+	}
+	// 去重：重复调用同 Detail 不再追加
+	attachSetNameCrossCheck(snap, lib)
+	if f := byPath["甲/既有画集_01.jpg"]; len(f.Clues) != 1 {
+		t.Fatalf("同 Detail 的集名互证线索不应重复追加: %+v", f.Clues)
+	}
+
+	// b) 未命中 → 无线索、状态不动
+	if f := byPath["乙/新画集_01.jpg"]; f.State != snapStatePlain || len(f.Clues) != 0 {
+		t.Fatalf("分群键未命中不应加线索或升格: state=%s clues=%+v", f.State, f.Clues)
+	}
+
+	// c) lib 为 nil / 集名索引为空 → 零作为（全员无新线索、状态保持构造态）
+	nilSnap := newCrossCheckSnap()
+	attachSetNameCrossCheck(nilSnap, nil)
+	emptySnap := newCrossCheckSnap()
+	attachSetNameCrossCheck(emptySnap, &LibraryIndex{WorkSetNames: map[string]struct{}{}})
+	for name, s := range map[string]*RecognitionSnapshot{"lib=nil": nilSnap, "空集名索引": emptySnap} {
+		for _, f := range s.Files {
+			if len(f.Clues) != 0 || (f.State != snapStatePlain && f.State != snapStateIdentified) {
+				t.Fatalf("%s 时文件 %s 应零作为: state=%s clues=%+v", name, f.RelPath, f.State, f.Clues)
+			}
+		}
 	}
 }
 

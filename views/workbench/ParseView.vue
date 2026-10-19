@@ -1517,6 +1517,7 @@ const clueLabel = (clue: { kind: string; detail: string }): string => {
     case 'predicate-tag': return `库内标签：${clue.detail}`
     case 'pixiv-id': return `pixiv 形态：${clue.detail}`
     case 'group-prefix': return `集名候选：${clue.detail}`
+    case 'set-name-match': return `集名互证：${clue.detail}`
     default: return clue.detail
   }
 }

@@ -271,11 +271,12 @@ func TestSiblingPatternEvaluate(t *testing.T) {
 }
 
 // TestPredicatePatternEvaluate 覆盖谓词模式：文件名（去扩展名）或指定捕获组
-// 的值命中/未命中库内作者或标签集合。
+// 的值命中/未命中库内作者、标签或作品集集合。
 func TestPredicatePatternEvaluate(t *testing.T) {
 	lib := &LibraryIndex{
-		AuthorNames: map[string]struct{}{"宫崎骏": {}},
-		TagNames:    map[string]struct{}{"治愈": {}},
+		AuthorNames:  map[string]struct{}{"宫崎骏": {}},
+		TagNames:     map[string]struct{}{"治愈": {}},
+		WorkSetNames: map[string]struct{}{"画集总集": {}},
 	}
 	cases := []struct {
 		name string
@@ -314,6 +315,19 @@ func TestPredicatePatternEvaluate(t *testing.T) {
 			kind:     PredicateTag,
 			from:     "tag",
 			fileName: "any.png",
+			want:     false,
+		},
+		{
+			name:     "文件名命中库内作品集",
+			kind:     PredicateWorkSet,
+			fileName: "画集总集.jpg",
+			want:     true,
+			wantHits: []PredicateHit{{Kind: "workSet", Input: "画集总集", Name: "画集总集"}},
+		},
+		{
+			name:     "文件名未命中库内作品集",
+			kind:     PredicateWorkSet,
+			fileName: "无此集.jpg",
 			want:     false,
 		},
 	}

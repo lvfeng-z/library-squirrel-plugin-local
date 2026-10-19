@@ -400,7 +400,7 @@ type patternJSON struct {
 	MinGroupSize int `json:"minGroupSize,omitempty"`
 	// Outcome 为 sibling 命中群组后的归属类别。
 	Outcome string `json:"outcome,omitempty"`
-	// PredKind 为 predicate 的谓词类别（author / tag）；判别字段已占用 kind，故另名序列化。
+	// PredKind 为 predicate 的谓词类别（author / tag / workSet）；判别字段已占用 kind，故另名序列化。
 	PredKind string `json:"predKind,omitempty"`
 	// From 为 predicate 的取值来源：空串表示文件名去扩展名，否则为捕获组名。
 	From string `json:"from,omitempty"`
@@ -511,7 +511,7 @@ func patternFromJSON(pj *patternJSON) (Pattern, error) {
 	case patternKindPredicate:
 		kind := PredicateKind(pj.PredKind)
 		switch kind {
-		case PredicateAuthor, PredicateTag:
+		case PredicateAuthor, PredicateTag, PredicateWorkSet:
 		default:
 			return nil, fmt.Errorf("未知的谓词类别: %q", pj.PredKind)
 		}

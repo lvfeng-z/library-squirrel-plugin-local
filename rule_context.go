@@ -24,6 +24,8 @@ type LibraryIndex struct {
 	AuthorNames map[string]struct{}
 	// TagNames 为库内已有标签名集合。
 	TagNames map[string]struct{}
+	// WorkSetNames 为库内作品集名集合——集名互证索引。
+	WorkSetNames map[string]struct{}
 }
 
 // GroupAnalysis 为群组分析产物，描述条目所属的连续序列群组。
@@ -48,7 +50,7 @@ type CaptureBinding struct {
 
 // PredicateHit 为一次谓词命中记录。
 type PredicateHit struct {
-	// Kind 为谓词类别，取值 "author" 或 "tag"；谓词类型枚举定义在 pattern 文件中。
+	// Kind 为谓词类别，取值 "author"、"tag" 或 "workSet"；谓词类型枚举定义在 pattern 文件中。
 	Kind string
 	// Input 为参与求值的输入文本。
 	Input string

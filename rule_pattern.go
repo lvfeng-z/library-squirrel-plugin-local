@@ -39,6 +39,8 @@ const (
 	PredicateAuthor PredicateKind = "author"
 	// PredicateTag 表示按标签名查询库内数据。
 	PredicateTag PredicateKind = "tag"
+	// PredicateWorkSet 表示按作品集名查询库内数据。
+	PredicateWorkSet PredicateKind = "workSet"
 )
 
 // Pattern 为规则模式接口：Evaluate 命中返回 true，并把命中的绑定追加进 ctx。
@@ -280,7 +282,7 @@ func (p *SiblingPattern) seqTextOf(fileName string) (string, bool) {
 
 // PredicatePattern 为谓词模式：以文件名去扩展名或某捕获组绑定的值为名字，查询库内集合。
 type PredicatePattern struct {
-	// Kind 为谓词类别（author / tag）。
+	// Kind 为谓词类别（author / tag / workSet）。
 	Kind PredicateKind `json:"kind"`
 	// From 为取值来源：空串表示文件名去扩展名，否则为捕获组名。
 	From string `json:"from"`
@@ -290,7 +292,7 @@ type PredicatePattern struct {
 func (p *PredicatePattern) patternMarker() {}
 
 // Evaluate 取名字（From 为空时取文件名去扩展名，否则取该捕获组名的最后一条绑定，
-// 绑定不存在返回 false），按 Kind 查询 lib 的作者 / 标签集合；命中时向 ctx
+// 绑定不存在返回 false），按 Kind 查询 lib 的作者 / 标签 / 作品集集合；命中时向 ctx
 // 追加 PredicateHit 并返回 true。
 func (p *PredicatePattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseContext) bool {
 	var name string
@@ -312,6 +314,8 @@ func (p *PredicatePattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Pars
 		names = lib.AuthorNames
 	case PredicateTag:
 		names = lib.TagNames
+	case PredicateWorkSet:
+		names = lib.WorkSetNames
 	default:
 		return false
 	}

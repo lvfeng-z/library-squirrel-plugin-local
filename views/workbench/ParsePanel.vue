@@ -1159,6 +1159,7 @@ const legacyClueLabel = (c: { kind: string; detail: string }): string => {
     case 'predicate-tag': return `库内标签：${c.detail}`
     case 'pixiv-id': return `pixiv 形态：${c.detail}`
     case 'group-prefix': return `集名候选：${c.detail}`
+    case 'set-name-match': return `集名互证：${c.detail}`
     default: return c.detail
   }
 }
