@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -427,8 +428,10 @@ func TestGeneralizeDirLayer(t *testing.T) {
 	}
 }
 
-// TestGeneralizeSequence 按序列形态：所属兄弟群公共前缀锚定定群规则（分组键=
-// 前缀字面、序号=扩展名前尾缀数字、≥2 成群、归入作品集），纯定群无提取动作。
+// TestGeneralizeSequence 按序列形态：规则定群群（测试档案的兄弟群组规则抢先
+// 定群、无形态标识）走公共前缀字面锚定路径（分组键=前缀字面、序号=扩展名前
+// 尾缀数字、≥2 成群、归入作品集），纯定群无提取动作，产物对同前缀新文件可
+// 复现定群；落单文件拒绝。
 func TestGeneralizeSequence(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newAdjudicationFixture(t, root)
@@ -461,6 +464,24 @@ func TestGeneralizeSequence(t *testing.T) {
 		t.Fatalf("定群规则不应携带提取动作（最简形式）: %+v", rule.Extractions)
 	}
 
+	// 复现定群：同前缀新文件（不同目录）经该规则聚群，异前缀不群。
+	replicas := []ScanFile{
+		{Path: `E:\lib\新目录\库内作者名_05.jpg`, FileName: "库内作者名_05.jpg", DirNames: []string{"新目录"}, RelPath: "新目录/库内作者名_05.jpg"},
+		{Path: `E:\lib\新目录\库内作者名_06.jpg`, FileName: "库内作者名_06.jpg", DirNames: []string{"新目录"}, RelPath: "新目录/库内作者名_06.jpg"},
+		{Path: `E:\lib\新目录\另一前缀_01.jpg`, FileName: "另一前缀_01.jpg", DirNames: []string{"新目录"}, RelPath: "新目录/另一前缀_01.jpg"},
+	}
+	rDecisions := RunPipeline(replicas, []RuleEntry{*rule}, nil)
+	rBy := decisionsByName(t, rDecisions)
+	for _, name := range []string{"库内作者名_05.jpg", "库内作者名_06.jpg"} {
+		d := rBy[name]
+		if d.Group == nil || d.Group.Key != "库内作者名" || d.Group.Size != 2 {
+			t.Fatalf("%s 应经泛化规则复现定群（键=库内作者名、组大小=2），实际 %+v", name, d.Group)
+		}
+	}
+	if d := rBy["另一前缀_01.jpg"]; d.Group != nil {
+		t.Fatalf("异前缀文件不应被前缀字面规则入群，实际 %+v", d.Group)
+	}
+
 	// 落单文件不成群：拒绝
 	if _, _, err := m.ApplyAssignment(root, "序列/lone_007.jpg", SessionAssignment{Author: "甲"}); err != nil {
 		t.Fatalf("写入赋值失败: %v", err)
@@ -468,6 +489,87 @@ func TestGeneralizeSequence(t *testing.T) {
 	if _, err := m.ApplyGeneralization(root, "序列/lone_007.jpg", generalizeModeSequence); err == nil ||
 		!strings.Contains(err.Error(), "不属于任何兄弟序列群") {
 		t.Fatalf("落单文件应拒绝序列形态泛化: %v", err)
+	}
+}
+
+// TestGeneralizeSequenceFormFollows 结构形态群的端到端形态跟随：空档案环境
+//（仅内置规则，测试档案的兄弟群组规则不抢占定群）下括号序号结构群携带形态
+// 标识 → 泛化产物按群携带的键/序号提取式定群（提取式补扩展名尾段）→ 同形态
+// 新文件复现定群、序号原文保留零填充；无尾锚提取式（中段序号）原样承载。
+func TestGeneralizeSequenceFormFollows(t *testing.T) {
+	root := t.TempDir()
+	store := newFakeSessionStore()
+	ctx := &workbenchTestCtx{store: store}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	if err := SaveProfile(store, &RuleProfile{SchemaVersion: CurrentSchemaVersion}); err != nil {
+		t.Fatalf("写入空规则档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	for i := 1; i <= 4; i++ {
+		writeTestFile(t, root+fmt.Sprintf("/括号/[作者甲]_[100423498]_新刊_[%02d].jpg", i), "x")
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	rel := "括号/[作者甲]_[100423498]_新刊_[02].jpg"
+	group := snapshotGroupOf(sess.Snapshot, rel)
+	if group == nil || group.FormName != "括号序号" {
+		t.Fatalf("样例文件应属括号序号结构群，实际 %+v", group)
+	}
+
+	if _, _, err := m.ApplyAssignment(root, rel, SessionAssignment{Collection: "新刊"}); err != nil {
+		t.Fatalf("写入赋值失败: %v", err)
+	}
+	result, err := m.ApplyGeneralization(root, rel, generalizeModeSequence)
+	if err != nil {
+		t.Fatalf("序列形态泛化失败: %v", err)
+	}
+	profile, _ := LoadProfile(m.store)
+	rule := findRuleByID(t, profile, result.Rule.ID)
+	sibling, ok := rule.Pattern.(*SiblingPattern)
+	if !ok {
+		t.Fatalf("泛化规则应为兄弟群组模式，实际 %T", rule.Pattern)
+	}
+	if sibling.KeyExpr != `^(.+?)_?\[\d{1,4}\](?:\.[^.]*)?$` || sibling.SeqExpr != `\[(\d{1,4})\](?:\.[^.]*)?$` {
+		t.Fatalf("括号序号形态的定群正则不符: key=%q seq=%q", sibling.KeyExpr, sibling.SeqExpr)
+	}
+	if !strings.Contains(rule.Description, "括号序号") {
+		t.Fatalf("泛化规则描述应携带形态名: %q", rule.Description)
+	}
+
+	// 复现定群：不同前缀的同类形态新文件经规则聚群，键=剥尾 `_` 的全前缀。
+	replicas := []ScanFile{
+		{Path: `E:\lib\别处\[作者乙]_[999888777]_画集_[01].jpg`, FileName: "[作者乙]_[999888777]_画集_[01].jpg", DirNames: []string{"别处"}, RelPath: "别处/[作者乙]_[999888777]_画集_[01].jpg"},
+		{Path: `E:\lib\别处\[作者乙]_[999888777]_画集_[02].jpg`, FileName: "[作者乙]_[999888777]_画集_[02].jpg", DirNames: []string{"别处"}, RelPath: "别处/[作者乙]_[999888777]_画集_[02].jpg"},
+	}
+	rDecisions := RunPipeline(replicas, []RuleEntry{*rule}, nil)
+	for _, d := range rDecisions {
+		if d.Group == nil || d.Group.Key != "[作者乙]_[999888777]_画集" || d.Group.Size != 2 {
+			t.Fatalf("同形态新文件应复现定群（键=前缀剥尾 _、组大小=2），实际 %+v", d.Group)
+		}
+	}
+	if text, ok := sibling.seqTextOf("[作者乙]_[999888777]_画集_[02].jpg"); !ok || text != "02" {
+		t.Fatalf("序号原文应保留零填充，实际 %q（ok=%v）", text, ok)
+	}
+
+	// 无尾锚提取式（中段序号）原样承载，不加扩展名尾段。
+	midRule, _, err := buildSequenceRule("丁/industrial_becca_page_10_by_x.jpg", "industrial_becca",
+		&SnapGroup{FormName: "中段序号", FormKeyExpr: `^(.+?)_page_`, FormSeqExpr: `_page_(\d{1,4})_by_`})
+	if err != nil {
+		t.Fatalf("中段序号形态泛化失败: %v", err)
+	}
+	midSibling, ok := midRule.Pattern.(*SiblingPattern)
+	if !ok {
+		t.Fatalf("中段序号泛化应为兄弟群组模式，实际 %T", midRule.Pattern)
+	}
+	if midSibling.KeyExpr != `^(.+?)_page_` || midSibling.SeqExpr != `_page_(\d{1,4})_by_` {
+		t.Fatalf("无尾锚提取式应原样承载: key=%q seq=%q", midSibling.KeyExpr, midSibling.SeqExpr)
 	}
 }
 

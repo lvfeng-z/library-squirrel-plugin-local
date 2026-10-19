@@ -270,7 +270,7 @@
                     <span class="li-ws-group-key">{{ g.key || '（空前缀）' }}</span>
                     <span class="li-ws-group-dir">{{ g.dirRelKey || '根目录' }}</span>
                     <span class="li-ws-group-size">{{ g.size }} 成员</span>
-                    <span class="li-ws-group-rule">{{ g.ruleId || '结构' }}</span>
+                    <span class="li-ws-group-rule">{{ groupBadge(g) }}</span>
                   </div>
                   <div class="li-ws-group-members">
                     <span
@@ -467,7 +467,7 @@
                 <div class="li-ws-sec">
                   <h4 class="li-ws-sec-title">所属序列群</h4>
                   <div v-if="selectedGroup" class="li-ws-sec-block">
-                    <p class="li-ws-sec-line">集 {{ selectedGroup.key || '（空前缀）' }} · {{ selectedGroup.dirRelKey || '根目录' }} · {{ selectedGroup.size }} 成员 · {{ selectedGroup.ruleId || '结构' }}</p>
+                    <p class="li-ws-sec-line">集 {{ selectedGroup.key || '（空前缀）' }} · {{ selectedGroup.dirRelKey || '根目录' }} · {{ selectedGroup.size }} 成员 · {{ groupBadge(selectedGroup) }}</p>
                     <p class="li-ws-sec-note">本件序号：#{{ selectedGroupMember ? (selectedGroupMember.seqText || selectedGroupMember.seq) : '-' }}</p>
                   </div>
                   <p v-else class="li-ws-empty">不属于任何序列群</p>
@@ -572,6 +572,8 @@ interface SnapGroup {
   key: string
   size: number
   ruleId: string
+  // 结构形态群携带的命中形态名（如「括号序号」）；规则定群群为空
+  formName?: string
   members: { relPath: string; seq: number; seqText: string }[]
 }
 
@@ -744,6 +746,13 @@ const selectedGroupMember = computed(() => {
   if (!file || !group) return null
   return group.members.find((m) => m.relPath === file.relPath) || null
 })
+
+// 群卡定群来源标注：结构形态群=「结构·形态名」（形态表命中形态透出），规则定群
+// 群=定群规则 ID，兜底「结构」（群卡列表与右栏「所属序列群」共用）
+const groupBadge = (g: SnapGroup): string => {
+  if (g.formName) return `结构·${g.formName}`
+  return g.ruleId || '结构'
+}
 
 // —— 右栏解析面板数据投影（ParsePanel 消费；请求仍走本组件唯一 workbench 通道） ——
 // 已忽略判定与选中文件的待裁决项（左栏待裁决折叠区保留只读总览，双路裁决在右栏就地）

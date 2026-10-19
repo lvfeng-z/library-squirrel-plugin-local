@@ -1,10 +1,11 @@
-// 内置惯例规则表单元测试：pixiv 形态与归属解析的求值等价、分隔惯例真值样例、
-// 规则表构造健全与档案往返。
+// 内置惯例规则表单元测试：pixiv 形态与归属解析的求值等价、页级定群真值样例、
+// 分隔惯例真值样例、规则表构造健全与档案往返。
 package main
 
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -162,7 +163,8 @@ func TestBuiltinSeparatorRules(t *testing.T) {
 }
 
 // TestBuiltinRulesSanity 内置规则表健全性：声明表全部条目构造无错、条数与声明表一致、
-// ID 非空且唯一、来源统一为内置、全部启用、描述非空、模式为文件名正则且声明了捕获组。
+// ID 非空且唯一、来源统一为内置、全部启用、描述非空；正则条目为文件名正则且声明了
+// 捕获组，兄弟群组条目两提取式经编译且成群门槛 ≥2。
 func TestBuiltinRulesSanity(t *testing.T) {
 	if _, err := buildBuiltinRules(); err != nil {
 		t.Fatalf("内置规则声明表构造失败: %v", err)
@@ -192,30 +194,44 @@ func TestBuiltinRulesSanity(t *testing.T) {
 		if rule.Description == "" {
 			t.Errorf("规则 %q 缺少人类可读描述", rule.ID)
 		}
-		pattern, ok := rule.Pattern.(*RegexPattern)
-		if !ok {
-			t.Fatalf("规则 %q 的模式类型 = %T，期望 *RegexPattern", rule.ID, rule.Pattern)
-		}
-		if pattern.Target != TargetFileName {
-			t.Errorf("规则 %q 的匹配目标 = %q，期望 %q", rule.ID, pattern.Target, TargetFileName)
-		}
-		if pattern.re == nil {
-			t.Errorf("规则 %q 的正则未经编译", rule.ID)
-			continue
-		}
-		// 声明的捕获组名必须真实存在于表达式内，否则求值只会绑定空串。
-		names := pattern.re.SubexpNames()
-		for _, capture := range pattern.Captures {
-			found := false
-			for i, groupName := range names {
-				if i > 0 && groupName == capture {
-					found = true
-					break
+		switch pattern := rule.Pattern.(type) {
+		case *RegexPattern:
+			if pattern.Target != TargetFileName {
+				t.Errorf("规则 %q 的匹配目标 = %q，期望 %q", rule.ID, pattern.Target, TargetFileName)
+			}
+			if pattern.re == nil {
+				t.Errorf("规则 %q 的正则未经编译", rule.ID)
+				continue
+			}
+			// 声明的捕获组名必须真实存在于表达式内，否则求值只会绑定空串。
+			names := pattern.re.SubexpNames()
+			for _, capture := range pattern.Captures {
+				found := false
+				for i, groupName := range names {
+					if i > 0 && groupName == capture {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("规则 %q 声明的捕获组 %q 不在表达式 %q 内", rule.ID, capture, pattern.Expr)
 				}
 			}
-			if !found {
-				t.Errorf("规则 %q 声明的捕获组 %q 不在表达式 %q 内", rule.ID, capture, pattern.Expr)
+		case *SiblingPattern:
+			if pattern.seqRe == nil {
+				t.Errorf("规则 %q 的序号正则未经编译", rule.ID)
 			}
+			if pattern.KeyExpr != "" && pattern.keyRe == nil {
+				t.Errorf("规则 %q 的分组键正则未经编译", rule.ID)
+			}
+			if pattern.MinGroupSize < 2 {
+				t.Errorf("规则 %q 的成群门槛 = %d，期望 ≥2", rule.ID, pattern.MinGroupSize)
+			}
+			if pattern.Outcome != OutcomeCollection {
+				t.Errorf("规则 %q 的归属类别 = %q，期望 %q", rule.ID, pattern.Outcome, OutcomeCollection)
+			}
+		default:
+			t.Fatalf("规则 %q 的模式类型 = %T，期望 *RegexPattern 或 *SiblingPattern", rule.ID, rule.Pattern)
 		}
 	}
 }
@@ -263,5 +279,125 @@ func TestBuiltinRulesProfileRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(data, data2) {
 		t.Errorf("往返两次 JSON 字节不等价:\n首次: %s\n二次: %s", data, data2)
+	}
+}
+
+// TestBuiltinPixivPageGroupRule 页级定群规则真值样例：同作品号各页（含流水号
+// 前缀与 _master 尾缀变体、去前缀原生态）聚为同键群、页号即序号且序号原文
+// 保留；单页不成群、跨作品号不成群、手工副本尾缀与十六进制补丁变体不属本形态。
+func TestBuiltinPixivPageGroupRule(t *testing.T) {
+	rule := builtinRuleByID(t, builtinRuleIDPixivPageGroup)
+	sibling, ok := rule.Pattern.(*SiblingPattern)
+	if !ok {
+		t.Fatalf("页级定群规则应为兄弟群组模式，实际 %T", rule.Pattern)
+	}
+
+	siblings := []string{
+		"00001_72019841_p0.jpg",
+		"00002_72019841_p1.jpg",
+		"72019841_p2.png",
+		"72019841_p0_master1200.jpg",
+	}
+	cases := []struct {
+		name     string
+		fileName string
+		siblings []string
+		wantHit  bool
+		wantKey  string
+		wantSeq  int
+		wantText string
+	}{
+		{"流水号前缀页", "00001_72019841_p0.jpg", siblings, true, "72019841", 0, "0"},
+		{"无前缀原生态", "72019841_p2.png", siblings, true, "72019841", 2, "2"},
+		{"master 尾缀变体", "72019841_p0_master1200.jpg", siblings, true, "72019841", 0, "0"},
+		{"跨作品号单页", "00001_72019841_p0.jpg", []string{"00002_11111111_p0.jpg"}, false, "", 0, ""},
+		{"单页不成群", "72019841_p0.jpg", []string{"72019841_p0.jpg"}, false, "", 0, ""},
+		{"手工副本尾缀不属页级", "00133_73989691_p2_1.jpg", []string{"00133_73989691_p2_1.jpg", "00133_73989691_p2_2.jpg"}, false, "", 0, ""},
+		{"十六进制补丁变体不入键", "12345678-abcdef_p0.jpg", []string{"12345678-abcdef_p0.jpg", "12345678-abcdef_p1.jpg"}, false, "", 0, ""},
+		{"页号两位数", "00009_72019841_p12.jpg", []string{"00008_72019841_p11.jpg", "00009_72019841_p12.jpg"}, true, "72019841", 12, "12"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &ParseContext{}
+			in := &MatchInput{FileName: tc.fileName, Siblings: tc.siblings}
+			hit := sibling.Evaluate(in, nil, ctx)
+			if hit != tc.wantHit {
+				t.Fatalf("页级定群对 %q 求值 = %v，期望 %v", tc.fileName, hit, tc.wantHit)
+			}
+			if !tc.wantHit {
+				return
+			}
+			if ctx.Group == nil || ctx.Group.Key != tc.wantKey || ctx.Group.Prefix != tc.wantKey {
+				t.Fatalf("群组键/前缀不符: %+v，期望 %q", ctx.Group, tc.wantKey)
+			}
+			if ctx.Group.Seq != tc.wantSeq || ctx.Group.Size != len(tc.siblings) {
+				t.Fatalf("序号/组大小不符: %+v，期望 seq=%d size=%d", ctx.Group, tc.wantSeq, len(tc.siblings))
+			}
+			if text, ok := sibling.seqTextOf(tc.fileName); !ok || text != tc.wantText {
+				t.Fatalf("序号原文 = %q（ok=%v），期望 %q", text, ok, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestBuiltinPixivPageGroupPipeline 页级定群规则经 EffectiveRules 参与流水线：
+// 形态甲实测样本（00001_72019841_p0 ~ 00009_72019841_p8）聚为一群（Key=作品
+// ID、序号=页号、序号原文保留）；同目录他作品单页保持独立；用户定群规则先于
+// 内置定群规则求值（用户分组口径胜出）。
+func TestBuiltinPixivPageGroupPipeline(t *testing.T) {
+	files := make([]ScanFile, 0, 10)
+	for i := 0; i <= 8; i++ {
+		name := fmt.Sprintf("%05d_72019841_p%d.jpg", i+1, i)
+		files = append(files, ScanFile{
+			Path: `E:\lib\Artist[らな夢]\` + name, FileName: name,
+			DirNames: []string{"Artist[らな夢]"}, RelPath: "Artist[らな夢]/" + name,
+		})
+	}
+	files = append(files, ScanFile{
+		Path: `E:\lib\Artist[らな夢]\88888888_p0.jpg`, FileName: "88888888_p0.jpg",
+		DirNames: []string{"Artist[らな夢]"}, RelPath: "Artist[らな夢]/88888888_p0.jpg",
+	})
+
+	decisions := RunPipeline(files, EffectiveRules(nil), nil)
+	byName := decisionsByName(t, decisions)
+	for i := 0; i <= 8; i++ {
+		name := fmt.Sprintf("%05d_72019841_p%d.jpg", i+1, i)
+		d := byName[name]
+		if d.Group == nil {
+			t.Fatalf("%s 应为页级群成员，实际 Group 为 nil", name)
+		}
+		if d.Group.Key != "72019841" || d.Group.Prefix != "72019841" {
+			t.Fatalf("%s 的群组键 = %q，期望作品 ID 72019841", name, d.Group.Key)
+		}
+		if d.Group.Seq != i || d.Group.Size != 9 {
+			t.Fatalf("%s 的序号/组大小 = %d/%d，期望 %d/9", name, d.Group.Seq, d.Group.Size, i)
+		}
+		if len(d.MatchedRuleIDs) != 0 {
+			t.Errorf("%s 的提取段命中规则 = %v，期望空（定群规则不参与提取段；流水号前缀文件不命中页级求值规则）", name, d.MatchedRuleIDs)
+		}
+	}
+	if lone := byName["88888888_p0.jpg"]; lone.Group != nil {
+		t.Errorf("他作品单页应保持独立，实际 Group = %+v", lone.Group)
+	}
+
+	// 用户规则先于内置：用户定群规则（按流水号前缀分组）先命中即胜出，
+	// 内置页级定群不再接管同批文件。
+	userRule := RuleEntry{
+		ID:          "user-serial-group",
+		Description: "用户自定义：按流水号前缀分组",
+		Source:      RuleSourceManual,
+		Enabled:     true,
+		Pattern:     mustSibling(t, `^(\d{5})_\d+_p\d+`, `_p(\d+)(?:\.[^.]*)?$`, 2, OutcomeCollection),
+	}
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{userRule}}
+	pair := []ScanFile{
+		{Path: `E:\lib\对\00001_72019841_p0.jpg`, FileName: "00001_72019841_p0.jpg", DirNames: []string{"对"}, RelPath: "对/00001_72019841_p0.jpg"},
+		{Path: `E:\lib\对\00001_72019841_p1.jpg`, FileName: "00001_72019841_p1.jpg", DirNames: []string{"对"}, RelPath: "对/00001_72019841_p1.jpg"},
+	}
+	userDecisions := RunPipeline(pair, EffectiveRules(profile), nil)
+	for _, d := range userDecisions {
+		if d.Group == nil || d.Group.Key != "00001" {
+			t.Fatalf("用户定群规则应先于内置页级定群生效（键=流水号 00001），实际 %+v", d.Group)
+		}
 	}
 }
