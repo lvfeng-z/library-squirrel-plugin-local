@@ -293,17 +293,33 @@
                       :class="{ 'is-selected': m.relPath === selectedRelPath }"
                       :title="m.relPath"
                       @click="selectFile(m.relPath)"
-                    ><template v-if="m.seqText">#{{ m.seqText }} </template><span
-                        v-for="(s, si) in segSpans(fileNameOf(m.relPath), m.segs).spans"
+                    ><template v-if="m.seqText"><span class="li-ws-seg-seq">#{{ m.seqText }} </span></template><span
+                        v-for="(s, si) in elSpans(fileNameOf(m.relPath), m.elements).spans"
                         :key="si"
                         :class="s.kind ? `li-ws-seg-${s.kind}` : ''"
-                      >{{ s.text }}</span><span class="li-ws-cand-ext">{{ segSpans(fileNameOf(m.relPath), m.segs).ext }}</span></span>
+                      >{{ s.text }}</span><span class="li-ws-cand-ext">{{ elSpans(fileNameOf(m.relPath), m.elements).ext }}</span></span>
                   </div>
                   <div v-if="confirming === candTarget(c)" class="li-ws-cand-confirm">
-                    <input v-model="confirmName" class="li-ws-cand-name" type="text" maxlength="200" placeholder="集名">
+                    <span class="li-ws-cand-namewrap">
+                      <input v-model="confirmName" class="li-ws-cand-name" type="text" maxlength="200" placeholder="集名" :style="{ width: nameInputWidth }">
+                      <button v-if="confirmName" type="button" class="li-ws-cand-clear" title="清空集名" :disabled="candBusy" @click="clearConfirmName">✕</button>
+                      <span class="li-ws-cand-name-mirror" aria-hidden="true">{{ confirmName || '集名' }}</span>
+                    </span>
                     <span v-if="c.existingSetId" class="li-ws-cand-existing">将归入既有集</span>
                     <button type="button" class="li-ws-filter-btn li-ws-cand-ok" :disabled="candBusy || !confirmName.trim()" @click="confirmCandidate(c)">确认归集</button>
                     <button type="button" class="li-ws-filter-btn" :disabled="candBusy" @click="confirming = ''">取消</button>
+                    <div v-if="chipVariants(c).length" class="li-ws-cand-chips">
+                      <button
+                        v-for="(chip, chi) in chipVariants(c)"
+                        :key="chi"
+                        type="button"
+                        class="li-ws-chip"
+                        :class="{ 'is-shelled': chip.shelled }"
+                        :title="chip.shelled ? '插入带壳形态' : '插入剥壳形态'"
+                        :disabled="candBusy"
+                        @click="insertChip(chip)"
+                      >{{ chip.label }}</button>
+                    </div>
                   </div>
                   <div v-else class="li-ws-cand-actions">
                     <button type="button" class="li-ws-filter-btn" :disabled="candBusy" @click="startConfirm(c)">归入一集</button>
@@ -642,19 +658,23 @@ interface SnapGroup {
   members: { relPath: string; seq: number; seqText: string }[]
 }
 
-// 剧本v2：文件名内序列块区间（后端形态表单一事实源；相对去扩展名正文的 0 基半开区间
-// [start,end)，kind=author/workId/seq；非序列段不产生区间）
-interface SnapSeg {
-  start: number
-  end: number
+// 剧本步1′：文件名元素（后端 splitFilenameElements 单一事实源；按序拼接 text
+// 即还原去扩展名正文，无偏移量纲问题）。kind=author 作者括号块/workId 作品号
+// 数字流/seq 序号/title 群公共元素/plain 非公共/sep 分隔 run（后两者无底色）；
+// shelled=括号组双态——text 含括号原文、inner 剥壳内名
+interface SnapEl {
+  text: string
   kind: string
+  shelled?: boolean
+  inner?: string
 }
 
-// 剧本v2：候选卡成员（群成员/目录直接子文件；Segs 供块底色渲染）
+// 剧本步1′：候选卡成员（群成员/目录直接子文件；elements 供元素级块底色渲染，
+// 旧快照 v1 无该字段时退整段无底色）
 interface SnapCandMember {
   relPath: string
   seqText?: string
-  segs?: SnapSeg[]
+  elements?: SnapEl[]
 }
 
 // 剧本v2 疑似作品集候选卡（三类合流）：source=dir 目录候选 / group 序列群（含页级）；
@@ -672,6 +692,9 @@ interface SnapCandidate {
   existingSetName?: string
   confirmedSetName?: string
   members: SnapCandMember[]
+  // 剧本步2′：键元素池（决策2 A——群来源=键前缀元素、目录来源=剥壳内名元素），
+  // 确认区插入 chips 的数据源（括号组双态成对出 chip）
+  keyElements?: SnapEl[]
 }
 
 interface SnapPending {
@@ -841,27 +864,95 @@ const candKey = (c: SnapCandidate): string => `${c.source}/${c.dir}/${c.key}`
 const candTarget = (c: SnapCandidate): string => `${c.source}\u0000${c.dir}\u0000${c.key}`
 const candSourceLabel = (c: SnapCandidate): string =>
   c.source === 'dir' ? '目录候选' : (c.formName ? `序列·${c.formName}` : '序列群')
-// 块底色渲染：按去扩展名正文与 Segs 区间切片（区间相对正文 0 基半开；重叠/越界按
-// 顺序消费兜底），扩展名尾巴以弱化样式缀尾
-const segSpans = (fileName: string, segs?: SnapSeg[]): { spans: { text: string; kind?: string }[]; ext: string } => {
+// 剧本步1′ 元素级块底色：元素数组按序拼接即去扩展名正文（后端单一事实源，
+// 无偏移换算），扩展名尾巴以弱化样式缀尾；plain/sep 不加底色类。旧快照 v1
+// （无 elements 字段）退整段无底色
+const elSpans = (fileName: string, els?: SnapEl[]): { spans: { text: string; kind?: string }[]; ext: string } => {
   const dot = fileName.lastIndexOf('.')
-  const base = dot > 0 ? fileName.slice(0, dot) : fileName
   const ext = dot > 0 ? fileName.slice(dot) : ''
   const spans: { text: string; kind?: string }[] = []
-  let pos = 0
-  for (const s of [...(segs || [])].sort((a, b) => a.start - b.start)) {
-    if (s.start > pos) spans.push({ text: base.slice(pos, s.start) })
-    if (s.end > s.start) spans.push({ text: base.slice(s.start, s.end), kind: s.kind })
-    pos = Math.max(pos, s.end)
+  for (const el of els || []) {
+    if (!el.text) continue
+    spans.push({ text: el.text, kind: el.kind === 'author' || el.kind === 'workId' || el.kind === 'seq' || el.kind === 'title' ? el.kind : undefined })
   }
-  if (pos < base.length) spans.push({ text: base.slice(pos) })
+  if (!spans.length) {
+    const base = dot > 0 ? fileName.slice(0, dot) : fileName
+    if (base) spans.push({ text: base })
+  }
   return { spans, ext }
+}
+// 剧本步2′：确认区元素插入池（决策2 A=键元素+目录名元素，后端 keyElements）；
+// 括号组元素双态成对出 chip（带壳 `[Isel]` / 剥壳 `Isel`），点击插入集名输入框
+// 光标处
+const chipVariants = (c: SnapCandidate): { label: string; insert: string; shelled: boolean }[] => {
+  const out: { label: string; insert: string; shelled: boolean }[] = []
+  for (const el of c.keyElements || []) {
+    if (!el.text) continue
+    if (el.shelled && el.inner) {
+      out.push({ label: el.text, insert: el.text, shelled: true })
+      out.push({ label: el.inner, insert: el.inner, shelled: false })
+    } else {
+      out.push({ label: el.text, insert: el.text, shelled: false })
+    }
+  }
+  return out
+}
+// 剧本步2′ 光标追踪：确认区输入框的最近选区由事件流持续维护（点击 chip 时
+// 输入框通常已失焦、且焦点/选区读取时序在后台窗口不可依赖——快照式维护不
+// 依赖点击瞬间的读取）。selectionchange 覆盖程序化与拖选，click/keyup/select/
+// input 事件委托覆盖用户键鼠置位（不依赖单一事件的浏览器覆盖面）。
+let nameSelSnapshot = { start: 0, end: 0 }
+const snapNameSel = (el: EventTarget | null) => {
+  if (el instanceof HTMLInputElement && el.classList.contains('li-ws-cand-name')) {
+    nameSelSnapshot = { start: el.selectionStart ?? 0, end: el.selectionEnd ?? 0 }
+  }
+}
+// 后台/失焦窗口中 document.activeElement 不可靠（恒为 body），selectionchange
+// 分支直接定位确认区输入框读选区（同时刻全页仅一个确认区输入框）
+const onNameSelChange = () => {
+  const el = document.querySelector<HTMLInputElement>('input.li-ws-cand-name')
+  if (el) snapNameSel(el)
+}
+const onNameSelDelegate = (ev: Event) => snapNameSel(ev.target)
+const insertChip = (chip: { insert: string }) => {
+  const name = confirmName.value
+  const start = Math.min(nameSelSnapshot.start, name.length)
+  const end = Math.min(nameSelSnapshot.end, name.length)
+  confirmName.value = name.slice(0, start) + chip.insert + name.slice(Math.max(start, end))
+  void nextTick(() => {
+    const input = [...document.querySelectorAll<HTMLInputElement>('input.li-ws-cand-name')].find(i => i.offsetParent !== null)
+    if (input) {
+      input.focus()
+      const caret = start + chip.insert.length
+      input.setSelectionRange(caret, caret)
+    }
+  })
 }
 // 两段式归集：预填=A 档既有集名（命中时）或候选键（剥壳段/群键），可改
 const startConfirm = (c: SnapCandidate) => {
   confirming.value = candTarget(c)
   confirmName.value = c.existingSetName || c.key
+  // 新确认区开启：预填后光标语义=键尾，快照重置防上一轮残留选区串位
+  nameSelSnapshot = { start: confirmName.value.length, end: confirmName.value.length }
 }
+// 用户反馈优化①：集名输入框一键清空（顺带重置选区快照到键首）
+const clearConfirmName = () => {
+  confirmName.value = ''
+  nameSelSnapshot = { start: 0, end: 0 }
+  void nextTick(() => { document.querySelector<HTMLInputElement>('input.li-ws-cand-name')?.focus() })
+}
+// 用户反馈优化①：输入框宽度自适应内容（镜像 span 量宽——v-for 内不可用模板 ref，
+// 与插入选区同因，DOM 直查；首帧 immediate 触发一次量宽）
+const nameInputWidth = ref('160px')
+const syncNameInputWidth = () => {
+  void nextTick(() => {
+    const mirror = document.querySelector<HTMLElement>('.li-ws-cand-name-mirror')
+    if (!mirror) return
+    const w = mirror.offsetWidth
+    if (w > 0) nameInputWidth.value = Math.min(Math.max(w + 34, 96), 360) + 'px'
+  })
+}
+watch(confirmName, syncNameInputWidth, { immediate: true })
 const confirmCandidate = async (c: SnapCandidate) => {
   if (!session.value || !confirmName.value.trim()) return
   candBusy.value = true
@@ -1794,6 +1885,11 @@ onMounted(async () => {
   offEvent = Events.On(TOPIC_EVENT, onEvent)
   // 体高同步三触发：窗口缩放、上游内容增减（body 尺寸变化改变清单顶部偏移）、清单容器出现
   window.addEventListener('resize', syncListBodyH)
+  // 光标追踪（剧本步2′ chips 插入用）：事件流维护选区快照
+  document.addEventListener('selectionchange', onNameSelChange)
+  for (const t of ['click', 'keyup', 'select', 'input'] as const) {
+    document.addEventListener(t, onNameSelDelegate, true)
+  }
   layoutRO = new ResizeObserver(syncListBodyH)
   layoutRO.observe(document.body)
   const root = await restoreSession()
@@ -1814,6 +1910,10 @@ onUnmounted(() => {
   viewportRO?.disconnect()
   layoutRO?.disconnect()
   window.removeEventListener('resize', syncListBodyH)
+  document.removeEventListener('selectionchange', onNameSelChange)
+  for (const t of ['click', 'keyup', 'select', 'input'] as const) {
+    document.removeEventListener(t, onNameSelDelegate, true)
+  }
 })
 </script>
 
@@ -2427,7 +2527,8 @@ onUnmounted(() => {
   box-shadow: inset 2px 0 0 var(--app-color-primary);
 }
 
-/* 序列块底色（剧本v2：作者括号=琥珀 / 作品号=蓝 / 序号=绿；半透明覆盖面兼容明暗主题） */
+/* 元素级块底色（剧本步1′：作者括号=琥珀 / 作品号=蓝 / 序号=绿 / 群公共元素=
+   浅灰；plain/sep 无底色；半透明覆盖面兼容明暗主题） */
 .li-ws-seg-author {
   background: rgba(255, 193, 7, 0.35);
   border-radius: 3px;
@@ -2440,6 +2541,11 @@ onUnmounted(() => {
 
 .li-ws-seg-seq {
   background: rgba(102, 187, 106, 0.36);
+  border-radius: 3px;
+}
+
+.li-ws-seg-title {
+  background: rgba(130, 130, 130, 0.22);
   border-radius: 3px;
 }
 
@@ -2456,14 +2562,60 @@ onUnmounted(() => {
 }
 
 .li-ws-cand-name {
-  width: 240px;
-  padding: 2px 8px;
+  /* 宽度由镜像量宽自适应（:style 绑定），此处兜底 */
+  min-width: 96px;
+  max-width: 360px;
+  padding: 2px 24px 2px 8px;
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius-sm);
   background: var(--app-bg-color, transparent);
   color: var(--app-text-primary);
   font-size: 12px;
+  font-family: inherit;
 }
+
+/* 用户反馈优化①：集名输入框包裹层（一键清除按钮定位 + 镜像量宽载体） */
+.li-ws-cand-namewrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.li-ws-cand-clear {
+  position: absolute;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--app-text-secondary, #888);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.li-ws-cand-clear:hover {
+  color: var(--app-text-primary, #333);
+  background: rgba(128, 128, 128, 0.15);
+}
+
+/* 镜像 span：与输入框同字体量宽，绝对定位移出视口不占位 */
+.li-ws-cand-name-mirror {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  visibility: hidden;
+  white-space: pre;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 2px 8px;
+}
+
 
 .li-ws-cand-name:focus {
   outline: none;
@@ -2473,6 +2625,34 @@ onUnmounted(() => {
 .li-ws-cand-existing {
   color: #1d7a45;
   font-size: 12px;
+}
+
+/* 剧本步2′：确认区元素插入 chips（决策2 A 池——键元素+目录名元素；括号组
+   双态成对：带壳 chip 加壳色描边，点击插入集名输入框光标处） */
+.li-ws-cand-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+}
+
+.li-ws-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--app-border-color-light);
+  border-radius: 10px;
+  background: var(--app-bg-color, transparent);
+  color: var(--app-text-primary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.li-ws-chip:hover:not(:disabled) {
+  border-color: var(--app-color-primary);
+}
+
+.li-ws-chip.is-shelled {
+  border-color: rgba(255, 193, 7, 0.6);
 }
 
 .li-ws-cand-bin {

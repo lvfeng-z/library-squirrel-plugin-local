@@ -138,29 +138,29 @@ func recognitionTestRules(t *testing.T) []RuleEntry {
 		},
 		{
 			ID: "test-conflict-a", Description: "测试：标题冲突 A", Source: RuleSourceManual, Enabled: true,
-			Pattern: conflictA,
+			Pattern:     conflictA,
 			Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromCapture, CaptureName: "c1"}},
 		},
 		{
 			ID: "test-conflict-b", Description: "测试：标题冲突 B", Source: RuleSourceManual, Enabled: true,
-			Pattern: conflictB,
+			Pattern:     conflictB,
 			Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromCapture, CaptureName: "c2"}},
 		},
 		{
 			ID: "test-predicate-author", Description: "测试：文件名命中库内作者", Source: RuleSourceManual, Enabled: true,
-			Pattern: &PredicatePattern{Kind: PredicateAuthor},
+			Pattern:     &PredicatePattern{Kind: PredicateAuthor},
 			Extractions: []ExtractionAction{{Dimension: DimAuthor, From: FromPredicate}},
 		},
 		{
 			ID: "test-dir-clue-tag", Description: "测试：线索层目录=标签", Source: RuleSourceManual, Enabled: true,
-			Pattern: dirPattern,
+			Pattern:     dirPattern,
 			Extractions: []ExtractionAction{{Dimension: DimTag, From: FromAncestorDir}},
 		},
 	}
 }
 
 // newRecognitionFixture 构造识别干跑测试环境：内存存储 + 桩上下文 + 测试档案
-//（含禁用规则一条，供元素6 启用态呈现）+ 指定库根会话与赋值。
+// （含禁用规则一条，供元素6 启用态呈现）+ 指定库根会话与赋值。
 func newRecognitionFixture(t *testing.T, root string, assigns map[string]SessionAssignment) (*SessionManager, *workbenchTestCtx) {
 	t.Helper()
 	store := newFakeSessionStore()
@@ -222,7 +222,7 @@ func writeTestFile(t *testing.T, path, content string) {
 }
 
 // recognitionSampleTree 构造样例目录树（七类元素各形态齐备；群组前缀
-//「库内作者名」命中库内索引，验证群组前缀侧的谓词线索）：
+// 「库内作者名」命中库内索引，验证群组前缀侧的谓词线索）：
 //
 //	<root>/已识别/【作者A】标题1.jpg      内置规则命中 → identified
 //	<root>/线索/任意名.jpg                目录层含义规则（线索层=标签）→ identified
@@ -779,7 +779,6 @@ func TestHandleFrontendRequestRecognitionActions(t *testing.T) {
 	}
 }
 
-
 // TestDetectStructuralGroups 验证规则无关的兄弟群结构探测（元素4 结构面与
 // 元素3 集名候选线索）：尾缀数字形态成群、序号形态单成员不成群、已识别成员
 // 入群不加线索、规则群成员不参与。
@@ -925,54 +924,65 @@ const formMidTitle = "industrial_becca"
 // TestStructuralFormMatch 结构形态表逐条目的键/序号提取判定：各形态实测样本
 // 提取正确、排除样本零命中、同文件命中多形态时按表序（括号 → 中段 → 尾缀 →
 // 直连）取先者。
-func TestStructuralFormMatch(t *testing.T) {
-	cases := []struct {
-		name    string
-		base    string
-		form    string // 期望命中的形态名；空串 = 零命中
-		key     string
-		seqText string
-	}{
-		{"括号序号零填充", formBracketKey + "_[01]", "括号序号", formBracketKey, "01"},
-		{"括号序号无下划线", "同族画集[12]", "括号序号", "同族画集", "12"},
-		{"中段序号", formMidTitle + "_page_10_by_jake__jaccobus_deq5g43", "中段序号", formMidTitle, "10"},
-		{"尾缀数字", "00133_73989691_p2_1", "尾缀数字", "00133_73989691_p2", "1"},
-		// 尾缀数字：键与序号间的分隔 run 吞并中段的 `...` 与 `_`（惰性键止于
-		// 首个可成分隔段的切分点）。
-		{"尾缀数字多分隔符", "[TsukijiTums]Finished 8$..._01", "尾缀数字", "[TsukijiTums]Finished 8$", "01"},
-		{"直连序号", formDirectKey + "0", "直连序号", formDirectKey, "0"},
-		{"直连序号两位", formDirectKey + "11", "直连序号", formDirectKey, "11"},
-
-		// 优先级：同一文件命中多形态时取表序先者。
-		{"中段先于直连", formMidTitle + "_page_10_by_jake__jaccobus_deq5g43", "中段序号", formMidTitle, "10"},
-		{"中段先于尾缀", "a_page_3_by_b_02", "中段序号", "a", "3"},
-		{"尾缀先于直连", "work_01", "尾缀数字", "work", "01"},
-
-		// 排除：浏览器重名冲突的圆括号序号（末字符 `)`）零命中。
-		{"圆括号序号", "(15)", "", "", ""},
-		{"圆括号序号二", "(38)", "", "", ""},
-		// 排除：纯数字名与尾部数字流超 4 位（直连键式要求前缀以非数字结尾）。
-		{"纯数字名", "12345", "", "", ""},
-		{"超长尾数流", "abc12345", "", "", ""},
-		// 页级流水号形态命中直连序号但键含流水号：不同流水号键不同，天然不成群
-		//（页级定群由内置规则负责）。
-		{"页级流水号一", "00001_72019841_p0", "直连序号", "00001_72019841_p", "0"},
-		{"页级流水号二", "00002_72019841_p1", "直连序号", "00002_72019841_p", "1"},
+// TestElementAlign 元素对齐判定（批次二 F3）：任意位序号泛化正例（第N话/
+// vol_N/industrial_N_becca/多数字位决策1 A）与反例（圆括号/纯数字/超长尾数流/
+// 日期/随机码/同值序号/页级流水号）；`_?[NN]` 分隔容忍（带与不带 `_` 的同族
+// 文件归同键的既有语义）。判定层退役后 matchStructuralForm 的表驱动用例由
+// 本用例以群级语义承接。
+func TestElementAlign(t *testing.T) {
+	plain := func(relPath, dirKey string) SnapFile {
+		return SnapFile{RelPath: relPath, FileName: fileNameOfRel(relPath), DirRelKey: dirKey, State: snapStatePlain}
 	}
-	for _, tc := range cases {
-		key, seqText, form := matchStructuralForm(tc.base)
-		if tc.form == "" {
-			if form != nil {
-				t.Fatalf("%s：不应命中形态，实际 %s（key=%q seq=%q）", tc.name, form.name, key, seqText)
-			}
-			continue
-		}
-		if form == nil {
-			t.Fatalf("%s：应命中形态 %s，实际零命中", tc.name, tc.form)
-		}
-		if form.name != tc.form || key != tc.key || seqText != tc.seqText {
-			t.Fatalf("%s：提取不符 form=%s key=%q seq=%q，期望 form=%s key=%q seq=%q",
-				tc.name, form.name, key, seqText, tc.form, tc.key, tc.seqText)
+	run := func(files ...SnapFile) []SnapGroup {
+		snap := &RecognitionSnapshot{Files: files}
+		detectStructuralGroups(snap)
+		return snap.Groups
+	}
+
+	// 正例：括号序号同族归键（`_?[NN]` 分隔容忍——带与不带 `_` 归同键）。
+	g := run(plain("fam/同族画集_[01].jpg", "fam"), plain("fam/同族画集[12].jpg", "fam"))
+	if len(g) != 1 || g[0].Key != "同族画集" || g[0].FormName != "括号序号" ||
+		g[0].Members[0].SeqText != "01" || g[0].Members[1].SeqText != "12" {
+		t.Fatalf("括号序号同族归键不符：%+v", g)
+	}
+	// 正例：第N话（词内直连数字的任意位序号，现状不识别的泛化目标；形态提取
+	// 式不命中 → 键退公共元素拼接兜底）。
+	g = run(plain("gen1/画集_第1话.jpg", "gen1"), plain("gen1/画集_第2话.jpg", "gen1"), plain("gen1/画集_第10话.jpg", "gen1"))
+	if len(g) != 1 || g[0].FormName != "中段序号" || g[0].Key != "画集_第话" ||
+		g[0].Members[0].Seq != 1 || g[0].Members[1].Seq != 2 || g[0].Members[2].Seq != 10 {
+		t.Fatalf("第N话泛化成群不符：%+v", g)
+	}
+	// 正例：vol_N 尾缀（形态键提取式复原键）。
+	g = run(plain("gen2/标题_vol_1.jpg", "gen2"), plain("gen2/标题_vol_2.jpg", "gen2"))
+	if len(g) != 1 || g[0].FormName != "尾缀数字" || g[0].Key != "标题_vol" {
+		t.Fatalf("vol_N 成群不符：%+v", g)
+	}
+	// 正例：industrial_N_becca（中段、键=公共元素拼接兜底）。
+	g = run(plain("gen3/industrial_1_becca.jpg", "gen3"), plain("gen3/industrial_2_becca.jpg", "gen3"), plain("gen3/industrial_12_becca.jpg", "gen3"))
+	if len(g) != 1 || g[0].FormName != "中段序号" || g[0].Key != "industrial_becca" ||
+		g[0].Members[0].SeqText != "1" || g[0].Members[2].SeqText != "12" {
+		t.Fatalf("industrial_N_becca 成群不符：%+v", g)
+	}
+	// 正例（决策1 A，2026-10-20 拍板）：多数字位并存取互异度最大位为序号、
+	// 共同数字位入键（B 案下多数字位即不成群——本例锚定 A 案覆盖面）。
+	g = run(plain("gen4/第1话_p7.jpg", "gen4"), plain("gen4/第2话_p7.jpg", "gen4"), plain("gen4/第3话_p7.jpg", "gen4"))
+	if len(g) != 1 || g[0].Key != "第话_p7" ||
+		g[0].Members[0].Seq != 1 || g[0].Members[2].Seq != 3 {
+		t.Fatalf("决策1 A 多数字位成群不符：%+v", g)
+	}
+
+	// 反例：序号候选缺席或键互异的各种形态零成群。
+	for name, files := range map[string][]SnapFile{
+		"圆括号序号（浏览器重名后缀）": {plain("p/(15).jpg", "p"), plain("p/(38).jpg", "p")},
+		"纯数字名":          {plain("p/12345.jpg", "p"), plain("p/12346.jpg", "p")},
+		"尾部数字流超 4 位":    {plain("p/abc12345.jpg", "p"), plain("p/abc12346.jpg", "p")},
+		"八位日期":          {plain("p/photo_20231001.jpg", "p"), plain("p/photo_20231002.jpg", "p")},
+		"字母随机码":         {plain("p/img_deq5g43.jpg", "p"), plain("p/img_d8xq2v1.jpg", "p")},
+		"同值序号（同基名异扩展名）": {plain("p/a_01.jpg", "p"), plain("p/a_01.png", "p")},
+		"页级流水号":         {plain("p/00001_72019841_p0.jpg", "p"), plain("p/00002_72019841_p1.jpg", "p")},
+	} {
+		if g := run(files...); len(g) != 0 {
+			t.Fatalf("%s：不应成群，实际 %+v", name, g)
 		}
 	}
 }
@@ -1124,79 +1134,84 @@ func TestStructuralFormGroups(t *testing.T) {
 	if g := mustGroup("乙", formBracketKey); len(g.Members) == 0 {
 		t.Fatal("乙群成员缺席")
 	} else {
-		segs := g.Members[0].Segs
-		if len(segs) != 3 || segs[0].Kind != "author" || segs[1].Kind != "workId" || segs[2].Kind != "seq" {
-			t.Fatalf("乙群成员区间不符（作者/作品号/序号三块）：%+v", segs)
+		els := g.Members[0].Elements
+		kinds := make(map[string]int)
+		for _, el := range els {
+			if el.Kind != elKindSep {
+				kinds[el.Kind]++
+			}
+		}
+		if kinds[elKindAuthor] != 1 || kinds[elKindWorkId] != 1 || kinds[elKindSeq] != 1 || kinds[elKindTitle] != 3 {
+			t.Fatalf("乙群成员元素类别不符（作者/作品号/公共×3/序号）：%+v（%v）", els, kinds)
 		}
 	}
 }
 
-// —— 作品集识别强化 批次三阶段5：序列块区间 / 目录候选 / A 档库内集识别 / 候选动作 ——
+// —— 元素级内核 批次二：元素拆分基座 / 元素对齐判定 / 目录候选 / A 档库内集识别 / 候选动作 ——
 
-// TestSegmentsOf 序列块区间提取：各形态命中时作者括号块/作品号块/序号块的
-// 区间与类别、无块形态只出序号块、未命中形态零区间；保守性锚点（首括号纯
-// 数字不回溯找作者块、5 位流水号不作作品号、区间文本即块原文）。
-func TestSegmentsOf(t *testing.T) {
-	formOf := func(name string) *structuralForm {
-		for _, f := range structuralForms {
-			if f.name == name {
-				return f
-			}
-		}
-		t.Fatalf("形态 %q 不在形态表", name)
-		return nil
-	}
-	assertSegs := func(base string, segs []SnapSeg, want ...[2]string) {
+// TestSplitElements 元素拆分基座：分隔 run/括号组双态/已知名保持/词内数字子段
+// 与特征级类别推断（author/workId/seq/plain）；拼接还原正文（CJK 量纲根治
+// 锚点——阶段0 的 TestSegProbeCJK 由本用例继承：标题括号组与直连尾缀数字都
+// 是显式元素，无偏移可丢）。
+func TestSplitElements(t *testing.T) {
+	assert := func(base string, hints []string, want ...SnapEl) {
 		t.Helper()
-		if len(segs) != len(want) {
-			t.Fatalf("%s 的块数 = %d，期望 %d：%+v", base, len(segs), len(want), segs)
+		got := splitFilenameElements(base, hints)
+		var concat strings.Builder
+		for i := range got {
+			concat.WriteString(got[i].Text)
 		}
-		for i, seg := range segs {
-			if seg.Kind != want[i][0] || base[seg.Start:seg.End] != want[i][1] {
-				t.Fatalf("%s 第 %d 块不符：%q[%d:%d]=%q kind=%s，期望 {kind=%s,text=%s}",
-					base, i, base, seg.Start, seg.End, base[seg.Start:seg.End], seg.Kind, want[i][0], want[i][1])
+		if concat.String() != base {
+			t.Fatalf("%s：元素拼接不还原正文（%q）：%+v", base, concat.String(), got)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s：元素数 = %d，期望 %d：%+v", base, len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s：第 %d 元素不符 %+v，期望 %+v", base, i, got[i], want[i])
 			}
 		}
 	}
-	// 括号序号：作者括号块 + 作品号块 + 序号块
-	bracket := formBracketKey + "_[01]"
-	assertSegs(bracket, segmentsOf(formOf("括号序号"), bracket),
-		[2]string{"author", "[くろニャン＠仕事募集中]"},
-		[2]string{"workId", "100423498"},
-		[2]string{"seq", "01"})
-	// 全角作者括号 + 无作品号 → 只出作者块与序号块
-	fwBase := "【作者乙】画集_[03]"
-	assertSegs(fwBase, segmentsOf(formOf("括号序号"), fwBase),
-		[2]string{"author", "【作者乙】"},
-		[2]string{"seq", "03"})
-	// 直连序号：作者括号 + 作品号 + 序号
-	direct := formDirectKey + "0"
-	assertSegs(direct, segmentsOf(formOf("直连序号"), direct),
-		[2]string{"author", "[Isel]"},
-		[2]string{"workId", "92242473"},
-		[2]string{"seq", "0"})
-	// 尾缀数字：5 位流水号不作作品号、8 位页作品号命中、尾缀序号成块
-	tail := "00133_73989691_p2_1"
-	assertSegs(tail, segmentsOf(formOf("尾缀数字"), tail),
-		[2]string{"workId", "73989691"},
-		[2]string{"seq", "1"})
-	// 中段序号：无作者括号与作品号 → 只出序号块
-	mid := formMidTitle + "_page_10_by_jake__jaccobus_deq5g43"
-	assertSegs(mid, segmentsOf(formOf("中段序号"), mid),
-		[2]string{"seq", "10"})
-	// 首括号纯数字（作品号括号形态）：不向后找作者块（保守）
-	digitFirst := "[100423498]_标题_[02]"
-	assertSegs(digitFirst, segmentsOf(formOf("括号序号"), digitFirst),
-		[2]string{"workId", "100423498"},
-		[2]string{"seq", "02"})
-	// 形态不命中 / nil 形态 → 零区间
-	if segs := segmentsOf(formOf("括号序号"), "(15)"); len(segs) != 0 {
-		t.Fatalf("形态不命中应零区间：%+v", segs)
-	}
-	if segs := segmentsOf(nil, "任意名"); len(segs) != 0 {
-		t.Fatalf("nil 形态应零区间：%+v", segs)
-	}
+	// CJK 实测文件名（用户实例）：作者/作品号/标题括号组/直连尾缀数字全显式携带。
+	assert("[Isel] [92242473] [瞬間的に絡み合う]0", nil,
+		SnapEl{Text: "[Isel]", Kind: "author", Shelled: true, Inner: "Isel"},
+		SnapEl{Text: " ", Kind: "sep"},
+		SnapEl{Text: "[92242473]", Kind: "workId", Shelled: true, Inner: "92242473"},
+		SnapEl{Text: " ", Kind: "sep"},
+		SnapEl{Text: "[瞬間的に絡み合う]", Kind: "plain", Shelled: true, Inner: "瞬間的に絡み合う"},
+		SnapEl{Text: "0", Kind: "seq"},
+	)
+	// 词内数字子段（`abc1`→abc+1）与位数判类（5 位流水号 plain、8 位作品号
+	// workId——宁缺勿滥口径）。
+	assert("abc1", nil, SnapEl{Text: "abc", Kind: "plain"}, SnapEl{Text: "1", Kind: "seq"})
+	assert("00133_73989691_p2_1", nil,
+		SnapEl{Text: "00133", Kind: "plain"}, SnapEl{Text: "_", Kind: "sep"},
+		SnapEl{Text: "73989691", Kind: "workId"}, SnapEl{Text: "_", Kind: "sep"},
+		SnapEl{Text: "p", Kind: "plain"}, SnapEl{Text: "2", Kind: "seq"}, SnapEl{Text: "_", Kind: "sep"},
+		SnapEl{Text: "1", Kind: "seq"})
+	// 括号组保守性：首括号内名纯数字=作品号括号形态（无作者块）；圆括号数字
+	// 不参与序号候选（浏览器重名后缀排除语义）。
+	assert("[100423498]_标题_[02]", nil,
+		SnapEl{Text: "[100423498]", Kind: "workId", Shelled: true, Inner: "100423498"},
+		SnapEl{Text: "_", Kind: "sep"}, SnapEl{Text: "标题", Kind: "plain"},
+		SnapEl{Text: "_", Kind: "sep"}, SnapEl{Text: "[02]", Kind: "seq", Shelled: true, Inner: "02"})
+	assert("(15)", nil, SnapEl{Text: "(15)", Kind: "plain", Shelled: true, Inner: "15"})
+	// 已知名保持：目录名提示的跨分隔符区间保持整段（jake__jaccobus 不拆）。
+	assert("art_by_jake__jaccobus_d1", []string{"jake--jaccobus"},
+		SnapEl{Text: "art", Kind: "plain"}, SnapEl{Text: "_", Kind: "sep"}, SnapEl{Text: "by", Kind: "plain"},
+		SnapEl{Text: "_", Kind: "sep"}, SnapEl{Text: "jake__jaccobus", Kind: "plain"},
+		SnapEl{Text: "_", Kind: "sep"}, SnapEl{Text: "d", Kind: "plain"}, SnapEl{Text: "1", Kind: "seq"})
+	// 句点族分隔：`...` 与 `_` 聚为一个分隔 run（与形态表尾缀数字分隔类对齐）。
+	assert("Finished 8$..._01", nil,
+		SnapEl{Text: "Finished", Kind: "plain"}, SnapEl{Text: " ", Kind: "sep"},
+		SnapEl{Text: "8", Kind: "seq"}, SnapEl{Text: "$", Kind: "plain"},
+		SnapEl{Text: "..._", Kind: "sep"}, SnapEl{Text: "01", Kind: "seq"})
 }
+
+// （阶段0 的 utf16Slice/TestSegProbeCJK 已随 SnapSeg 区间退役——CJK 量纲
+// 锚点由 TestSplitElements 与 TestElementAlign 的元素级断言继承：元素显式
+// 携带原文文本，无偏移可丢。）
 
 // TestDirCollectionCandidate 目录候选探测：目录名含作品号命中、单一结构群键
 // 目录命中（理由「已成一集」）、剥壳目录名取内名为候选键、无信号与单文件目录
@@ -1259,20 +1274,20 @@ func TestDirCollectionCandidate(t *testing.T) {
 	if len(c1.Members) != 4 {
 		t.Fatalf("成员应=目录直接子文件全部，实际: %+v", c1.Members)
 	}
-	seqText, hasSeqSeg := "", false
+	seqText, hasSeqEl := "", false
 	for _, mem := range c1.Members {
 		if mem.RelPath != "100423498/b_01.jpg" {
 			continue
 		}
 		seqText = mem.SeqText
-		for _, s := range mem.Segs {
-			if s.Kind == "seq" {
-				hasSeqSeg = true
+		for _, el := range mem.Elements {
+			if el.Kind == elKindSeq {
+				hasSeqEl = true
 			}
 		}
 	}
-	if seqText != "01" || !hasSeqSeg {
-		t.Fatalf("目录候选成员区间应现算（b_01 序号 01），实际 seqText=%q hasSeqSeg=%v", seqText, hasSeqSeg)
+	if seqText != "01" || !hasSeqEl {
+		t.Fatalf("目录候选成员元素应现算（b_01 序号 01），实际 seqText=%q hasSeqEl=%v", seqText, hasSeqEl)
 	}
 	// 剥壳目录：候选键取内名
 	if c2 := byDir["Artist[100423501]"]; c2.Key != "100423501" || c2.Size != 2 {
@@ -1324,7 +1339,7 @@ func TestLibSetCandidate(t *testing.T) {
 	snap := &RecognitionSnapshot{
 		Dirs: []SnapDir{{RelKey: "", Name: "根", Depth: 0}, {RelKey: "序列", Name: "序列", Depth: 1}},
 		Groups: []SnapGroup{{DirRelKey: "序列", Key: "既有画集", Size: 2, Members: []SnapGroupMember{
-			{RelPath: "序列/a_01.jpg", Seq: 1, SeqText: "01", Segs: []SnapSeg{{Start: 2, End: 4, Kind: "seq"}}},
+			{RelPath: "序列/a_01.jpg", Seq: 1, SeqText: "01", Elements: []SnapEl{{Text: "a"}, {Text: "_", Kind: "sep"}, {Text: "01", Kind: "seq"}}},
 			{RelPath: "序列/a_02.jpg", Seq: 2, SeqText: "02"},
 		}}},
 	}
@@ -1336,7 +1351,7 @@ func TestLibSetCandidate(t *testing.T) {
 	if !got.CrossMatch || got.Source != candSourceGroup || got.Key != "既有画集" || got.Size != 2 {
 		t.Fatalf("群候选注记不符: %+v", got)
 	}
-	if len(got.Members) != 2 || len(got.Members[0].Segs) != 1 {
+	if len(got.Members) != 2 || len(got.Members[0].Elements) != 3 {
 		t.Fatalf("群候选成员应复用群成员（含区间）: %+v", got.Members)
 	}
 }
@@ -1345,7 +1360,7 @@ func TestLibSetCandidate(t *testing.T) {
 // 恢复 → 回主清单；确认（带既有集行 id）→ 成员逐文件写集维度赋值、终选声明
 // 携带 collection、进 confirmed 分仓（带确认集名与既有 id）；已确认候选再确认
 // 回可读错误。候选动作经识别刷新调度异步落快照，测试内等在途识别清零后断言
-//（确定性锚点：StartRecognition 返回前同步置在途标记）。
+// （确定性锚点：StartRecognition 返回前同步置在途标记）。
 func TestWorkSetCandidateActions(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newRecognitionFixture(t, root, nil)
