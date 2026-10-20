@@ -113,6 +113,15 @@
                     title="平铺清单模式：全量文件平铺"
                     @click="listMode = 'flat'"
                   >▦ 清单</button>
+                  <!-- 剧本v2 第三标签：疑似作品集候选卡墙（目录候选/序列群/A 档库内集比对合流；
+                       原「序列群」折叠区能力并入此处退役） -->
+                  <button
+                    type="button"
+                    class="li-ws-filter-btn li-ws-mode-btn"
+                    :class="{ 'is-active': listMode === 'sets' }"
+                    title="候选卡墙：目录候选 / 序列群 / 库内集比对（确认归集或忽略）"
+                    @click="listMode = 'sets'"
+                  >疑似作品集</button>
                 </span>
                 <!-- H2：识别统计随快照刷新；增量跳过目录>0 时串内追加 -->
                 <span class="li-ws-card-stats">文件 {{ snapshot.stats.totalFiles }} · 已识别 {{ snapshot.stats.identified }} · 有线索 {{ snapshot.stats.clueful }} · 无线索 {{ snapshot.stats.plain }} · 序列群 {{ snapshot.stats.groupCount }} · 待裁决 {{ snapshot.stats.pendingFiles }}<template v-if="snapshot.stats.skippedDirs > 0"> · 增量跳过目录 {{ snapshot.stats.skippedDirs }}</template></span>
@@ -253,37 +262,93 @@
                 </template>
                 <p v-if="treeRows.length === 0" class="li-ws-empty">当前过滤条件下无文件</p>
               </div>
-            </section>
-
-            <!-- 区4 目录结构折叠区已退役（剧本F：层含义/递选/覆盖标记能力已被清单树模式吸收） -->
-            <!-- 区6 序列群折叠区（兄弟群：前缀/组大小/序号形态/成群落单） -->
-            <section class="li-ws-fold">
-              <button type="button" class="li-ws-fold-head" :aria-expanded="!folded.groups" @click="folded.groups = !folded.groups">
-                <span class="li-ws-fold-arrow" :class="{ 'is-open': !folded.groups }">▸</span>
-                <span class="li-ws-fold-title">序列群</span>
-                <span class="li-ws-fold-note">{{ (snapshot.groups || []).length }} 群</span>
-              </button>
-              <div v-show="!folded.groups" class="li-ws-fold-body">
-                <p v-if="!(snapshot.groups || []).length" class="li-ws-empty">无成群序列</p>
-                <div v-for="g in snapshot.groups || []" :key="`${g.dirRelKey}/${g.key}`" class="li-ws-group">
-                  <div class="li-ws-group-head">
-                    <span class="li-ws-group-key">{{ g.key || '（空前缀）' }}</span>
-                    <span class="li-ws-group-dir">{{ g.dirRelKey || '根目录' }}</span>
-                    <span class="li-ws-group-size">{{ g.size }} 成员</span>
-                    <span class="li-ws-group-rule">{{ groupBadge(g) }}</span>
+              <!-- 剧本v2 疑似作品集候选卡墙（第三标签体）：三类候选合流出卡——目录候选（整目录像一集）/
+                   序列群（结构/规则/页级）/A 档库内集比对（集名互证徽标 + 作品号命中→归入既有集）；
+                   成员文件名序列块底色（区间=后端形态表单一事实源）；两段式归集（预填可改）；
+                   已归集/已忽略收纳分组（会话内，忽略可恢复）；确认走集维度批量赋值+既有建议卡通路 -->
+              <div v-show="listMode === 'sets'" class="li-ws-sets" :style="{ height: `${listBodyH}px` }">
+                <p
+                  v-if="candidates.length === 0 && !(snapshot.ignoredCandidates || []).length && !(snapshot.confirmedCandidates || []).length"
+                  class="li-ws-empty"
+                >无疑似作品集候选</p>
+                <div
+                  v-for="c in candidates"
+                  :key="candKey(c)"
+                  class="li-ws-cand"
+                  :class="{ 'is-confirming': confirming === candTarget(c) }"
+                >
+                  <div class="li-ws-cand-head">
+                    <span class="li-ws-cand-key">{{ c.key || '（空键）' }}</span>
+                    <span class="li-ws-cand-dir">{{ c.dir || '根目录' }}</span>
+                    <span class="li-ws-cand-size">{{ c.size }} 成员</span>
+                    <span class="li-ws-cand-src">{{ candSourceLabel(c) }}</span>
+                    <span v-if="c.crossMatch" class="li-ws-cand-cross" title="库内已有同名作品集（集名互证）">集名互证</span>
                   </div>
-                  <div class="li-ws-group-members">
+                  <p v-if="c.reason" class="li-ws-cand-reason">{{ c.reason }}</p>
+                  <div class="li-ws-cand-members">
                     <span
-                      v-for="m in g.members"
+                      v-for="m in c.members"
                       :key="m.relPath"
-                      class="li-ws-group-member"
+                      class="li-ws-cand-member"
                       :class="{ 'is-selected': m.relPath === selectedRelPath }"
+                      :title="m.relPath"
                       @click="selectFile(m.relPath)"
-                    >#{{ m.seqText || m.seq }} {{ fileNameOf(m.relPath) }}</span>
+                    ><template v-if="m.seqText">#{{ m.seqText }} </template><span
+                        v-for="(s, si) in segSpans(fileNameOf(m.relPath), m.segs).spans"
+                        :key="si"
+                        :class="s.kind ? `li-ws-seg-${s.kind}` : ''"
+                      >{{ s.text }}</span><span class="li-ws-cand-ext">{{ segSpans(fileNameOf(m.relPath), m.segs).ext }}</span></span>
+                  </div>
+                  <div v-if="confirming === candTarget(c)" class="li-ws-cand-confirm">
+                    <input v-model="confirmName" class="li-ws-cand-name" type="text" maxlength="200" placeholder="集名">
+                    <span v-if="c.existingSetId" class="li-ws-cand-existing">将归入既有集</span>
+                    <button type="button" class="li-ws-filter-btn li-ws-cand-ok" :disabled="candBusy || !confirmName.trim()" @click="confirmCandidate(c)">确认归集</button>
+                    <button type="button" class="li-ws-filter-btn" :disabled="candBusy" @click="confirming = ''">取消</button>
+                  </div>
+                  <div v-else class="li-ws-cand-actions">
+                    <button type="button" class="li-ws-filter-btn" :disabled="candBusy" @click="startConfirm(c)">归入一集</button>
+                    <button type="button" class="li-ws-filter-btn" :disabled="candBusy" @click="ignoreCandidate(c)">忽略</button>
+                  </div>
+                </div>
+                <!-- 收纳分组：已归集（只读回看，确认集名随卡回带） -->
+                <div v-if="(snapshot.confirmedCandidates || []).length" class="li-ws-cand-bin">
+                  <button type="button" class="li-ws-fold-head" @click="binConfirmed = !binConfirmed">
+                    <span class="li-ws-fold-arrow" :class="{ 'is-open': !binConfirmed }">▸</span>
+                    <span class="li-ws-fold-title">已归集 {{ (snapshot.confirmedCandidates || []).length }}</span>
+                  </button>
+                  <div v-show="!binConfirmed" class="li-ws-cand-binbody">
+                    <div v-for="c in snapshot.confirmedCandidates || []" :key="`cf-${candKey(c)}`" class="li-ws-cand is-done">
+                      <div class="li-ws-cand-head">
+                        <span class="li-ws-cand-key">{{ c.key || '（空键）' }}</span>
+                        <span class="li-ws-cand-size">{{ c.size }} 成员</span>
+                        <span class="li-ws-cand-src">{{ candSourceLabel(c) }}</span>
+                        <span class="li-ws-cand-done">已归集「{{ c.confirmedSetName || c.key }}」</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <!-- 收纳分组：已忽略（可恢复回候选区；会话内记忆不写档案） -->
+                <div v-if="(snapshot.ignoredCandidates || []).length" class="li-ws-cand-bin">
+                  <button type="button" class="li-ws-fold-head" @click="binIgnored = !binIgnored">
+                    <span class="li-ws-fold-arrow" :class="{ 'is-open': !binIgnored }">▸</span>
+                    <span class="li-ws-fold-title">已忽略 {{ (snapshot.ignoredCandidates || []).length }}</span>
+                  </button>
+                  <div v-show="!binIgnored" class="li-ws-cand-binbody">
+                    <div v-for="c in snapshot.ignoredCandidates || []" :key="`ig-${candKey(c)}`" class="li-ws-cand is-done">
+                      <div class="li-ws-cand-head">
+                        <span class="li-ws-cand-key">{{ c.key || '（空键）' }}</span>
+                        <span class="li-ws-cand-size">{{ c.size }} 成员</span>
+                        <span class="li-ws-cand-src">{{ candSourceLabel(c) }}</span>
+                        <button type="button" class="li-ws-filter-btn li-ws-cand-restore" :disabled="candBusy" @click="restoreCandidate(c)">恢复</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
             </section>
+
+            <!-- 区4 目录结构折叠区已退役（剧本F：层含义/递选/覆盖标记能力已被清单树模式吸收） -->
+            <!-- 区6 序列群折叠区已退役（剧本v2：能力并入「疑似作品集」第三标签候选卡墙——群全量出卡，动作与收纳在卡墙） -->
 
             <!-- 区7 待裁决项折叠区（合成层声明冲突全量清单；单文件就地裁决在右栏·阶段3接入） -->
             <section class="li-ws-fold">
@@ -577,6 +642,38 @@ interface SnapGroup {
   members: { relPath: string; seq: number; seqText: string }[]
 }
 
+// 剧本v2：文件名内序列块区间（后端形态表单一事实源；相对去扩展名正文的 0 基半开区间
+// [start,end)，kind=author/workId/seq；非序列段不产生区间）
+interface SnapSeg {
+  start: number
+  end: number
+  kind: string
+}
+
+// 剧本v2：候选卡成员（群成员/目录直接子文件；Segs 供块底色渲染）
+interface SnapCandMember {
+  relPath: string
+  seqText?: string
+  segs?: SnapSeg[]
+}
+
+// 剧本v2 疑似作品集候选卡（三类合流）：source=dir 目录候选 / group 序列群（含页级）；
+// crossMatch=库内同名集互证（批次二 set-name-match 同源）；existingSet*=A 档作品号唯一
+// 命中的库内既有集；confirmedSetName=已归集分仓回带的确认集名
+interface SnapCandidate {
+  key: string
+  dir: string
+  source: string
+  formName?: string
+  size: number
+  reason?: string
+  crossMatch?: boolean
+  existingSetId?: number
+  existingSetName?: string
+  confirmedSetName?: string
+  members: SnapCandMember[]
+}
+
 interface SnapPending {
   relPath: string
   fileName: string
@@ -602,6 +699,11 @@ interface PanoramaSnapshot {
   }[]
   files: SnapFile[]
   groups: SnapGroup[]
+  // 剧本v2 疑似作品集候选三清单（主列表恒数组；两分仓 omitempty——动作应答先回、
+  // 分仓数据随自动重识别的快照事件到达）
+  candidates: SnapCandidate[]
+  ignoredCandidates?: SnapCandidate[]
+  confirmedCandidates?: SnapCandidate[]
   pending?: SnapPending[]
   ruleStats: { id: string; description: string; source: string; enabled: boolean; hitCount: number }[]
   staleAssignments?: string[]
@@ -719,10 +821,80 @@ const progress = ref({ phase: '', done: 0, total: 0 })
 // —— 双栏布局态（会话内记忆，不持久化） ——
 // 右栏收起态与折叠区开合态：默认右栏展开、折叠区全收起（目录结构区已退役，能力并入清单树模式）
 const rightCollapsed = ref(false)
-const folded = ref({ groups: true, pending: true, rules: true, decisions: true })
+const folded = ref({ pending: true, rules: true, decisions: true })
 
-// —— 清单浏览模式（剧本F：平铺 ↔ 目录树；默认=目录树〔决策2〕，会话内记忆不持久化） ——
-const listMode = ref<'tree' | 'flat'>('tree')
+// —— 清单浏览模式（剧本F：平铺 ↔ 目录树；默认=目录树〔决策2〕，会话内记忆不持久化。
+// 剧本v2 增第三标签 sets=疑似作品集候选卡墙） ——
+const listMode = ref<'tree' | 'flat' | 'sets'>('tree')
+
+// —— 剧本v2 疑似作品集候选卡墙（第三标签体） ——
+// 候选/两分仓清单来自快照（后端 buildSnapshotCandidates 三类合流）；动作走本组件唯一
+// workbench 请求通道，应答先回、分仓随自动重识别的快照事件刷新（既有事件通路联动）
+const candidates = computed<SnapCandidate[]>(() => (snapshot.value && snapshot.value.candidates) || [])
+const confirming = ref('')
+const confirmName = ref('')
+const candBusy = ref(false)
+const binConfirmed = ref(true)
+const binIgnored = ref(true)
+const candKey = (c: SnapCandidate): string => `${c.source}/${c.dir}/${c.key}`
+// 动作寻址串（与后端 target() 同式：source+NUL+dir+NUL+key）
+const candTarget = (c: SnapCandidate): string => `${c.source}\u0000${c.dir}\u0000${c.key}`
+const candSourceLabel = (c: SnapCandidate): string =>
+  c.source === 'dir' ? '目录候选' : (c.formName ? `序列·${c.formName}` : '序列群')
+// 块底色渲染：按去扩展名正文与 Segs 区间切片（区间相对正文 0 基半开；重叠/越界按
+// 顺序消费兜底），扩展名尾巴以弱化样式缀尾
+const segSpans = (fileName: string, segs?: SnapSeg[]): { spans: { text: string; kind?: string }[]; ext: string } => {
+  const dot = fileName.lastIndexOf('.')
+  const base = dot > 0 ? fileName.slice(0, dot) : fileName
+  const ext = dot > 0 ? fileName.slice(dot) : ''
+  const spans: { text: string; kind?: string }[] = []
+  let pos = 0
+  for (const s of [...(segs || [])].sort((a, b) => a.start - b.start)) {
+    if (s.start > pos) spans.push({ text: base.slice(pos, s.start) })
+    if (s.end > s.start) spans.push({ text: base.slice(s.start, s.end), kind: s.kind })
+    pos = Math.max(pos, s.end)
+  }
+  if (pos < base.length) spans.push({ text: base.slice(pos) })
+  return { spans, ext }
+}
+// 两段式归集：预填=A 档既有集名（命中时）或候选键（剥壳段/群键），可改
+const startConfirm = (c: SnapCandidate) => {
+  confirming.value = candTarget(c)
+  confirmName.value = c.existingSetName || c.key
+}
+const confirmCandidate = async (c: SnapCandidate) => {
+  if (!session.value || !confirmName.value.trim()) return
+  candBusy.value = true
+  try {
+    await request('confirmWorkSetCandidate', {
+      root: session.value.rootPath,
+      target: candTarget(c),
+      setName: confirmName.value.trim(),
+      existingSetId: c.existingSetId || 0
+    })
+    confirming.value = ''
+  } finally {
+    candBusy.value = false
+  }
+}
+const ignoreCandidate = async (c: SnapCandidate) => {
+  if (!session.value) return
+  candBusy.value = true
+  try {
+    await request('ignoreCandidate', { root: session.value.rootPath, target: candTarget(c) })
+  } finally {
+    candBusy.value = false
+  }
+}
+const restoreCandidate = async (c: SnapCandidate) => {
+  if (!session.value) return
+  candBusy.value = true
+  try {
+    await request('restoreCandidate', { root: session.value.rootPath, target: candTarget(c) })
+  } finally {
+    candBusy.value = false
+  }
+}
 
 // —— 右栏选中态（主从联动） ——
 // 选中键 = 文件相对路径：自动刷新（重识别）后快照重排，选中态凭键保持；
@@ -2162,18 +2334,37 @@ onUnmounted(() => {
   color: var(--app-tag-neutral-text);
 }
 
-/* —— 区6 序列群 —— */
+/* 区6 序列群样式已退役（剧本v2：折叠区并入「疑似作品集」第三标签候选卡墙，见下节） */
 
-.li-ws-group {
+/* —— 剧本v2 疑似作品集候选卡墙（第三标签；区6 序列群折叠区能力并入） —— */
+
+.li-ws-sets {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 10px;
+}
+
+.li-ws-cand {
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius-sm);
   padding: 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  background: var(--app-bg-color, transparent);
 }
 
-.li-ws-group-head {
+.li-ws-cand.is-confirming {
+  border-color: var(--app-color-primary);
+}
+
+.li-ws-cand.is-done {
+  opacity: 0.72;
+}
+
+.li-ws-cand-head {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -2181,45 +2372,130 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
-.li-ws-group-key {
+.li-ws-cand-key {
   font-weight: 600;
   color: var(--app-text-primary);
 }
 
-.li-ws-group-dir {
+.li-ws-cand-dir {
   color: var(--app-text-secondary);
 }
 
-.li-ws-group-size {
+.li-ws-cand-size {
   padding: 1px 6px;
   border-radius: var(--app-radius-sm);
   background: var(--app-tag-neutral-bg);
   color: var(--app-text-regular);
 }
 
-.li-ws-group-rule {
+.li-ws-cand-src {
   color: var(--app-text-secondary);
   font-size: 11px;
 }
 
-.li-ws-group-members {
+.li-ws-cand-cross {
+  padding: 1px 6px;
+  border-radius: var(--app-radius-sm);
+  background: rgba(29, 122, 69, 0.14);
+  color: #1d7a45;
+  font-size: 11px;
+}
+
+.li-ws-cand-reason {
+  margin: 0;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.li-ws-cand-members {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
 }
 
-.li-ws-group-member {
+.li-ws-cand-member {
   font-size: 12px;
   padding: 1px 8px;
   border-radius: var(--app-radius-sm);
   background: var(--app-fill-color);
   color: var(--app-text-regular);
   cursor: pointer;
+  word-break: break-all;
 }
 
-.li-ws-group-member.is-selected {
+.li-ws-cand-member.is-selected {
   box-shadow: inset 2px 0 0 var(--app-color-primary);
-  background: var(--app-tag-neutral-bg);
+}
+
+/* 序列块底色（剧本v2：作者括号=琥珀 / 作品号=蓝 / 序号=绿；半透明覆盖面兼容明暗主题） */
+.li-ws-seg-author {
+  background: rgba(255, 193, 7, 0.35);
+  border-radius: 3px;
+}
+
+.li-ws-seg-workId {
+  background: rgba(64, 148, 250, 0.32);
+  border-radius: 3px;
+}
+
+.li-ws-seg-seq {
+  background: rgba(102, 187, 106, 0.36);
+  border-radius: 3px;
+}
+
+.li-ws-cand-ext {
+  opacity: 0.55;
+}
+
+.li-ws-cand-actions,
+.li-ws-cand-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.li-ws-cand-name {
+  width: 240px;
+  padding: 2px 8px;
+  border: 1px solid var(--app-border-color-light);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-bg-color, transparent);
+  color: var(--app-text-primary);
+  font-size: 12px;
+}
+
+.li-ws-cand-name:focus {
+  outline: none;
+  border-color: var(--app-color-primary);
+}
+
+.li-ws-cand-existing {
+  color: #1d7a45;
+  font-size: 12px;
+}
+
+.li-ws-cand-bin {
+  border-top: 1px dashed var(--app-border-color-light);
+  padding-top: 6px;
+  margin-top: 2px;
+}
+
+.li-ws-cand-binbody {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.li-ws-cand-done {
+  color: #1d7a45;
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.li-ws-cand-restore {
+  margin-left: auto;
 }
 
 /* —— 区7 待裁决项 —— */

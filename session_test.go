@@ -74,6 +74,8 @@ type workbenchTestCtx struct {
 
 	// library 谓词索引构造的分页数据集（Query* 五方法的桩数据；零值=五轨全空）。
 	library libraryFixture
+	// workSetIDSeq QueryLocalWorkSets 桩的行 id 发号器（跨页单调递增）。
+	workSetIDSeq int64
 
 	// CreateTask 桩：createTaskStub 为应答（nil=默认成功 AddedQuantity=3），
 	// 计数与末次 URL 供创建编排断言。

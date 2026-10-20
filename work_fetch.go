@@ -640,6 +640,14 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 		case DimTag:
 			resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{LocalTagName: new(decl.Value)})
 		case DimCollection:
+			// 集维度声明 → 作品集按名声明：SiteWorkSetId 传 local 站点的业务键
+			// "workSet:{名}"——宿主按 (site_id, site_work_set_id) 业务键 upsert
+			//（library-squirrel/backend/work/service.go upsertWorkSets：同名键
+			// 复用既有行、缺席才新建），同名集幂等归并。库内既有集「行 id」不
+			// 得作此键传入：宿主无任何按行 id 寻址的消费路径，行 id 字符串会
+			// 命中不到既有行而另造业务键="{行id}" 的新行（批次三阶段5 宿主语义
+			// 核验结论）；既有集行 id 只经会话旁路簿记随快照 confirmedCandidates
+			// 呈现，不进创建链。
 			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
 				SiteWorkSetId: "workSet:" + decl.Value,
 				WorkSetName:   decl.Value,
@@ -686,8 +694,10 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 			}
 		case "workSet":
 			// 作品集按名 upsert 落作品所属站点域：local 归属作品落 local 域
-			// （workSet:{名} 即 local 站点的作品集 ID 约定形态）。真实域归属作品的
-			// 站点侧作品集 ID 无法从名字派生（键即身份，无 ID 不造行），跳过该含义
+			// （workSet:{名} 即 local 站点的作品集 ID 约定形态；业务键语义同上
+			// DimCollection 注释——宿主按业务键 upsert，集行 id 不作键）。真实域
+			// 归属作品的站点侧作品集 ID 无法从名字派生（键即身份，无 ID 不造
+			// 行），跳过该含义
 			if fp.hasRealAttribution() {
 				if h.ctx != nil {
 					h.ctx.Infof("作品集含义按名仅支持 local 归属，真实域归属(%s)跳过: %s", fp.SiteKey, m.Name)

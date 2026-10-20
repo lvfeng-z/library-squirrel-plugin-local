@@ -26,6 +26,10 @@ type LibraryIndex struct {
 	TagNames map[string]struct{}
 	// WorkSetNames 为库内作品集名集合——集名互证索引。
 	WorkSetNames map[string]struct{}
+	// WorkSetIDs 为库内作品集名 → 集行 id（第五轨同一次拉取填充）：A 档
+	// 「归入既有集」比对的既有 id 来源。同名多行时取后拉到的行（互证按名
+	// 判定不受影响，id 仅呈现与旁路簿记用）。
+	WorkSetIDs map[string]int64
 }
 
 // GroupAnalysis 为群组分析产物，描述条目所属的连续序列群组。

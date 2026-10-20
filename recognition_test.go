@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,8 +105,10 @@ func (c *workbenchTestCtx) QueryLocalWorkSets(req *sdkdto.QueryLocalWorkSetsRequ
 	}
 	names := pageOf(c.library.localWorkSets, req.Page)
 	items := make([]*sdkdto.WorkSetNameEntry, 0, len(names))
-	for i, name := range names {
-		items = append(items, &sdkdto.WorkSetNameEntry{Id: int64(i) + 1, Name: name})
+	for _, name := range names {
+		// 行 id 跨页单调递增（同桩多次拉取也稳定唯一），供 WorkSetIDs 断言
+		c.workSetIDSeq++
+		items = append(items, &sdkdto.WorkSetNameEntry{Id: c.workSetIDSeq, Name: name})
 	}
 	return &sdkdto.QueryLocalWorkSetsResponse{Items: items}, nil
 }
@@ -680,6 +683,17 @@ func TestBuildLibraryIndexPagingAndFallback(t *testing.T) {
 	if _, ok := lib.WorkSetNames[localWorkSets[0]]; !ok {
 		t.Fatal("库内作品集名未入索引")
 	}
+	// 集 id 索引与集名全集同轨同源：拉全后逐名有行 id（桩按页序发号，首名=1、
+	// 跨页末名=205——跨页条目的 id 不因翻页重置）
+	if len(lib.WorkSetIDs) != len(localWorkSets) {
+		t.Fatalf("跨页拉全后集名→行 id = %d，期望 %d", len(lib.WorkSetIDs), len(localWorkSets))
+	}
+	if id := lib.WorkSetIDs[localWorkSets[0]]; id != 1 {
+		t.Fatalf("首个集名的行 id = %d，期望 1", id)
+	}
+	if id := lib.WorkSetIDs[localWorkSets[len(localWorkSets)-1]]; id != int64(len(localWorkSets)) {
+		t.Fatalf("跨页末名的行 id = %d，期望 %d", id, len(localWorkSets))
+	}
 
 	// 失败轨（站点作者 / 库内作品集）按空集降级：不污染其余轨道、不返回 nil
 	failCtx := &workbenchTestCtx{store: newFakeSessionStore()}
@@ -695,6 +709,9 @@ func TestBuildLibraryIndexPagingAndFallback(t *testing.T) {
 	}
 	if len(failLib.WorkSetNames) != 0 {
 		t.Fatalf("作品集失败轨应按空集降级，实际: %+v", failLib.WorkSetNames)
+	}
+	if len(failLib.WorkSetIDs) != 0 {
+		t.Fatalf("作品集失败轨的集 id 索引应按空集降级，实际: %+v", failLib.WorkSetIDs)
 	}
 
 	// 查询源不可用 → nil 索引（谓词恒不命中）
@@ -1101,5 +1118,352 @@ func TestStructuralFormGroups(t *testing.T) {
 	}
 	if len(member.Clues) != 1 || member.Clues[0].Kind != clueGroupPrefix || member.Clues[0].Detail != formBracketKey {
 		t.Fatalf("群组成员集名候选线索不符：%+v", member.Clues)
+	}
+
+	// 成员区间：结构群成员携带序列块区间（提取式单一事实源，乙=括号序号三块）
+	if g := mustGroup("乙", formBracketKey); len(g.Members) == 0 {
+		t.Fatal("乙群成员缺席")
+	} else {
+		segs := g.Members[0].Segs
+		if len(segs) != 3 || segs[0].Kind != "author" || segs[1].Kind != "workId" || segs[2].Kind != "seq" {
+			t.Fatalf("乙群成员区间不符（作者/作品号/序号三块）：%+v", segs)
+		}
+	}
+}
+
+// —— 作品集识别强化 批次三阶段5：序列块区间 / 目录候选 / A 档库内集识别 / 候选动作 ——
+
+// TestSegmentsOf 序列块区间提取：各形态命中时作者括号块/作品号块/序号块的
+// 区间与类别、无块形态只出序号块、未命中形态零区间；保守性锚点（首括号纯
+// 数字不回溯找作者块、5 位流水号不作作品号、区间文本即块原文）。
+func TestSegmentsOf(t *testing.T) {
+	formOf := func(name string) *structuralForm {
+		for _, f := range structuralForms {
+			if f.name == name {
+				return f
+			}
+		}
+		t.Fatalf("形态 %q 不在形态表", name)
+		return nil
+	}
+	assertSegs := func(base string, segs []SnapSeg, want ...[2]string) {
+		t.Helper()
+		if len(segs) != len(want) {
+			t.Fatalf("%s 的块数 = %d，期望 %d：%+v", base, len(segs), len(want), segs)
+		}
+		for i, seg := range segs {
+			if seg.Kind != want[i][0] || base[seg.Start:seg.End] != want[i][1] {
+				t.Fatalf("%s 第 %d 块不符：%q[%d:%d]=%q kind=%s，期望 {kind=%s,text=%s}",
+					base, i, base, seg.Start, seg.End, base[seg.Start:seg.End], seg.Kind, want[i][0], want[i][1])
+			}
+		}
+	}
+	// 括号序号：作者括号块 + 作品号块 + 序号块
+	bracket := formBracketKey + "_[01]"
+	assertSegs(bracket, segmentsOf(formOf("括号序号"), bracket),
+		[2]string{"author", "[くろニャン＠仕事募集中]"},
+		[2]string{"workId", "100423498"},
+		[2]string{"seq", "01"})
+	// 全角作者括号 + 无作品号 → 只出作者块与序号块
+	fwBase := "【作者乙】画集_[03]"
+	assertSegs(fwBase, segmentsOf(formOf("括号序号"), fwBase),
+		[2]string{"author", "【作者乙】"},
+		[2]string{"seq", "03"})
+	// 直连序号：作者括号 + 作品号 + 序号
+	direct := formDirectKey + "0"
+	assertSegs(direct, segmentsOf(formOf("直连序号"), direct),
+		[2]string{"author", "[Isel]"},
+		[2]string{"workId", "92242473"},
+		[2]string{"seq", "0"})
+	// 尾缀数字：5 位流水号不作作品号、8 位页作品号命中、尾缀序号成块
+	tail := "00133_73989691_p2_1"
+	assertSegs(tail, segmentsOf(formOf("尾缀数字"), tail),
+		[2]string{"workId", "73989691"},
+		[2]string{"seq", "1"})
+	// 中段序号：无作者括号与作品号 → 只出序号块
+	mid := formMidTitle + "_page_10_by_jake__jaccobus_deq5g43"
+	assertSegs(mid, segmentsOf(formOf("中段序号"), mid),
+		[2]string{"seq", "10"})
+	// 首括号纯数字（作品号括号形态）：不向后找作者块（保守）
+	digitFirst := "[100423498]_标题_[02]"
+	assertSegs(digitFirst, segmentsOf(formOf("括号序号"), digitFirst),
+		[2]string{"workId", "100423498"},
+		[2]string{"seq", "02"})
+	// 形态不命中 / nil 形态 → 零区间
+	if segs := segmentsOf(formOf("括号序号"), "(15)"); len(segs) != 0 {
+		t.Fatalf("形态不命中应零区间：%+v", segs)
+	}
+	if segs := segmentsOf(nil, "任意名"); len(segs) != 0 {
+		t.Fatalf("nil 形态应零区间：%+v", segs)
+	}
+}
+
+// TestDirCollectionCandidate 目录候选探测：目录名含作品号命中、单一结构群键
+// 目录命中（理由「已成一集」）、剥壳目录名取内名为候选键、无信号与单文件目录
+// 不出、规则定群覆盖目录不重复出（群来源已有卡）、成员=目录直接子文件全部且
+// 区间现算。
+func TestDirCollectionCandidate(t *testing.T) {
+	plainFile := func(relPath, dirKey, name string) SnapFile {
+		return SnapFile{RelPath: relPath, FileName: name, DirRelKey: dirKey, State: snapStatePlain}
+	}
+	snap := &RecognitionSnapshot{
+		Dirs: []SnapDir{
+			{RelKey: "", Name: "根", Depth: 0},
+			{RelKey: "100423498", Name: "100423498", Depth: 1},
+			{RelKey: "Artist[100423501]", Name: "Artist[100423501]", Depth: 1},
+			{RelKey: "无信号目录", Name: "无信号目录", Depth: 1},
+			{RelKey: "单文件目录", Name: "100423499", Depth: 1},
+			{RelKey: "规则群目录", Name: "100423500", Depth: 1},
+			{RelKey: "结构群目录", Name: "结构群目录", Depth: 1},
+		},
+		Files: []SnapFile{
+			// 作品号目录：4 个散文件（无群归属）→ 命中
+			plainFile("100423498/a.jpg", "100423498", "a.jpg"),
+			plainFile("100423498/b_01.jpg", "100423498", "b_01.jpg"),
+			plainFile("100423498/c_02.jpg", "100423498", "c_02.jpg"),
+			plainFile("100423498/d.jpg", "100423498", "d.jpg"),
+			// 剥壳目录名含作品号：候选键取内名
+			plainFile("Artist[100423501]/x.jpg", "Artist[100423501]", "x.jpg"),
+			plainFile("Artist[100423501]/y.jpg", "Artist[100423501]", "y.jpg"),
+			// 无信号目录：不出
+			plainFile("无信号目录/x.jpg", "无信号目录", "x.jpg"),
+			plainFile("无信号目录/y.jpg", "无信号目录", "y.jpg"),
+			// 直接子文件 <2：不出
+			plainFile("单文件目录/only.jpg", "单文件目录", "only.jpg"),
+			// 规则定群覆盖：不重复出（群来源已有卡）
+			{RelPath: "规则群目录/g_1.jpg", FileName: "g_1.jpg", DirRelKey: "规则群目录", State: snapStatePlain, GroupKey: "g", GroupSeq: 1},
+			{RelPath: "规则群目录/g_2.jpg", FileName: "g_2.jpg", DirRelKey: "规则群目录", State: snapStatePlain, GroupKey: "g", GroupSeq: 2},
+			// 单一结构群键成集：出目录卡
+			{RelPath: "结构群目录/散集 01.jpg", FileName: "散集 01.jpg", DirRelKey: "结构群目录", State: snapStatePlain, GroupKey: "散集", GroupSeq: 1},
+			{RelPath: "结构群目录/散集 02.jpg", FileName: "散集 02.jpg", DirRelKey: "结构群目录", State: snapStatePlain, GroupKey: "散集", GroupSeq: 2},
+		},
+		Groups: []SnapGroup{
+			{DirRelKey: "规则群目录", Key: "g", Size: 2, RuleID: "test-sibling-set"},
+			{DirRelKey: "结构群目录", Key: "散集", Size: 2, FormName: "尾缀数字"},
+		},
+	}
+	cands := detectDirCandidates(snap)
+	if len(cands) != 3 {
+		t.Fatalf("目录候选 = %d，期望 3（作品号目录/剥壳目录/单一结构群目录）：%+v", len(cands), cands)
+	}
+	byDir := map[string]SnapCandidate{}
+	for _, c := range cands {
+		byDir[c.Dir] = c
+	}
+	// 作品号目录：理由含作品号与文件数；成员=直接子文件全部、区间现算
+	c1 := byDir["100423498"]
+	if c1.Source != candSourceDir || c1.Key != "100423498" || c1.Size != 4 ||
+		!strings.Contains(c1.Reason, "目录名含作品号 100423498") || !strings.Contains(c1.Reason, "4 个文件") {
+		t.Fatalf("作品号目录候选不符: %+v", c1)
+	}
+	if len(c1.Members) != 4 {
+		t.Fatalf("成员应=目录直接子文件全部，实际: %+v", c1.Members)
+	}
+	seqText, hasSeqSeg := "", false
+	for _, mem := range c1.Members {
+		if mem.RelPath != "100423498/b_01.jpg" {
+			continue
+		}
+		seqText = mem.SeqText
+		for _, s := range mem.Segs {
+			if s.Kind == "seq" {
+				hasSeqSeg = true
+			}
+		}
+	}
+	if seqText != "01" || !hasSeqSeg {
+		t.Fatalf("目录候选成员区间应现算（b_01 序号 01），实际 seqText=%q hasSeqSeg=%v", seqText, hasSeqSeg)
+	}
+	// 剥壳目录：候选键取内名
+	if c2 := byDir["Artist[100423501]"]; c2.Key != "100423501" || c2.Size != 2 {
+		t.Fatalf("剥壳目录候选键应取内名: %+v", c2)
+	}
+	// 单一结构群键目录：理由「已成一集」
+	if c3 := byDir["结构群目录"]; c3.Key != "结构群目录" || !strings.Contains(c3.Reason, "2 个文件已成一集") {
+		t.Fatalf("单一结构群键目录候选不符: %+v", c3)
+	}
+}
+
+// TestLibSetCandidate A 档库内集识别：候选键与库内集名全等 → 互证；候选键作品
+// 号与集名内作品号唯一相等 → 既有集行 id+集名；零命中/多命中/键无作品号 →
+// 留空；索引缺席零命中；注记经 buildWorkSetCandidates 落卡（群候选成员含区间）。
+func TestLibSetCandidate(t *testing.T) {
+	lib := &LibraryIndex{
+		WorkSetNames: map[string]struct{}{
+			"既有画集": {}, "100423498 C100新刊告知": {}, "100423498 别名": {},
+		},
+		WorkSetIDs: map[string]int64{"既有画集": 9, "100423498 C100新刊告知": 57, "100423498 别名": 88},
+	}
+	// 集名全等（键无作品号）→ 只出互证
+	cross, id, name := matchExistingWorkSet("既有画集", lib)
+	if !cross || id != 0 || name != "" {
+		t.Fatalf("集名全等应只出互证: cross=%v id=%d name=%q", cross, id, name)
+	}
+	// 作品号零命中 → 留空
+	if cross, id, name = matchExistingWorkSet("[作者]_[100423499]_标题", lib); cross || id != 0 || name != "" {
+		t.Fatalf("作品号零命中应留空: cross=%v id=%d name=%q", cross, id, name)
+	}
+	// 作品号多命中（两集名同作品号）→ 留空
+	if cross, id, name = matchExistingWorkSet("[作者]_[100423498]_标题", lib); cross || id != 0 || name != "" {
+		t.Fatalf("作品号多命中应留空: cross=%v id=%d name=%q", cross, id, name)
+	}
+	// 作品号唯一命中 → 既有集行 id + 集名
+	unique := &LibraryIndex{
+		WorkSetNames: map[string]struct{}{"100423498 C100新刊告知": {}, "无关集": {}},
+		WorkSetIDs:   map[string]int64{"100423498 C100新刊告知": 57},
+	}
+	if cross, id, name = matchExistingWorkSet("[作者]_[100423498]_标题", unique); cross || id != 57 || name != "100423498 C100新刊告知" {
+		t.Fatalf("作品号唯一命中应出既有集: cross=%v id=%d name=%q", cross, id, name)
+	}
+	// 索引缺席 → 零命中
+	if cross, id, name = matchExistingWorkSet("既有画集", nil); cross || id != 0 || name != "" {
+		t.Fatalf("索引缺席应零命中: cross=%v id=%d name=%q", cross, id, name)
+	}
+
+	// 落卡：群候选键命中库内集名 → CrossMatch、成员（含区间）随卡携带
+	snap := &RecognitionSnapshot{
+		Dirs: []SnapDir{{RelKey: "", Name: "根", Depth: 0}, {RelKey: "序列", Name: "序列", Depth: 1}},
+		Groups: []SnapGroup{{DirRelKey: "序列", Key: "既有画集", Size: 2, Members: []SnapGroupMember{
+			{RelPath: "序列/a_01.jpg", Seq: 1, SeqText: "01", Segs: []SnapSeg{{Start: 2, End: 4, Kind: "seq"}}},
+			{RelPath: "序列/a_02.jpg", Seq: 2, SeqText: "02"},
+		}}},
+	}
+	cands := buildWorkSetCandidates(snap, lib)
+	if len(cands) != 1 {
+		t.Fatalf("群候选应出 1 卡，实际 %d", len(cands))
+	}
+	got := cands[0]
+	if !got.CrossMatch || got.Source != candSourceGroup || got.Key != "既有画集" || got.Size != 2 {
+		t.Fatalf("群候选注记不符: %+v", got)
+	}
+	if len(got.Members) != 2 || len(got.Members[0].Segs) != 1 {
+		t.Fatalf("群候选成员应复用群成员（含区间）: %+v", got.Members)
+	}
+}
+
+// TestWorkSetCandidateActions 候选动作三态：忽略 → 移出主清单进 ignored 分仓；
+// 恢复 → 回主清单；确认（带既有集行 id）→ 成员逐文件写集维度赋值、终选声明
+// 携带 collection、进 confirmed 分仓（带确认集名与既有 id）；已确认候选再确认
+// 回可读错误。候选动作经识别刷新调度异步落快照，测试内等在途识别清零后断言
+//（确定性锚点：StartRecognition 返回前同步置在途标记）。
+func TestWorkSetCandidateActions(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	recognitionSampleTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	snapshotOf := func() *RecognitionSnapshot {
+		t.Helper()
+		sess, err := m.SessionOf(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		if sess.Snapshot == nil {
+			t.Fatal("快照缺席")
+		}
+		return sess.Snapshot
+	}
+	// 样例树唯一候选：序列目录的规则群（键=库内作者名，A 档互证命中）
+	snap := snapshotOf()
+	if len(snap.Candidates) != 1 {
+		t.Fatalf("候选主清单应恰 1 条，实际: %+v", snap.Candidates)
+	}
+	target, members := snap.Candidates[0].target(), snap.Candidates[0].Members
+	if target != "group\x00序列\x00库内作者名" || !snap.Candidates[0].CrossMatch {
+		t.Fatalf("候选目标键/注记不符: %q %+v", target, snap.Candidates[0])
+	}
+	if snap.IgnoredCandidates != nil || snap.ConfirmedCandidates != nil {
+		t.Fatal("初始态分仓清单应为空")
+	}
+
+	// 候选动作触发的识别刷新在途标记清零（同步锚点后轮询）
+	waitIdle := func() {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			m.recogMu.Lock()
+			idle := !m.recogRunning[root]
+			m.recogMu.Unlock()
+			if idle {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("候选动作触发的识别刷新超时未完成")
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	// 忽略 → 分仓（分仓卡携带原候选成员）
+	if _, err := m.SetCandidateIgnored(root, target, true); err != nil {
+		t.Fatalf("忽略候选失败: %v", err)
+	}
+	waitIdle()
+	snap = snapshotOf()
+	if len(snap.Candidates) != 0 || len(snap.IgnoredCandidates) != 1 {
+		t.Fatalf("忽略后应移出主清单进分仓: main=%d ignored=%d", len(snap.Candidates), len(snap.IgnoredCandidates))
+	}
+	if snap.IgnoredCandidates[0].target() != target || len(snap.IgnoredCandidates[0].Members) != len(members) {
+		t.Fatalf("分仓卡应携带原候选成员: %+v", snap.IgnoredCandidates[0])
+	}
+
+	// 恢复 → 回主清单
+	if _, err := m.SetCandidateIgnored(root, target, false); err != nil {
+		t.Fatalf("恢复候选失败: %v", err)
+	}
+	waitIdle()
+	snap = snapshotOf()
+	if len(snap.Candidates) != 1 || len(snap.IgnoredCandidates) != 0 {
+		t.Fatalf("恢复后应回主清单: main=%d ignored=%d", len(snap.Candidates), len(snap.IgnoredCandidates))
+	}
+
+	// 确认（带既有集行 id）→ 成员赋值 + confirmed 分仓
+	sess, affected, err := m.ConfirmWorkSetCandidate(root, target, "确认集名", 57)
+	if err != nil || affected != len(members) {
+		t.Fatalf("确认候选不符: %v %d", err, affected)
+	}
+	for _, mem := range members {
+		if a := sess.Assignments[mem.RelPath]; a.Collection != "确认集名" {
+			t.Fatalf("成员 %s 的集维度赋值未生效: %+v", mem.RelPath, a)
+		}
+	}
+	if id := sess.ConfirmedSetIDs["确认集名"]; id != 57 {
+		t.Fatalf("既有集行 id 旁路簿记不符: %d", id)
+	}
+	waitIdle()
+	snap = snapshotOf()
+	if len(snap.Candidates) != 0 || len(snap.ConfirmedCandidates) != 1 || len(snap.IgnoredCandidates) != 0 {
+		t.Fatalf("确认后应进 confirmed 分仓: main=%d confirmed=%d ignored=%d",
+			len(snap.Candidates), len(snap.ConfirmedCandidates), len(snap.IgnoredCandidates))
+	}
+	confirmed := snap.ConfirmedCandidates[0]
+	if confirmed.ConfirmedSetName != "确认集名" || confirmed.ExistingSetID != 57 || !confirmed.CrossMatch {
+		t.Fatalf("confirmed 卡应带确认集名与既有集行 id: %+v", confirmed)
+	}
+	// 成员终选声明含 collection=确认集名（赋值覆盖档案结论）且全员已识别
+	byPath := map[string]SnapFile{}
+	for _, f := range snap.Files {
+		byPath[f.RelPath] = f
+	}
+	found := false
+	for _, mem := range members {
+		f := byPath[mem.RelPath]
+		if f.State != snapStateIdentified || !f.Assigned {
+			t.Fatalf("确认后成员应已识别并带赋值标记: %+v", f)
+		}
+		for _, d := range f.Final {
+			if d.Dimension == string(DimCollection) && d.Value == "确认集名" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("成员终选声明未携带确认集名的 collection 声明")
+	}
+
+	// 已确认候选不在主清单：再确认回可读错误
+	if _, _, err := m.ConfirmWorkSetCandidate(root, target, "再确认", 0); err == nil {
+		t.Fatal("已确认候选再确认应回可读错误")
 	}
 }

@@ -110,6 +110,19 @@ type WorkbenchSession struct {
 	// 集为默认聚合单元（集聚合由前端按选择域展开为成员作品键）。创建成功后清空，
 	// 赋值与快照保留。
 	Selection []string `json:"selection,omitempty"`
+	// IgnoredCandidates 已忽略的集名候选目标键（Source+Dir+Key 稳定串，阶段5）：
+	// 忽略=会话态，重识别时对应候选移出快照主清单进 ignoredCandidates 分仓。
+	IgnoredCandidates []string `json:"ignoredCandidates,omitempty"`
+	// ConfirmedCandidates 已确认的集名候选目标键：确认动作对成员逐文件写集
+	// 维度赋值后登记，重识别时对应候选进快照 confirmedCandidates 分仓（带
+	// 确认集名与既有集行 id）。
+	ConfirmedCandidates []string `json:"confirmedCandidates,omitempty"`
+	// ConfirmedSetIDs 确认集名 → 库内既有集行 id 的旁路簿记（existingSetID>0
+	// 的确认才记）：快照 confirmedCandidates 分仓的既有 id 呈现数据源。行 id
+	// 不作建任务的 SiteWorkSetId 业务键——宿主按 (site_id, site_work_set_id)
+	// 业务键 upsert，行 id 字符串命中不到既有行而会另造新行（语义核验结论见
+	// work_fetch.go DimCollection 注释）。
+	ConfirmedSetIDs map[string]int64 `json:"confirmedSetIds,omitempty"`
 }
 
 // SessionStore 会话读写所需的最小存储方法集；签名与 SDK 的 dto.KVStore 同名方法
@@ -586,6 +599,102 @@ func (m *SessionManager) SetIgnored(root, relPath string, ignored bool) (*Workbe
 	})
 }
 
+// —— 集名候选动作（作品集识别强化 批次三阶段5：归集两段式由前端做，后端供
+// 确认动作；忽略/恢复=会话态）——
+
+// slicePos 字符串切片内目标的位置（缺席 -1）。
+func slicePos(items []string, want string) int {
+	for i, item := range items {
+		if item == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// SetCandidateIgnored 登记或解除集名候选的忽略（幂等会话态）：ignored 真=
+// 目标键入忽略清单，假=移出（恢复）。随后排一轮重识别——候选分仓在重识别
+// 聚合时按清单移入/移回（成员结论不受影响）。
+func (m *SessionManager) SetCandidateIgnored(root, target string, ignored bool) (*WorkbenchSession, error) {
+	if target == "" {
+		return nil, errors.New("候选目标键为空，无法登记忽略项")
+	}
+	sess, err := m.mutateSession(root, func(sess *WorkbenchSession) error {
+		pos := slicePos(sess.IgnoredCandidates, target)
+		if ignored && pos < 0 {
+			sess.IgnoredCandidates = append(sess.IgnoredCandidates, target)
+		} else if !ignored && pos >= 0 {
+			sess.IgnoredCandidates = append(sess.IgnoredCandidates[:pos], sess.IgnoredCandidates[pos+1:]...)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	m.scheduleRecognitionRefresh(root)
+	return sess, nil
+}
+
+// ConfirmWorkSetCandidate 确认集名候选（两段式归集的确认动作）：对候选全部
+// 成员逐文件合并写集维度赋值（collection=setName，其余维度不动——复用目录
+// 赋值的合并通路），目标键登记进 confirmed 清单并移出 ignored，
+// existingSetID>0 记会话旁路簿记（集名→既有集行 id）。赋值写走 mutateSession
+// 单点串行与修订号递增（与单次赋值同通路），成功后排一轮增量重识别（成员
+// 终选声明与快照 confirmedCandidates 分仓随之刷新）。返回会话与生效成员数。
+func (m *SessionManager) ConfirmWorkSetCandidate(root, target, setName string, existingSetID int64) (*WorkbenchSession, int, error) {
+	setName = strings.TrimSpace(setName)
+	if target == "" || setName == "" {
+		return nil, 0, errors.New("候选目标键与确认集名均不可为空")
+	}
+	sess, err := m.loadSession(root)
+	if err != nil {
+		return nil, 0, err
+	}
+	if sess.Snapshot == nil {
+		return nil, 0, errors.New("该会话尚未完成全量识别，无候选可确认，请先识别")
+	}
+	var cand *SnapCandidate
+	for i := range sess.Snapshot.Candidates {
+		if sess.Snapshot.Candidates[i].target() == target {
+			cand = &sess.Snapshot.Candidates[i]
+			break
+		}
+	}
+	if cand == nil {
+		return nil, 0, errors.New("候选不在当前主清单内（可能已忽略、已确认或识别结构已变化），请刷新候选墙后重试")
+	}
+	now := time.Now().UnixMilli()
+	sess, err = m.mutateSession(root, func(sess *WorkbenchSession) error {
+		if sess.Assignments == nil {
+			sess.Assignments = make(map[string]SessionAssignment)
+		}
+		for _, mem := range cand.Members {
+			merged := mergeDirAssignment(sess.Assignments[mem.RelPath], SessionAssignment{Collection: setName})
+			merged.UpdatedAtMs = now
+			sess.Assignments[mem.RelPath] = merged
+		}
+		sess.AssignRevision++
+		if pos := slicePos(sess.IgnoredCandidates, target); pos >= 0 {
+			sess.IgnoredCandidates = append(sess.IgnoredCandidates[:pos], sess.IgnoredCandidates[pos+1:]...)
+		}
+		if slicePos(sess.ConfirmedCandidates, target) < 0 {
+			sess.ConfirmedCandidates = append(sess.ConfirmedCandidates, target)
+		}
+		if existingSetID > 0 {
+			if sess.ConfirmedSetIDs == nil {
+				sess.ConfirmedSetIDs = make(map[string]int64)
+			}
+			sess.ConfirmedSetIDs[setName] = existingSetID
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	m.scheduleRecognitionRefresh(root)
+	return sess, len(cand.Members), nil
+}
+
 // UpdateProfile 档案单点串行读改写：全部档案写（泛化/裁决生成/规则编辑面三入口）
 // 一律经此入口，锁内 Load→mutate→Save 原子完成；mutate 返回错误即中止不落库；
 // 档案不可载入（损坏/版本不符）时拒绝写，不覆写既有档案。
@@ -635,6 +744,11 @@ const (
 	workbenchActionSetSelection        = "setSelection"        // 全量替换资源选择集（作品键）
 	workbenchActionCreateTasks         = "createTasks"         // 创建编排（对账→CreateTask→清理选择集）
 
+	// —— 集名候选族（作品集识别强化 批次三阶段5）——
+	workbenchActionIgnoreCandidate  = "ignoreCandidate"         // 集名候选忽略（会话态分仓；target 寻址）
+	workbenchActionRestoreCandidate = "restoreCandidate"        // 集名候选恢复（移回候选墙主清单）
+	workbenchActionConfirmCandidate = "confirmWorkSetCandidate" // 集名候选确认（成员逐文件写集维度赋值；target+setName+existingSetId）
+
 	// —— 规则管理族（规则子页）——
 	workbenchActionGetRules           = "getRules"           // 规则管理视图（档案条目+内置表+禁用清单+备份态）
 	workbenchActionSaveRule           = "saveRule"           // 规则条目保存（新建/编辑，构造期单条校验）
@@ -647,7 +761,7 @@ const (
 // getPanorama 的分节拉取词汇。
 const (
 	// panoramaSectionFiles 只取文件级清单（元素2/3 载体 + 序列群 + 待裁决明细 +
-	// 统计）——大库清单单独拉取，先渲染概览骨架再拉清单。
+	// 集名候选墙三清单 + 统计）——大库清单单独拉取，先渲染概览骨架再拉清单。
 	panoramaSectionFiles = "files"
 )
 
@@ -688,6 +802,16 @@ type workbenchFrontendRequest struct {
 	TagClueRefs       []string `json:"tagClueRefs,omitempty"`
 	// Ignored setIgnored 的登记方向（真=登记忽略，假=解除）。
 	Ignored bool `json:"ignored,omitempty"`
+
+	// —— 集名候选族载荷（阶段5 候选墙）——
+	// Target 候选目标键（Source+Dir+Key 稳定串）：ignoreCandidate /
+	// restoreCandidate / confirmWorkSetCandidate 的寻址。
+	Target string `json:"target,omitempty"`
+	// SetName confirmWorkSetCandidate 的确认集名（成员集维度赋值的 collection）。
+	SetName string `json:"setName,omitempty"`
+	// ExistingSetID confirmWorkSetCandidate 携带的库内既有集行 id（A 档「归入
+	// 既有集」命中时 >0，记会话旁路簿记随快照呈现）。
+	ExistingSetID int64 `json:"existingSetId,omitempty"`
 	// GeneralizeMode generalize 的泛化维度：filename（按文件名形态）/
 	// dirLayer（按目录层）/ sequence（按序列形态）。
 	GeneralizeMode string `json:"generalizeMode,omitempty"`
@@ -960,6 +1084,8 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			view = RecognitionSnapshot{
 				SchemaVersion: view.SchemaVersion, GeneratedAtMs: view.GeneratedAtMs,
 				Files: view.Files, Groups: view.Groups, Pending: view.Pending, Stats: view.Stats,
+				Candidates: view.Candidates, IgnoredCandidates: view.IgnoredCandidates,
+				ConfirmedCandidates: view.ConfirmedCandidates,
 			}
 		}
 		resp.Panorama = &view
@@ -1018,6 +1144,25 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		if sess, err := m.SessionOf(req.Root); err == nil {
 			resp.Decisions = decisionsViewOf(sess)
 		}
+	case workbenchActionIgnoreCandidate, workbenchActionRestoreCandidate:
+		// 候选分仓为快照态：动作登记会话清单并排一轮重识别，分仓清单随刷新
+		// 到达（应答只回会话摘要与决策态，与赋值族通路一致）
+		sess, err := m.SetCandidateIgnored(req.Root, req.Target, req.Action == workbenchActionIgnoreCandidate)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Session = summarizeSession(sess)
+		resp.Decisions = decisionsViewOf(sess)
+	case workbenchActionConfirmCandidate:
+		sess, affected, err := m.ConfirmWorkSetCandidate(req.Root, req.Target, req.SetName, req.ExistingSetID)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Session = summarizeSession(sess)
+		resp.Decisions = decisionsViewOf(sess)
+		resp.Affected = affected
 	case workbenchActionGeneralize:
 		// relPath 缺省=目录寻址（dirRelKey 子树，样本=首个有赋值的文件）。
 		var result *GenerationResult

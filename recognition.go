@@ -1,5 +1,6 @@
 // 全量识别引擎：识别干跑（零任务产出、零弹问的纯求值）的合并求值单一实现、
-// 库内谓词索引构造、七类识别全景元素聚合与快照裁剪模型、增量游标编排。
+// 库内谓词索引构造、七类识别全景元素与集名候选墙（批次三阶段5）聚合与快照
+// 裁剪模型、增量游标编排。
 package main
 
 import (
@@ -117,10 +118,13 @@ type FileConclusion struct {
 	FileName  string
 	DirRelKey string
 	// Group 为兄弟群组定群产物（群组成员非 nil，落单为 nil）；GroupRuleID 为
-	// 定群规则 ID；GroupSeqText 为本成员序号的原文（前导零体现零填充形态）。
+	// 定群规则 ID；GroupSeqText 为本成员序号的原文（前导零体现零填充形态）；
+	// GroupSegs 为文件名内序列块区间（规则定群群按定群规则的键/序号提取式
+	// 定位，供候选墙成员的块底色渲染）。
 	Group        *GroupAnalysis
 	GroupRuleID  string
 	GroupSeqText string
+	GroupSegs    []SnapSeg
 	// MatchedRuleIDs 为提取段命中的规则 ID（与流水线结论一致）。
 	MatchedRuleIDs []string
 	// Final 为合成终选声明（会话赋值的指定维度已覆盖档案结论）。
@@ -185,6 +189,9 @@ func mergedFileConclusionOf(in *MatchInput, rules []RuleEntry, lib *LibraryIndex
 			if text, has := sibling.seqTextOf(in.FileName); has {
 				c.GroupSeqText = text
 			}
+			// 序列块区间：定群规则的键/序号提取式定位（求值域=含扩展名文件名，
+			// 区间对该原文成立）
+			c.GroupSegs = segsFromExprs(sibling.keyRe, sibling.seqRe, in.FileName)
 		}
 	}
 	return c
@@ -239,8 +246,9 @@ type libraryIndexQuerySource interface {
 const libraryIndexPageSize = 200
 
 // BuildLibraryIndex 经只读库查询构造谓词索引：本地/站点两轨的作者名与标签名全集、
-// 库内作品集名轨（分页拉全）。任一轨查询失败时该轨按空集继续并告警（谓词规则对
-// 空集恒不命中，不阻断识别）；查询源不可用返回 nil 索引。
+// 库内作品集轨（分页拉全，集名全集与集名→集行 id 两表同一次拉取填充）。任一轨
+// 查询失败时该轨按空集继续并告警（谓词规则对空集恒不命中，不阻断识别）；查询源
+// 不可用返回 nil 索引。
 func BuildLibraryIndex(q libraryIndexQuerySource, warnf func(format string, args ...any)) *LibraryIndex {
 	if q == nil {
 		return nil
@@ -249,6 +257,7 @@ func BuildLibraryIndex(q libraryIndexQuerySource, warnf func(format string, args
 		AuthorNames:  make(map[string]struct{}),
 		TagNames:     make(map[string]struct{}),
 		WorkSetNames: make(map[string]struct{}),
+		WorkSetIDs:   make(map[string]int64),
 	}
 	addNames := func(names []string, into map[string]struct{}) {
 		for _, name := range names {
@@ -309,19 +318,39 @@ func BuildLibraryIndex(q libraryIndexQuerySource, warnf func(format string, args
 		}
 		return siteTagNamesOf(resp.Items), nil
 	}, lib.TagNames)
-	pull("库内作品集", func(page int32) ([]string, error) {
+	// 库内作品集轨（单次分页拉取同时填充两表）：集名全集 → 互证索引，
+	// 集名 → 集行 id → A 档「归入既有集」的既有 id 来源。任一页失败按
+	// 空集降级告警（同其余轨）。
+	for page := int32(1); ; page++ {
 		resp, err := q.QueryLocalWorkSets(&sdkdto.QueryLocalWorkSetsRequest{
 			Page: &sdkdto.PageRequest{Page: page, PageSize: libraryIndexPageSize},
 		})
 		if err != nil {
-			return nil, err
+			if warnf != nil {
+				warnf("构造谓词索引时查询库内作品集失败，该轨按空集处理（谓词规则对该轨恒不命中）: %v", err)
+			}
+			return lib
 		}
-		return workSetNamesOf(resp.Items), nil
-	}, lib.WorkSetNames)
-	return lib
+		names := make([]string, 0, len(resp.Items))
+		for _, item := range resp.Items {
+			if item == nil || item.Name == "" {
+				continue
+			}
+			names = append(names, item.Name)
+			if item.Id > 0 {
+				lib.WorkSetIDs[item.Name] = item.Id
+			}
+		}
+		addNames(names, lib.WorkSetNames)
+		if len(names) < libraryIndexPageSize {
+			return lib
+		}
+	}
 }
 
-// authorNamesOf / tagNamesOf 等五函数把查询条目投影为名字集（空名剔除）。
+// authorNamesOf / tagNamesOf 等四函数把查询条目投影为名字集（空名剔除）；
+// 库内作品集轨的条目投影内联在 BuildLibraryIndex 的拉取循环内（名与行 id
+// 同次消费）。
 func authorNamesOf(items []*sdkdto.LocalAuthorDTO) []string {
 	names := make([]string, 0, len(items))
 	for _, item := range items {
@@ -357,16 +386,6 @@ func siteTagNamesOf(items []*sdkdto.SiteTagInfo) []string {
 	for _, item := range items {
 		if item != nil && item.TagName != "" {
 			names = append(names, item.TagName)
-		}
-	}
-	return names
-}
-
-func workSetNamesOf(items []*sdkdto.WorkSetNameEntry) []string {
-	names := make([]string, 0, len(items))
-	for _, item := range items {
-		if item != nil && item.Name != "" {
-			names = append(names, item.Name)
 		}
 	}
 	return names
@@ -420,6 +439,15 @@ type RecognitionSnapshot struct {
 	Files []SnapFile `json:"files"`
 	// Groups 序列群（元素4）：公共前缀、组大小与成员序号形态。
 	Groups []SnapGroup `json:"groups"`
+	// Candidates 集名候选主清单（元素8，批次三阶段5）：目录/序列群两类来源
+	// 合流的候选墙单一数据源（成员带序列块区间），A 档库内集识别注记
+	//（互证/归入既有集）随卡携带；已忽略/已确认的候选分仓至对应清单、不
+	// 重复出现在主清单。
+	Candidates []SnapCandidate `json:"candidates"`
+	// IgnoredCandidates / ConfirmedCandidates 已忽略/已确认候选分仓（会话态
+	// 随重识别重算；confirmed 卡带确认集名与既有集行 id）。
+	IgnoredCandidates   []SnapCandidate `json:"ignoredCandidates,omitempty"`
+	ConfirmedCandidates []SnapCandidate `json:"confirmedCandidates,omitempty"`
 	// Pending 待裁决明细（元素5）：冲突维度与候选声明对照。
 	Pending []SnapPending `json:"pending,omitempty"`
 	// RuleStats 规则档案态（元素6）：全部规则（含禁用）的来源、启用态与命中数。
@@ -517,6 +545,10 @@ type SnapGroupMember struct {
 	RelPath string `json:"relPath"`
 	Seq     int    `json:"seq"`
 	SeqText string `json:"seqText"`
+	// Segs 文件名内序列块区间（批次三阶段5）：结构群按命中形态的提取式、
+	// 规则定群群按定群规则的提取式定位（单一事实源=提取式，前端按区间渲染
+	// 块底色）。
+	Segs []SnapSeg `json:"segs,omitempty"`
 }
 
 // SnapPending 待裁决明细（元素5）：合成层声明冲突的维度、候选对照与原因。
@@ -579,6 +611,12 @@ type aggregateInput struct {
 	// profileDigest 本轮档案指纹；assignRevision 本轮会话赋值修订号。
 	profileDigest string
 	assignRevision int64
+	// ignoredTargets / confirmedTargets 候选分仓判据（会话态目标键集合，元素8）；
+	// confirmedSetIDs 确认集名 → 既有集行 id 的会话旁路（confirmed 分仓的
+	// 既有 id 呈现数据源）。
+	ignoredTargets   map[string]bool
+	confirmedTargets map[string]bool
+	confirmedSetIDs  map[string]int64
 }
 
 // aggregatePanorama 把合并求值结论聚合为识别全景快照（七类元素）：
@@ -590,7 +628,9 @@ type aggregateInput struct {
 //	4 序列：兄弟群的公共前缀/组大小/成员序号形态（零填充由原文前导零呈现）；
 //	5 待裁决项：合成层声明冲突的维度与候选对照；
 //	6 规则档案态：全部规则的来源/启用态/命中数；
-//	7 会话决策态：赋值标记入文件记录（计数为会话活数据，经查询响应另呈）。
+//	7 会话决策态：赋值标记入文件记录（计数为会话活数据，经查询响应另呈）；
+//	8 集名候选墙（批次三阶段5）：目录/序列群两类来源合流的集名候选 + A 档库内
+//	  集识别注记（互证/归入既有集），会话态忽略/确认目标键分仓。
 func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	snap := &RecognitionSnapshot{
 		SchemaVersion: recognitionSnapshotSchemaVersion,
@@ -601,10 +641,11 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		// 序列化契约：快照经 JSON 落会话 KV 并直接驱动前端渲染，切片字段
 		// 一律非 nil（nil 序列化为 null，前端 .length 即崩）；Pending 与
 		// StaleAssignments 带 omitempty（缺席由前端守卫兜底）。
-		Dirs:      make([]SnapDir, 0, len(in.enumRes.Dirs)),
-		Files:     make([]SnapFile, 0, len(in.enumRes.AllFiles)),
-		Groups:    make([]SnapGroup, 0),
-		RuleStats: make([]SnapRuleStat, 0, len(in.enabledRules)),
+		Dirs:       make([]SnapDir, 0, len(in.enumRes.Dirs)),
+		Files:      make([]SnapFile, 0, len(in.enumRes.AllFiles)),
+		Groups:     make([]SnapGroup, 0),
+		Candidates: make([]SnapCandidate, 0),
+		RuleStats:  make([]SnapRuleStat, 0, len(in.enabledRules)),
 	}
 
 	// —— 元素1：目录树与层含义（根层深 0 无规则索引，不参与回放）——
@@ -668,7 +709,7 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 				groups[gkey] = group
 			}
 			group.Members = append(group.Members, SnapGroupMember{
-				RelPath: c.RelPath, Seq: c.Group.Seq, SeqText: c.GroupSeqText,
+				RelPath: c.RelPath, Seq: c.Group.Seq, SeqText: c.GroupSeqText, Segs: c.GroupSegs,
 			})
 		}
 	}
@@ -724,6 +765,10 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	// 完整）的分群键对库内作品集名全集精确匹配，命中的群全员补「集名互证」线索
 	//（plain 成员升格有线索态，统计在末段按终态汇总）——
 	attachSetNameCrossCheck(snap, in.lib)
+
+	// —— 元素8：集名候选墙（批次三阶段5）：三类来源合流 + A 档库内集识别注记
+	// + 会话态分仓（ignored/confirmed），见 buildSnapshotCandidates。——
+	buildSnapshotCandidates(snap, in.lib, in)
 
 	// —— 元素6：规则命中统计（含禁用规则；复用文件的命中从旧记录累计）——
 	hitByID := make(map[string]int)
@@ -870,14 +915,15 @@ func detectClues(c *FileConclusion, lib *LibraryIndex) []SnapClue {
 // 落单」判定的结构面）：对未被规则定群（GroupKey 为空）的文件按结构形态表
 // 提取「目录+命中形态+分群键」分桶，桶内 ≥2 成员即成结构群（RuleID 留空=非
 // 规则产物，呈现层标注「结构」；群携带命中形态标识——形态名与键/序号提取
-// 式，供规则泛化与呈现取用）；无终选声明且无线索冲突的成员补「群组前缀」
-// 线索并升格有线索态（元素3 集名候选）。已识别成员仅入群呈现，不加线索不
-// 升格。
+// 式，供规则泛化与呈现取用）；成员携带序列块区间（批次三阶段5，提取式单一
+// 事实源）。无终选声明且无线索冲突的成员补「群组前缀」线索并升格有线索
+// 态（元素3 集名候选）；已识别成员仅入群呈现，不加线索不升格。
 func detectStructuralGroups(snap *RecognitionSnapshot) {
 	type member struct {
 		relPath string
 		seq     int
 		seqText string
+		segs    []SnapSeg
 	}
 	// 桶 = 同目录、同命中形态、同分群键的成员集合：桶键含形态名，不同形态
 	// 的同值键不合并（保证群携带的形态标识对全体成员成立）。
@@ -909,7 +955,11 @@ func detectStructuralGroups(snap *RecognitionSnapshot) {
 			b = &bucket{form: form, dirKey: f.DirRelKey, key: key}
 			buckets[bk] = b
 		}
-		b.members = append(b.members, member{relPath: f.RelPath, seq: seq, seqText: seqText})
+		// 序列块区间随分桶一次算定（单一事实源=命中形态的提取式）
+		b.members = append(b.members, member{
+			relPath: f.RelPath, seq: seq, seqText: seqText,
+			segs: segmentsOf(form, BaseNameWithoutExt(f.FileName)),
+		})
 	}
 	for _, b := range buckets {
 		if len(b.members) < 2 {
@@ -918,7 +968,9 @@ func detectStructuralGroups(snap *RecognitionSnapshot) {
 		group := SnapGroup{DirRelKey: b.dirKey, Key: b.key, Size: len(b.members),
 			FormName: b.form.name, FormKeyExpr: b.form.keyExpr, FormSeqExpr: b.form.seqExpr}
 		for _, mem := range b.members {
-			group.Members = append(group.Members, SnapGroupMember{RelPath: mem.relPath, Seq: mem.seq, SeqText: mem.seqText})
+			group.Members = append(group.Members, SnapGroupMember{
+				RelPath: mem.relPath, Seq: mem.seq, SeqText: mem.seqText, Segs: mem.segs,
+			})
 			f := fileByPath[mem.relPath]
 			if f == nil || len(f.Final) > 0 {
 				continue
@@ -981,6 +1033,250 @@ func attachSetNameCrossCheck(snap *RecognitionSnapshot, lib *LibraryIndex) {
 			}
 		}
 	}
+}
+
+// —— 集名候选墙（作品集识别强化 批次三阶段5）——
+
+// 候选来源词汇（SnapCandidate.Source）。
+const (
+	// candSourceDir 目录候选：目录名含作品号等信号、整目录像一集。
+	candSourceDir = "dir"
+	// candSourceGroup 序列群候选：既有序列群全部（结构/规则/页级定群）。
+	candSourceGroup = "group"
+)
+
+// SnapCandidate 集名候选卡：候选墙的单一数据源（前端卡墙只按本清单渲染）。
+type SnapCandidate struct {
+	// Key 集名候选：目录候选=目录名剥壳段（剥壳未命中时=目录名）、群候选=
+	// 分群键（=公共前缀）。
+	Key string `json:"key"`
+	// Dir 候选所在目录键（相对库根的 '/' 目录路径）。
+	Dir string `json:"dir"`
+	// Source 来源："dir"（目录信号）|"group"（序列群）。
+	Source string `json:"source"`
+	// FormName 群来源时携带的命中形态标识（规则定群群为空）。
+	FormName string `json:"formName,omitempty"`
+	// Size 成员数。
+	Size int `json:"size"`
+	// Reason 人话理由（如「目录名含作品号 100423498，目录内 4 个文件已成一集」）。
+	Reason string `json:"reason"`
+	// CrossMatch A 档互证：候选键与库内集名全集精确相等。
+	CrossMatch bool `json:"crossMatch,omitempty"`
+	// ExistingSetID / ExistingSetName A 档「归入既有集」：候选键作品号与库内
+	// 集名内作品号唯一相等时的既有集行 id 与集名（零/多命中留空）。confirmed
+	// 分仓时 ExistingSetID 改取会话旁路簿记的确认值。
+	ExistingSetID   int64  `json:"existingSetId,omitempty"`
+	ExistingSetName string `json:"existingSetName,omitempty"`
+	// ConfirmedSetName confirmed 分仓携带：确认动作写入成员集维度赋值的集名。
+	ConfirmedSetName string `json:"confirmedSetName,omitempty"`
+	// Members 候选成员（群来源复用群成员；目录来源=目录直接子文件、区间现算）。
+	Members []SnapCandMember `json:"members"`
+}
+
+// SnapCandMember 候选成员：相对路径 + 序号原文 + 文件名序列块区间（区间相对
+// 去扩展名正文，为含扩展名文件名的前缀——对两者均成立）。
+type SnapCandMember struct {
+	RelPath string    `json:"relPath"`
+	SeqText string    `json:"seqText,omitempty"`
+	Segs    []SnapSeg `json:"segs,omitempty"`
+}
+
+// target 候选目标键（Source+Dir+Key 的稳定串）：会话忽略/确认清单的寻址形态
+//（同目录同键的两形态结构群视为同一目标——忽略/确认按集名候选语义合并处置）。
+func (c SnapCandidate) target() string {
+	return c.Source + "\x00" + c.Dir + "\x00" + c.Key
+}
+
+// buildSnapshotCandidates 候选墙装配（元素8 入口）：三类来源合流为快照主清单
+//（buildWorkSetCandidates），再按会话态目标键分仓——ignored 进
+// IgnoredCandidates、confirmed 进 ConfirmedCandidates（带确认集名与既有集行
+// id：确认集名取成员赋值的 collection〔确认动作的落点〕，既有 id 取会话旁路
+// 簿记），分仓候选移出主清单。
+func buildSnapshotCandidates(snap *RecognitionSnapshot, lib *LibraryIndex, in aggregateInput) {
+	snap.Candidates = buildWorkSetCandidates(snap, lib)
+	if len(in.ignoredTargets) == 0 && len(in.confirmedTargets) == 0 {
+		return
+	}
+	kept := make([]SnapCandidate, 0, len(snap.Candidates))
+	for _, cand := range snap.Candidates {
+		switch target := cand.target(); {
+		case in.confirmedTargets[target]:
+			setName := confirmedCollectionOf(cand, in.assigns)
+			cand.ConfirmedSetName = setName
+			cand.ExistingSetID = in.confirmedSetIDs[setName]
+			snap.ConfirmedCandidates = append(snap.ConfirmedCandidates, cand)
+		case in.ignoredTargets[target]:
+			snap.IgnoredCandidates = append(snap.IgnoredCandidates, cand)
+		default:
+			kept = append(kept, cand)
+		}
+	}
+	snap.Candidates = kept
+}
+
+// confirmedCollectionOf 已确认候选的确认集名：确认动作对全员写集维度赋值
+//（collection=setName），故取首个携带集维度赋值成员的取值；赋值此后被用户
+// 清除时为空串（confirmed 分仓仍在场，呈现按已确认但集名缺席处理）。
+func confirmedCollectionOf(cand SnapCandidate, assigns map[string]SessionAssignment) string {
+	for _, mem := range cand.Members {
+		if a, ok := assigns[mem.RelPath]; ok && a.Collection != "" {
+			return a.Collection
+		}
+	}
+	return ""
+}
+
+// buildWorkSetCandidates 候选主清单装配（纯函数）：① 目录候选
+//（detectDirCandidates：目录名含作品号/整目录单一群键成集）；② 序列群全部
+//（快照 Groups 即全集——结构/规则/页级定群同权出卡）；③ A 档库内集识别对
+// 全部候选注记（matchExistingWorkSet：键∈集名全集=互证、键作品号与集名内
+// 作品号唯一相等=归入既有集）。清单按目录、候选键、来源稳定排序。
+func buildWorkSetCandidates(snap *RecognitionSnapshot, lib *LibraryIndex) []SnapCandidate {
+	cands := make([]SnapCandidate, 0, len(snap.Groups))
+	for _, g := range snap.Groups {
+		reason := fmt.Sprintf("同目录 %d 个文件成序列群，公共前缀即集名候选", g.Size)
+		if g.FormName != "" {
+			reason += fmt.Sprintf("（%s形态）", g.FormName)
+		} else if g.RuleID != "" {
+			reason += fmt.Sprintf("（规则 %s 定群）", g.RuleID)
+		}
+		cand := SnapCandidate{
+			Key: g.Key, Dir: g.DirRelKey, Source: candSourceGroup,
+			FormName: g.FormName, Size: g.Size, Reason: reason,
+			Members: make([]SnapCandMember, 0, len(g.Members)),
+		}
+		for _, mem := range g.Members {
+			cand.Members = append(cand.Members, SnapCandMember{
+				RelPath: mem.RelPath, SeqText: mem.SeqText, Segs: mem.Segs,
+			})
+		}
+		cands = append(cands, cand)
+	}
+	cands = append(cands, detectDirCandidates(snap)...)
+	for i := range cands {
+		cands[i].CrossMatch, cands[i].ExistingSetID, cands[i].ExistingSetName =
+			matchExistingWorkSet(cands[i].Key, lib)
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].Dir != cands[j].Dir {
+			return cands[i].Dir < cands[j].Dir
+		}
+		if cands[i].Key != cands[j].Key {
+			return cands[i].Key < cands[j].Key
+		}
+		return cands[i].Source < cands[j].Source
+	})
+	return cands
+}
+
+// detectDirCandidates 目录候选探测（纯函数）：目录名含作品号（workNumberOf
+// 保守提取命中）或目录内直接子文件已单一群键成集 → 整目录归集候选。成员=
+// 目录直接子文件全部（不含子目录文件；区间与序号原文按结构形态表现算），
+// 直接子文件 <2 不出候选；已被规则定群覆盖的目录（任一直接子文件是规则
+// 定群群成员）不重复出——群来源已有候选卡。库根本身（RelKey 空）不出目录
+// 候选。
+func detectDirCandidates(snap *RecognitionSnapshot) []SnapCandidate {
+	ruleGroupKeys := make(map[string]bool, len(snap.Groups))
+	for _, g := range snap.Groups {
+		if g.RuleID != "" {
+			ruleGroupKeys[g.DirRelKey+"\x00"+g.Key] = true
+		}
+	}
+	filesByDir := make(map[string][]SnapFile, len(snap.Files))
+	for _, f := range snap.Files {
+		filesByDir[f.DirRelKey] = append(filesByDir[f.DirRelKey], f)
+	}
+	var cands []SnapCandidate
+	for _, dir := range snap.Dirs {
+		if dir.RelKey == "" {
+			continue
+		}
+		members := filesByDir[dir.RelKey]
+		if len(members) < 2 {
+			continue
+		}
+		ruleCovered := false
+		groupKeys := make(map[string]bool, len(members))
+		allGrouped := true
+		for _, f := range members {
+			if f.GroupKey == "" {
+				allGrouped = false
+				continue
+			}
+			groupKeys[f.GroupKey] = true
+			if ruleGroupKeys[f.DirRelKey+"\x00"+f.GroupKey] {
+				ruleCovered = true
+				break
+			}
+		}
+		if ruleCovered {
+			continue
+		}
+		workNo := workNumberOf(dir.Name)
+		singleGroup := allGrouped && len(groupKeys) == 1
+		if workNo == "" && !singleGroup {
+			continue
+		}
+		key := dir.Name
+		if _, inner, ok := stripShell(dir.Name); ok {
+			key = inner
+		}
+		var parts []string
+		if workNo != "" {
+			parts = append(parts, "目录名含作品号 "+workNo)
+		}
+		if singleGroup {
+			parts = append(parts, fmt.Sprintf("目录内 %d 个文件已成一集", len(members)))
+		} else {
+			parts = append(parts, fmt.Sprintf("目录内 %d 个文件", len(members)))
+		}
+		cand := SnapCandidate{
+			Key: key, Dir: dir.RelKey, Source: candSourceDir, Size: len(members),
+			Reason:  strings.Join(parts, "，"),
+			Members: make([]SnapCandMember, 0, len(members)),
+		}
+		for _, f := range members {
+			mem := SnapCandMember{RelPath: f.RelPath}
+			if base := BaseNameWithoutExt(f.FileName); base != "" {
+				if _, seqText, form := matchStructuralForm(base); form != nil {
+					mem.SeqText = seqText
+					mem.Segs = segmentsOf(form, base)
+				}
+			}
+			cand.Members = append(cand.Members, mem)
+		}
+		cands = append(cands, cand)
+	}
+	return cands
+}
+
+// matchExistingWorkSet A 档库内集识别（纯函数）：候选键对库内集名全集比对——
+// 键与某集名精确相等 → 互证（CrossMatch）；键内作品号与集名内作品号
+//（workNumberOf 保守提取）唯一相等 → 该集行 id 与集名（「归入既有集」），
+// 零或多个命中留空。lib 缺席或集名索引为空时零命中。
+func matchExistingWorkSet(key string, lib *LibraryIndex) (crossMatch bool, setID int64, setName string) {
+	if lib == nil || len(lib.WorkSetNames) == 0 {
+		return false, 0, ""
+	}
+	if _, ok := lib.WorkSetNames[key]; ok {
+		crossMatch = true
+	}
+	workNo := workNumberOf(key)
+	if workNo == "" {
+		return crossMatch, 0, ""
+	}
+	hits := 0
+	for name := range lib.WorkSetNames {
+		if workNumberOf(name) != workNo {
+			continue
+		}
+		hits++
+		setID, setName = lib.WorkSetIDs[name], name
+	}
+	if hits == 1 {
+		return crossMatch, setID, setName
+	}
+	return crossMatch, 0, ""
 }
 
 // firstMeaningRuleID 目录层含义回放中首个命中规则的 ID（元素1 的「被哪条规则
@@ -1296,11 +1592,23 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		Done: len(conclusions), Total: len(evalFiles),
 	})
 
+	// 候选分仓判据（会话态目标键，元素8）：ignored/confirmed 清单与确认旁路
+	ignoredTargets := make(map[string]bool, len(sess.IgnoredCandidates))
+	for _, t := range sess.IgnoredCandidates {
+		ignoredTargets[t] = true
+	}
+	confirmedTargets := make(map[string]bool, len(sess.ConfirmedCandidates))
+	for _, t := range sess.ConfirmedCandidates {
+		confirmedTargets[t] = true
+	}
+
 	snapshot := aggregatePanorama(aggregateInput{
 		root: root, enumRes: enumRes,
 		enabledRules: enabledRules, allRules: allRules, lib: lib,
 		conclusions: conclusions, prev: prev, prevSkipped: prevSkipped,
 		assigns: sess.Assignments, profileDigest: digest, assignRevision: sess.AssignRevision,
+		ignoredTargets: ignoredTargets, confirmedTargets: confirmedTargets,
+		confirmedSetIDs: sess.ConfirmedSetIDs,
 	})
 
 	// 差异集：与上一份快照的文件级结论对比（prev 为 nil 时为全量新增形态）——
