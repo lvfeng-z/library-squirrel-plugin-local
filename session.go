@@ -486,7 +486,7 @@ func (m *SessionManager) MarkRecognized(root string) (*WorkbenchSession, error) 
 // CompleteRecognition 全量识别完成落库（无差异集形态）：识别全景快照入会话与
 // 状态迁移在锁内单次写完成——首次识别迁移 created→recognized；重识别（已
 // recognized）只覆写快照，状态不回退。会话的档案指纹同步为快照依据指纹
-//（识别时点基准，后续档案外部变更仍可对账检出）。生产路径经
+// （识别时点基准，后续档案外部变更仍可对账检出）。生产路径经
 // CompleteRecognitionWithDiff（携带验证轮差异集）。
 func (m *SessionManager) CompleteRecognition(root string, snapshot *RecognitionSnapshot) (*WorkbenchSession, error) {
 	return m.CompleteRecognitionWithDiff(root, snapshot, nil)
@@ -772,8 +772,8 @@ type workbenchFrontendRequest struct {
 	// Root 会话寻址的库根（createSession 为新建库根输入）。
 	Root string `json:"root,omitempty"`
 	// ConfirmSeq / Accepted 入口确认答复的配对序号与采纳结果。
-	ConfirmSeq int64  `json:"confirmSeq,omitempty"`
-	Accepted   bool   `json:"accepted,omitempty"`
+	ConfirmSeq int64 `json:"confirmSeq,omitempty"`
+	Accepted   bool  `json:"accepted,omitempty"`
 	// Section getPanorama 的分节拉取（缺省=全量投影）。
 	Section string `json:"section,omitempty"`
 
@@ -903,7 +903,7 @@ type workbenchFrontendResponse struct {
 	// 选择交互与选择集键的单一推导源）。
 	Domain *WorkDomain `json:"domain,omitempty"`
 	// Created / CreateMsg createTasks 的创建结论：已提交作品数与用户可读摘要。
-	Created  int    `json:"created,omitempty"`
+	Created   int    `json:"created,omitempty"`
 	CreateMsg string `json:"createMsg,omitempty"`
 	// RulesView getRules 与规则管理族动作随答返回的规则管理视图（档案条目+
 	// 内置表+禁用清单+备份态），前端每次动作后整份刷新。

@@ -106,7 +106,7 @@ type MetadataDeclaration struct {
 }
 
 // DeclPredicate 声明谓词：某来源载体在某含义维度上的声明是否在场
-//（条件表达式树的布尔叶节点，也是 v2 谓词组合形态的最小操作数）。
+// （条件表达式树的布尔叶节点，也是 v2 谓词组合形态的最小操作数）。
 type DeclPredicate struct {
 	// Source 为待判定的声明来源载体。
 	Source SourceKind `json:"source"`
@@ -347,7 +347,7 @@ type RuleEntry struct {
 const CurrentSchemaVersion = 3
 
 // legacySchemaVersions 为可向后兼容载入的历史结构版本
-//（v1=无条件形态，v2=谓词组合条件形态——载入时映射为等价表达式树）。
+// （v1=无条件形态，v2=谓词组合条件形态——载入时映射为等价表达式树）。
 var legacySchemaVersions = map[int]bool{1: true, 2: true}
 
 // RuleProfile 为规则档案：一批规则的容器。
@@ -600,7 +600,7 @@ func parseConditionJSON(raw []byte) (*CondExpr, error) {
 }
 
 // condExprFromJSON 把条件中间结构递归构造回表达式树；子节点为 null 视为非法
-//（判别类别与引用的静态校验在 validateExpr 完成，此处只做结构装配）。
+// （判别类别与引用的静态校验在 validateExpr 完成，此处只做结构装配）。
 func condExprFromJSON(in *conditionJSON) (*CondExpr, error) {
 	if in == nil {
 		return nil, fmt.Errorf("条件子表达式不能为空")

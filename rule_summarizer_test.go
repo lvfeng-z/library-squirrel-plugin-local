@@ -90,13 +90,13 @@ func TestBuildStructMapRulesRealSample(t *testing.T) {
 }
 
 // TestBuildStructMapRulesManualFallback 手填兜底：无显式出处时值=某段自动匹配
-//（作者=剥壳内名、作品名=首段）；不对应任何段的值降级「手工指定（不参与泛化）」。
+// （作者=剥壳内名、作品名=首段）；不对应任何段的值降级「手工指定（不参与泛化）」。
 func TestBuildStructMapRulesManualFallback(t *testing.T) {
 	root, rel, file := realSampleStructFixture()
 	assign := &SessionAssignment{
 		Author:     "Jake--Jaccobus", // 自动匹配 dirLevelStripped1
 		Title:      "atago",          // 自动匹配 filenameSeg0
-		Collection: "手填集",           // 无对应段
+		Collection: "手填集",            // 无对应段
 	}
 	sugg, rules, err := buildStructMapRules(root, rel, file, assign)
 	if err != nil {
@@ -274,7 +274,7 @@ func TestStructSummaryPreviewAndSessionRoundTrip(t *testing.T) {
 	sess, view, err := m.ApplyAssignment(root, rel, SessionAssignment{
 		Author: "Jake--Jaccobus", AuthorClueRef: "dirLevelStripped1",
 		Title: "atago", TitleClueRef: "filenameSeg0",
-		Tags:  []string{"big belly"}, TagClueRefs: []string{"rootName"},
+		Tags: []string{"big belly"}, TagClueRefs: []string{"rootName"},
 	})
 	if err != nil {
 		t.Fatalf("赋值失败: %v", err)

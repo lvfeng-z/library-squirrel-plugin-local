@@ -84,11 +84,11 @@ func TestRegexPatternEvaluate(t *testing.T) {
 			wantCaptures: []CaptureBinding{{Name: "missing", Value: ""}},
 		},
 		{
-			name: "dirname任一层命中追加DirHit",
-			target:   string(TargetDirName),
-			expr:     `^作者-(.+)$`,
-			in:       MatchInput{DirNames: []string{"库根", "作者-张三", "作品"}},
-			want:     true,
+			name:        "dirname任一层命中追加DirHit",
+			target:      string(TargetDirName),
+			expr:        `^作者-(.+)$`,
+			in:          MatchInput{DirNames: []string{"库根", "作者-张三", "作品"}},
+			want:        true,
 			wantDirHits: []DirHit{{Depth: 1, Name: "作者-张三"}},
 		},
 		{
@@ -148,37 +148,37 @@ func TestLocationPatternEvaluate(t *testing.T) {
 	// ancestor 带 named 捕获组，用于验证子绑定不进主上下文。
 	ancestor := mustRegex(t, string(TargetFileName), `^(?P<kw>漫画)$`, []string{"kw"})
 	cases := []struct {
-		name             string
+		name               string
 		minDepth, maxDepth int
-		ancestor         Pattern
-		in               MatchInput
-		want             bool
-		wantDirHits      []DirHit
+		ancestor           Pattern
+		in                 MatchInput
+		want               bool
+		wantDirHits        []DirHit
 	}{
 		{
-			name:       "命中层在深度区间内",
-			minDepth:   0,
-			maxDepth:   2,
-			ancestor:   ancestor,
-			in:         MatchInput{DirNames: []string{"库根", "漫画", "第01卷"}},
-			want:       true,
+			name:        "命中层在深度区间内",
+			minDepth:    0,
+			maxDepth:    2,
+			ancestor:    ancestor,
+			in:          MatchInput{DirNames: []string{"库根", "漫画", "第01卷"}},
+			want:        true,
 			wantDirHits: []DirHit{{Depth: 1, Name: "漫画"}},
 		},
 		{
-			name:       "命中层在深度区间外",
-			minDepth:   2,
-			maxDepth:   -1, // 不限上界，但起点已越过命中层
-			ancestor:   ancestor,
-			in:         MatchInput{DirNames: []string{"库根", "漫画", "第01卷"}},
-			want:       false,
+			name:     "命中层在深度区间外",
+			minDepth: 2,
+			maxDepth: -1, // 不限上界，但起点已越过命中层
+			ancestor: ancestor,
+			in:       MatchInput{DirNames: []string{"库根", "漫画", "第01卷"}},
+			want:     false,
 		},
 		{
-			name:       "区间内无命中层",
-			minDepth:   1,
-			maxDepth:   1,
-			ancestor:   ancestor,
-			in:         MatchInput{DirNames: []string{"库根", "杂项"}},
-			want:       false,
+			name:     "区间内无命中层",
+			minDepth: 1,
+			maxDepth: 1,
+			ancestor: ancestor,
+			in:       MatchInput{DirNames: []string{"库根", "杂项"}},
+			want:     false,
 		},
 	}
 	for _, tc := range cases {
@@ -302,13 +302,13 @@ func TestPredicatePatternEvaluate(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:         "从捕获组取值命中库内标签",
-			kind:         PredicateTag,
-			from:         "tag",
-			preCaptures:  []CaptureBinding{{Name: "tag", Value: "治愈"}},
-			fileName:     "any.png",
-			want:         true,
-			wantHits:     []PredicateHit{{Kind: "tag", Input: "治愈", Name: "治愈"}},
+			name:        "从捕获组取值命中库内标签",
+			kind:        PredicateTag,
+			from:        "tag",
+			preCaptures: []CaptureBinding{{Name: "tag", Value: "治愈"}},
+			fileName:    "any.png",
+			want:        true,
+			wantHits:    []PredicateHit{{Kind: "tag", Input: "治愈", Name: "治愈"}},
 		},
 		{
 			name:     "捕获组绑定缺失不命中",

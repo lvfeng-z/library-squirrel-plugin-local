@@ -20,7 +20,7 @@ type structMappingSlot struct {
 	dim      MetadataDimension
 	roleName string
 	value    string
-	clueRef  string // 显式出处引用（空=手填）
+	clueRef  string          // 显式出处引用（空=手填）
 	clue     *SnapStructClue // 解析后的线索；nil=手工指定（不参与泛化）
 	manual   bool
 	segIndex int    // 文件名段下标（文件名段映射有效）
@@ -55,7 +55,7 @@ type RuleSuggestion struct {
 	RelPath string `json:"relPath"`
 	// Summary 人话规则一行（如「一级目录 Artist[任意] 剥壳→作者；文件名首段→
 	// 作品名；库根名→标签；尾部码丢弃」）。
-	Summary string                   `json:"summary"`
+	Summary  string                  `json:"summary"`
 	Mappings []RuleSuggestionMapping `json:"mappings"`
 	// ManualDims 手工指定维度的说明（值不对应任何段，不参与泛化）。
 	ManualDims []string `json:"manualDims,omitempty"`

@@ -37,7 +37,7 @@ func TestSynthesizeUnionCoexistWithRoles(t *testing.T) {
 }
 
 // TestSynthesizeUnionDedupByValue 覆盖 union 的按值去重：同值声明只保留首个
-//（来源与规则归属取先到者），不同值全部保留。
+// （来源与规则归属取先到者），不同值全部保留。
 func TestSynthesizeUnionDedupByValue(t *testing.T) {
 	decls := []MetadataDeclaration{
 		{Dimension: DimTag, Value: "同人志", Source: SourceFilename, RuleID: "r1"},

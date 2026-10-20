@@ -24,10 +24,10 @@ import (
 
 // 泛化维度词汇（generalize 动作的模式分支）。
 const (
-	generalizeModeFilename = "filename"  // 按文件名形态：从文件名提取模式（如方括号作者）
-	generalizeModeDirLayer = "dirLayer"  // 按目录层：目录含义规则
-	generalizeModeSequence = "sequence"  // 按序列形态：定群规则
-	generalizeModeStruct   = "struct"    // 按结构映射：赋值线索出处→组合规则（规则总结器的确认入档动作）
+	generalizeModeFilename = "filename" // 按文件名形态：从文件名提取模式（如方括号作者）
+	generalizeModeDirLayer = "dirLayer" // 按目录层：目录含义规则
+	generalizeModeSequence = "sequence" // 按序列形态：定群规则
+	generalizeModeStruct   = "struct"   // 按结构映射：赋值线索出处→组合规则（规则总结器的确认入档动作）
 )
 
 // 裁决方式词汇（adjudicate 动作的模式分支）。
@@ -52,8 +52,8 @@ type GeneratedRuleView struct {
 // GenerationResult 生成动作的结果：入档的规则摘要与验证轮启动结论。Rules 为
 // 组合规则（结构映射维度）的全部入档条目；单规则维度仅填 Rule。
 type GenerationResult struct {
-	Rule                 *GeneratedRuleView
-	Rules                []*GeneratedRuleView
+	Rule                *GeneratedRuleView
+	Rules               []*GeneratedRuleView
 	VerificationStarted bool
 }
 
@@ -117,7 +117,7 @@ func dirSubtreeFilesOf(snap *RecognitionSnapshot, dirRelKey string) ([]*SnapFile
 }
 
 // dirScopedFiles 目录寻址的作用域解析（目录赋值外的动作共用）：返回子树文件集
-//（快照序）与样本文件（子树内首个有赋值的文件）。目录键不在快照、子树无文件、
+// （快照序）与样本文件（子树内首个有赋值的文件）。目录键不在快照、子树无文件、
 // 子树无赋值文件分别回可读错误；actionNoun 为动作名（泛化/总结规则）。
 func dirScopedFiles(sess *WorkbenchSession, dirRelKey, actionNoun string) ([]*SnapFile, string, error) {
 	if sess.Snapshot == nil {
@@ -246,7 +246,7 @@ func (m *SessionManager) ClearDirAssignments(root, dirRelKey string) (*Workbench
 // —— 泛化成规则（入档后即接管：消费剥离）——
 
 // ApplyGeneralization 泛化动作（单文件寻址）：从单次赋值样例与该文件的识别上下文
-//（快照记录）出发生成对应 PatternKind 的规则（来源 qna）入档案，并以新入档规则
+// （快照记录）出发生成对应 PatternKind 的规则（来源 qna）入档案，并以新入档规则
 // 消费作用域内赋值（复现维度剥离、全剥空删除、残存者置已泛化标记），随即启动
 // 强制验证轮。mode 为空时按文件名形态（缺省维度）。
 func (m *SessionManager) ApplyGeneralization(root, relPath, mode string) (*GenerationResult, error) {
@@ -580,7 +580,7 @@ func closerExclusionClass(c rune) (string, bool) {
 
 // buildDirLayerRule 按目录层泛化：直接父目录名锚定一条位置规则（MinDepth=
 // MaxDepth=父目录的 DirNames 索引）——赋值值与父目录名相同的维度按目录名取值
-//（ancestorDir），其余维度作为该目录层的常量声明（目录含义规则）。
+// （ancestorDir），其余维度作为该目录层的常量声明（目录含义规则）。
 func buildDirLayerRule(relPath, dirRelKey string, assign *SessionAssignment) (RuleEntry, ArchiveWriteEntry, error) {
 	if dirRelKey == "" {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("文件 %s 位于库根直下，无目录层可泛化（可改按文件名形态）", relPath)
@@ -687,7 +687,7 @@ func buildSequenceRule(relPath, groupKey string, group *SnapGroup) (RuleEntry, A
 }
 
 // exprWithExtTail 形态提取式 → 规则提取式：末尾 $ 锚定前补可选扩展名尾段
-//（结构形态表对去扩展名正文求值，SiblingPattern 对含扩展名文件名求值）；
+// （结构形态表对去扩展名正文求值，SiblingPattern 对含扩展名文件名求值）；
 // 无尾锚（如中段序号的提取式）或已含扩展名段的表达式原样返回。
 func exprWithExtTail(expr string) string {
 	if strings.HasSuffix(expr, "$") && !strings.HasSuffix(expr, builtinTrailingExtExpr) {
@@ -882,7 +882,7 @@ func (m *SessionManager) scheduleRecognitionRefresh(root string) bool {
 const recognitionFollowupTimeout = 30 * time.Second
 
 // combinePatterns 候选规则模式的最简组合：单一模式原样返回，多个模式 And 组合
-//（全部命中才命中——双命中冲突的锚定形态）。
+// （全部命中才命中——双命中冲突的锚定形态）。
 func combinePatterns(subs []Pattern) Pattern {
 	if len(subs) == 1 {
 		return subs[0]
@@ -945,7 +945,7 @@ func ensureRuleIDUnique(p *RuleProfile, id string) string {
 }
 
 // generatedRuleID 生成规则 ID：来源前缀 + 样例 slug + 时间戳去重
-//（如 qna-file-<slug>-1718…、adj-<slug>-1718…）。
+// （如 qna-file-<slug>-1718…、adj-<slug>-1718…）。
 func generatedRuleID(prefix, sample string) string {
 	return prefix + "-" + ruleSlug(sample) + "-" + strconv.FormatInt(time.Now().UnixMilli(), 10)
 }

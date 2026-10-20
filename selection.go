@@ -80,9 +80,9 @@ type SelectableWork struct {
 // WorkSetView 集（序列群）的呈现视图：成员作品键按集内序排列。
 type WorkSetView struct {
 	// SetKey 集键；DirRelKey 所在目录键；Key 分组键（公共前缀=集名候选）。
-	SetKey   string `json:"setKey"`
+	SetKey    string `json:"setKey"`
 	DirRelKey string `json:"dirRelKey"`
-	Key      string `json:"key"`
+	Key       string `json:"key"`
 	// Members 成员作品键（集内序）。
 	Members []string `json:"members"`
 }
@@ -189,11 +189,11 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 		f := &snap.Files[i]
 		if f.GroupKey != "" {
 			work := &SelectableWork{
-				WorkID:   workKeyPrefixSetMember + f.RelPath,
-				Kind:     WorkKindSetMember,
+				WorkID:    workKeyPrefixSetMember + f.RelPath,
+				Kind:      WorkKindSetMember,
 				DirRelKey: f.DirRelKey,
-				Files:    []string{f.RelPath},
-				SetKey:   workSetKey(f.DirRelKey, f.GroupKey),
+				Files:     []string{f.RelPath},
+				SetKey:    workSetKey(f.DirRelKey, f.GroupKey),
 			}
 			appendWork(work)
 			setMembers[work.SetKey] = append(setMembers[work.SetKey], work)
@@ -202,8 +202,8 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 		work := dirTracks[f.DirRelKey]
 		if work == nil {
 			work = &SelectableWork{
-				WorkID:   workKeyPrefixDirTracks + f.DirRelKey,
-				Kind:     WorkKindDirTracks,
+				WorkID:    workKeyPrefixDirTracks + f.DirRelKey,
+				Kind:      WorkKindDirTracks,
 				DirRelKey: f.DirRelKey,
 			}
 			dirTracks[f.DirRelKey] = work
@@ -475,7 +475,7 @@ type CreateTasksOutcome struct {
 
 // buildCreateTasksMessage 创建完成的通知文案：已创建任务「名」：N 件作品（M 个
 // 子任务，Created 待手动开始）；批次含非 local 归属子行时按归属分布追加
-//「其中 n 件归属 站点名」（逐站点一段、顿号连写）。文案按归属分布组织，与父行
+// 「其中 n 件归属 站点名」（逐站点一段、顿号连写）。文案按归属分布组织，与父行
 // 形态正交（归属附注分支不随父行分组形态变化）。
 func buildCreateTasksMessage(taskName string, works, tasks int, summary createBatchSummary) string {
 	message := fmt.Sprintf("已创建任务「%s」：%d 件作品（%d 个子任务，Created 待手动开始）", taskName, works, tasks)

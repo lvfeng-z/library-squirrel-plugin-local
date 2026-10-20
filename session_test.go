@@ -79,8 +79,8 @@ type workbenchTestCtx struct {
 
 	// CreateTask 桩：createTaskStub 为应答（nil=默认成功 AddedQuantity=3），
 	// 计数与末次 URL 供创建编排断言。
-	createTaskStub   *sdkdto.CreateTaskResult
-	createTaskCount  int
+	createTaskStub    *sdkdto.CreateTaskResult
+	createTaskCount   int
 	createTaskLastURL string
 
 	mu        sync.Mutex
@@ -88,7 +88,7 @@ type workbenchTestCtx struct {
 }
 
 // CreateTask 创建编排动作（ApplyCreateTasks）的桩：记录调用并回告预设结论
-//（真实 Create 过滤产出分支由测试直驱，不经此桩）。
+// （真实 Create 过滤产出分支由测试直驱，不经此桩）。
 func (c *workbenchTestCtx) CreateTask(url string) (*sdkdto.CreateTaskResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -48,11 +48,11 @@ func errorTexts(errs []error) []string {
 // rulesAdminViewOf 档案 → 规则管理视图（不含备份在场——需查存储，由调用方填充）。
 func rulesAdminViewOf(profile *RuleProfile, warnings []string) (*rulesAdminView, error) {
 	view := &rulesAdminView{
-		SchemaVersion:     profile.SchemaVersion,
-		Rules:             make([]*ruleEntryJSON, 0, len(profile.Rules)),
-		Warnings:          warnings,
+		SchemaVersion:      profile.SchemaVersion,
+		Rules:              make([]*ruleEntryJSON, 0, len(profile.Rules)),
+		Warnings:           warnings,
 		DisabledBuiltinIDs: profile.DisabledBuiltinIDs,
-		Builtins:          make([]builtinRuleView, 0),
+		Builtins:           make([]builtinRuleView, 0),
 	}
 	for i := range profile.Rules {
 		rj, err := ruleToJSON(profile.Rules[i])

@@ -100,7 +100,7 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // decision.Declarations；来源缺失的动作不产出声明，不中断其余动作。
 //
 // 带生效条件（When，通用条件表达式树）的动作两遍执行：第一遍只跑无条件动作
-//（全部规则按序），第二遍按规则序补跑条件动作——条件对该规则命中时的解析
+// （全部规则按序），第二遍按规则序补跑条件动作——条件对该规则命中时的解析
 // 上下文与求值时点已产出的声明集求值（见 CondExpr.Holds），两遍执行使条件
 // 可见全部无条件声明（裁决生成的条件规则居档案尾，其条件谓词引用的声明在
 // 第一遍已全部在场）。
@@ -326,12 +326,12 @@ type PendingItem struct {
 // 裁决声明（用户对冲突的裁决结果），压过全部规则推导来源（含 dir），使裁决
 // 生成规则的常量声明在 highTrust 维度上稳定胜出、原冲突双方声明落选。
 var sourceTrust = map[SourceKind]int{
-	SourceDir:         5,
-	SourcePredicate:   4,
-	SourceFilename:    3,
-	SourceGroup:       2,
-	SourceConstant:    1,
-	SourceAssignment:  6,
+	SourceDir:          5,
+	SourcePredicate:    4,
+	SourceFilename:     3,
+	SourceGroup:        2,
+	SourceConstant:     1,
+	SourceAssignment:   6,
 	SourceAdjudication: 6,
 }
 

@@ -25,7 +25,7 @@ import (
 // v2：FilePluginData 增加可选归属字段（siteKey/siteWorkId，扫描期归属裁决结果）；
 // v3：FilePluginData 增加任务级赋值快照（assignment，工作台创建时固化的会话赋值，
 // 执行期重算优先消费）；v0/v1/v2 旧数据无对应字段，读侧按零值走既有路径
-//（无归属=local 回退、无赋值快照=纯档案求值）
+// （无归属=local 回退、无赋值快照=纯档案求值）
 const currentPluginDataVersion = 3
 
 // checkPluginDataVersion 校验 task PluginData 格式版本：
@@ -40,11 +40,11 @@ func checkPluginDataVersion(v int) error {
 
 // FilePluginData 文件级 PluginData
 type FilePluginData struct {
-	SchemaVersion int    `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=引入版本约定，2=增加归属字段，3=增加任务级赋值快照
-	FullPath      string `json:"fullPath"`
-	RelPath       string `json:"relPath"`
-	Hash          string `json:"hash"`
-	Size          int64  `json:"size"`
+	SchemaVersion int           `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=引入版本约定，2=增加归属字段，3=增加任务级赋值快照
+	FullPath      string        `json:"fullPath"`
+	RelPath       string        `json:"relPath"`
+	Hash          string        `json:"hash"`
+	Size          int64         `json:"size"`
 	Metadata      []PathMeaning `json:"metadata,omitempty"`
 	// SiteKey/SiteWorkId 真实域归属（扫描期站点分类与文件名形态解析的裁决结果）：
 	// SiteKey=归属站点键、SiteWorkId=页级作品 ID。两字段空=local 回退，作品身份=Hash
@@ -594,11 +594,11 @@ func pixivPageWorkIDOf(matchedRuleIDs []string, rules []RuleEntry, in *MatchInpu
 // 任务级赋值快照（PluginData.Assignment）优先参与合并覆盖（recomputeFileDecision
 // 内经 mergedFileConclusionOf 与干跑同源，风险13），提取声明合成终选与待裁决——
 // 待裁决项逐条记日志（维度/候选值/原因，归因观测面）。终选映射：标题→作品名
-//（无标题声明回退整个文件名去扩展名，扩展名由 Resource.Format 单独提供）、
+// （无标题声明回退整个文件名去扩展名，扩展名由 Resource.Format 单独提供）、
 // 作者→本地作者声明（带声明级角色）、标签→本地标签声明、作品集→作品集声明
-//（集名=声明值，集内序不传契约——宿主续排近似，本期既定裁决）；路径含义
-//（PathMeaning）映射维持现状。归属裁决按内置 pixiv 规则重算：命中即真实域键
-//（捕获值=页级作品 ID），未命中走非 pixiv 路径（PluginData 携带的创建期归属，
+// （集名=声明值，集内序不传契约——宿主续排近似，本期既定裁决）；路径含义
+// （PathMeaning）映射维持现状。归属裁决按内置 pixiv 规则重算：命中即真实域键
+// （捕获值=页级作品 ID），未命中走非 pixiv 路径（PluginData 携带的创建期归属，
 // 无归属=文件内容哈希）。
 func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {

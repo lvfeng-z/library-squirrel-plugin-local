@@ -129,7 +129,7 @@ func findSpecByRole(specs []*sdkdto.StoreSpec, role string) *sdkdto.StoreSpec {
 //（TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 族）。
 
 // TestClassifyDirAbsorbsAnswerAsQnaRule 问答吸收与回放：作者答案生成一条 qna 规则
-//（层深锚定的 LocationPattern + 目录名全匹配正则、ancestorDir→作者维度提取），
+// （层深锚定的 LocationPattern + 目录名全匹配正则、ancestorDir→作者维度提取），
 // 经 SaveProfile 落键 rule-profile（重启语义由 KV 落地承载）；再次分类时规则回放
 // 含义（作者=目录名），不再发起问答；同层同目录锚点重复吸收原位替换不重复追加。
 // 锚点取扫描根下首层目录（问答层深 1）：规则的 LocationPattern 层深须为换算后的
@@ -381,7 +381,7 @@ func TestCreateWorkInfoLegacyPseudoFormDataConvertsByName(t *testing.T) {
 // TestBuildChildResponsesSiteKeyAndSingleParent 混归属子行构造与单父行形态：
 // 子行归属键与 FilePluginData 归属字段同构——真实域子行携 siteKey 与页级作品
 // ID 身份、local 回退子行键留空（继承父应答站点键）与哈希身份；父行为纯容器
-//（DirRelPath 空、无含义链），PluginTaskId=local-batch-<毫秒>（无组间后缀）、
+// （DirRelPath 空、无含义链），PluginTaskId=local-batch-<毫秒>（无组间后缀）、
 // 站点键=创建域 identity.Local.Key；单子行亦为父行（一次创建恒为一个父任务）。
 func TestBuildChildResponsesSiteKeyAndSingleParent(t *testing.T) {
 	dir := t.TempDir()

@@ -59,22 +59,22 @@ func selectionTestRules(t *testing.T) []RuleEntry {
 		},
 		{
 			ID: "sel-set-collection", Description: "测试：群组成员集名=公共前缀", Source: RuleSourceManual, Enabled: true,
-			Pattern: mustRegexPattern(t, `^.+$`, nil),
+			Pattern:     mustRegexPattern(t, `^.+$`, nil),
 			Extractions: []ExtractionAction{{Dimension: DimCollection, From: FromGroupPrefix}},
 		},
 		{
 			ID: "test-conflict-a", Description: "测试：标题冲突 A", Source: RuleSourceManual, Enabled: true,
-			Pattern: conflictA,
+			Pattern:     conflictA,
 			Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromCapture, CaptureName: "c1"}},
 		},
 		{
 			ID: "test-conflict-b", Description: "测试：标题冲突 B", Source: RuleSourceManual, Enabled: true,
-			Pattern: conflictB,
+			Pattern:     conflictB,
 			Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromCapture, CaptureName: "c2"}},
 		},
 		{
 			ID: "test-predicate-author", Description: "测试：文件名命中库内作者", Source: RuleSourceManual, Enabled: true,
-			Pattern: &PredicatePattern{Kind: PredicateAuthor},
+			Pattern:     &PredicatePattern{Kind: PredicateAuthor},
 			Extractions: []ExtractionAction{{Dimension: DimAuthor, From: FromPredicate}},
 		},
 	}
@@ -203,11 +203,11 @@ func TestDeriveWorkDomainWorkAtomicity(t *testing.T) {
 	// 不可选作品：未识别（含落单 plain）、待裁决；根目录聚合作品（库内作者名.jpg
 	// 经谓词识别）可选
 	for id, wantSelectable := range map[string]bool{
-		"d:未识别":  false,
-		"d:序列":   false, // 落单_009 为 plain → 整件不可选
-		"d:冲突":   false, // 待裁决 → 整件不可选
-		"d:":     true,  // 库内作者名.jpg 谓词识别 → 可选
-		"d:已识别":  true,
+		"d:未识别": false,
+		"d:序列":  false, // 落单_009 为 plain → 整件不可选
+		"d:冲突":  false, // 待裁决 → 整件不可选
+		"d:":    true,  // 库内作者名.jpg 谓词识别 → 可选
+		"d:已识别": true,
 	} {
 		work := byID[id]
 		if work == nil {
@@ -699,7 +699,7 @@ func TestResolveCreateTaskName(t *testing.T) {
 // —— 退出标准 3/5：赋值快照自包含与合并同源 —— //
 
 // TestRecomputeSharesMergedRecognitionLogic 执行期重算与识别干跑的合并结论同源
-//（风险13）：同一规则+库内索引+赋值输入下，recomputeFileDecision（消费任务级
+// （风险13）：同一规则+库内索引+赋值输入下，recomputeFileDecision（消费任务级
 // 赋值快照）与 MergedRecognition（干跑批量入口）产出等价终选声明。
 func TestRecomputeSharesMergedRecognitionLogic(t *testing.T) {
 	root, m, _ := recognizedSelectionFixture(t, nil)
@@ -727,7 +727,9 @@ func TestRecomputeSharesMergedRecognitionLogic(t *testing.T) {
 	if len(conclusion.Final) != len(batch[0].Final) {
 		t.Fatalf("重算与干跑终选声明数不一致: %d vs %d（%+v / %+v）", len(conclusion.Final), len(batch[0].Final), conclusion.Final, batch[0].Final)
 	}
-	key := func(d MetadataDeclaration) string { return string(d.Dimension) + "=" + d.Value + "|" + string(d.Source) }
+	key := func(d MetadataDeclaration) string {
+		return string(d.Dimension) + "=" + d.Value + "|" + string(d.Source)
+	}
 	seen := map[string]int{}
 	for _, decl := range batch[0].Final {
 		seen[key(decl)]++

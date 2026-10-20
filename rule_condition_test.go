@@ -1,6 +1,6 @@
 // 通用条件表达式（档案 v3 语义层）的单元测试：操作数与运算符求值（含嵌套）、
 // 构造期静态校验（捕获组存在性 / 类型匹配）的可读错误、v1/v2 旧档案兼容回归
-//（v2 谓词组合映射为等价表达式树，行为零变化）、读侧版本不符（未来更高版本）
+// （v2 谓词组合映射为等价表达式树，行为零变化）、读侧版本不符（未来更高版本）
 // 告警不中断，以及 v3 表达式档案的序列化往返。
 package main
 
@@ -48,7 +48,7 @@ func equalCondExpr(a, b *CondExpr) bool {
 
 // TestCondExprEvaluationTable 条件表达式树求值：谓词在场/缺席（经逻辑非表达）、
 // 捕获组引用（相等/不等、未绑定不可用）、深度与群组产物字段的数值区间
-//（双边/单边）、字面量比较、与/或/非逻辑组合与嵌套。
+// （双边/单边）、字面量比较、与/或/非逻辑组合与嵌套。
 func TestCondExprEvaluationTable(t *testing.T) {
 	dirAuthor := DeclPredicate{Source: SourceDir, Dimension: DimAuthor}
 	fileTitle := DeclPredicate{Source: SourceFilename, Dimension: DimTitle}
@@ -533,7 +533,7 @@ func TestProfileFutureVersionBestEffort(t *testing.T) {
 }
 
 // TestIsolatedFileConditionStrategyJSON 孤立文件场景的手写 v3 条件策略 JSON
-//（目录源作者缺席 → 兜底常量作者并绑定角色）：完整 JSON 经 ParseProfile 构造期
+// （目录源作者缺席 → 兜底常量作者并绑定角色）：完整 JSON 经 ParseProfile 构造期
 // 校验通过并入档形态参与求值（手写进阶入口的端到端锚定）。
 func TestIsolatedFileConditionStrategyJSON(t *testing.T) {
 	profileJSON := `{"schemaVersion":3,"rules":[` +

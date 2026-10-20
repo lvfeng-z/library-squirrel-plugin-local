@@ -190,7 +190,7 @@ func TestStripShellTable(t *testing.T) {
 }
 
 // TestDirStructCluesOf 目录线索集：库根名 + 各级目录名与剥壳变体（标签
-//「N级目录剥壳」），无文件名段与尾部码；库根（空目录键）仅库根名线索。
+// 「N级目录剥壳」），无文件名段与尾部码；库根（空目录键）仅库根名线索。
 func TestDirStructCluesOf(t *testing.T) {
 	clues := DirStructCluesOf("E:/libs/big belly", "Artist[Jake--Jaccobus]/子层")
 	if len(clues) != 4 {
