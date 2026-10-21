@@ -155,27 +155,27 @@
         表单已改动、尚未保存——保存后生效；此时切换文件/目录会先弹确认，确认切换即丢弃改动
       </div>
       <!-- 剧本G2-G3：选给填值 + 来源小字（「自 一级目录(剥壳)」式；作者双来源标「与目录互证」）；
-           手填兼容——直接打字即清该字段出处，无出处手填值照常提交（后端总结器兜底匹配） -->
+           手填兼容——直接打字即清该字段出处，无出处手填值照常提交（后端总结器兜底匹配）；剧本A 目录模式另预填子树共有赋值（三态小字：子树共有/不一致），改该维度即清小字 -->
       <div class="li-pp-form">
         <div class="li-pp-field">
           <el-input v-model="formAuthor" placeholder="作者" size="small" clearable @input="onAuthorInput" />
-          <span v-if="fieldSourceText('author')" class="li-pp-field-src">{{ fieldSourceText('author') }}</span>
+          <span v-if="dirFieldHint('author') || fieldSourceText('author')" class="li-pp-field-src">{{ dirFieldHint('author') || fieldSourceText('author') }}</span>
         </div>
         <div class="li-pp-field">
           <el-input v-model="formAuthorRole" placeholder="作者角色（如 原画，可空）" size="small" clearable @input="onAuthorRoleInput" />
-          <span v-if="fieldSourceText('authorRole')" class="li-pp-field-src">{{ fieldSourceText('authorRole') }}</span>
+          <span v-if="dirFieldHint('authorRole') || fieldSourceText('authorRole')" class="li-pp-field-src">{{ dirFieldHint('authorRole') || fieldSourceText('authorRole') }}</span>
         </div>
         <div class="li-pp-field">
           <el-input v-model="formTitle" placeholder="作品名" size="small" clearable @input="onTitleInput" />
-          <span v-if="fieldSourceText('title')" class="li-pp-field-src">{{ fieldSourceText('title') }}</span>
+          <span v-if="dirFieldHint('title') || fieldSourceText('title')" class="li-pp-field-src">{{ dirFieldHint('title') || fieldSourceText('title') }}</span>
         </div>
         <div class="li-pp-field">
           <el-input v-model="formTagsText" placeholder="标签（逗号分隔多个，可空）" size="small" clearable @input="onTagsInput" />
-          <span v-if="tagsSourceText()" class="li-pp-field-src">{{ tagsSourceText() }}</span>
+          <span v-if="dirFieldHint('tags') || tagsSourceText()" class="li-pp-field-src">{{ dirFieldHint('tags') || tagsSourceText() }}</span>
         </div>
         <div class="li-pp-field">
           <el-input v-model="formCollection" placeholder="作品集（集归属，可空）" size="small" clearable @input="onCollectionInput" />
-          <span v-if="fieldSourceText('collection')" class="li-pp-field-src">{{ fieldSourceText('collection') }}</span>
+          <span v-if="dirFieldHint('collection') || fieldSourceText('collection')" class="li-pp-field-src">{{ dirFieldHint('collection') || fieldSourceText('collection') }}</span>
         </div>
       </div>
       <!-- 剧本J3：目录模式表单下作用域提示小字（N=子树文件数；0 文件=保存禁用并提示「该目录下没有文件」） -->
@@ -233,6 +233,8 @@
       <p v-if="suggestion.manualDims && suggestion.manualDims.length" class="li-pp-hint">
         手工指定（不参与泛化）：{{ manualDimsText }}
       </p>
+      <!-- 剧本A 附注行：集名对不上文件名段落等如实呈现的说明行 -->
+      <p v-for="(n, ni) in suggestion.notes || []" :key="`sugg-note-${ni}`" class="li-pp-hint">{{ n }}</p>
       <!-- 命中预览（文件与目录两路共用）：全库口径；样例行带目录键时文件名前呈目录键 -->
       <p class="li-pp-hint">
         命中预览：将命中全库 {{ suggestion.hitCount }} 个文件（全库共 {{ suggestion.hitTotal }} 个）<template v-if="suggestion.dropsTailCode">；样例尾部码将被丢弃</template>
@@ -305,6 +307,7 @@ import { ref, computed, watch } from 'vue'
 // 组装传入）——目录头信息（J1）+ 目录线索胶囊（J2）+ 五字段表单与子树作用域
 // 提示（J3）+ 保存 assignDir / 清除目录赋值 clearDirAssignments（J4）+ 建议
 // 卡泛化 generalize 目录寻址（J5）；与文件面板互斥使用、互不联动（J7）。
+// 剧本A——目录表单预填子树共有赋值（三态小字）+ 建议卡附注行（notes）。
 // 其余：忽略/清除、待裁决就地双路裁决、生成规则与差异提示。
 // 请求经父组件 ParseView 的既有 workbench 请求通道（request 以 prop 注入，
 // 不另建事件通道，避免双通道序号错配）；识别事件（recognitionProgress/
@@ -433,6 +436,8 @@ interface PanelRuleSuggestion {
   summary: string
   mappings?: PanelRuleSuggestionMapping[]
   manualDims?: string[]
+  // 剧本A 呈现附注行（如样本属序列群但集名对不上段组合时的说明行）
+  notes?: string[]
   rules?: PanelRule[]
   hitCount: number
   hitTotal: number
@@ -521,7 +526,104 @@ function setForm(a: PanelAssignment | null): void {
   srcAuthorRole.value = ''
   srcTags.value = (a && a.tagClueRefs ? a.tagClueRefs.slice() : [])
   crossAuthorRefs.value = []
+  dirHints.value = {}
   formDirty.value = false
+}
+
+// —— 剧本A 目录表单预填：子树已赋值文件的维度共有值聚合 ——
+// 子树=relKey 前缀（库根空键=全树；非空键带 '/'，防同前缀目录误并）；每维度
+// 三态——全部已赋值文件同值→预填值+小字「子树 N 个文件共有」（N=该维度有赋值
+// 的文件数）；有赋值但不一致→留空+小字「子树内不一致」；无赋值→留空无小字。
+// 用户可改预填值（打字/选线索即清该维度小字）；保存语义不变（子树合并写）。
+const dirHints = ref<Record<string, string>>({})
+
+function subtreeAssignmentsOf(): PanelAssignment[] {
+  const dir = props.dir
+  if (!dir) return []
+  const prefix = dir.relKey ? dir.relKey + '/' : ''
+  return props.assignments.filter((a) => a.relPath.startsWith(prefix))
+}
+
+// dirCommonOf 子树赋值在某维度取值上的聚合：null=无赋值；'mixed'=有赋值但不
+// 一致；否则 { value, count }（count=该维度有赋值的文件数）。
+function dirCommonOf<R>(
+  pick: (a: PanelAssignment) => R | undefined,
+  same: (x: R, y: R) => boolean
+): { value: R; count: number } | 'mixed' | null {
+  let first: R | undefined
+  let count = 0
+  let mixed = false
+  for (const a of subtreeAssignmentsOf()) {
+    const v = pick(a)
+    if (v === undefined) continue
+    count++
+    if (count === 1) {
+      first = v
+    } else if (!same(first as R, v)) {
+      mixed = true
+    }
+  }
+  if (count === 0) return null
+  if (mixed) return 'mixed'
+  return { value: first as R, count }
+}
+
+// applyDirPrefill 目录表单预填落位：五维度三态各就各位；预填不带线索出处
+//（出处小字与子树共有小字互斥呈现）。
+function applyDirPrefill(): void {
+  if (!props.dir) return
+  formAuthor.value = ''
+  formAuthorRole.value = ''
+  formTitle.value = ''
+  formTagsText.value = ''
+  formCollection.value = ''
+  const hints: Record<string, string> = {}
+  const fill = (
+    dim: 'author' | 'authorRole' | 'title' | 'tags' | 'collection',
+    agg: { value: string | string[]; count: number } | 'mixed' | null
+  ): void => {
+    if (agg === null) return
+    if (agg === 'mixed') {
+      hints[dim] = '子树内不一致'
+      return
+    }
+    hints[dim] = `子树 ${agg.count} 个文件共有`
+    if (dim === 'tags') {
+      formTagsText.value = (agg.value as string[]).join('，')
+    } else if (dim === 'author') {
+      formAuthor.value = agg.value as string
+    } else if (dim === 'authorRole') {
+      formAuthorRole.value = agg.value as string
+    } else if (dim === 'title') {
+      formTitle.value = agg.value as string
+    } else {
+      formCollection.value = agg.value as string
+    }
+  }
+  fill('author', dirCommonOf((a) => (a.author ? a.author : undefined), (x, y) => x === y))
+  fill('authorRole', dirCommonOf((a) => (a.authorRole ? a.authorRole : undefined), (x, y) => x === y))
+  fill('title', dirCommonOf((a) => (a.title ? a.title : undefined), (x, y) => x === y))
+  fill('tags', dirCommonOf((a) => (a.tags && a.tags.length ? a.tags : undefined), (x, y) => x.join('，') === y.join('，')))
+  fill('collection', dirCommonOf((a) => (a.collection ? a.collection : undefined), (x, y) => x === y))
+  dirHints.value = hints
+  srcAuthor.value = ''
+  srcAuthorRole.value = ''
+  srcTitle.value = ''
+  srcCollection.value = ''
+  srcTags.value = []
+  crossAuthorRefs.value = []
+  formDirty.value = false
+}
+
+// dirFieldHint 目录模式三态小字（剧本A：子树共有/不一致）；文件模式恒空（走
+// 线索出处小字）。
+function dirFieldHint(dim: 'author' | 'authorRole' | 'title' | 'tags' | 'collection'): string {
+  return props.dir ? dirHints.value[dim] || '' : ''
+}
+
+// 预填小字的逐字段失效：用户改该维度（打字/选线索）即清（值保留可编辑）
+function clearDirHint(dim: 'author' | 'authorRole' | 'title' | 'tags' | 'collection'): void {
+  if (dirHints.value[dim]) dirHints.value = { ...dirHints.value, [dim]: '' }
 }
 
 // —— 剧本G1-G3 + 剧本J2：线索集投影与赋值出处（选给=值+clueRef 同时进表单与 assign 载荷；
@@ -594,27 +696,33 @@ function tagsSourceText(): string {
   return labels.length ? `自 ${labels.join('、')}` : ''
 }
 
-// 手填兼容：打字即清该字段出处（无出处手填值照常提交，后端按「值=某段」兜底匹配）
+// 手填兼容：打字即清该字段出处（无出处手填值照常提交，后端按「值=某段」兜底匹配）；
+// 目录模式同时清该维度预填小字（剧本A：改预填值即失效）
 function onAuthorInput(): void {
   markDirty()
   srcAuthor.value = ''
   crossAuthorRefs.value = []
+  clearDirHint('author')
 }
 function onAuthorRoleInput(): void {
   markDirty()
   srcAuthorRole.value = ''
+  clearDirHint('authorRole')
 }
 function onTitleInput(): void {
   markDirty()
   srcTitle.value = ''
+  clearDirHint('title')
 }
 function onCollectionInput(): void {
   markDirty()
   srcCollection.value = ''
+  clearDirHint('collection')
 }
 function onTagsInput(): void {
   markDirty()
   srcTags.value = []
+  clearDirHint('tags')
 }
 
 // —— 剧本G2-G3：点线索 → 维度选择弹层 → 选给 ——
@@ -650,15 +758,19 @@ function applyClueToDim(dim: string): void {
       srcAuthor.value = clue.ref
       crossAuthorRefs.value = []
     }
+    clearDirHint('author')
   } else if (dim === 'authorRole') {
     formAuthorRole.value = clue.value
     srcAuthorRole.value = clue.ref
+    clearDirHint('authorRole')
   } else if (dim === 'title') {
     formTitle.value = clue.value
     srcTitle.value = clue.ref
+    clearDirHint('title')
   } else if (dim === 'collection') {
     formCollection.value = clue.value
     srcCollection.value = clue.ref
+    clearDirHint('collection')
   } else if (dim === 'tag') {
     // 标签追加：文本追加一段，出处数组与解析后 tags 保持逐位平行
     const parts = formTagsText.value
@@ -670,6 +782,7 @@ function applyClueToDim(dim: string): void {
     refs.push(clue.ref)
     srcTags.value = refs
     formTagsText.value = parts.length ? `${parts.join('，')}，${clue.value}` : clue.value
+    clearDirHint('tags')
   }
   formDirty.value = true
 }
@@ -725,11 +838,15 @@ const diffEntries = computed<{ kind: string; relPath: string; before?: PanelDiff
 })
 
 // —— 面板复位：点行切换文件/点目录名切换目录时表单与裁决/反馈态跟随重置
-//    （文件模式按现值预填；目录模式无单点赋值存储，从空表单起）。
+//    （文件模式按现值预填；目录模式预填子树共有赋值聚合——剧本A）。
 //    未保存改动的切换确认在父组件切换入口（ParseView 暂存目标、用户二选一后
 //    才落选中键）——选中键变化到达这里时，丢弃已被确认，直接复位 ——
 function resetPanelState(): void {
-  setForm(currentAssignment.value)
+  if (props.dir) {
+    applyDirPrefill()
+  } else {
+    setForm(currentAssignment.value)
+  }
   notice.value = ''
   actionError.value = ''
   halfState.value = null
@@ -763,11 +880,17 @@ watch(
 )
 
 // 自动刷新落盘（assignments 投影更新）：表单未被用户改动时跟随预填现值（含已泛化标记随标记位刷新）；
-// 目录模式无赋值预填源，刷新不覆写目录表单（保存后表单内容保留）
+// 目录模式同样跟随（剧本A：未改动时按子树共有赋值聚合重落预填与小字——保存后的
+// 合并写结果即时回显）；已改动则不覆写
 watch(
   () => props.assignments,
   () => {
-    if (!formDirty.value && !props.dir) setForm(currentAssignment.value)
+    if (formDirty.value) return
+    if (props.dir) {
+      applyDirPrefill()
+    } else {
+      setForm(currentAssignment.value)
+    }
   }
 )
 

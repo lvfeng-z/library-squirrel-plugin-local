@@ -319,11 +319,18 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 		}
 		rules = []RuleEntry{rule}
 	case generalizeModeStruct:
-		_, rs, err := buildStructMapRules(sess.RootPath, relPath, fileRec.FileName, &assign)
-		if err != nil {
-			return nil, err
+		// 序列形态路径与总结器共用同一构造（建议即所见即所入）：样本属序列群
+		// 且集名对得上群键元素段组合时入档序列形态条目（sibling 形态跟随 +
+		// 集名捕获 + 仅序列成员产出 when 原子）；否则走既有结构映射构造。
+		if out := trySequenceFormSummary(relPath, fileRec.FileName, &assign, sess.Snapshot); out.matched {
+			rules = out.rules
+		} else {
+			_, rs, err := buildStructMapRules(sess.RootPath, relPath, fileRec.FileName, &assign)
+			if err != nil {
+				return nil, err
+			}
+			rules = rs
 		}
-		rules = rs
 	default:
 		return nil, fmt.Errorf("未知的泛化维度 %q（可用：%s / %s / %s / %s）", mode,
 			generalizeModeFilename, generalizeModeDirLayer, generalizeModeSequence, generalizeModeStruct)
@@ -334,7 +341,7 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 			return nil, err
 		}
 	}
-	if err := m.consumeScopedAssignments(root, scope, rules); err != nil {
+	if err := m.consumeScopedAssignments(root, scope, sess.Snapshot, rules); err != nil {
 		m.warnf("泛化消费赋值失败（规则已入档）: %v", err)
 	}
 	started := m.scheduleRecognitionRefresh(root)
@@ -351,20 +358,53 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 	return &GenerationResult{Rule: views[0], Rules: views, VerificationStarted: started}, nil
 }
 
-// combinedRuleDeclarations 组合规则集在单文件上的声明求值（消费判据）：各规则
-// 独立上下文、与流水线逐规则求值同构，任一规则模式未命中即整体不产出（组合
-// 规则须全部命中才算覆盖）。MatchInput 由快照记录构造（FileName/DirNames/
-// RelPath）。
-func combinedRuleDeclarations(rules []RuleEntry, f *SnapFile) []MetadataDeclaration {
-	in := &MatchInput{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath}
+// combinedRuleDeclarations 组合规则集在单文件上的声明求值（消费判据）：兄弟
+// 群组定群规则先于提取规则求值（首个命中的定群写入群组上下文，与流水线分组
+// 段同构；其余定群规则不再求值）——群组序号等条件操作数与群组前缀提取自该
+// 上下文取值；其余规则在共享上下文内依序求值（目录命中/捕获绑定逐规则累积，
+// 与流水线单文件单上下文同构），任一规则模式未命中即整体不产出（组合规则须
+// 全部命中才算覆盖）。带生效条件的动作按流水线两遍执行语义求值（第二遍可见
+// 全部无条件声明）。MatchInput 由快照记录构造，siblings 为同目录兄弟全集
+// （定群成群判定的求值输入，可为空——空时定群规则恒不命中）。
+func combinedRuleDeclarations(rules []RuleEntry, f *SnapFile, siblings []string) []MetadataDeclaration {
+	in := &MatchInput{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath, Siblings: siblings}
+	ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
 	var decls []MetadataDeclaration
+	var conditional []struct{ rule *RuleEntry }
+	grouped := false
 	for i := range rules {
-		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
-		if !rules[i].Pattern.Evaluate(in, nil, ctx) {
+		rule := &rules[i]
+		if _, isSibling := rule.Pattern.(*SiblingPattern); isSibling {
+			if grouped {
+				continue
+			}
+			if !rule.Pattern.Evaluate(in, nil, ctx) {
+				return nil
+			}
+			grouped = true
+			continue
+		}
+		if !rule.Pattern.Evaluate(in, nil, ctx) {
 			return nil
 		}
-		for _, action := range rules[i].Extractions {
-			if decl, ok := action.Apply(rules[i].ID, ctx); ok {
+		if hasConditionalAction(rule.Extractions) {
+			conditional = append(conditional, struct{ rule *RuleEntry }{rule})
+		}
+		for _, action := range rule.Extractions {
+			if action.When != nil {
+				continue
+			}
+			if decl, ok := action.Apply(rule.ID, ctx); ok {
+				decls = append(decls, decl)
+			}
+		}
+	}
+	for _, match := range conditional {
+		for _, action := range match.rule.Extractions {
+			if action.When == nil || !action.When.Holds(ctx, decls) {
+				continue
+			}
+			if decl, ok := action.Apply(match.rule.ID, ctx); ok {
 				decls = append(decls, decl)
 			}
 		}
@@ -426,14 +466,23 @@ func stripConsumedDimensions(assign SessionAssignment, decls []MetadataDeclarati
 // consumeScopedAssignments 泛化即接管的消费剥离：以本次新入档的规则对作用域内
 // 每个文件求值，某赋值维度的全部指定值被规则声明复现即从该文件赋值剥离该维度；
 // 全维度剥空→删除赋值；残存赋值保留并置已泛化标记（全消费的赋值删除即无标记）。
-// 裁决（adjudicate）生成物不经此消费。
-func (m *SessionManager) consumeScopedAssignments(root string, scope []*SnapFile, rules []RuleEntry) error {
+// 定群规则的成群判定携带同目录兄弟全集（快照口径）——序列形态条目（sibling +
+// 集名捕获 + 仅序列成员产出条件）的消费与入档后重识别同一求值口径。裁决
+// （adjudicate）生成物不经此消费。
+func (m *SessionManager) consumeScopedAssignments(root string, scope []*SnapFile, snap *RecognitionSnapshot, rules []RuleEntry) error {
 	if len(scope) == 0 || len(rules) == 0 {
 		return nil
 	}
+	siblingsByDir := make(map[string][]string)
+	if snap != nil {
+		for i := range snap.Files {
+			f := &snap.Files[i]
+			siblingsByDir[f.DirRelKey] = append(siblingsByDir[f.DirRelKey], f.FileName)
+		}
+	}
 	declsByRel := make(map[string][]MetadataDeclaration, len(scope))
 	for _, f := range scope {
-		declsByRel[f.RelPath] = combinedRuleDeclarations(rules, f)
+		declsByRel[f.RelPath] = combinedRuleDeclarations(rules, f, siblingsByDir[f.DirRelKey])
 	}
 	now := time.Now().UnixMilli()
 	_, err := m.mutateSession(root, func(sess *WorkbenchSession) error {

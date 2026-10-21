@@ -59,6 +59,9 @@ type RuleSuggestion struct {
 	Mappings []RuleSuggestionMapping `json:"mappings"`
 	// ManualDims 手工指定维度的说明（值不对应任何段，不参与泛化）。
 	ManualDims []string `json:"manualDims,omitempty"`
+	// Notes 呈现附注行（如样本属序列群但集名对不上段组合时，退回既有形态
+	// 并附「集名无法对应文件名段落，未生成提取式规则」）。
+	Notes []string `json:"notes,omitempty"`
 	// Rules 将入档的组合规则摘要（目录层/文件名/库根名条目序列）。
 	Rules []*GeneratedRuleView `json:"rules"`
 	// HitCount 命中预览（全库）：除样本文件外将被组合规则完整覆盖的文件数；
@@ -734,15 +737,64 @@ func (m *SessionManager) applyStructSummary(root, relPath, dirRelKey string) (*R
 	if fileRec == nil {
 		return nil, fmt.Errorf("识别全景中无文件 %s 的记录（磁盘可能与快照不一致），请重新识别", relPath)
 	}
+	// 序列形态路径（建议即所见即所入）：样本属序列群且集名对得上群键元素段
+	// 组合时产出序列形态规则（sibling 形态跟随 + 集名捕获，无目录层锚定）；
+	// 属序列群但对不上段组合时退回既有结构映射形态并附说明行；不属序列群
+	// 完全走既有形态（与现状零差异）。
+	out := trySequenceFormSummary(relPath, fileRec.FileName, &assign, sess.Snapshot)
+	if out.matched {
+		out.sugg.HitCount, out.sugg.HitTotal, out.sugg.Samples = previewSequenceFormRules(out.rules, sess.Snapshot, relPath)
+		if dirAddressed {
+			out.sugg.RelPath = dirRelKey
+		}
+		return out.sugg, nil
+	}
 	sugg, rules, err := buildStructMapRules(sess.RootPath, relPath, fileRec.FileName, &assign)
 	if err != nil {
-		return nil, err
+		if !out.unmatched {
+			return nil, err
+		}
+		// 集名纯手打（无任何结构段可映射）：建议卡退回手工指定形态并附说明行
+		//（剧本A 边界行——对不上段组合时如实呈现，不硬造提取式规则）。
+		sugg = manualOnlySeqSuggestion(relPath, &assign)
+		if dirAddressed {
+			sugg.RelPath = dirRelKey
+		}
+		sugg.HitTotal = len(sess.Snapshot.Files)
+		return sugg, nil
+	}
+	if out.unmatched {
+		sugg.Notes = append(sugg.Notes, seqNameUnmatchedNote)
 	}
 	sugg.HitCount, sugg.HitTotal, sugg.Samples = previewStructRules(rules, sess.Snapshot, relPath)
 	if dirAddressed {
 		sugg.RelPath = dirRelKey
 	}
 	return sugg, nil
+}
+
+// manualOnlySeqSuggestion 集名对不上段组合且无任何结构段可映射时的退回建议卡：
+// 各维度按手工指定呈现（不参与泛化）+ 说明行——无将入档条目（Rules 空）。
+func manualOnlySeqSuggestion(relPath string, assign *SessionAssignment) *RuleSuggestion {
+	sugg := &RuleSuggestion{RelPath: relPath, Summary: "全部赋值维度为手工指定（不参与泛化）"}
+	add := func(dim MetadataDimension, value string) {
+		sugg.ManualDims = append(sugg.ManualDims, fmt.Sprintf("%s=%s（手工指定，不参与泛化）", qnaDimensionLabel(dim), value))
+		sugg.Mappings = append(sugg.Mappings, RuleSuggestionMapping{Dimension: string(dim), From: "手工指定"})
+	}
+	if assign.Author != "" {
+		add(DimAuthor, assign.Author)
+	}
+	if assign.Title != "" {
+		add(DimTitle, assign.Title)
+	}
+	if assign.Collection != "" {
+		add(DimCollection, assign.Collection)
+	}
+	for _, tag := range assign.Tags {
+		add(DimTag, tag)
+	}
+	sugg.Notes = append(sugg.Notes, seqNameUnmatchedNote)
+	return sugg
 }
 
 // previewStructRules 命中预览（全库）：全库文件逐一经组合规则求值（各规则独立
