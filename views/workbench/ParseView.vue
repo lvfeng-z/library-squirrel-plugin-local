@@ -326,19 +326,52 @@
                     <button type="button" class="li-ws-filter-btn" :disabled="candBusy" @click="ignoreCandidate(c)">忽略</button>
                   </div>
                 </div>
-                <!-- 收纳分组：已归集（只读回看，确认集名随卡回带） -->
+                <!-- 收纳分组：已归集（与待归集卡同构〔剧本1〕：键名=所在目录的目录解析
+                     面板入口、成员文件名块联动右栏；右上「撤销归集」〔剧本2〕；确认集名随卡回带） -->
                 <div v-if="(snapshot.confirmedCandidates || []).length" class="li-ws-cand-bin">
                   <button type="button" class="li-ws-fold-head" @click="binConfirmed = !binConfirmed">
                     <span class="li-ws-fold-arrow" :class="{ 'is-open': !binConfirmed }">▸</span>
                     <span class="li-ws-fold-title">已归集 {{ (snapshot.confirmedCandidates || []).length }}</span>
                   </button>
                   <div v-show="!binConfirmed" class="li-ws-cand-binbody">
+                    <el-alert
+                      v-if="candError"
+                      class="li-ws-cand-error"
+                      type="error"
+                      :closable="false"
+                      show-icon
+                      :title="candError"
+                    />
                     <div v-for="c in snapshot.confirmedCandidates || []" :key="`cf-${candKey(c)}`" class="li-ws-cand is-done">
                       <div class="li-ws-cand-head">
-                        <span class="li-ws-cand-key">{{ c.key || '（空键）' }}</span>
+                        <span
+                          class="li-ws-cand-key is-link"
+                          title="打开所在目录的目录解析面板"
+                          @click="showDirCard(c.dir)"
+                        >{{ c.key || '（空键）' }}</span>
                         <span class="li-ws-cand-size">{{ c.size }} 成员</span>
                         <span class="li-ws-cand-src">{{ candSourceLabel(c) }}</span>
                         <span class="li-ws-cand-done">已归集「{{ c.confirmedSetName || c.key }}」</span>
+                        <button
+                          type="button"
+                          class="li-ws-filter-btn li-ws-cand-undo"
+                          :disabled="candBusy"
+                          @click="undoConfirm(c)"
+                        >{{ undoing === candTarget(c) ? '撤销中…' : '撤销归集' }}</button>
+                      </div>
+                      <div class="li-ws-cand-members">
+                        <span
+                          v-for="m in c.members"
+                          :key="m.relPath"
+                          class="li-ws-cand-member"
+                          :class="{ 'is-selected': m.relPath === selectedRelPath }"
+                          :title="m.relPath"
+                          @click="selectFile(m.relPath)"
+                        ><template v-if="m.seqText"><span class="li-ws-seg-seq">#{{ m.seqText }} </span></template><span
+                          v-for="(s, si) in elSpans(fileNameOf(m.relPath), m.elements).spans"
+                          :key="si"
+                          :class="s.kind ? `li-ws-seg-${s.kind}` : ''"
+                        >{{ s.text }}</span><span class="li-ws-cand-ext">{{ elSpans(fileNameOf(m.relPath), m.elements).ext }}</span></span>
                       </div>
                     </div>
                   </div>
@@ -995,6 +1028,24 @@ const restoreCandidate = async (c: SnapCandidate) => {
   try {
     await request('restoreCandidate', { root: session.value.rootPath, target: candTarget(c) })
   } finally {
+    candBusy.value = false
+  }
+}
+// 剧本2 撤销归集：在途态按钮「撤销中…」（undoing 寻址 + candBusy 全墙禁用）；
+// 失败回错误提示、卡片不动；成功后卡随自动重识别的快照事件移回上方候选清单
+// （成员集声明先保持旧值、刷新完成后消失——与忽略/恢复同通路）
+const undoing = ref('')
+const candError = ref('')
+const undoConfirm = async (c: SnapCandidate) => {
+  if (!session.value) return
+  undoing.value = candTarget(c)
+  candBusy.value = true
+  candError.value = ''
+  try {
+    const resp = await request('undoWorkSetCandidate', { root: session.value.rootPath, target: candTarget(c) })
+    if (!resp.ok) candError.value = resp.error || '撤销归集失败'
+  } finally {
+    undoing.value = ''
     candBusy.value = false
   }
 }
@@ -2560,6 +2611,16 @@ onUnmounted(() => {
   color: var(--app-text-primary);
 }
 
+/* 剧本1：已归集卡键名=所在目录的目录解析面板入口（showDirCard(c.dir)，空目录键
+   =库根目录的既有处理） */
+.li-ws-cand-key.is-link {
+  cursor: pointer;
+}
+
+.li-ws-cand-key.is-link:hover {
+  color: var(--app-color-primary);
+}
+
 .li-ws-cand-dir {
   color: var(--app-text-secondary);
 }
@@ -2755,6 +2816,17 @@ onUnmounted(() => {
   color: #1d7a45;
   font-size: 12px;
   margin-left: auto;
+}
+
+/* 剧本2：已归集卡右上「撤销归集」按钮（已归集徽标 margin-left:auto 已推至行尾，
+   按钮紧随其后即右上位；在途态文案切换见 undoConfirm） */
+.li-ws-cand-undo {
+  flex: none;
+}
+
+/* 剧本2：撤销归集失败提示（错误路径：卡片不动） */
+.li-ws-cand-error {
+  margin-bottom: 2px;
 }
 
 .li-ws-cand-restore {

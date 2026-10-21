@@ -1738,3 +1738,119 @@ func TestWorkSetCandidateActions(t *testing.T) {
 		t.Fatal("已确认候选再确认应回可读错误")
 	}
 }
+
+// TestUnconfirmWorkSetCandidate 撤销归集（剧本2）：确认（带既有集行 id）后撤销——
+// 只清成员的集维度赋值（其余维度原样保留、全维度剥空的赋值整条删除），目标移出
+// confirmed 清单、既有集旁路簿记一并清理；随自动重识别候选回主清单（分仓重建按
+// 会话清单）、成员终选声明不再携带 collection；目标不在已归集清单（会话已刷新/
+// 结构已变）时回可读错误、状态不动。撤销动作经识别刷新调度异步落快照，测试内等
+// 在途识别清零后断言（确定性锚点：StartRecognition 返回前同步置在途标记）。
+func TestUnconfirmWorkSetCandidate(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	recognitionSampleTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	snapshotOf := func() *RecognitionSnapshot {
+		t.Helper()
+		sess, err := m.SessionOf(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		if sess.Snapshot == nil {
+			t.Fatal("快照缺席")
+		}
+		return sess.Snapshot
+	}
+	waitIdle := func() {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			m.recogMu.Lock()
+			idle := !m.recogRunning[root]
+			m.recogMu.Unlock()
+			if idle {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("撤销动作触发的识别刷新超时未完成")
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	// 样例树唯一候选：序列目录的结构群（键=库内作者名）；先给首成员预置作者维度
+	// 赋值（撤销清维语义的保留侧锚点）
+	snap := snapshotOf()
+	if len(snap.Candidates) != 1 {
+		t.Fatalf("候选主清单应恰 1 条，实际: %+v", snap.Candidates)
+	}
+	target, members := snap.Candidates[0].target(), snap.Candidates[0].Members
+	if _, err := m.SetAssignment(root, members[0].RelPath, SessionAssignment{Author: "保留作者"}); err != nil {
+		t.Fatalf("预置作者维度赋值失败: %v", err)
+	}
+	if _, _, err := m.ConfirmWorkSetCandidate(root, target, "确认集名", 57); err != nil {
+		t.Fatalf("确认候选失败: %v", err)
+	}
+	waitIdle()
+	snap = snapshotOf()
+	if len(snap.Candidates) != 0 || len(snap.ConfirmedCandidates) != 1 {
+		t.Fatalf("确认后应进 confirmed 分仓: main=%d confirmed=%d",
+			len(snap.Candidates), len(snap.ConfirmedCandidates))
+	}
+	if snap.ConfirmedCandidates[0].target() != target || len(snap.ConfirmedCandidates[0].Members) != len(members) {
+		t.Fatalf("confirmed 分仓卡应携带完整成员: %+v", snap.ConfirmedCandidates[0])
+	}
+
+	// 撤销 → 只清集维度、清单移动、旁路簿记清理
+	sess, affected, err := m.UnconfirmWorkSetCandidate(root, target)
+	if err != nil || affected != len(members) {
+		t.Fatalf("撤销归集不符: %v %d", err, affected)
+	}
+	if pos := slicePos(sess.ConfirmedCandidates, target); pos >= 0 {
+		t.Fatalf("目标应移出 confirmed 清单: %+v", sess.ConfirmedCandidates)
+	}
+	if _, has := sess.ConfirmedSetIDs["确认集名"]; has {
+		t.Fatal("既有集行 id 旁路簿记应一并清理")
+	}
+	for _, mem := range members {
+		if assign := sess.Assignments[mem.RelPath]; assign.Collection != "" {
+			t.Fatalf("成员 %s 的集维度赋值应清空: %+v", mem.RelPath, assign)
+		}
+	}
+	if a := sess.Assignments[members[0].RelPath]; a.Author != "保留作者" {
+		t.Fatalf("撤销只清集维度，其余维度应原样保留: %+v", a)
+	}
+	if _, has := sess.Assignments[members[1].RelPath]; has {
+		t.Fatalf("全维度剥空的成员赋值应整条删除: %+v", sess.Assignments[members[1].RelPath])
+	}
+
+	// 随自动重识别：候选回主清单、成员终选声明不再携带 collection
+	waitIdle()
+	snap = snapshotOf()
+	if len(snap.Candidates) != 1 || len(snap.ConfirmedCandidates) != 0 || len(snap.IgnoredCandidates) != 0 {
+		t.Fatalf("撤销后候选应回主清单: main=%d confirmed=%d ignored=%d",
+			len(snap.Candidates), len(snap.ConfirmedCandidates), len(snap.IgnoredCandidates))
+	}
+	if snap.Candidates[0].target() != target {
+		t.Fatalf("回流候选目标键不符: %q（期望 %q）", snap.Candidates[0].target(), target)
+	}
+	byPath := map[string]SnapFile{}
+	for _, f := range snap.Files {
+		byPath[f.RelPath] = f
+	}
+	for _, mem := range members {
+		for _, d := range byPath[mem.RelPath].Final {
+			if d.Dimension == string(DimCollection) {
+				t.Fatalf("撤销重识别后成员 %s 不应再携带 collection 声明: %+v",
+					mem.RelPath, byPath[mem.RelPath].Final)
+			}
+		}
+	}
+
+	// 错误路径：目标不在已归集清单（撤销后重识别已完成、分仓已重建）→ 可读错误
+	if _, _, err := m.UnconfirmWorkSetCandidate(root, target); err == nil {
+		t.Fatal("目标不在已归集清单时撤销应回可读错误")
+	}
+}

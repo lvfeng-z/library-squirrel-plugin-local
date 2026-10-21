@@ -695,6 +695,77 @@ func (m *SessionManager) ConfirmWorkSetCandidate(root, target, setName string, e
 	return sess, len(cand.Members), nil
 }
 
+// UnconfirmWorkSetCandidate 撤销集名候选的归集（剧本2）：目标在快照 confirmed
+// 分仓内寻址（与前端已归集卡同源），缺席回可读错误、卡片不动（会话已刷新或
+// 识别结构已变）。撤销只清成员的「作品集」维度赋值（collection 置空、出处
+// 引用一并清，其余维度原样保留；全维度剥空的赋值整条删除——与单次赋值「空
+// 赋值=清除」同语义，含已泛化标记一并移除），目标键移出 confirmed 清单，
+// 确认集名的既有集旁路簿记（ConfirmedSetIDs，单键记账）一并清理。赋值写走
+// mutateSession 单点串行，修订号递增驱动增量闸门失效（清赋值后成员目录不再
+// 由赋值集锚定，靠修订号防止旧结论被 mtime 游标复用）；成功后排一轮增量重
+// 识别——完成前快照保持旧态（成员集声明旧值、卡在已归集分仓），完成后候选
+// 重新聚合回主清单、成员集声明消失。返回会话与生效成员数。
+func (m *SessionManager) UnconfirmWorkSetCandidate(root, target string) (*WorkbenchSession, int, error) {
+	if target == "" {
+		return nil, 0, errors.New("候选目标键为空，无法撤销归集")
+	}
+	sess, err := m.loadSession(root)
+	if err != nil {
+		return nil, 0, err
+	}
+	if sess.Snapshot == nil {
+		return nil, 0, errors.New("该会话尚未完成全量识别，无已归集候选可撤销，请先识别")
+	}
+	var cand *SnapCandidate
+	for i := range sess.Snapshot.ConfirmedCandidates {
+		if sess.Snapshot.ConfirmedCandidates[i].target() == target {
+			cand = &sess.Snapshot.ConfirmedCandidates[i]
+			break
+		}
+	}
+	if cand == nil {
+		return nil, 0, errors.New("目标不在已归集清单（会话已刷新或识别结构已变），请刷新候选墙后重试")
+	}
+	// 簿记清理的确认集名：优先 confirmed 分仓卡回带值，缺席（成员赋值此后被
+	// 用户清除）时回退成员赋值现值，均缺席则无簿记可清。
+	setName := cand.ConfirmedSetName
+	if setName == "" {
+		setName = confirmedCollectionOf(*cand, sess.Assignments)
+	}
+	now := time.Now().UnixMilli()
+	sess, err = m.mutateSession(root, func(sess *WorkbenchSession) error {
+		for _, mem := range cand.Members {
+			assign, ok := sess.Assignments[mem.RelPath]
+			if !ok {
+				continue
+			}
+			assign.Collection = ""
+			assign.CollectionClueRef = ""
+			if len(assign.coveredDimensions()) == 0 {
+				// 全维度剥空=清除赋值（含已泛化标记一并移除，与单次赋值通路同语义）
+				delete(sess.Assignments, mem.RelPath)
+				continue
+			}
+			assign.UpdatedAtMs = now
+			sess.Assignments[mem.RelPath] = assign
+		}
+		// 批量清维整体视为一次赋值变更：修订号递增驱动增量闸门失效
+		sess.AssignRevision++
+		if pos := slicePos(sess.ConfirmedCandidates, target); pos >= 0 {
+			sess.ConfirmedCandidates = append(sess.ConfirmedCandidates[:pos], sess.ConfirmedCandidates[pos+1:]...)
+		}
+		if setName != "" {
+			delete(sess.ConfirmedSetIDs, setName)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	m.scheduleRecognitionRefresh(root)
+	return sess, len(cand.Members), nil
+}
+
 // UpdateProfile 档案单点串行读改写：全部档案写（泛化/裁决生成/规则编辑面三入口）
 // 一律经此入口，锁内 Load→mutate→Save 原子完成；mutate 返回错误即中止不落库；
 // 档案不可载入（损坏/版本不符）时拒绝写，不覆写既有档案。
@@ -748,6 +819,7 @@ const (
 	workbenchActionIgnoreCandidate  = "ignoreCandidate"         // 集名候选忽略（会话态分仓；target 寻址）
 	workbenchActionRestoreCandidate = "restoreCandidate"        // 集名候选恢复（移回候选墙主清单）
 	workbenchActionConfirmCandidate = "confirmWorkSetCandidate" // 集名候选确认（成员逐文件写集维度赋值；target+setName+existingSetId）
+	workbenchActionUndoConfirm      = "undoWorkSetCandidate"    // 集名候选撤销归集（清成员集维度赋值、移出 confirmed 分仓；target 寻址）
 
 	// —— 规则管理族（规则子页）——
 	workbenchActionGetRules           = "getRules"           // 规则管理视图（档案条目+内置表+禁用清单+备份态）
@@ -1156,6 +1228,15 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.Decisions = decisionsViewOf(sess)
 	case workbenchActionConfirmCandidate:
 		sess, affected, err := m.ConfirmWorkSetCandidate(req.Root, req.Target, req.SetName, req.ExistingSetID)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Session = summarizeSession(sess)
+		resp.Decisions = decisionsViewOf(sess)
+		resp.Affected = affected
+	case workbenchActionUndoConfirm:
+		sess, affected, err := m.UnconfirmWorkSetCandidate(req.Root, req.Target)
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break
