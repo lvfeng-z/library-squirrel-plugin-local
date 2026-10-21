@@ -145,6 +145,15 @@
             class="li-rules-json-area"
             spellcheck="false"
           />
+          <!-- 仅序列成员产出：保存时对全部提取动作的 when 条件统一并入/移除「群组序号 ≥ 1」原子 -->
+          <div class="li-rules-seq-line">
+            <el-checkbox v-model="editIsSeqOnly">仅序列成员产出</el-checkbox>
+            <span class="li-rules-seq-note">
+              勾选后保存时对上方全部提取动作的 when 条件并入「群组序号 ≥ 1」原子（数值区间式，操作数=群组序号）：
+              只有序列成员（规则定群或文件名元素对齐的结构群）才产出声明，落单文件不产出；取消勾选则移除该原子，
+              其余手写条件原样保留。重开编辑器时，全部动作均含该原子则复选保持勾选；该原子也可直接手写进 JSON 表达。
+            </span>
+          </div>
         </div>
 
         <div class="li-rules-actions">
@@ -324,6 +333,23 @@ function rootFromHash(): string {
   return new URLSearchParams(hash.slice(queryIndex + 1)).get('root') || ''
 }
 
+// 进入时地址携 rule 查询参数（解析视图声明来源「直达编辑」的携参形态）：取走参数
+// 并剥离——历史回退/刷新回到本页时不再重复触发编辑器打开（与工作台页 root 参数
+// 同款取走即剥离语义；其余参数如 root 原样保留）
+function consumeRuleParam(): string {
+  const hash = location.hash || ''
+  const queryIndex = hash.indexOf('?')
+  if (queryIndex < 0) return ''
+  const params = new URLSearchParams(hash.slice(queryIndex + 1))
+  const rule = params.get('rule') || ''
+  if (!rule) return ''
+  params.delete('rule')
+  const rest = params.toString()
+  // 保留 vue-router 写入的 history.state（页面位置簿记），只改写 URL 剥掉该参数
+  history.replaceState(history.state, '', `${location.pathname}${location.search}${hash.slice(0, queryIndex)}${rest ? `?${rest}` : ''}`)
+  return rule
+}
+
 function parseRoute(): string {
   const root = session.value ? session.value.rootPath : rootFromHash()
   if (!root) return `${ROUTE_BASE}workbench-parse`
@@ -358,6 +384,17 @@ async function loadRules(): Promise<void> {
     return
   }
   applyRulesView(resp.rulesView)
+}
+
+// 携规则 ID 进入（解析视图声明来源直达编辑）：规则档案载入后按 ID 打开该规则
+// 编辑态（与列表行「编辑」按钮同一路径）；找不到时不阻断列表呈现，给出提示
+function openRuleById(ruleId: string): void {
+  const rule = rules.value.find((r) => r.id === ruleId)
+  if (!rule) {
+    actionError.value = `未在规则档案中找到规则「${ruleId}」（可能已被删除；内置规则不在档案条目内）`
+    return
+  }
+  openEdit(rule)
 }
 
 // —— 一、列表操作：启停 / 删除 ——
@@ -400,6 +437,8 @@ const editRoles = ref<RoleBindingView[]>([])
 const editDims = ref<DimPolicyView[]>([])
 const editPatternText = ref('')
 const editExtractionsText = ref('')
+// 仅序列成员产出（一等开关）：作用于全部提取动作 when 条件的「群组序号 ≥ 1」原子开关
+const editIsSeqOnly = ref(false)
 const saving = ref(false)
 
 // 新建时的最小可改样例：pattern.captures 与 extractions.captureName 同名呼应
@@ -456,6 +495,7 @@ function openNew(): void {
   editDims.value = []
   editPatternText.value = NEW_PATTERN_SAMPLE
   editExtractionsText.value = NEW_EXTRACTIONS_SAMPLE
+  editIsSeqOnly.value = false
   editOpen.value = true
   actionError.value = ''
 }
@@ -471,6 +511,8 @@ function openEdit(rule: RuleEntryView): void {
   editDims.value = ((synth.dimPolicies || []) as DimPolicyView[]).map((d) => ({ dimension: d.dimension, strategy: d.strategy }))
   editPatternText.value = JSON.stringify(rule.pattern, null, 2)
   editExtractionsText.value = JSON.stringify(rule.extractions ?? [], null, 2)
+  // 派生态由档案动作的 when 内容决定：全部动作均含「群组序号 ≥ 1」原子才勾选
+  editIsSeqOnly.value = checkExtractionsSeqOnly(rule.extractions)
   editOpen.value = true
   actionError.value = ''
 }
@@ -485,6 +527,98 @@ function addRole(): void {
 
 function addDim(): void {
   editDims.value.push({ dimension: 'title', strategy: 'union' })
+}
+
+// —— 仅序列成员产出开关：「群组序号 ≥ 1」原子的构造 / 判别 / 并入 / 移除 ——
+// 群组序号从 1 起，落单文件（不属于任何群组）取值不可用、含它的比较为假，
+// 故该原子成立即「属于任意一个序列」（规则定群或结构群成员），不绑定群组来源。
+
+// 条件表达式节点的松散形态：只按判别字段读写，动作/表达式其余字段一律透传不动
+type CondNode = Record<string, unknown>
+
+function isCondNode(e: unknown): e is CondNode {
+  return typeof e === 'object' && e !== null && !Array.isArray(e)
+}
+
+// 「群组序号 ≥ 1」原子（数值区间式，操作数=群组序号）：与手写 JSON 可表达的形态一致
+function buildSeqAtom(): CondNode {
+  return { kind: 'range', operand: { kind: 'groupSeq' }, min: 1 }
+}
+
+// 原子判别：数值区间式、操作数=群组序号、下界恰为 1、无上界（带上界的更严区间是手写条件，不算本原子）
+function checkSeqAtom(e: unknown): boolean {
+  if (!isCondNode(e) || e['kind'] !== 'range') return false
+  const operand = e['operand']
+  if (!isCondNode(operand) || operand['kind'] !== 'groupSeq') return false
+  return e['min'] === 1 && (e['max'] === undefined || e['max'] === null)
+}
+
+// 原子是否为整棵表达式的必要合取项（从根到原子只经过 and 节点）：or 分支或 not
+// 内层的原子不构成「仅序列成员」限定——落单文件仍可能经析取分支产出，故不参与
+// 派生勾选，也不会被开关移除
+function checkRequiredConjunct(e: unknown): boolean {
+  if (!isCondNode(e)) return false
+  if (checkSeqAtom(e)) return true
+  if (e['kind'] === 'and') {
+    const subs = e['subs']
+    if (Array.isArray(subs)) return subs.some((sub) => checkRequiredConjunct(sub))
+  }
+  return false
+}
+
+// 原子并入单条 when：已含必要合取则幂等返回；既有 and 节点直接追加子项（避免
+// 层层包裹）；其余既有条件以 and 合取；原本无条件则以原子为整棵条件
+function buildWhenWithSeqAtom(when: unknown): unknown {
+  if (when == null) return buildSeqAtom()
+  if (checkRequiredConjunct(when)) return when
+  if (isCondNode(when) && when['kind'] === 'and') {
+    const subs = when['subs']
+    if (Array.isArray(subs)) return { ...when, subs: [...subs, buildSeqAtom()] }
+  }
+  return { kind: 'and', subs: [when, buildSeqAtom()] }
+}
+
+// 从 when 中移除必要合取位置上的全部原子：and 剔除后仅剩一项则收敛为该项、
+// 剔除殆尽则该动作无条件（when 置空）；or / not 子树与叶子节点原样保留
+function buildWhenWithoutSeqAtom(e: unknown): unknown {
+  if (!isCondNode(e)) return e
+  if (checkSeqAtom(e)) return null
+  if (e['kind'] === 'and') {
+    const subs = e['subs']
+    if (Array.isArray(subs)) {
+      const kept = subs
+        .map((sub) => buildWhenWithoutSeqAtom(sub))
+        .filter((sub) => sub !== null && sub !== undefined)
+      if (kept.length === 0) return null
+      if (kept.length === 1) return kept[0]
+      return { ...e, subs: kept }
+    }
+  }
+  return e
+}
+
+// 派生态：全部提取动作的 when 均含必要合取位置的原子才勾选（任一动作不含即不
+// 勾选）；无提取动作时无产出可限定，不勾选
+function checkExtractionsSeqOnly(extractions: unknown): boolean {
+  if (!Array.isArray(extractions) || extractions.length === 0) return false
+  return extractions.every((action) => isCondNode(action) && checkRequiredConjunct(action['when']))
+}
+
+// 开关落到已解析的提取动作数组（保存时调用）：勾选逐动作并入原子、取消逐动作
+// 移除原子；仅改写 when 字段，非对象动作与不含 when 的动作原样透传
+function applySeqSwitch(extractions: unknown[], seqOnly: boolean): unknown[] {
+  return extractions.map((action) => {
+    if (!isCondNode(action)) return action
+    const when = action['when']
+    const nextWhen = seqOnly ? buildWhenWithSeqAtom(when) : buildWhenWithoutSeqAtom(when)
+    if (nextWhen === when) return action
+    if (nextWhen == null) {
+      const rest: CondNode = { ...action }
+      delete rest['when']
+      return rest
+    }
+    return { ...action, when: nextWhen }
+  })
 }
 
 // 前端侧先解析两段 JSON 片段（拼装完整规则对象）；语义校验由后端构造期管线兜底
@@ -514,7 +648,8 @@ async function doSaveRule(): Promise<void> {
     source: editSource.value,
     enabled: editEnabled.value,
     pattern: pattern,
-    extractions: extractions,
+    // 「仅序列成员产出」在保存时统一落到各动作的 when 条件（并入/移除原子）
+    extractions: applySeqSwitch(extractions, editIsSeqOnly.value),
     synthesis: {
       dimPolicies: editDims.value.filter((d) => d.dimension && d.strategy),
       roles: editRoles.value.filter((r) => r.source && r.roleName)
@@ -565,9 +700,12 @@ async function doRollback(): Promise<void> {
 
 onMounted(() => {
   offResponse = Events.On(TOPIC_RESPONSE, onResponse)
+  // 取走即剥离：必须在任何导航发生前读取（进入时地址即携参形态）
+  const ruleParam = consumeRuleParam()
   void (async () => {
     if (!(await restoreSession())) return
     await loadRules()
+    if (ruleParam) openRuleById(ruleParam)
   })()
 })
 
@@ -786,6 +924,19 @@ onUnmounted(() => {
   font-family: Consolas, 'Courier New', monospace;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.li-rules-seq-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.li-rules-seq-note {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-text-secondary);
 }
 
 .li-rules-actions {

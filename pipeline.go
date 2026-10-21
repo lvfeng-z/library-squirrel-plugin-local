@@ -78,7 +78,10 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 // runGroupStage 分组段：对顶层 Pattern 为 SiblingPattern 的启用规则逐条求值，
 // 首个命中的规则把群组分析写入 ctx 并作为定群结果返回（同时返回定群规则 ID，
 // 供识别全景的序号形态重放与规则命中统计消费）；全部不命中返回 nil
-// （独立文件）。禁用规则与非兄弟群组模式的规则不参与本段。
+// （独立文件）。禁用规则与非兄弟群组模式的规则不参与本段。求值上下文的群组
+// 字段另有一类写入方：规则未定群时由合并求值路径的前置结构群对齐补位（见
+// recognition.go 的 mergedFileConclusionWithStructural）——两类群共用同一字段，
+// 群组操作数与群组前缀提取对二者统一生效。
 func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) (*GroupAnalysis, string) {
 	for _, rule := range rules {
 		if !rule.Enabled {
@@ -193,9 +196,9 @@ func (p DeclPredicate) Holds(decls []MetadataDeclaration) bool {
 }
 
 // Holds 对解析上下文与求值时点已产出的声明集求值条件表达式树：nil 恒真。
-// 操作数取值不可用（捕获组未绑定、非群组成员的群组字段）时含该操作数的
-// 相等/不等/区间比较一律为假——条件无法确立则动作不产出（保守取向）；
-// 未知判别类别在构造期已被拦截，此处防御性为假。
+// 操作数取值不可用（捕获组未绑定、非群组成员——既不在规则定群也不在结构群
+// 中——的群组字段）时含该操作数的相等/不等/区间比较一律为假——条件无法确立
+// 则动作不产出（保守取向）；未知判别类别在构造期已被拦截，此处防御性为假。
 func (e *CondExpr) Holds(ctx *ParseContext, decls []MetadataDeclaration) bool {
 	if e == nil {
 		return true

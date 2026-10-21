@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1144,6 +1145,261 @@ func TestStructuralFormGroups(t *testing.T) {
 		if kinds[elKindAuthor] != 1 || kinds[elKindWorkId] != 1 || kinds[elKindSeq] != 1 || kinds[elKindTitle] != 3 {
 			t.Fatalf("乙群成员元素类别不符（作者/作品号/公共×3/序号）：%+v（%v）", els, kinds)
 		}
+	}
+}
+
+// —— 结构群前置对齐与序列成员条件（规则群与结构群统一求值）—— //
+
+// structuralCondRules 序列成员条件测试规则集：集名规则（捕获集名，群组序号
+// ≥1 才产出——「仅序列成员产出」形态）与多成员规则（群组规模 ≥2 才产出常量
+// 标题）。
+func structuralCondRules(t *testing.T) []RuleEntry {
+	t.Helper()
+	num := func(v float64) *float64 { return &v }
+	return []RuleEntry{
+		{
+			ID: "struct-cond-set", Description: "测试：仅序列成员产出集名", Source: RuleSourceManual, Enabled: true,
+			Pattern: mustRegexPattern(t, `^(?P<setname>[^_]+)_(\d{1,4})\.jpg$`, []string{"setname"}),
+			Extractions: []ExtractionAction{{
+				Dimension: DimCollection, From: FromCapture, CaptureName: "setname",
+				When: &CondExpr{Kind: ExprRange, Operand: &CondExpr{Kind: ExprGroupSeq}, Min: num(1)},
+			}},
+		},
+		{
+			ID: "struct-cond-size", Description: "测试：多成员才产出标题", Source: RuleSourceManual, Enabled: true,
+			Pattern: mustRegexPattern(t, `^(?P<setname>[^_]+)_(\d{1,4})\.jpg$`, []string{"setname"}),
+			Extractions: []ExtractionAction{{
+				Dimension: DimTitle, From: FromConstant, Constant: "多成员作品",
+				When: &CondExpr{Kind: ExprRange, Operand: &CondExpr{Kind: ExprGroupSize}, Min: num(2)},
+			}},
+		},
+	}
+}
+
+// structuralCondFiles 序列成员条件测试文件：同目录结构群三成员 + 另一目录的
+// 同形落单文件（同一条集名规则的匹配形态，目录内无同形兄弟）。
+func structuralCondFiles() []ScanFile {
+	return []ScanFile{
+		{FileName: "路灯下的她们_01.jpg", DirNames: []string{"路灯"}, RelPath: "路灯/路灯下的她们_01.jpg"},
+		{FileName: "路灯下的她们_02.jpg", DirNames: []string{"路灯"}, RelPath: "路灯/路灯下的她们_02.jpg"},
+		{FileName: "路灯下的她们_03.jpg", DirNames: []string{"路灯"}, RelPath: "路灯/路灯下的她们_03.jpg"},
+		{FileName: "孤行画集_07.jpg", DirNames: []string{"别处"}, RelPath: "别处/孤行画集_07.jpg"},
+	}
+}
+
+// conclusionByRel 结论按相对路径索引。
+func conclusionByRel(conclusions []FileConclusion) map[string]FileConclusion {
+	byRel := make(map[string]FileConclusion, len(conclusions))
+	for _, c := range conclusions {
+		byRel[c.RelPath] = c
+	}
+	return byRel
+}
+
+// declKey 声明的多重集比对键（维度=值|来源）。
+func declKey(d MetadataDeclaration) string {
+	return string(d.Dimension) + "=" + d.Value + "|" + string(d.Source)
+}
+
+// assertSameDeclSet 断言两组声明为同一多重集。
+func assertSameDeclSet(t *testing.T, label string, want, got []MetadataDeclaration) {
+	t.Helper()
+	seen := make(map[string]int, len(want))
+	for _, d := range want {
+		seen[declKey(d)]++
+	}
+	for _, d := range got {
+		seen[declKey(d)]--
+	}
+	for k, count := range seen {
+		if count != 0 {
+			t.Fatalf("%s 声明集不一致（%s 差 %d；期望 %+v，实际 %+v）", label, k, count, want, got)
+		}
+	}
+}
+
+// TestStructuralGroupMemberCondition 结构群前置后的序列成员条件：结构群成员
+// 的群组序号/规模操作数可取值（序号≥1 与规模≥2 的条件成立、集名与标题声明
+// 产出，结论携带结构群键/序号/规模与序号原文）；同形落单文件的群组操作数取值
+// 不可用——含它的区间比较一律为假（两条规则照常命中计数但不产出声明）。
+func TestStructuralGroupMemberCondition(t *testing.T) {
+	conclusions := MergedRecognition(structuralCondFiles(), structuralCondRules(t), nil, nil)
+	byRel := conclusionByRel(conclusions)
+	if len(conclusions) != 4 {
+		t.Fatalf("结论数 = %d，期望 4", len(conclusions))
+	}
+
+	// 结构群成员：群组字段补位注入（无定群规则 ID）、条件成立、声明产出
+	for rel, wantSeq := range map[string]int{
+		"路灯/路灯下的她们_01.jpg": 1, "路灯/路灯下的她们_02.jpg": 2, "路灯/路灯下的她们_03.jpg": 3,
+	} {
+		c := byRel[rel]
+		if c.Group == nil || c.GroupRuleID != "" || c.Group.Key != "路灯下的她们" ||
+			c.Group.Seq != wantSeq || c.Group.Size != 3 || c.GroupSeqText != fmt.Sprintf("%02d", wantSeq) {
+			t.Fatalf("%s 结构群补位字段不符：group=%+v seqText=%q", rel, c.Group, c.GroupSeqText)
+		}
+		var collection, title int
+		for _, d := range c.Final {
+			if d.Dimension == DimCollection && d.Value == "路灯下的她们" {
+				collection++
+			}
+			if d.Dimension == DimTitle && d.Value == "多成员作品" {
+				title++
+			}
+		}
+		if collection != 1 || title != 1 {
+			t.Fatalf("%s 序列成员条件应全部成立（集名与标题各一条声明），实际集名 %d 条、标题 %d 条（终选: %+v）", rel, collection, title, c.Final)
+		}
+	}
+
+	// 同形落单文件：规则命中计数照常，群组操作数不可用 → 条件为假、零声明
+	lone := byRel["别处/孤行画集_07.jpg"]
+	if lone.Group != nil {
+		t.Fatalf("落单文件不应有群组身份：%+v", lone.Group)
+	}
+	if len(lone.MatchedRuleIDs) != 2 {
+		t.Fatalf("落单文件的两条规则应照常命中（计数不受条件影响），实际命中 %+v", lone.MatchedRuleIDs)
+	}
+	if len(lone.Final) != 0 {
+		t.Fatalf("落单文件含群组操作数的比较为假，不应产出任何声明：%+v", lone.Final)
+	}
+}
+
+// TestGroupFreeRulesUnaffectedByStructuralFill 无群组引用的规则零行为变化：
+// 条件与动作均不引用群组操作数/群组前缀来源的规则，在结构群补位注入的合并
+// 求值（批量干跑入口）与不含结构群补位的纯流水线（RunPipeline）下对同批
+// 文件产出同一声明集——前置对齐只扩大群组引用规则的可表达面，不波及其余。
+func TestGroupFreeRulesUnaffectedByStructuralFill(t *testing.T) {
+	capture := func(id string, dim MetadataDimension, when *CondExpr) RuleEntry {
+		return RuleEntry{
+			ID: id, Description: "测试：无群组引用的提取", Source: RuleSourceManual, Enabled: true,
+			Pattern: mustRegexPattern(t, `^(?P<setname>[^_]+)_(\d{1,4})\.jpg$`, []string{"setname"}),
+			Extractions: []ExtractionAction{{
+				Dimension: dim, From: FromCapture, CaptureName: "setname", When: when,
+			}},
+		}
+	}
+	// 两条规则分别声明不同维度（无条件标题 + 捕获相等条件的作者），合成层无冲突
+	rules := []RuleEntry{
+		capture("group-free-uncond", DimTitle, nil),
+		capture("group-free-capture-eq", DimAuthor, &CondExpr{Kind: ExprEqual,
+			Left:  &CondExpr{Kind: ExprCapture, CaptureName: "setname"},
+			Right: &CondExpr{Kind: ExprString, Str: "路灯下的她们"}}),
+	}
+	files := structuralCondFiles()
+	decisions := RunPipeline(files, rules, nil)
+	conclusions := MergedRecognition(files, rules, nil, nil)
+	byRel := conclusionByRel(conclusions)
+	for _, d := range decisions {
+		c, ok := byRel[d.RelPath]
+		if !ok {
+			t.Fatalf("合并求值缺少 %s 的结论", d.RelPath)
+		}
+		assertSameDeclSet(t, "文件 "+d.RelPath, d.Declarations, c.Final)
+		if fmt.Sprint(c.MatchedRuleIDs) != fmt.Sprint(d.MatchedRuleIDs) {
+			t.Fatalf("文件 %s 命中规则不一致：%v vs %v", d.RelPath, d.MatchedRuleIDs, d.MatchedRuleIDs)
+		}
+		// 条件取值与群组在场与否无关：三份群成员与落单文件的捕获相等条件同判
+		want := 1
+		if strings.HasPrefix(d.FileName, "路灯下的她们_") {
+			want = 2
+		}
+		if len(c.Final) != want {
+			t.Fatalf("文件 %s 声明数 = %d，期望 %d（%+v）", d.RelPath, len(c.Final), want, c.Final)
+		}
+	}
+}
+
+// TestStructuralRecomputeMatchesBatch 单文件重算与批量干跑对同一目录结论一致：
+// 重算通道以磁盘重扫的兄弟名单现场跑同一前置对齐，结构群成员身份与条件声明
+// 与批量入口（每目录预计算）逐文件等价。
+func TestStructuralRecomputeMatchesBatch(t *testing.T) {
+	root := t.TempDir()
+	rels := []string{
+		"路灯/路灯下的她们_01.jpg", "路灯/路灯下的她们_02.jpg", "路灯/路灯下的她们_03.jpg",
+		"别处/孤行画集_07.jpg",
+	}
+	entries := make([]FileEntry, 0, len(rels))
+	for _, rel := range rels {
+		writeTestFile(t, root+"/"+rel, "x")
+		entries = append(entries, FileEntry{FullPath: root + "/" + rel, RelPath: rel})
+	}
+	rules := structuralCondRules(t)
+	lib := BuildLibraryIndex(nil, nil)
+	batch := MergedRecognition(buildScanFiles(entries), rules, lib, nil)
+	byRel := conclusionByRel(batch)
+	h := &LocalImportWorkFetcher{}
+	for _, e := range entries {
+		fp := &FilePluginData{FullPath: e.FullPath, RelPath: e.RelPath}
+		recomputed, _ := h.recomputeFileDecision(fp, rules, lib)
+		want := byRel[e.RelPath]
+		if want.Group == nil {
+			if recomputed.Group != nil {
+				t.Fatalf("%s 重算不应有群组身份：%+v", e.RelPath, recomputed.Group)
+			}
+		} else if recomputed.Group == nil || recomputed.Group.Key != want.Group.Key ||
+			recomputed.Group.Seq != want.Group.Seq || recomputed.Group.Size != want.Group.Size ||
+			recomputed.GroupSeqText != want.GroupSeqText {
+			t.Fatalf("%s 重算结构群身份与干跑不符：%+v/%q vs %+v/%q",
+				e.RelPath, recomputed.Group, recomputed.GroupSeqText, want.Group, want.GroupSeqText)
+		}
+		assertSameDeclSet(t, "文件 "+e.RelPath, want.Final, recomputed.Final)
+	}
+}
+
+// TestRunFullRecognitionStructuralPresentation 全量识别下结构群的快照呈现：
+// 对齐判定前置到求值段后，快照组装消费结论携带的群组信息——群卡（键/规模/
+// 序号原文/命中形态标识）、文件行群组键与「群组前缀=集名候选」线索、未识别
+// 成员升格有线索态；异形落单文件不入群不升格。
+func TestRunFullRecognitionStructuralPresentation(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	// 空格分隔形态：不落测试档案兄弟规则的下划线键形态，由结构群承接
+	writeTestFile(t, root+"/路灯/路灯下的她们 01.jpg", "a")
+	writeTestFile(t, root+"/路灯/路灯下的她们 02.jpg", "b")
+	writeTestFile(t, root+"/路灯/路灯下的她们 03.jpg", "c")
+	writeTestFile(t, root+"/路灯/孤本.jpg", "d")
+
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	sess, _ := m.SessionOf(root)
+	snap := sess.Snapshot
+	if len(snap.Groups) != 1 {
+		t.Fatalf("序列群数量 = %d，期望 1（groups: %+v）", len(snap.Groups), snap.Groups)
+	}
+	g := snap.Groups[0]
+	if g.DirRelKey != "路灯" || g.Key != "路灯下的她们" || g.Size != 3 || g.RuleID != "" ||
+		g.FormName != "尾缀数字" || g.FormKeyExpr != `^(.+?)[ _\-·.．]+\d{1,4}$` || g.FormSeqExpr != `(\d{1,4})$` {
+		t.Fatalf("结构群群卡不符: %+v", g)
+	}
+	if len(g.Members) != 3 {
+		t.Fatalf("结构群成员数 = %d，期望 3（%+v）", len(g.Members), g.Members)
+	}
+	for i, mem := range g.Members {
+		if wantSeq := i + 1; mem.Seq != wantSeq || mem.SeqText != fmt.Sprintf("%02d", wantSeq) {
+			t.Fatalf("成员 %s 序号不符：%d/%q（期望 %d/%02d）", mem.RelPath, mem.Seq, mem.SeqText, wantSeq, wantSeq)
+		}
+		if len(mem.Elements) == 0 {
+			t.Fatalf("成员 %s 缺少元素数组", mem.RelPath)
+		}
+	}
+	fileByRel := make(map[string]SnapFile, len(snap.Files))
+	for _, f := range snap.Files {
+		fileByRel[f.RelPath] = f
+	}
+	member := fileByRel["路灯/路灯下的她们 01.jpg"]
+	if member.State != snapStateClueful || member.GroupKey != "路灯下的她们" || member.GroupSeq != 1 {
+		t.Fatalf("未识别成员文件行呈现不符：%+v", member)
+	}
+	if len(member.Clues) != 1 || member.Clues[0].Kind != clueGroupPrefix || member.Clues[0].Detail != "路灯下的她们" {
+		t.Fatalf("未识别成员线索不符：%+v", member.Clues)
+	}
+	if lone := fileByRel["路灯/孤本.jpg"]; lone.State != snapStatePlain || lone.GroupKey != "" || len(lone.Clues) != 0 {
+		t.Fatalf("异形落单文件不应入群或升格：%+v", lone)
+	}
+	if snap.Stats.TotalFiles != 4 || snap.Stats.Identified != 0 || snap.Stats.Clueful != 3 || snap.Stats.Plain != 1 || snap.Stats.GroupCount != 1 {
+		t.Fatalf("汇总统计不符：%+v", snap.Stats)
 	}
 }
 

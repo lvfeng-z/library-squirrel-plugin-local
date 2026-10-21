@@ -573,3 +573,84 @@ func TestStartThumbnailDeclaresSha256(t *testing.T) {
 		t.Fatalf("③缩略图轨 ExpectedSha256 应为生成字节 sha256(%q)，实得 %v", want, specs[0].ExpectedSha256)
 	}
 }
+
+// TestEmitSelectedWorksChildOrderFollowsGroupSeq 子行序=选择域集内序：集成员
+// 作品的文件名字典序（集名_06 < 集名_1 < 集名_10 < 集名_2）与群组序号数值序
+// （1 < 2 < 6 < 10）不同，批次子行按集内序排列（任务树子项序与识别序一致）。
+// 夹具混排两类成员形态：已识别成员（文件行不落群组键，群归属只在群卡）与
+// 未识别成员（规则群形态，文件行与群卡双携带）——群组序号取值与集序记录同
+// 口径（群卡反查为主、文件行兜底），只读文件行时已识别成员序取零、子行退回
+// 传入字典序（06,1,10,2 而非 1,2,06,10）。集序记录随批次落库（存储键=集业务
+// 键原文），作答身份键与子行身份键同源同值、序号=集内序-1。
+func TestEmitSelectedWorksChildOrderFollowsGroupSeq(t *testing.T) {
+	root := t.TempDir()
+	// 成员按传入序（选择集落库序=文件名字典序）列出：06 → 1 → 10 → 2；
+	// 已识别成员 06/10（文件行无群组键）、未识别成员 1/2（文件行携带群组键）
+	members := []struct {
+		name       string
+		seq        int
+		seqText    string
+		identified bool
+	}{
+		{"集名_06.jpg", 6, "06", true},
+		{"集名_1.jpg", 1, "1", false},
+		{"集名_10.jpg", 10, "10", true},
+		{"集名_2.jpg", 2, "2", false},
+	}
+	sess := &WorkbenchSession{Snapshot: &RecognitionSnapshot{}}
+	works := make([]*SelectableWork, 0, len(members))
+	groupMembers := make([]SnapGroupMember, 0, len(members))
+	for _, m := range members {
+		writeTestFile(t, root+"/乙/"+m.name, m.name)
+		rel := "乙/" + m.name
+		sf := SnapFile{
+			RelPath: rel, FileName: m.name, DirRelKey: "乙",
+			Final: []SnapDecl{{Dimension: string(DimCollection), Value: "集名"}},
+		}
+		if m.identified {
+			// 已识别形态：文件行不落群组键（群归属只在群卡）
+			sf.State = snapStateIdentified
+		} else {
+			// 未识别规则群形态：文件行与群卡双携带群组键与序号
+			sf.State = snapStatePlain
+			sf.GroupKey = "集名"
+			sf.GroupSeq = m.seq
+		}
+		sess.Snapshot.Files = append(sess.Snapshot.Files, sf)
+		groupMembers = append(groupMembers, SnapGroupMember{RelPath: rel, Seq: m.seq, SeqText: m.seqText})
+		works = append(works, &SelectableWork{
+			WorkID: "f:" + rel, Kind: WorkKindSetMember, DirRelKey: "乙",
+			Files: []string{rel}, SetKey: workSetKey("乙", "集名"),
+		})
+	}
+	sess.Snapshot.Groups = append(sess.Snapshot.Groups, SnapGroup{DirRelKey: "乙", Key: "集名", Members: groupMembers})
+	m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
+	ctx := stubPluginCtx{kv: make(map[string]string)}
+	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx}
+
+	resps := collectEmitted(t, h, root, sess, works, "集序批次")
+	if len(resps) != 1 {
+		t.Fatalf("纯 local 批次应为单应答单父，实得 %d 个", len(resps))
+	}
+	if want := "集名_1.jpg,集名_2.jpg,集名_06.jpg,集名_10.jpg"; strings.Join(responseChildNames(resps[0]), ",") != want {
+		t.Fatalf("子行应按集内序（序号数值序 1,2,06,10）排列，实际 %v", responseChildNames(resps[0]))
+	}
+
+	// 集序记录随批次落库：作答全序=集内序、身份键与子行身份键（内容哈希）逐位一致
+	entries, err := h.QueryWorkSetOrder(0, "workSet:集名")
+	if err != nil {
+		t.Fatalf("查询集序作答失败: %v", err)
+	}
+	if len(entries) != len(members) {
+		t.Fatalf("作答应含 %d 条，实得 %d", len(members), len(entries))
+	}
+	children := resps[0].Children
+	for i, e := range entries {
+		if e.SortOrder != int64(i) {
+			t.Fatalf("作答序号应为集内序-1，第 %d 位实得 %d", i+1, e.SortOrder)
+		}
+		if e.SiteWorkId != children[i].SiteWorkId {
+			t.Fatalf("作答第 %d 位身份键应与子行一致（%s），实得 %s", i+1, children[i].SiteWorkId, e.SiteWorkId)
+		}
+	}
+}

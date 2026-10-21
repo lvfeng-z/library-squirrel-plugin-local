@@ -46,7 +46,7 @@
             @click="pickByDim[p.dimension] = j"
           >
             <span class="li-pp-cand-value">{{ dimLabel(c.dimension) }}={{ c.value }}</span>
-            <span class="li-pp-cand-src">{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · {{ c.ruleId }}</template></span>
+            <span class="li-pp-cand-src">{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <span class="li-pp-rule-link" title="跳规则管理子页并打开该规则编辑" @click.stop="emit('openRule', c.ruleId)">{{ c.ruleId }}</span></template></span>
           </button>
         </div>
         <div class="li-pp-row">
@@ -150,6 +150,10 @@
         <el-tag v-if="currentAssignment && currentAssignment.generalized" size="small" type="success">已泛化</el-tag>
         <span v-if="ignored" class="li-pp-sec-note">已忽略</span>
       </h4>
+      <!-- 未保存提示条：表单改动后常驻，保存成功或随目标切换复位时消失 -->
+      <div v-if="formDirty" class="li-pp-unsaved">
+        表单已改动、尚未保存——保存后生效；此时切换文件/目录会先弹确认，确认切换即丢弃改动
+      </div>
       <!-- 剧本G2-G3：选给填值 + 来源小字（「自 一级目录(剥壳)」式；作者双来源标「与目录互证」）；
            手填兼容——直接打字即清该字段出处，无出处手填值照常提交（后端总结器兜底匹配） -->
       <div class="li-pp-form">
@@ -185,6 +189,8 @@
       <div class="li-pp-row">
         <el-button
           v-if="dir"
+          class="li-pp-save"
+          :class="{ 'is-unsaved': formDirty }"
           type="primary"
           size="small"
           :disabled="dir.subtreeFileCount === 0"
@@ -193,6 +199,8 @@
         >保存</el-button>
         <el-button
           v-else
+          class="li-pp-save"
+          :class="{ 'is-unsaved': formDirty }"
           type="primary"
           size="small"
           :loading="assigning || summarizing"
@@ -450,6 +458,8 @@ const emit = defineEmits<{
   (e: 'refresh'): void
   // 剧本J7：目录面板「返回文件面板」（清目录选中态，互斥切回文件面板）
   (e: 'exitDir'): void
+  // 声明来源规则名直达编辑：路由上下文在父组件，由父组件跳规则管理子页并携规则 ID
+  (e: 'openRule', ruleId: string): void
 }>()
 
 // —— 反馈态 ——
@@ -477,12 +487,20 @@ const formTagsText = ref('')
 const formCollection = ref('')
 const assigning = ref(false)
 const ignoring = ref(false)
-// 用户是否改动过表单：改动后自动刷新（assignments 投影更新）不再覆盖预填
-let formDirty = false
+// 用户是否改动过表单（同一标志双职责）：改动后自动刷新（assignments 投影更新）
+// 不再覆盖预填；未保存期间驱动面板内提示条与保存按钮高亮，并供父组件在切换
+// 选中目标（文件/目录互斥切换）前读取做轻量确认
+const formDirty = ref(false)
 
 function markDirty(): void {
-  formDirty = true
+  formDirty.value = true
 }
+
+// 供父组件在切换选中目标（文件/目录互斥切换）前读取：表单是否有未保存改动
+// （读同一标志位，不另建跟踪；父组件据此弹轻量确认）
+defineExpose({
+  isFormDirty: (): boolean => formDirty.value
+})
 
 const currentAssignment = computed<PanelAssignment | null>(() => {
   const rel = props.file ? props.file.relPath : ''
@@ -503,7 +521,7 @@ function setForm(a: PanelAssignment | null): void {
   srcAuthorRole.value = ''
   srcTags.value = (a && a.tagClueRefs ? a.tagClueRefs.slice() : [])
   crossAuthorRefs.value = []
-  formDirty = false
+  formDirty.value = false
 }
 
 // —— 剧本G1-G3 + 剧本J2：线索集投影与赋值出处（选给=值+clueRef 同时进表单与 assign 载荷；
@@ -653,7 +671,7 @@ function applyClueToDim(dim: string): void {
     srcTags.value = refs
     formTagsText.value = parts.length ? `${parts.join('，')}，${clue.value}` : clue.value
   }
-  formDirty = true
+  formDirty.value = true
 }
 
 // —— 剧本G4-G6：规则建议与泛化确认（泛化维度由总结器按线索出处推导，前端不再三选） ——
@@ -707,7 +725,9 @@ const diffEntries = computed<{ kind: string; relPath: string; before?: PanelDiff
 })
 
 // —— 面板复位：点行切换文件/点目录名切换目录时表单与裁决/反馈态跟随重置
-//    （文件模式按现值预填；目录模式无单点赋值存储，从空表单起） ——
+//    （文件模式按现值预填；目录模式无单点赋值存储，从空表单起）。
+//    未保存改动的切换确认在父组件切换入口（ParseView 暂存目标、用户二选一后
+//    才落选中键）——选中键变化到达这里时，丢弃已被确认，直接复位 ——
 function resetPanelState(): void {
   setForm(currentAssignment.value)
   notice.value = ''
@@ -747,7 +767,7 @@ watch(
 watch(
   () => props.assignments,
   () => {
-    if (!formDirty && !props.dir) setForm(currentAssignment.value)
+    if (!formDirty.value && !props.dir) setForm(currentAssignment.value)
   }
 )
 
@@ -804,7 +824,7 @@ async function doSave(): Promise<void> {
   }
   const ok = await runAssign()
   if (!ok) return
-  formDirty = false
+  formDirty.value = false
   notice.value = '已保存赋值（重识别后生效，识别完成本面板自动刷新）'
   suggestion.value = null
   // 全部留空=清除赋值路径：无建议卡
@@ -880,7 +900,7 @@ async function doSaveDir(): Promise<void> {
     actionError.value = resp.error || '保存目录赋值失败'
     return
   }
-  formDirty = false
+  formDirty.value = false
   const affected = resp.affected || 0
   notice.value = `已对 ${affected} 个文件保存赋值（重识别后生效）`
   emit('refresh')
@@ -1214,6 +1234,29 @@ const conclusionSummary = (c?: PanelDiffConclusion | null): string => {
   border-radius: var(--app-radius);
   background: var(--app-tag-warning-bg);
   color: var(--app-tag-warning-text);
+}
+
+/* 未保存提示条：表单改动后常驻，保存成功或随目标切换复位时消失（与识别中状态条同款告警配色） */
+.li-pp-unsaved {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 5px 10px;
+  border-radius: var(--app-radius);
+  background: var(--app-tag-warning-bg);
+  color: var(--app-tag-warning-text);
+}
+
+/* 保存按钮高亮：未保存期间主色描边提示有待保存改动 */
+.li-pp-save.is-unsaved {
+  font-weight: 600;
+  box-shadow: 0 0 0 2px var(--app-color-primary-light, rgba(64, 158, 255, 0.35));
+}
+
+/* 声明来源规则名直达编辑链接（待裁决候选内的规则 ID） */
+.li-pp-rule-link {
+  color: var(--app-color-primary);
+  cursor: pointer;
+  text-decoration: underline dotted;
 }
 
 .li-pp-sec {

@@ -386,7 +386,7 @@
                   </div>
                   <div class="li-ws-pending-cands">
                     <span v-for="(c, j) in p.candidates || []" :key="j" class="li-ws-pending-cand">
-                      {{ dimLabel(c.dimension) }}={{ c.value }}（{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · {{ c.ruleId }}</template>）
+                      {{ dimLabel(c.dimension) }}={{ c.value }}（{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(c.ruleId)" :title="`跳规则管理子页并打开「${c.ruleId}」编辑`">{{ c.ruleId }}</a></template>）
                     </span>
                   </div>
                   <p class="li-ws-pending-reason">{{ p.reason }}</p>
@@ -496,6 +496,14 @@
               <span class="li-ws-panel-title">解析面板</span>
               <button type="button" class="li-ws-panel-btn" title="收起面板" @click="rightCollapsed = true">收起 »</button>
             </div>
+            <!-- 未保存切换确认条：表单有未保存改动时切换选中目标先暂存，二选一后放行 -->
+            <div v-if="pendingSwitch" class="li-ws-switch-confirm">
+              <span>解析面板有未保存的改动，切换将丢弃</span>
+              <span class="li-ws-switch-confirm-actions">
+                <button type="button" class="li-ws-panel-btn is-primary" @click="applyPendingSwitch">丢弃并切换</button>
+                <button type="button" class="li-ws-panel-btn" @click="pendingSwitch = null">留在当前去保存</button>
+              </span>
+            </div>
             <div class="li-ws-panel-body">
               <!-- 剧本J 目录解析面板（卡+解析合一，保存作用子树）：目录头信息+线索胶囊+
                    五字段表单+目录保存/清除+建议卡，全部由 ParsePanel 目录模式承载
@@ -503,6 +511,7 @@
                    文件面板、点目录名回来，不联动文件表单（J7） -->
               <ParsePanel
                 v-if="dirPanelContext"
+                ref="dirPanelRef"
                 :root="session ? session.rootPath : ''"
                 :dir="dirPanelContext"
                 :assignments="assignmentList"
@@ -512,7 +521,8 @@
                 :recognizing="recognizing"
                 :request="request"
                 @refresh="onPanelRefresh"
-                @exit-dir="selectedDirKey = null"
+                @exit-dir="exitDirPanel"
+                @open-rule="openRuleEdit"
               />
               <!-- 边界：右栏空态引导 -->
               <div v-else-if="!selectedRelPath" class="li-ws-panel-guide">
@@ -540,7 +550,7 @@
                   <template v-if="selectedFile.final && selectedFile.final.length">
                     <div v-for="(d, i) in selectedFile.final" :key="i" class="li-ws-decl">
                       <span class="li-ws-decl-main">{{ declLabel(d) }}</span>
-                      <span class="li-ws-decl-src">{{ sourceLabel(d.source) }}<template v-if="d.ruleId"> · {{ d.ruleId }}</template></span>
+                      <span class="li-ws-decl-src">{{ sourceLabel(d.source) }}<template v-if="d.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(d.ruleId)" :title="`跳规则管理子页并打开「${d.ruleId}」编辑`">{{ d.ruleId }}</a></template></span>
                     </div>
                   </template>
                   <p v-else class="li-ws-empty">无终选声明</p>
@@ -557,6 +567,7 @@
                      选给五字段+出处小字 → 保存 → 规则建议卡（泛化成规则/仅保留本次赋值）+
                      待裁决就地双路裁决 / 忽略 / 清除赋值 / 生成规则与差异提示；请求走本组件唯一通道 -->
                 <ParsePanel
+                  ref="filePanelRef"
                   :root="session ? session.rootPath : ''"
                   :file="selectedFile"
                   :assignments="assignmentList"
@@ -566,6 +577,7 @@
                   :recognizing="recognizing"
                   :request="request"
                   @refresh="onPanelRefresh"
+                  @open-rule="openRuleEdit"
                 />
               </template>
             </div>
@@ -1088,6 +1100,19 @@ function subRoute(key: string): string {
   return `${ROUTE_BASE}${key}?root=${encodeURIComponent(root)}`
 }
 
+// 声明来源规则名直达编辑：跳规则管理子页并携规则 ID——子页载入规则档案后按 ID
+// 打开该规则编辑态。规则名出现在待裁决候选/终选声明的来源小字处（含泛化规则），
+// 点击即达修改口，消除「泛化规则无修改口」的认知缺口
+function ruleEditRoute(ruleId: string): string {
+  const base = subRoute('workbench-rules')
+  return `${base}${base.indexOf('?') >= 0 ? '&' : '?'}rule=${encodeURIComponent(ruleId)}`
+}
+
+// 面板声明来源规则名点击（待裁决候选内的规则 ID）：路由上下文在本组件，统一由此跳转
+function openRuleEdit(ruleId: string): void {
+  location.hash = ruleEditRoute(ruleId)
+}
+
 // 恢复会话：按 hash 库根激活（含档案对账）；库根缺席时若恰一个会话则直接恢复；
 // 会话可能刚经入口确认建立（导航先于建会话落库到达），短暂重试
 async function restoreSession(attempt = 0): Promise<string> {
@@ -1265,8 +1290,45 @@ function onListScroll(e: Event): void {
 // —— 主从联动：点清单行 → 选中键落右栏（与复选不互斥：行选中不改选择集，
 //    复选改选择集不改行选中） —— //
 
+// 右栏解析面板实例引用（文件/目录两实例互斥挂载，活动实例非空）：切换选中
+// 目标前读面板的未保存标志（面板表单改动标志，见 ParsePanel）
+const filePanelRef = ref<{ isFormDirty: () => boolean } | null>(null)
+const dirPanelRef = ref<{ isFormDirty: () => boolean } | null>(null)
+
+function panelDirty(): boolean {
+  const filePanel = filePanelRef.value
+  if (filePanel && filePanel.isFormDirty()) return true
+  const dirPanel = dirPanelRef.value
+  return dirPanel ? dirPanel.isFormDirty() : false
+}
+
+// 未保存切换确认：表单有未保存改动时切换选中目标先暂存于此——「丢弃并切换」
+// 才落选中键（面板随选中变化的复位逻辑在此之后才触发），「留在当前去保存」丢弃
+// 暂存、保持现选中，用户先保存再切换即无确认直通
+type PendingSwitch = { kind: 'file'; relPath: string } | { kind: 'dir'; relKey: string } | { kind: 'exitDir' }
+const pendingSwitch = ref<PendingSwitch | null>(null)
+
+function applyPendingSwitch(): void {
+  const pending = pendingSwitch.value
+  pendingSwitch.value = null
+  if (!pending) return
+  if (pending.kind === 'file') {
+    selectedDirKey.value = null
+    selectedRelPath.value = pending.relPath
+  } else if (pending.kind === 'dir') {
+    selectedDirKey.value = pending.relKey
+  } else {
+    selectedDirKey.value = null
+  }
+}
+
 function selectFile(relPath: string): void {
-  // 点文件行 = 现有联动（F5/J7）；同时让出目录解析面板（目录与文件面板互斥，文件优先）
+  // 点文件行 = 现有联动（F5/J7）；同时让出目录解析面板（目录与文件面板互斥，文件优先）。
+  // 面板有未保存改动时暂存切换目标待确认；点同一文件仅让出目录面板也属切换，同样确认
+  if (panelDirty() && (relPath !== selectedRelPath.value || selectedDirKey.value !== null)) {
+    pendingSwitch.value = { kind: 'file', relPath: relPath }
+    return
+  }
   selectedDirKey.value = null
   selectedRelPath.value = relPath
 }
@@ -1597,7 +1659,22 @@ const selectedDirNode = computed<TreeDirNode | null>(() =>
 )
 
 function showDirCard(relKey: string): void {
+  // 点目录名进入目录面板；面板有未保存改动时暂存切换目标待确认（含目录间切换）
+  if (panelDirty() && relKey !== selectedDirKey.value) {
+    pendingSwitch.value = { kind: 'dir', relKey: relKey }
+    return
+  }
   selectedDirKey.value = relKey
+}
+
+// 目录面板「返回文件面板」：让出目录面板会卸载目录表单实例、未保存改动随之
+// 丢失，故同样先确认
+function exitDirPanel(): void {
+  if (panelDirty()) {
+    pendingSwitch.value = { kind: 'exitDir' }
+    return
+  }
+  selectedDirKey.value = null
 }
 
 // 剧本J 目录模式上下文（与 ParsePanel PanelDirContext 同构；ParsePanel 目录模式消费）
@@ -1961,6 +2038,12 @@ onUnmounted(() => {
 .li-ws-header-link {
   font-size: 13px;
   color: var(--app-color-primary);
+}
+
+/* 声明来源规则名直达编辑链接（待裁决候选/终选声明的来源小字内） */
+.li-ws-rule-link {
+  color: var(--app-color-primary);
+  text-decoration: underline dotted;
 }
 
 .li-ws-banner {
@@ -2905,6 +2988,30 @@ onUnmounted(() => {
   background: var(--app-bg-surface);
   color: var(--app-text-regular);
   cursor: pointer;
+}
+
+/* 未保存切换确认条（解析面板表单有未保存改动时切换文件/目录目标的轻量确认） */
+.li-ws-switch-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--app-border-color-light);
+  background: var(--app-tag-warning-bg);
+  color: var(--app-tag-warning-text);
+  font-size: 12px;
+}
+
+.li-ws-switch-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.li-ws-switch-confirm .li-ws-panel-btn.is-primary {
+  border-color: var(--app-color-primary);
+  color: var(--app-color-primary);
 }
 
 .li-ws-panel-body {

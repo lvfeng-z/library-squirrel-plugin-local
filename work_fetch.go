@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -300,6 +301,23 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		}
 	}
 
+	// 集成员按选择域集内序排入批次：集间按集键字典序（与选择域集视图序一致）、
+	// 集内按快照群组序号升序（群组序号从 1 起）。群组序号取值与集序记录同口径
+	//（buildGroupSeqIndex：快照群卡按成员路径反查为主、文件行群组序兜底）——
+	// 已识别成员的文件行不落群组键，只读文件行会取零而丢集内序。批次子行按
+	// 集内序组织——任务树子项序与识别序一致；快照查不到群组序的成员（游标
+	// 异常形态）序取零，排最前并保持传入稳定序。
+	groupSeqByPath := buildGroupSeqIndex(sess.Snapshot)
+	for _, dirKey := range dirOrder {
+		setMembers := plans[dirKey].setMembers
+		sort.SliceStable(setMembers, func(i, j int) bool {
+			if setMembers[i].SetKey != setMembers[j].SetKey {
+				return setMembers[i].SetKey < setMembers[j].SetKey
+			}
+			return groupSeqByPath[setMembers[i].Files[0]].seq < groupSeqByPath[setMembers[j].Files[0]].seq
+		})
+	}
+
 	// 子行素材归集：逐文件裁决归属后按原序扁平进批次（目录序内先目录聚合作品
 	// 后集成员——同目录文件不按归属重排）
 	items := make([]batchFileItem, 0)
@@ -336,6 +354,11 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		batchMs := time.Now().UnixMilli()
 		parentID := fmt.Sprintf("local-batch-%d", batchMs)
 		ch <- buildBatchParentResponse(parentID, taskName, "local://"+root, identity.Local.Key, children)
+
+		// 集序记录：为有集归属的子行按集归集落记录（集内原站序作答的数据源，
+		// 批次号=父行身份同源毫秒时间戳）；写入失败不阻断批次产出——记录缺席
+		// 时作答为空，集原站序维持现状
+		h.recordWorkSetOrders(sess.Snapshot, items, batchMs)
 	}
 
 	// 批次摘要：按实际产出子行的 siteKey 统计归属分布——local 子行键空（继承
@@ -649,7 +672,7 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 			// 核验结论）；既有集行 id 只经会话旁路簿记随快照 confirmedCandidates
 			// 呈现，不进创建链。
 			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
-				SiteWorkSetId: "workSet:" + decl.Value,
+				SiteWorkSetId: workSetBizKey(decl.Value),
 				WorkSetName:   decl.Value,
 			})
 		}
@@ -705,7 +728,7 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 				continue
 			}
 			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
-				SiteWorkSetId: "workSet:" + m.Name,
+				SiteWorkSetId: workSetBizKey(m.Name),
 				WorkSetName:   m.Name,
 			})
 		}

@@ -125,6 +125,12 @@ type FileConclusion struct {
 	GroupRuleID   string
 	GroupSeqText  string
 	GroupElements []SnapEl
+	// GroupFormName / GroupFormKeyExpr / GroupFormSeqExpr 为结构群携带的命中
+	// 形态标识（形态名与键/序号提取式原文，供快照群卡呈现与序列形态的规则
+	// 泛化器消费）；规则定群成员为空。
+	GroupFormName    string
+	GroupFormKeyExpr string
+	GroupFormSeqExpr string
 	// MatchedRuleIDs 为提取段命中的规则 ID（与流水线结论一致）。
 	MatchedRuleIDs []string
 	// Final 为合成终选声明（会话赋值的指定维度已覆盖档案结论）。
@@ -147,6 +153,8 @@ func MergedRecognition(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, a
 		key := dirGroupKey(file.DirNames)
 		siblingsByDir[key] = append(siblingsByDir[key], file.FileName)
 	}
+	// 结构群前置对齐每目录只算一次，成员按相对路径登记，各单文件结论取用
+	structuralByRel := precomputeStructuralMembers(files, rules, lib, siblingsByDir)
 	conclusions := make([]FileConclusion, 0, len(files))
 	for _, file := range files {
 		in := &MatchInput{
@@ -157,22 +165,43 @@ func MergedRecognition(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, a
 		if a, ok := assigns[file.RelPath]; ok {
 			assign = &a
 		}
-		conclusions = append(conclusions, mergedFileConclusionOf(in, rules, lib, assign))
+		conclusions = append(conclusions, mergedFileConclusionWithStructural(in, rules, lib, assign, structuralByRel[file.RelPath]))
 	}
 	return conclusions
 }
 
-// mergedFileConclusionOf 单文件「档案规则 ∪ 会话赋值」合并求值结论——合并逻辑
-// 的唯一实现：先流水线两段求值（分组定群+提取声明，注入库内谓词索引），再合成
-// 终选与待裁决，最后会话赋值按维度覆盖终选（特异性压过普适）；群组成员附定群
-// 规则 ID 与序号原文（识别全景的序列形态呈现）。识别干跑（MergedRecognition
-// 批量入口）与执行期单文件重算（recomputeFileDecision，消费任务级赋值快照）
-// 共用本函数——风险13（干跑与会话模式合并同源）的构造性保证。
+// mergedFileConclusionOf 单文件「档案规则 ∪ 会话赋值」合并求值结论（无批量
+// 预计算形态）：结构群补位在函数内现场对齐，其余与批量入口同一实现——
+// 执行期单文件重算通道经此与识别干跑共用合并逻辑。
 func mergedFileConclusionOf(in *MatchInput, rules []RuleEntry, lib *LibraryIndex, assign *SessionAssignment) FileConclusion {
+	return mergedFileConclusionWithStructural(in, rules, lib, assign, nil)
+}
+
+// mergedFileConclusionWithStructural 单文件「档案规则 ∪ 会话赋值」合并求值结论
+// ——合并逻辑的唯一实现：先流水线两段求值（分组定群+提取声明，注入库内谓词
+// 索引），再合成终选与待裁决，最后会话赋值按维度覆盖终选（特异性压过普适）。
+// 结构群补位发生在规则定群段之后、提取段之前：规则群优先，规则未定群且前置
+// 对齐成群时把结构群分析写入求值上下文的同一群组字段（群组序号/规模操作数
+// 与群组前缀提取对规则群与结构群统一可取值；落单文件群组字段保持空，含群组
+// 操作数的比较取值不可用恒为假）。pre 为批量入口预计算的结构群成员信息，
+// nil 时现场对齐（与批量入口同一实现，两期结论一致）。群组成员附定群规则 ID
+// 与序号原文；识别干跑（MergedRecognition 批量入口）与执行期单文件重算
+// （recomputeFileDecision，消费任务级赋值快照）共用本函数。
+func mergedFileConclusionWithStructural(in *MatchInput, rules []RuleEntry, lib *LibraryIndex, assign *SessionAssignment, pre *structuralMemberInfo) FileConclusion {
 	ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
 	decision := FileDecision{RelPath: in.RelPath, FileName: in.FileName}
 	group, groupRuleID := runGroupStage(rules, in, lib, ctx)
 	decision.Group = group
+	if group == nil {
+		if pre == nil {
+			pre = alignStructuralForFile(in, rules, lib)
+		}
+		if pre != nil {
+			ctx.Group = pre.analysis
+		}
+	} else {
+		pre = nil // 规则群优先：已定群文件不再取结构群身份
+	}
 	runExtractionStage(&decision, rules, in, lib, ctx)
 	final, pending := Synthesize(decision.Declarations, AggregateSynthesis(rules))
 	if assign != nil {
@@ -189,18 +218,18 @@ func mergedFileConclusionOf(in *MatchInput, rules []RuleEntry, lib *LibraryIndex
 			if text, has := sibling.seqTextOf(in.FileName); has {
 				c.GroupSeqText = text
 			}
-			// 文件名元素数组（批次二）：与结构群同一拆分基座；已知名提示=目录
-			// 名+剥壳变体（库根提示在求值输入不可得，省略——规则群成员的元素
-			// 呈现不依赖它）。
-			hints := make([]string, 0, 2*len(in.DirNames))
-			hints = append(hints, in.DirNames...)
-			for _, name := range in.DirNames {
-				if _, inner, ok := stripShell(name); ok {
-					hints = append(hints, inner)
-				}
-			}
-			c.GroupElements = splitFilenameElements(BaseNameWithoutExt(in.FileName), hints)
+			// 文件名元素数组（规则定群群成员）：与结构群同一拆分基座；已知名
+			// 提示=目录名+剥壳变体（库根提示在求值输入不可得，省略——规则群
+			// 成员的元素呈现不依赖它）。
+			c.GroupElements = splitFilenameElements(BaseNameWithoutExt(in.FileName), dirNameHints(in.DirNames))
 		}
+	} else if pre != nil && pre.analysis != nil {
+		// 结构群补位成员：群组分析、序号原文、元素数组与命中形态标识随结论
+		// 携带（快照组装消费）；定群规则 ID 保持空——结构群非规则产物。
+		c.Group = pre.analysis
+		c.GroupSeqText = pre.seqText
+		c.GroupElements = pre.elements
+		c.GroupFormName, c.GroupFormKeyExpr, c.GroupFormSeqExpr = pre.formName, pre.formKeyExpr, pre.formSeqExpr
 	}
 	return c
 }
@@ -711,10 +740,16 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 			}
 		}
 		if c.Group != nil {
-			gkey := c.DirRelKey + "\x00" + c.Group.Key
+			// 群组键含定群规则 ID：规则群与结构群同目录同键时分立（一文件至多
+			// 一个群组身份，两类群不合并呈现）。
+			gkey := c.DirRelKey + "\x00" + c.Group.Key + "\x00" + c.GroupRuleID
 			group := groups[gkey]
 			if group == nil {
 				group = &SnapGroup{DirRelKey: c.DirRelKey, Key: c.Group.Key, Size: c.Group.Size, RuleID: c.GroupRuleID}
+				if c.GroupRuleID == "" {
+					// 结构群：命中形态标识随结论携带（规则定群不带形态）
+					group.FormName, group.FormKeyExpr, group.FormSeqExpr = c.GroupFormName, c.GroupFormKeyExpr, c.GroupFormSeqExpr
+				}
 				groups[gkey] = group
 			}
 			group.Members = append(group.Members, SnapGroupMember{
@@ -737,32 +772,44 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		snap.Pending = append(snap.Pending, prevPendingByPath[prevFile.RelPath]...)
 		snap.Files = append(snap.Files, prevFile)
 		if prevFile.GroupKey != "" && in.prev != nil {
-			gkey := prevFile.DirRelKey + "\x00" + prevFile.GroupKey
-			if !reusedGroups[gkey] {
-				reusedGroups[gkey] = true
-				for i := range in.prev.Groups {
-					g := in.prev.Groups[i]
-					if g.DirRelKey == prevFile.DirRelKey && g.Key == prevFile.GroupKey {
+			for i := range in.prev.Groups {
+				g := in.prev.Groups[i]
+				if g.DirRelKey == prevFile.DirRelKey && g.Key == prevFile.GroupKey {
+					// 复用键与结论侧同构（目录 + 分组键 + 定群规则 ID），命中即
+					// 整组拷贝一次
+					gkey := prevFile.DirRelKey + "\x00" + prevFile.GroupKey + "\x00" + g.RuleID
+					if !reusedGroups[gkey] {
+						reusedGroups[gkey] = true
 						groups[gkey] = &g
-						break
 					}
+					break
 				}
 			}
 		}
 	}
 
-	// —— 元素4 结构性兄弟群（规则无关）：同目录「公共前缀+分隔符+尾缀序号」
-	// 形态且未被规则定群的文件聚为结构群（≥2 成员，序号原文保留零填充形态）；
-	// 无终选声明的成员记「群组前缀=集名候选」线索（元素3）并升格有线索态。——
-	detectStructuralGroups(snap)
+	// —— 元素4 结构性兄弟群（规则无关）的对齐判定已前置到求值段（规则定群段
+	// 之后、提取段之前，结论携带成员信息），此处只做呈现标记：未识别成员记
+	// 文件行群组键与「群组前缀=集名候选」线索（元素3）并升格有线索态；已识别
+	// 成员仅入群呈现，不加线索不升格。跳过复用目录的群零操作（成员文件复用
+	// 旧记录时已带标记，重复标记为幂等空转）。——
+	structuralMarks := make([]SnapGroup, 0)
+	for _, group := range groups {
+		if group.RuleID == "" {
+			structuralMarks = append(structuralMarks, *group)
+		}
+	}
+	markStructuralPresentation(snap, structuralMarks)
 
-	// 序列群按集内序排列成员、落元素公共性终判（规则定群群；结构群已在
-	// detectStructuralGroups 内终判），群间按目录与分组键排序（呈现稳定序）
+	// 序列群按集内序排列成员、规则定群群落元素公共性终判（结构群的元素终判在
+	// 对齐装配内完成），群间按目录与分组键排序（呈现稳定序）
 	for _, group := range groups {
 		sort.SliceStable(group.Members, func(i, j int) bool {
 			return group.Members[i].Seq < group.Members[j].Seq
 		})
-		markCommonElements(group)
+		if group.RuleID != "" {
+			markCommonElements(group)
+		}
 		snap.Groups = append(snap.Groups, *group)
 	}
 	sort.Slice(snap.Groups, func(i, j int) bool {
@@ -841,7 +888,9 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assigns map[string]Session
 	for _, item := range c.Pending {
 		file.PendingDims = append(file.PendingDims, string(item.Dimension))
 	}
-	if c.Group != nil {
+	if c.Group != nil && c.GroupRuleID != "" {
+		// 文件行群组键只落规则定群成员；结构群成员的文件行群组键由呈现标记步
+		// 决定（仅未识别成员落键——已识别成员的群组信息只在群卡呈现）
 		file.GroupKey = c.Group.Key
 		file.GroupSeq = c.Group.Seq
 	}
@@ -882,12 +931,14 @@ func snapPendingOf(c *FileConclusion, item PendingItem) SnapPending {
 
 // detectClues 对未识别文件探测疑似线索（元素3）：谓词原子以文件名去扩展名与
 // 群组公共前缀分别对库内作者/标签名集合求值；pixiv 页级 ID 形态用内置惯例
-// 探测器；群组成员无元数据声明时公共前缀即集名候选线索。
+// 探测器；群组成员无元数据声明时公共前缀即集名候选线索。群组前缀的谓词匹配
+// 与线索呈现只吃规则定群产物——结构群成员的群组键线索由快照呈现标记步补
+// （未识别成员才落线索，与结构群前置前的呈现一致）。
 func detectClues(c *FileConclusion, lib *LibraryIndex) []SnapClue {
 	var clues []SnapClue
 	baseName := BaseNameWithoutExt(c.FileName)
 	names := []string{baseName}
-	if c.Group != nil && c.Group.Prefix != "" && c.Group.Prefix != baseName {
+	if c.GroupRuleID != "" && c.Group != nil && c.Group.Prefix != "" && c.Group.Prefix != baseName {
 		names = append(names, c.Group.Prefix)
 	}
 	seen := make(map[string]bool)
@@ -916,18 +967,20 @@ func detectClues(c *FileConclusion, lib *LibraryIndex) []SnapClue {
 	if pageID := parsePixivPageWorkID(baseName); pageID != "" {
 		clues = append(clues, SnapClue{Kind: cluePixivID, Detail: pageID})
 	}
-	if c.Group != nil && c.Group.Prefix != "" {
+	if c.GroupRuleID != "" && c.Group != nil && c.Group.Prefix != "" {
 		clues = append(clues, SnapClue{Kind: clueGroupPrefix, Detail: c.Group.Prefix})
 	}
 	return clues
 }
 
-// alignEntry 元素对齐判定的参与文件：文件名元素数组与非分隔元素下标序列。
+// alignEntry 元素对齐判定的参与文件：文件名、相对路径与元素数组、非分隔元素
+// 下标序列（求值段前置对齐与快照直检共用同一参与形态）。
 type alignEntry struct {
-	file   *SnapFile
-	base   string
-	els    []SnapEl
-	nonSep []int
+	fileName string
+	relPath  string
+	base     string
+	els      []SnapEl
+	nonSep   []int
 }
 
 // tailCodeRange 豁免的尾部随机码位区间 [lo,hi]（末词=末个分隔 run 之后拼接
@@ -999,34 +1052,38 @@ func (e *alignEntry) alignSignature(seqPos int) string {
 	return b.String()
 }
 
-// detectStructuralGroups 在全景聚合后探测规则无关的兄弟群结构（元素4「成群/
-// 落单」判定的结构面，元素对齐判定版——批次二 F3 统摄既有四形态）：对未被
-// 规则定群的文件按元素拆分基座分解，同目录文件做元素序列对齐——非分隔元素
-// 数一致、除序号位外全部相同（对齐取值=剥壳内名，尾部随机码元素豁免等值）
-// 且序号位为 1-4 位纯数字、各成员取值互异 → 成群。多候选数字位并存时取
-// 「各文件间取值互异度最大」的数字位为序号、其余数字位入键（决策1 A，
-// 2026-10-20 拍板），同互异度取最左位；被先选群消费的文件不再参与后续位。
+// newAlignEntry 构造元素对齐判定的参与文件：去扩展名正文按已知名提示拆元素
+// 数组，并记非分隔元素下标序列。
+func newAlignEntry(fileName, relPath string, hints []string) *alignEntry {
+	base := BaseNameWithoutExt(fileName)
+	e := &alignEntry{fileName: fileName, relPath: relPath, base: base, els: splitFilenameElements(base, hints)}
+	for j, el := range e.els {
+		if el.Kind != elKindSep {
+			e.nonSep = append(e.nonSep, j)
+		}
+	}
+	return e
+}
+
+// detectStructuralGroups 在快照文件集上直接探测规则无关的兄弟群结构（快照直检
+// 入口，原始快照形态的消费方）：对未被规则定群的文件按元素拆分基座分解，同
+// 目录文件做元素序列对齐——非分隔元素数一致、除序号位外全部相同（对齐取值=
+// 剥壳内名，尾部随机码元素豁免等值）且序号位为 1-4 位纯数字、各成员取值互异
+// → 成群。多候选数字位并存时取「各文件间取值互异度最大」的数字位为序号、
+// 其余数字位入键，同互异度取最左位；被先选群消费的文件不再参与后续位。
 // 群携带命中形态标识（形态名按序号元素上下文映射、提取式取自形态表——命名
-// 层；键文本优先由形态键提取式复原〔既有形态键语义零漂移〕，新形态退公共
-// 元素拼接兜底）。无终选声明且无线索冲突的成员补「群组前缀」线索并升格有
-// 线索态（元素3 集名候选）；已识别成员仅入群呈现，不加线索不升格。
+// 层；键文本优先由形态键提取式复原，新形态退公共元素拼接兜底）。无终选声明
+// 且无线索冲突的成员补「群组前缀」线索并升格有线索态（元素3 集名候选）；
+// 已识别成员仅入群呈现，不加线索不升格。识别主流水线的结构群由求值段的前置
+// 对齐产出（同一判定实现）、经结论注入快照组装，不走本入口。
 func detectStructuralGroups(snap *RecognitionSnapshot) {
-	fileByPath := make(map[string]*SnapFile, len(snap.Files))
 	byDir := make(map[string][]*alignEntry)
 	for i := range snap.Files {
 		f := &snap.Files[i]
-		fileByPath[f.RelPath] = f
 		if f.GroupKey != "" {
 			continue
 		}
-		base := BaseNameWithoutExt(f.FileName)
-		e := &alignEntry{file: f, base: base, els: splitFilenameElements(base, elementHints(snap.RootPath, f.RelPath))}
-		for j, el := range e.els {
-			if el.Kind != elKindSep {
-				e.nonSep = append(e.nonSep, j)
-			}
-		}
-		byDir[f.DirRelKey] = append(byDir[f.DirRelKey], e)
+		byDir[f.DirRelKey] = append(byDir[f.DirRelKey], newAlignEntry(f.FileName, f.RelPath, elementHints(snap.RootPath, f.RelPath)))
 	}
 	dirKeys := make([]string, 0, len(byDir))
 	for k := range byDir {
@@ -1034,91 +1091,231 @@ func detectStructuralGroups(snap *RecognitionSnapshot) {
 	}
 	sort.Strings(dirKeys)
 	for _, dirKey := range dirKeys {
-		entries := byDir[dirKey]
-		// 逐候选数字位分桶（桶内签名一致 = 除序号位外全部相同）。
-		type provisional struct {
-			seqPos    int
-			members   []*alignEntry
-			diversity int
-		}
-		var provs []provisional
-		maxCount := 0
-		for _, e := range entries {
-			if n := len(e.nonSep); n > maxCount {
-				maxCount = n
-			}
-		}
-		for pos := 0; pos < maxCount; pos++ {
-			buckets := make(map[string][]*alignEntry)
-			order := make([]string, 0)
-			for _, e := range entries {
-				if pos >= len(e.nonSep) || e.els[e.nonSep[pos]].Kind != elKindSeq {
-					continue
-				}
-				sig := e.alignSignature(pos)
-				if _, ok := buckets[sig]; !ok {
-					order = append(order, sig)
-				}
-				buckets[sig] = append(buckets[sig], e)
-			}
-			for _, sig := range order {
-				b := buckets[sig]
-				distinct := make(map[string]bool, len(b))
-				for _, e := range b {
-					distinct[elValue(e.els[e.nonSep[pos]])] = true
-				}
-				// 序号取值互异（防 `1,1` 假序列——同基名不同扩展名不成群）。
-				if len(b) >= 2 && len(distinct) == len(b) {
-					provs = append(provs, provisional{seqPos: pos, members: b, diversity: len(distinct)})
-				}
-			}
-		}
-		// 决策1 A：互异度降序、位次升序贪心选群；已消费文件不再入群。
-		sort.SliceStable(provs, func(i, j int) bool {
-			if provs[i].diversity != provs[j].diversity {
-				return provs[i].diversity > provs[j].diversity
-			}
-			return provs[i].seqPos < provs[j].seqPos
-		})
-		consumed := make(map[*alignEntry]bool)
-		for _, pr := range provs {
-			members := make([]*alignEntry, 0, len(pr.members))
-			for _, e := range pr.members {
-				if !consumed[e] {
-					members = append(members, e)
-				}
-			}
-			if len(members) < 2 {
+		groups := alignStructuralDir(dirKey, byDir[dirKey])
+		snap.Groups = append(snap.Groups, groups...)
+		markStructuralPresentation(snap, groups)
+	}
+}
+
+// markStructuralPresentation 结构群呈现标记：未识别成员记文件行群组键与集内
+// 序、补「群组前缀=集名候选」线索（同类别线索去重）并升格有线索态；已识别
+// 成员仅入群卡呈现，不加线索不升格（其群组信息只在群卡）。
+func markStructuralPresentation(snap *RecognitionSnapshot, groups []SnapGroup) {
+	if len(groups) == 0 {
+		return
+	}
+	fileByPath := make(map[string]*SnapFile, len(snap.Files))
+	for i := range snap.Files {
+		fileByPath[snap.Files[i].RelPath] = &snap.Files[i]
+	}
+	for _, group := range groups {
+		for _, mem := range group.Members {
+			f := fileByPath[mem.RelPath]
+			if f == nil || len(f.Final) > 0 {
 				continue
 			}
-			group := buildAlignedGroup(dirKey, members, pr.seqPos)
-			snap.Groups = append(snap.Groups, group)
-			for _, mem := range group.Members {
-				f := fileByPath[mem.RelPath]
-				if f == nil || len(f.Final) > 0 {
-					continue
-				}
-				f.GroupKey = group.Key
-				f.GroupSeq = mem.Seq
-				dup := false
-				for _, c := range f.Clues {
-					if c.Kind == clueGroupPrefix {
-						dup = true
-						break
-					}
-				}
-				if !dup {
-					f.Clues = append(f.Clues, SnapClue{Kind: clueGroupPrefix, Detail: group.Key})
-				}
-				if f.State == snapStatePlain {
-					f.State = snapStateClueful
+			f.GroupKey = group.Key
+			f.GroupSeq = mem.Seq
+			dup := false
+			for _, c := range f.Clues {
+				if c.Kind == clueGroupPrefix {
+					dup = true
+					break
 				}
 			}
-			for _, e := range members {
-				consumed[e] = true
+			if !dup {
+				f.Clues = append(f.Clues, SnapClue{Kind: clueGroupPrefix, Detail: group.Key})
+			}
+			if f.State == snapStatePlain {
+				f.State = snapStateClueful
 			}
 		}
 	}
+}
+
+// alignStructuralDir 同目录候选文件集的结构群对齐判定（唯一实现）：逐候选数字
+// 位分桶（桶内签名一致 = 除序号位外全部相同），互异度降序、位次升序贪心选群，
+// 被先选群消费的文件不再入群。参与文件先按文件名稳定排序——批量干跑（扫描
+// 序）、单文件重算（磁盘重扫序）与快照直检（快照文件序）在此归一为同一顺序，
+// 各入口结论一致。候选集由调用方给足（排除规则定群文件）。
+func alignStructuralDir(dirKey string, entries []*alignEntry) []SnapGroup {
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].fileName < entries[j].fileName })
+	// 逐候选数字位分桶（桶内签名一致 = 除序号位外全部相同）。
+	type provisional struct {
+		seqPos    int
+		members   []*alignEntry
+		diversity int
+	}
+	var provs []provisional
+	maxCount := 0
+	for _, e := range entries {
+		if n := len(e.nonSep); n > maxCount {
+			maxCount = n
+		}
+	}
+	for pos := 0; pos < maxCount; pos++ {
+		buckets := make(map[string][]*alignEntry)
+		order := make([]string, 0)
+		for _, e := range entries {
+			if pos >= len(e.nonSep) || e.els[e.nonSep[pos]].Kind != elKindSeq {
+				continue
+			}
+			sig := e.alignSignature(pos)
+			if _, ok := buckets[sig]; !ok {
+				order = append(order, sig)
+			}
+			buckets[sig] = append(buckets[sig], e)
+		}
+		for _, sig := range order {
+			b := buckets[sig]
+			distinct := make(map[string]bool, len(b))
+			for _, e := range b {
+				distinct[elValue(e.els[e.nonSep[pos]])] = true
+			}
+			// 序号取值互异（防 `1,1` 假序列——同基名不同扩展名不成群）。
+			if len(b) >= 2 && len(distinct) == len(b) {
+				provs = append(provs, provisional{seqPos: pos, members: b, diversity: len(distinct)})
+			}
+		}
+	}
+	// 互异度降序、位次升序贪心选群；已消费文件不再入群。
+	sort.SliceStable(provs, func(i, j int) bool {
+		if provs[i].diversity != provs[j].diversity {
+			return provs[i].diversity > provs[j].diversity
+		}
+		return provs[i].seqPos < provs[j].seqPos
+	})
+	consumed := make(map[*alignEntry]bool)
+	var groups []SnapGroup
+	for _, pr := range provs {
+		members := make([]*alignEntry, 0, len(pr.members))
+		for _, e := range pr.members {
+			if !consumed[e] {
+				members = append(members, e)
+			}
+		}
+		if len(members) < 2 {
+			continue
+		}
+		groups = append(groups, buildAlignedGroup(dirKey, members, pr.seqPos))
+		for _, e := range members {
+			consumed[e] = true
+		}
+	}
+	return groups
+}
+
+// structuralMemberInfo 单文件的结构群前置对齐产物：注入求值上下文的群组分析
+// （与规则定群共用群组字段的补位值）与快照组装消费的序号原文、元素数组、命中
+// 形态标识。
+type structuralMemberInfo struct {
+	analysis    *GroupAnalysis
+	seqText     string
+	elements    []SnapEl
+	formName    string
+	formKeyExpr string
+	formSeqExpr string
+}
+
+// dirNameHints 求值输入可得的名字提示：各级目录名 + 剥壳变体（库根名在求值
+// 输入不可得，不参与结构群元素拆分——与规则定群群成员的元素拆分同口径）。
+func dirNameHints(dirNames []string) []string {
+	hints := make([]string, 0, 2*len(dirNames))
+	hints = append(hints, dirNames...)
+	for _, name := range dirNames {
+		if _, inner, ok := stripShell(name); ok {
+			hints = append(hints, inner)
+		}
+	}
+	return hints
+}
+
+// siblingRelPath 同目录兄弟文件名的相对路径：取本文件相对路径的目录前缀拼接
+// 兄弟文件名（即本文件自身时原样返回）。
+func siblingRelPath(relPath, fileName string) string {
+	idx := strings.LastIndex(relPath, "/")
+	if idx < 0 {
+		return fileName
+	}
+	return relPath[:idx+1] + fileName
+}
+
+// precomputeStructuralMembers 批量入口的结构群前置对齐：每目录一次——先对目录
+// 内各文件求规则定群段（规则群优先，命中者不入候选——与单文件结论内的定群
+// 求值同一输入），再对候选文件集跑对齐判定的唯一实现，成员按相对路径登记供
+// 各单文件结论取用。
+func precomputeStructuralMembers(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, siblingsByDir map[string][]string) map[string]*structuralMemberInfo {
+	byDir := make(map[string][]ScanFile, len(siblingsByDir))
+	for _, file := range files {
+		key := dirGroupKey(file.DirNames)
+		byDir[key] = append(byDir[key], file)
+	}
+	out := make(map[string]*structuralMemberInfo)
+	for key, dirFiles := range byDir {
+		hints := dirNameHints(dirFiles[0].DirNames)
+		var entries []*alignEntry
+		for _, file := range dirFiles {
+			in := &MatchInput{
+				FileName: file.FileName, DirNames: file.DirNames, RelPath: file.RelPath,
+				Siblings: siblingsByDir[key],
+			}
+			if group, _ := runGroupStage(rules, in, lib, &ParseContext{DirNames: file.DirNames, Depth: len(file.DirNames)}); group != nil {
+				continue
+			}
+			entries = append(entries, newAlignEntry(file.FileName, file.RelPath, hints))
+		}
+		for _, g := range alignStructuralDir(dirRelKeyOf(dirFiles[0].RelPath), entries) {
+			for _, mem := range g.Members {
+				out[mem.RelPath] = &structuralMemberInfo{
+					analysis:    &GroupAnalysis{Key: g.Key, Prefix: g.Key, Seq: mem.Seq, Size: g.Size},
+					seqText:     mem.SeqText,
+					elements:    mem.Elements,
+					formName:    g.FormName,
+					formKeyExpr: g.FormKeyExpr,
+					formSeqExpr: g.FormSeqExpr,
+				}
+			}
+		}
+	}
+	return out
+}
+
+// alignStructuralForFile 单文件通道的结构群前置对齐：兄弟名单（含自身，与求值
+// 输入同一份）先逐名求规则定群段排除已定群者，再跑与批量入口同一实现的对齐
+// 判定，取本文件所在群的成员信息；落单（不在任何群）返回 nil。
+func alignStructuralForFile(in *MatchInput, rules []RuleEntry, lib *LibraryIndex) *structuralMemberInfo {
+	hints := dirNameHints(in.DirNames)
+	seen := make(map[string]bool, len(in.Siblings))
+	var entries []*alignEntry
+	for _, name := range in.Siblings {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		rel := siblingRelPath(in.RelPath, name)
+		sib := &MatchInput{FileName: name, DirNames: in.DirNames, RelPath: rel, Siblings: in.Siblings}
+		if group, _ := runGroupStage(rules, sib, lib, &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}); group != nil {
+			continue
+		}
+		entries = append(entries, newAlignEntry(name, rel, hints))
+	}
+	self := siblingRelPath(in.RelPath, in.FileName)
+	for _, g := range alignStructuralDir(dirRelKeyOf(in.RelPath), entries) {
+		for _, mem := range g.Members {
+			if mem.RelPath != self {
+				continue
+			}
+			return &structuralMemberInfo{
+				analysis:    &GroupAnalysis{Key: g.Key, Prefix: g.Key, Seq: mem.Seq, Size: g.Size},
+				seqText:     mem.SeqText,
+				elements:    mem.Elements,
+				formName:    g.FormName,
+				formKeyExpr: g.FormKeyExpr,
+				formSeqExpr: g.FormSeqExpr,
+			}
+		}
+	}
+	return nil
 }
 
 // buildAlignedGroup 对齐桶 → 结构群：序号文本=序号元素对齐取值；形态名按
@@ -1157,7 +1354,7 @@ func buildAlignedGroup(dirKey string, members []*alignEntry, seqPos int) SnapGro
 		st := elValue(e.els[e.nonSep[seqPos]])
 		sv, _ := strconv.Atoi(st)
 		group.Members = append(group.Members, SnapGroupMember{
-			RelPath: e.file.RelPath, Seq: sv, SeqText: st,
+			RelPath: e.relPath, Seq: sv, SeqText: st,
 			Elements: append([]SnapEl(nil), e.els...),
 		})
 	}

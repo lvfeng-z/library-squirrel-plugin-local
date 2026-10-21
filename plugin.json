@@ -13,6 +13,7 @@
         "id": "main",
         "name": "本地导入",
         "description": "从本地路径导入文件",
+        "options": ["workOrderQuery"],
         "siteKey": "local",
         "urlPatterns": [
           "^local://.*",
