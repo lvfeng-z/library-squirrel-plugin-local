@@ -821,6 +821,12 @@ const (
 	workbenchActionConfirmCandidate = "confirmWorkSetCandidate" // 集名候选确认（成员逐文件写集维度赋值；target+setName+existingSetId）
 	workbenchActionUndoConfirm      = "undoWorkSetCandidate"    // 集名候选撤销归集（清成员集维度赋值、移出 confirmed 分仓；target 寻址）
 
+	// —— 集规则泛化族（已归集泛化入口 · 迭代三 · 剧本C；target 寻址
+	// confirmed 分仓卡，泛化主体=集整体——key+members+confirmedSetName）——
+	workbenchActionSummarizeWorkSetRule  = "summarizeWorkSetRule"  // 集规则草稿推导（共同形态+规则草稿+命中预览+调整面线索清单；不写档案）
+	workbenchActionGeneralizeWorkSetRule = "generalizeWorkSetRule" // 集规则泛化入档（草稿即所见即所入；集成员作用域消费+验证轮）
+	workbenchActionSaveWorkSetRuleAdjust = "saveWorkSetRuleAdjust" // 集规则调整面保存（线索指派→规则组装入档；效果与泛化入档相同）
+
 	// —— 规则管理族（规则子页）——
 	workbenchActionGetRules           = "getRules"           // 规则管理视图（档案条目+内置表+禁用清单+备份态）
 	workbenchActionSaveRule           = "saveRule"           // 规则条目保存（新建/编辑，构造期单条校验）
@@ -884,6 +890,22 @@ type workbenchFrontendRequest struct {
 	// ExistingSetID confirmWorkSetCandidate 携带的库内既有集行 id（A 档「归入
 	// 既有集」命中时 >0，记会话旁路簿记随快照呈现）。
 	ExistingSetID int64 `json:"existingSetId,omitempty"`
+
+	// —— 集规则泛化族载荷（迭代三 · 剧本C 调整面；维度指派复用
+	// AuthorClueRef/TitleClueRef/TagClueRefs——可指向目录层或文件名段线索）——
+	// CollectionSegRefs 集名捕获的文件名段组合（setSegN 引用，须连续段）。
+	CollectionSegRefs []string `json:"collectionSegRefs,omitempty"`
+	// VariableSegRefs 标记为可变的文件名段（构造上与未指派段同泛化消费）。
+	VariableSegRefs []string `json:"variableSegRefs,omitempty"`
+	// SeqSegRef 序号段指派（默认=末段序号元素；须为序号段线索）。
+	SeqSegRef string `json:"seqSegRef,omitempty"`
+	// DirAnchorRef 目录锚定指派（dirLevel[n]/dirLevelStripped[n]；捕获规则
+	// 模式 And 目录层锚）。
+	DirAnchorRef string `json:"dirAnchorRef,omitempty"`
+	// SetRuleMemberOnlyOff saveWorkSetRuleAdjust 关闭「仅序列成员产出」时为真
+	//（缺省假=勾选仅序列成员产出，与草稿默认一致——bool 载荷以关向为极性，
+	// 未携带即保持默认）。
+	SetRuleMemberOnlyOff bool `json:"setRuleMemberOnlyOff,omitempty"`
 	// GeneralizeMode generalize 的泛化维度：filename（按文件名形态）/
 	// dirLayer（按目录层）/ sequence（按序列形态）。
 	GeneralizeMode string `json:"generalizeMode,omitempty"`
@@ -971,6 +993,10 @@ type workbenchFrontendResponse struct {
 	// RuleSuggestion summarizeRule 的总结器产物（建议卡载荷：人话规则+逐维度
 	// 映射+命中预览统计+样例应用；未入档，确认走 generalize mode=struct）。
 	RuleSuggestion *RuleSuggestion `json:"ruleSuggestion,omitempty"`
+	// SetRuleSuggestion summarizeWorkSetRule 的集规则草稿（集整体推导：集名+
+	// 成员+共同形态+规则草稿+命中预览+调整面线索清单与默认指派；Failed=true
+	// 为剧本步5a 失败态——泛化置灰、调整可用）。
+	SetRuleSuggestion *SetRuleSuggestion `json:"setRuleSuggestion,omitempty"`
 	// Domain getPanorama 附带的资源选择域（阶段4：作品原子结构+集视图，前端
 	// 选择交互与选择集键的单一推导源）。
 	Domain *WorkDomain `json:"domain,omitempty"`
@@ -1244,6 +1270,40 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.Session = summarizeSession(sess)
 		resp.Decisions = decisionsViewOf(sess)
 		resp.Affected = affected
+	case workbenchActionSummarizeWorkSetRule:
+		sugg, err := m.ApplyWorkSetRuleSummary(req.Root, req.Target)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.SetRuleSuggestion = sugg
+	case workbenchActionGeneralizeWorkSetRule:
+		result, err := m.ApplyWorkSetRuleGeneralize(req.Root, req.Target)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Rule = result.Rule
+		resp.Rules = result.Rules
+		resp.Started = result.VerificationStarted
+	case workbenchActionSaveWorkSetRuleAdjust:
+		result, err := m.ApplyWorkSetRuleAdjust(req.Root, req.Target, setRuleAdjustInput{
+			AuthorClueRef:     req.AuthorClueRef,
+			TitleClueRef:      req.TitleClueRef,
+			TagClueRefs:       req.TagClueRefs,
+			CollectionSegRefs: req.CollectionSegRefs,
+			VariableSegRefs:   req.VariableSegRefs,
+			SeqSegRef:         req.SeqSegRef,
+			DirAnchorRef:      req.DirAnchorRef,
+			MemberOnly:        !req.SetRuleMemberOnlyOff,
+		})
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.Rule = result.Rule
+		resp.Rules = result.Rules
+		resp.Started = result.VerificationStarted
 	case workbenchActionGeneralize:
 		// relPath 缺省=目录寻址（dirRelKey 子树，样本=首个有赋值的文件）。
 		var result *GenerationResult

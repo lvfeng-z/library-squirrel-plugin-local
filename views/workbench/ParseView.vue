@@ -352,6 +352,13 @@
                         <span class="li-ws-cand-size">{{ c.size }} 成员</span>
                         <span class="li-ws-cand-src">{{ candSourceLabel(c) }}</span>
                         <span class="li-ws-cand-done">已归集「{{ c.confirmedSetName || c.key }}」</span>
+                        <!-- 剧本C：已归集卡的集规则泛化入口——右栏切集规则面板（泛化主体=本集整体） -->
+                        <button
+                          type="button"
+                          class="li-ws-filter-btn li-ws-cand-setrule"
+                          :disabled="candBusy"
+                          @click="openSetRule(c)"
+                        >泛化集规则</button>
                         <button
                           type="button"
                           class="li-ws-filter-btn li-ws-cand-undo"
@@ -538,12 +545,30 @@
               </span>
             </div>
             <div class="li-ws-panel-body">
+              <!-- 剧本C 集规则面板（已归集卡「泛化集规则」进入）：泛化主体=集整体
+                   （target 寻址 confirmed 分仓卡），推导/命中预览/泛化入档/调整面全由
+                   SetRulePanel 承载；与文件/目录面板互斥——点文件行/目录名让出、点
+                   成员行（面板内）切到该文件的表单 -->
+              <SetRulePanel
+                v-if="setPanelTarget"
+                :key="setPanelTarget"
+                ref="setPanelRef"
+                :root="session ? session.rootPath : ''"
+                :target="setPanelTarget"
+                :set-name="setPanelName"
+                :diff="diff"
+                :recognizing="recognizing"
+                :request="request"
+                @refresh="onPanelRefresh"
+                @select-member="onSetMemberSelected"
+                @exit="exitSetPanel"
+              />
               <!-- 剧本J 目录解析面板（卡+解析合一，保存作用子树）：目录头信息+线索胶囊+
                    五字段表单+目录保存/清除+建议卡，全部由 ParsePanel 目录模式承载
                   （dir 上下文由本组件组装传入）；与文件面板互斥——点树中文件行切回
                    文件面板、点目录名回来，不联动文件表单（J7） -->
               <ParsePanel
-                v-if="dirPanelContext"
+                v-else-if="dirPanelContext"
                 ref="dirPanelRef"
                 :root="session ? session.rootPath : ''"
                 :dir="dirPanelContext"
@@ -648,6 +673,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { Events } from '@wailsio/runtime'
 import ParsePanel from './ParsePanel.vue'
+import SetRulePanel from './SetRulePanel.vue'
 
 // 双栏主从解析工作区（识别全景 × 手动解析合一）：
 // 左栏 = 清单全景（过滤器 + 资源清单 + 目录树/序列群/待裁决/规则态/决策态折叠区 + 选择创建栏），
@@ -1050,6 +1076,42 @@ const undoConfirm = async (c: SnapCandidate) => {
   }
 }
 
+// —— 剧本C 集规则面板（已归集卡的泛化集规则入口；与文件/目录面板互斥） ——
+// target 寻址 confirmed 分仓卡（后端按集整体推导）；面板头集名用卡面确认集名
+// 兜底（推导应答到达后以应答为准）。面板不随快照自动重推导（5c 面板不动），
+// 重进由用户再点入口达成
+const setPanelTarget = ref('')
+const setPanelName = ref('')
+
+const openSetRule = (c: SnapCandidate) => {
+  const target = candTarget(c)
+  const setName = c.confirmedSetName || c.key || ''
+  // 面板有未保存改动时暂存切换目标待确认（含集面板间切换）
+  if (panelDirty() && (target !== setPanelTarget.value || selectedDirKey.value !== null || selectedRelPath.value !== '')) {
+    pendingSwitch.value = { kind: 'set', target: target, setName: setName }
+    return
+  }
+  selectedDirKey.value = null
+  selectedRelPath.value = ''
+  setPanelTarget.value = target
+  setPanelName.value = setName
+}
+
+// 集面板「返回」：让出集面板会卸载调整面指派、未保存改动随之丢失，故同样先确认
+const exitSetPanel = (): void => {
+  if (panelDirty()) {
+    pendingSwitch.value = { kind: 'exitSet' }
+    return
+  }
+  setPanelTarget.value = ''
+}
+
+// 集面板成员点行：切到该文件的表单（集面板让出，与点清单文件行同语义——走
+// 同一未保存确认通路）
+const onSetMemberSelected = (relPath: string): void => {
+  selectFile(relPath)
+}
+
 // —— 右栏选中态（主从联动） ——
 // 选中键 = 文件相对路径：自动刷新（重识别）后快照重排，选中态凭键保持；
 // 该路径从快照消失时右栏转「文件已不在当前全景」提示态
@@ -1341,22 +1403,30 @@ function onListScroll(e: Event): void {
 // —— 主从联动：点清单行 → 选中键落右栏（与复选不互斥：行选中不改选择集，
 //    复选改选择集不改行选中） —— //
 
-// 右栏解析面板实例引用（文件/目录两实例互斥挂载，活动实例非空）：切换选中
-// 目标前读面板的未保存标志（面板表单改动标志，见 ParsePanel）
+// 右栏解析面板实例引用（文件/目录/集规则三实例互斥挂载，活动实例非空）：切换选中
+// 目标前读面板的未保存标志（面板表单改动标志，见 ParsePanel / SetRulePanel）
 const filePanelRef = ref<{ isFormDirty: () => boolean } | null>(null)
 const dirPanelRef = ref<{ isFormDirty: () => boolean } | null>(null)
+const setPanelRef = ref<{ isFormDirty: () => boolean } | null>(null)
 
 function panelDirty(): boolean {
   const filePanel = filePanelRef.value
   if (filePanel && filePanel.isFormDirty()) return true
   const dirPanel = dirPanelRef.value
-  return dirPanel ? dirPanel.isFormDirty() : false
+  if (dirPanel && dirPanel.isFormDirty()) return true
+  const setPanel = setPanelRef.value
+  return setPanel ? setPanel.isFormDirty() : false
 }
 
 // 未保存切换确认：表单有未保存改动时切换选中目标先暂存于此——「丢弃并切换」
 // 才落选中键（面板随选中变化的复位逻辑在此之后才触发），「留在当前去保存」丢弃
 // 暂存、保持现选中，用户先保存再切换即无确认直通
-type PendingSwitch = { kind: 'file'; relPath: string } | { kind: 'dir'; relKey: string } | { kind: 'exitDir' }
+type PendingSwitch =
+  | { kind: 'file'; relPath: string }
+  | { kind: 'dir'; relKey: string }
+  | { kind: 'exitDir' }
+  | { kind: 'set'; target: string; setName: string }
+  | { kind: 'exitSet' }
 const pendingSwitch = ref<PendingSwitch | null>(null)
 
 function applyPendingSwitch(): void {
@@ -1365,22 +1435,32 @@ function applyPendingSwitch(): void {
   if (!pending) return
   if (pending.kind === 'file') {
     selectedDirKey.value = null
+    setPanelTarget.value = ''
     selectedRelPath.value = pending.relPath
   } else if (pending.kind === 'dir') {
+    setPanelTarget.value = ''
     selectedDirKey.value = pending.relKey
+  } else if (pending.kind === 'set') {
+    selectedDirKey.value = null
+    selectedRelPath.value = ''
+    setPanelTarget.value = pending.target
+    setPanelName.value = pending.setName
+  } else if (pending.kind === 'exitSet') {
+    setPanelTarget.value = ''
   } else {
     selectedDirKey.value = null
   }
 }
 
 function selectFile(relPath: string): void {
-  // 点文件行 = 现有联动（F5/J7）；同时让出目录解析面板（目录与文件面板互斥，文件优先）。
-  // 面板有未保存改动时暂存切换目标待确认；点同一文件仅让出目录面板也属切换，同样确认
-  if (panelDirty() && (relPath !== selectedRelPath.value || selectedDirKey.value !== null)) {
+  // 点文件行 = 现有联动（F5/J7）；同时让出目录/集规则面板（三面板互斥，文件优先）。
+  // 面板有未保存改动时暂存切换目标待确认；点同一文件仅让出其他面板也属切换，同样确认
+  if (panelDirty() && (relPath !== selectedRelPath.value || selectedDirKey.value !== null || setPanelTarget.value !== '')) {
     pendingSwitch.value = { kind: 'file', relPath: relPath }
     return
   }
   selectedDirKey.value = null
+  setPanelTarget.value = ''
   selectedRelPath.value = relPath
 }
 
@@ -1710,11 +1790,13 @@ const selectedDirNode = computed<TreeDirNode | null>(() =>
 )
 
 function showDirCard(relKey: string): void {
-  // 点目录名进入目录面板；面板有未保存改动时暂存切换目标待确认（含目录间切换）
-  if (panelDirty() && relKey !== selectedDirKey.value) {
+  // 点目录名进入目录面板（同时让出集规则面板）；面板有未保存改动时暂存切换
+  // 目标待确认（含目录间切换）
+  if (panelDirty() && (relKey !== selectedDirKey.value || setPanelTarget.value !== '')) {
     pendingSwitch.value = { kind: 'dir', relKey: relKey }
     return
   }
+  setPanelTarget.value = ''
   selectedDirKey.value = relKey
 }
 
@@ -2831,6 +2913,11 @@ onUnmounted(() => {
 
 .li-ws-cand-restore {
   margin-left: auto;
+}
+
+/* 剧本C：已归集卡「泛化集规则」入口（撤销归集左侧；进入右栏集规则面板） */
+.li-ws-cand-setrule {
+  flex: none;
 }
 
 /* —— 区7 待裁决项 —— */
