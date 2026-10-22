@@ -229,3 +229,86 @@ func TestArtistShellSetDirFormCJKCaptureNameRejected(t *testing.T) {
 		t.Fatalf("替换后 JSON 应仍可解析：err=%v rules=%d", err, len(probe.Rules))
 	}
 }
+
+// artistLibPredicateRuleJSON 「{作者} = 已被识别出的作者」的库内互证落法：
+// 集目录形态正则捕获作者，And 内接 author 谓词（Kind=author、From=捕获组名）
+// ——捕获值必须命中库内作者集合（LibraryIndex.AuthorNames，宿主侧已入库作品
+// 的作者名集）规则才命中。与壳层无关：不写上级 Artist 壳正则，作者域=库内
+// 已有作者全集（任何途径入库的作者都算「已被识别出」）。
+const artistLibPredicateRuleJSON = `{
+  "schemaVersion": 3,
+  "rules": [
+    {
+      "id": "manual-setdir-author-lib-predicate",
+      "description": "集目录 {作者}_{集名}_{序号} 且作者命中库内作者集：作者/集名提取",
+      "source": "manual",
+      "enabled": true,
+      "pattern": {
+        "kind": "and",
+        "patterns": [
+          {
+            "kind": "location",
+            "minDepth": 1,
+            "maxDepth": 1,
+            "ancestor": {
+              "kind": "regex",
+              "target": "filename",
+              "expr": "^(?P<setauthor>[^_]+)_(?P<setname>.+)_(?P<seqno>[0-9]+)$",
+              "captures": ["setauthor", "setname", "seqno"]
+            }
+          },
+          { "kind": "predicate", "predKind": "author", "from": "setauthor" }
+        ]
+      },
+      "extractions": [
+        { "dimension": "author", "from": "capture", "captureName": "setauthor" },
+        { "dimension": "collection", "from": "capture", "captureName": "setname" }
+      ],
+      "synthesis": {
+        "dimPolicies": [
+          { "dimension": "author", "strategy": "union" },
+          { "dimension": "collection", "strategy": "union" }
+        ],
+        "roles": []
+      }
+    }
+  ]
+}`
+
+// TestSetDirFormAuthorLibraryPredicate 「{作者}=已被识别出的作者」的库内互证
+// 落法：谓词在命中级（And 组合内）拦截——作者不在库内作者集时规则整体不命中
+// （对照 When 条件的提取级门：不产出但命中计数仍在）；作者在库内时命中并产出。
+// 边界：首轮导入的全新作者尚未入库，谓词不命中、该轮不产出（库内互证的固有
+// 边界，与集名互证同族）。
+func TestSetDirFormAuthorLibraryPredicate(t *testing.T) {
+	run := func(lib *LibraryIndex, in *MatchInput) *FileDecision {
+		t.Helper()
+		profile, errs := ParseProfile([]byte(artistLibPredicateRuleJSON))
+		if len(errs) > 0 {
+			t.Fatalf("库内互证规则 JSON 载入失败: %v", errs)
+		}
+		decision := &FileDecision{RelPath: in.RelPath, FileName: in.FileName}
+		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+		runExtractionStage(decision, profile.Rules, in, lib, ctx)
+		return decision
+	}
+	in := &MatchInput{
+		FileName: "表紙.png",
+		DirNames: []string{"Artist[Isel]", "Isel_瞬間的に絡み合う_01"},
+		RelPath:  "Artist[Isel]/Isel_瞬間的に絡み合う_01/表紙.png",
+	}
+	libWithIsel := &LibraryIndex{AuthorNames: map[string]struct{}{"Isel": {}, "Beko": {}}}
+	decision := run(libWithIsel, in)
+	if len(decision.MatchedRuleIDs) != 1 {
+		t.Fatalf("作者在库内作者集时规则应命中：matched=%v", decision.MatchedRuleIDs)
+	}
+	if v, ok := declOf(decision, "manual-setdir-author-lib-predicate", DimAuthor); !ok || v != "Isel" {
+		t.Fatalf("作者声明应为 Isel：got %q ok=%v", v, ok)
+	}
+	// 作者不在库内（全新作者首轮）：And 内谓词失败 → 规则整体不命中（命中级拦截）。
+	libWithout := &LibraryIndex{AuthorNames: map[string]struct{}{"Beko": {}}}
+	decision2 := run(libWithout, in)
+	if len(decision2.MatchedRuleIDs) != 0 || len(decision2.Declarations) != 0 {
+		t.Fatalf("作者不在库内时规则不应命中：matched=%v decls=%+v", decision2.MatchedRuleIDs, decision2.Declarations)
+	}
+}
