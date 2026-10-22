@@ -145,18 +145,18 @@ func TestWorkSetRuleSummarySetWideDraft(t *testing.T) {
 	if cross < 2 || !strings.Contains(sugg.Samples[0].Result, "作品集=CCC_DDD") {
 		t.Fatalf("样例应含跨目录两条且首条为跨目录求值结论: %+v", sugg.Samples)
 	}
-	// 调整面默认指派：集名捕获=自动组合（第 3..4 段）、序号=末段（第 5）、
-	// 其余段（作者/作品号段）标可变。
-	if len(sugg.DefaultCollectionSegRefs) != 2 ||
-		sugg.DefaultCollectionSegRefs[0] != "setSeg3" || sugg.DefaultCollectionSegRefs[1] != "setSeg4" {
-		t.Fatalf("默认集名捕获组合不符: %v", sugg.DefaultCollectionSegRefs)
+	// 调整面默认指派（剧本E：集名默认跟随识别形态——本集为序列形态识别，
+	// 默认集名=序列行 seqKey〔群键/公共前缀〕，不再是文件名段组合）；序号=
+	// 末段（第 5）；其余段（作者/作品号/集名段）全部标可变（集名不占段）。
+	if len(sugg.DefaultCollectionSegRefs) != 1 || sugg.DefaultCollectionSegRefs[0] != "seqKey" {
+		t.Fatalf("默认集名指派应为序列行 seqKey: %v", sugg.DefaultCollectionSegRefs)
 	}
 	if sugg.DefaultSeqSegRef != "setSeg5" {
 		t.Fatalf("默认序号段应为末段序号元素: %q", sugg.DefaultSeqSegRef)
 	}
-	if len(sugg.DefaultVariableSegRefs) != 2 ||
-		sugg.DefaultVariableSegRefs[0] != "setSeg1" || sugg.DefaultVariableSegRefs[1] != "setSeg2" {
-		t.Fatalf("默认可变段不符: %v", sugg.DefaultVariableSegRefs)
+	if len(sugg.DefaultVariableSegRefs) != 4 ||
+		sugg.DefaultVariableSegRefs[0] != "setSeg1" || sugg.DefaultVariableSegRefs[3] != "setSeg4" {
+		t.Fatalf("默认可变段应为全部非序号文件名段: %v", sugg.DefaultVariableSegRefs)
 	}
 	if !sugg.DefaultMemberOnly {
 		t.Fatal("默认应勾选仅序列成员产出")
@@ -202,6 +202,13 @@ func TestWorkSetRuleCluesIncludeStrippedDir(t *testing.T) {
 	}
 	if seg2 := byRef["setSeg1"]; !seg2.Shelled || seg2.Inner != "hakosaku" {
 		t.Fatalf("括号组段应带剥壳内名: %+v", seg2)
+	}
+	// 序列行（剧本E 步1）：值=群键/公共前缀（括号序号形态键=序号元素前全部
+	// 正文），序列形态在场（群卡反查成立）才列出。
+	seqKey, ok := byRef[setClueSeqRef]
+	if !ok || seqKey.Kind != setClueKindSeqKey || seqKey.Label != "序列" ||
+		seqKey.Value != "[hakosaku]_[126794866]_AAA_BBB" {
+		t.Fatalf("序列线索行不符: %+v", seqKey)
 	}
 }
 

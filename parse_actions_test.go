@@ -454,7 +454,7 @@ func TestGeneralizeSequence(t *testing.T) {
 	if !ok {
 		t.Fatalf("序列形态泛化应为兄弟群组模式，实际 %T", rule.Pattern)
 	}
-	if sibling.KeyExpr != `^(库内作者名)` || sibling.SeqExpr != `(\d+)(?:\.[^.]*)?$` {
+	if sibling.KeyExpr != `^(库内作者名)` || sibling.SeqExpr != `[\[\(]?(\d+)[\]\)]?(?:\.[^.]*)?$` {
 		t.Fatalf("定群正则不符: key=%q seq=%q", sibling.KeyExpr, sibling.SeqExpr)
 	}
 	if sibling.MinGroupSize != 2 || sibling.Outcome != OutcomeCollection {
@@ -489,6 +489,107 @@ func TestGeneralizeSequence(t *testing.T) {
 	if _, err := m.ApplyGeneralization(root, "序列/lone_007.jpg", generalizeModeSequence); err == nil ||
 		!strings.Contains(err.Error(), "不属于任何兄弟序列群") {
 		t.Fatalf("落单文件应拒绝序列形态泛化: %v", err)
+	}
+}
+
+// TestBuildSequenceRuleFallbackWrappedSeq 规则定群群（无形态标识）回退分支的
+// 序号提取式须容忍尾部包裹符（live-test 发现 1 回归锚：泛化入档后同形态集的
+// 快照群变规则定群，括号序号 `…_[01].png` 的 `]` 阻断数字与扩展名相邻 → 零
+// 提取 → SiblingPattern.Evaluate 全员 false → 调整面「序列」指派被定群门拒
+// 绝）；数字紧邻扩展名的既有形态（含无扩展名/单侧包裹变体）不回归。
+func TestBuildSequenceRuleFallbackWrappedSeq(t *testing.T) {
+	rule, _, err := buildSequenceRule("集盒/[画师]_[123456789]_[集名]_[01].png", "[画师]_[123456789]_[集名]", nil)
+	if err != nil {
+		t.Fatalf("回退分支构造失败: %v", err)
+	}
+	sibling, ok := rule.Pattern.(*SiblingPattern)
+	if !ok {
+		t.Fatalf("回退分支应为兄弟群组模式，实际 %T", rule.Pattern)
+	}
+	if sibling.KeyExpr != `^(\[画师\]_\[123456789\]_\[集名\])` || sibling.SeqExpr != `[\[\(]?(\d+)[\]\)]?(?:\.[^.]*)?$` {
+		t.Fatalf("回退分支定群正则不符: key=%q seq=%q", sibling.KeyExpr, sibling.SeqExpr)
+	}
+	// 括号序号成员经回退式定群（≥2 同键、序号=去包裹数字、键=前缀字面）。
+	bracketFiles := []string{
+		"[画师]_[123456789]_[集名]_[01].png",
+		"[画师]_[123456789]_[集名]_[02].png",
+	}
+	ctx := &ParseContext{}
+	if !sibling.Evaluate(&MatchInput{FileName: bracketFiles[0], Siblings: bracketFiles}, nil, ctx) || ctx.Group == nil {
+		t.Fatalf("括号序号应经回退式定群: group=%+v", ctx.Group)
+	}
+	if ctx.Group.Key != "[画师]_[123456789]_[集名]" || ctx.Group.Seq != 1 {
+		t.Fatalf("括号序号定群键/序号不符: %+v", ctx.Group)
+	}
+	// 提取式形态面（含既有形态不回归）：包裹符两侧（方括号/圆括号/单侧）、
+	// 数字紧邻扩展名、无扩展名。
+	for _, tc := range []struct{ file, want string }{
+		{"[画师]_[123456789]_[集名]_[12].png", "12"},
+		{"[画师]_[123456789]_[集名]_(34).png", "34"},
+		{"[画师]_[123456789]_[集名]_[9.png", "9"},
+		{"[画师]_[123456789]_[集名]_56.png", "56"},
+		{"[画师]_[123456789]_[集名]_78", "78"},
+	} {
+		if text, ok := sibling.seqTextOf(tc.file); !ok || text != tc.want {
+			t.Fatalf("%s 序号原文应=%q，实际 %q（ok=%v）", tc.file, tc.want, text, ok)
+		}
+	}
+	if _, ok := sibling.seqTextOf("表紙.png"); ok {
+		t.Fatal("无尾缀数字的文件不应提取出序号")
+	}
+}
+
+// TestDirectSeqFormSingleCharKey 直连序号形态键式须容忍单字符键（live 发现
+// 1-fix 回归锚：键式 `^(.+?[^\d])\d{1,4}$` 组1最少 2 字符，集键 `m`（成员
+// m1.jpg/m2.jpg——识别侧元素对齐可建群）经 FORM 分支构造的定群规则 keyMatch
+// false → 序列指派被定群门拒；识别侧能建出的键构造侧都该能复现）；纯数字
+// 基不放宽（识别侧该形态键由元素拼接兜底为空串——数字流尽数归序号），多字
+// 符键不回归。
+func TestDirectSeqFormSingleCharKey(t *testing.T) {
+	form := formByName("直连序号")
+	if form == nil {
+		t.Fatal("形态表缺直连序号条目")
+	}
+	if m := form.keyRe.FindStringSubmatch("m1"); len(m) != 2 || m[1] != "m" {
+		t.Fatalf("单字符键应可提取: %+v", m)
+	}
+	if m := form.keyRe.FindStringSubmatch("moka1"); len(m) != 2 || m[1] != "moka" {
+		t.Fatalf("多字符键不回归: %+v", m)
+	}
+	for _, base := range []string{"12345", "12", "1"} {
+		if m := form.keyRe.FindStringSubmatch(base); m != nil {
+			t.Fatalf("纯数字基不应提取出非空键: %q -> %+v", base, m)
+		}
+	}
+	// FORM 分支配新键式复现单字符键定群（结构群 → 泛化器构造 → Evaluate：
+	// 同键 ≥2、键=组1、序号=尾缀数字）。
+	rule, _, err := buildSequenceRule("单键集/m1.jpg", "m", &SnapGroup{
+		FormName: form.name, FormKeyExpr: form.keyExpr, FormSeqExpr: form.seqExpr,
+	})
+	if err != nil {
+		t.Fatalf("FORM 分支构造失败: %v", err)
+	}
+	sibling, ok := rule.Pattern.(*SiblingPattern)
+	if !ok {
+		t.Fatalf("FORM 分支应为兄弟群组模式: %T", rule.Pattern)
+	}
+	if sibling.KeyExpr != `^(.+?[^\d]|[^\d])\d{1,4}(?:\.[^.]*)?$` {
+		t.Fatalf("FORM 分支键式不符（扩展名尾段）: %q", sibling.KeyExpr)
+	}
+	files := []string{"m1.jpg", "m2.jpg"}
+	ctx := &ParseContext{}
+	if !sibling.Evaluate(&MatchInput{FileName: "m1.jpg", Siblings: files}, nil, ctx) || ctx.Group == nil {
+		t.Fatalf("单字符键应经 FORM 式定群: group=%+v", ctx.Group)
+	}
+	if ctx.Group.Key != "m" || ctx.Group.Seq != 1 {
+		t.Fatalf("单字符键定群键/序号不符: %+v", ctx.Group)
+	}
+	// 多字符键经同一键式不回归（abc1/abc12 同键 abc——已知误群边界维持）。
+	abcFiles := []string{"abc1.jpg", "abc12.jpg"}
+	ctx2 := &ParseContext{}
+	if !sibling.Evaluate(&MatchInput{FileName: "abc1.jpg", Siblings: abcFiles}, nil, ctx2) ||
+		ctx2.Group.Key != "abc" {
+		t.Fatalf("多字符键定群不符: %+v", ctx2.Group)
 	}
 }
 

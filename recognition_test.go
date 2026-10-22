@@ -1066,7 +1066,7 @@ func TestStructuralFormGroups(t *testing.T) {
 	// 丙：键=直连数字前的全前缀，形态标识=直连序号。
 	direct := mustGroup("丙", formDirectKey)
 	if direct.Size != 3 || direct.FormName != "直连序号" ||
-		direct.FormKeyExpr != `^(.+?[^\d])\d{1,4}$` || direct.FormSeqExpr != `(\d{1,4})$` {
+		direct.FormKeyExpr != `^(.+?[^\d]|[^\d])\d{1,4}$` || direct.FormSeqExpr != `(\d{1,4})$` {
 		t.Fatalf("丙形态群不符：%+v", direct)
 	}
 	if len(direct.Members) != 3 || direct.Members[0].SeqText != "0" || direct.Members[2].SeqText != "11" {

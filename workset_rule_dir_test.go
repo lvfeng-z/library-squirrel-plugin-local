@@ -339,16 +339,17 @@ func TestWorkSetDirAdjustRuleAssembly(t *testing.T) {
 		}
 	}
 
-	// 指派校验：文件名段与目录段混指、目录段多段集名、目录段指作品名。
+	// 指派校验：文件名段与目录段混指（剧本E 起回「一个维度只能有一个来源」）、
+	// 目录段跳段组合、目录段指作品名。
 	if _, err := m.ApplyWorkSetRuleAdjust(root, target, setRuleAdjustInput{
 		CollectionSegRefs: []string{"setDirSeg3", "setSeg1"},
-	}); err == nil || !strings.Contains(err.Error(), "同为") {
+	}); err == nil || !strings.Contains(err.Error(), "一个维度只能有一个来源") {
 		t.Fatalf("混指应回可读错误: %v", err)
 	}
 	if _, err := m.ApplyWorkSetRuleAdjust(root, target, setRuleAdjustInput{
 		CollectionSegRefs: []string{"setDirSeg1", "setDirSeg3"},
-	}); err == nil || !strings.Contains(err.Error(), "单段") {
-		t.Fatalf("目录段多段集名应回可读错误: %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "连续") {
+		t.Fatalf("目录段跳段组合应回可读错误: %v", err)
 	}
 	if _, err := m.ApplyWorkSetRuleAdjust(root, target, setRuleAdjustInput{
 		TitleClueRef: "setDirSeg1",

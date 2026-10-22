@@ -705,7 +705,9 @@ func buildDirLayerRule(relPath, dirRelKey string, assign *SessionAssignment) (Ru
 // 其余规则与赋值承载）。群携带结构形态标识时（结构形态群）按群携带的键/序号
 // 提取式构造——提取式锚定去扩展名正文，规则求值域为含扩展名文件名，末尾 $
 // 锚前补可选扩展名尾段（同形态新文件可复现定群）；无形态标识时（规则定群群）
-// 按公共前缀字面锚定（分组键=前缀字面、序号=扩展名前的尾缀数字，现状保持）。
+// 按公共前缀字面锚定（分组键=前缀字面、序号=扩展名前的尾缀数字——容忍尾部
+// 包裹符：括号/方括号序号 `…_[01].png`、`…_(01).png` 同判，与形态表括号序号
+// 的括号感知序号提取同语义，包裹符阻断数字与扩展名相邻不得令提取落空）。
 func buildSequenceRule(relPath, groupKey string, group *SnapGroup) (RuleEntry, ArchiveWriteEntry, error) {
 	if groupKey == "" {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("文件 %s 不属于任何兄弟序列群，无法按序列形态泛化", relPath)
@@ -729,7 +731,7 @@ func buildSequenceRule(relPath, groupKey string, group *SnapGroup) (RuleEntry, A
 	}
 	sibling, err := NewSiblingPattern(
 		"^("+regexp.QuoteMeta(groupKey)+")",
-		`(\d+)(?:\.[^.]*)?$`,
+		`[\[\(]?(\d+)[\]\)]?(?:\.[^.]*)?$`,
 		2, OutcomeCollection,
 	)
 	if err != nil {
@@ -737,7 +739,7 @@ func buildSequenceRule(relPath, groupKey string, group *SnapGroup) (RuleEntry, A
 	}
 	rule := RuleEntry{
 		ID:          generatedRuleID("qna-seq", groupKey),
-		Description: fmt.Sprintf("泛化（序列形态）：前缀「%s」+尾缀序号 ≥2 成群归入同一作品集（源自「%s」的赋值）", groupKey, relPath),
+		Description: fmt.Sprintf("泛化（序列形态）：前缀「%s」+尾缀序号（可括号包裹）≥2 成群归入同一作品集（源自「%s」的赋值）", groupKey, relPath),
 		Source:      RuleSourceQna,
 		Enabled:     true,
 		Pattern:     sibling,

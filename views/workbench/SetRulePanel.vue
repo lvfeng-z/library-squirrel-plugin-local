@@ -132,45 +132,36 @@
           :loading="generalizing"
           @click="doGeneralize"
         >{{ generalizing ? '泛化中…' : '泛化成规则' }}</el-button>
-        <el-button size="small" @click="adjustVisible = !adjustVisible">调整规则</el-button>
-      </div>
-
-      <!-- 步4 调整面：线索清单逐项指派 → 保存规则（泛化/保存成功后收起） -->
-      <div v-if="adjustVisible && !genResult" class="li-sr-sec">
-        <h4 class="li-sr-sec-title">
-          调整规则
-          <span class="li-sr-sec-note">线索逐项指派 · 保存即入档</span>
-        </h4>
-        <p class="li-sr-hint">每条线索指派到维度/集名组合/可变/目录锚定/不用之一；末段序号默认已指；集名组合可勾选连续多段；集所在目录名另列目录名分段行（数字段默认已标可变、标题段默认已指集名组合）。</p>
-        <div class="li-sr-clue-table">
-          <div v-for="c in suggestion.clues || []" :key="c.ref" class="li-sr-clue-row">
-            <span class="li-sr-clue-label" :title="c.ref">{{ clueLabel(c) }}</span>
-            <span class="li-sr-clue-value" :title="c.value">{{ clueValueText(c) }}</span>
-            <select v-model="assigns[c.ref]" class="li-sr-clue-select" @change="onAssignChange(c.ref)">
-              <option v-for="opt in destOptionsOf(c)" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-            </select>
-          </div>
-        </div>
-        <label class="li-sr-cond">
-          <input v-model="memberOnly" type="checkbox">
-          <span>仅序列成员产出</span>
-        </label>
-        <p v-if="adjustError" class="li-sr-adjust-error">{{ adjustError }}</p>
-        <div class="li-sr-row">
-          <el-button type="primary" size="small" :loading="savingAdjust" @click="doSaveAdjust">保存规则</el-button>
-          <el-button size="small" @click="resetAdjust">还原默认指派</el-button>
-        </div>
+        <el-button size="small" @click="adjustDialogOpen = true">调整规则</el-button>
       </div>
     </template>
+
+    <!-- 步4 调整规则（剧本F 两段式弹窗 · 共用组件 RuleEditDialog——与规则管理子页
+         「编辑/新建」同一弹窗）：上半=草稿识别形态（只读呈现）、下半=指派行；剧本E
+         全部语义随迁（线索三族来源/默认指派预填/目录段多段连续组合/互斥行级提示/
+         仅序列成员/还原默认指派）；保存走既有 saveWorkSetRuleAdjust RPC，效果与
+         原调整面一致；取消不保存、再开回上次保存态 -->
+    <RuleEditDialog
+      v-model:state="adjustDialogOpen"
+      mode="setAdjust"
+      :suggestion="suggestion"
+      :initial-assigns="assigns"
+      :initial-member-only="memberOnly"
+      :saving="savingAdjust"
+      :save-error="adjustError"
+      @save="onAdjustSave"
+      @dirty-change="onAdjustDirty"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
+import RuleEditDialog from './RuleEditDialog.vue'
 
-// 集规则面板（迭代三 · 剧本C + 迭代四 · 剧本D）：已归集集卡「泛化集规则」
-// 进入——泛化主体=集整体（后端对 confirmed 分仓卡按 target 寻址推导多成员
-// 共同形态），不再绕道集内单个作品的表单。面板态机：
+// 集规则面板（迭代三 · 剧本C + 迭代四 · 剧本D + 迭代五 · 剧本E）：已归集
+// 集卡「泛化集规则」进入——泛化主体=集整体（后端对 confirmed 分仓卡按 target
+// 寻址推导多成员共同形态），不再绕道集内单个作品的表单。面板态机：
 //   推导中… → 草稿态（集卡+成员列表+共同形态+规则草稿〔人话/表达式/仅序列
 //   成员产出已勾——文件名共同形态优先；无共同形态时给目录格式草稿（剧本D：
 //   第 N 层目录段格式→作品集=末非数字段、每目录各自成集，默认不勾仅序列
@@ -179,12 +170,19 @@ import { ref, computed, onMounted } from 'vue'
 //   失败三分支——a) 推导失败如实呈现原因（含「无法从目录名推导稳定格式
 //   （原因）」；泛化置灰、调整可用）；b) 入档写失败半程态（重试泛化/放弃，
 //   草稿不丢）；c) 集不在已归集清单内（面板不动）。
-// 调整面（步4）：线索清单（目录各层〔含剥壳变体〕+集所在目录名分段
-// 〔setDirSegN——数字段默认可变、标题段默认指集名组合〕+成员文件名段+序号段
-// +库根名）逐项指派（维度←线索/集名捕获段组合/可变/目录锚定/不用；末段序号
-// 默认已指）→ 保存规则（入档+验证轮，与泛化同终点）。请求经父组件 ParseView
-// 的唯一 workbench 请求通道（request prop 注入）；成员点行 emit selectMember
-// 由父组件切到该文件的表单（集面板让出）。
+// 调整规则（步4，剧本F 起为两段式弹窗——与规则管理子页「编辑/新建」共用
+// RuleEditDialog 组件）：上半=草稿识别形态（只读呈现）、下半=指派行。线索清单
+// （目录各层〔含剥壳变体〕+集所在目录名分段〔setDirSegN——可勾多段连续组合〕
+// +序列〔seqKey，剧本E——序列形态在场才列，值=群键/公共前缀〕+成员文件名段
+// +序号段+库根名）逐项指派（维度←线索/集名捕获段组合〔序列单指｜文件名段/
+// 目录段连续组合，三族互斥〕/可变/目录锚定/不用；末段序号默认已指；集名默认
+// 跟随识别形态——序列形态=序列行、目录名形态=目录标题段，默认指派呈现跟随应
+// 答）→ 保存规则（入档+验证轮，与泛化同终点——走既有 saveWorkSetRuleAdjust，
+// 效果与原内联调整面一致）；同维度互斥多来源/目录段不连续行级就地提示（保存
+// 校验照旧后端拒绝）。弹窗取消不保存、再开回上次保存态（面板 assigns/memberOnly
+// 持已应用指派作弹窗初值）。请求经父组件 ParseView 的唯一 workbench 请求通道
+// （request prop 注入）；成员点行 emit selectMember 由父组件切到该文件的表单
+// （集面板让出）。
 
 interface SetRuleMember {
   relPath: string
@@ -286,7 +284,11 @@ const loadError = ref('')
 const suggestion = ref<SetRuleSuggestion | null>(null)
 const generalizing = ref(false)
 const savingAdjust = ref(false)
-const adjustVisible = ref(false)
+// 调整规则弹窗（剧本F 两段式共用组件）开关态；指派编辑态在弹窗内部（取消即弃、
+// 再开回上次保存态——initialAssigns 取面板当前已应用指派）
+const adjustDialogOpen = ref(false)
+// 弹窗内指派改动标志（dirty-change 上行）：供父组件切换选中目标前的未保存确认
+const adjustDirty = ref(false)
 const adjustError = ref('')
 const halfState = ref<{ reason: string } | null>(null)
 // 泛化/调整保存成功后的生成结果态（生成规则与差异；面板保持挂载——动作行
@@ -308,9 +310,9 @@ const firstGenId = computed<string>(() => {
 // ''=不用；author/title/tag=维度（author/title/anchor 单选互斥，tag 可多条，
 // 集 README 组序即标签序）；collection=集名捕获段组合（可多选=连续段组合）；
 // variable=可变段；seq=序号（仅序号段线索可指，默认已指）；anchor=目录锚定
-//（仅目录层线索可指）。
-type Dest = '' | 'author' | 'title' | 'tag' | 'collection' | 'variable' | 'anchor' | 'seq'
-const assigns = ref<Record<string, Dest>>({})
+//（仅目录层线索可指）。行内指派交互与校验（剧本E 语义）由 RuleEditDialog 承载，
+// 面板只持「当前已应用指派」作为弹窗初值与保存落点。
+const assigns = ref<Record<string, string>>({})
 const memberOnly = ref(true)
 let assignsBaseline = ''
 
@@ -325,7 +327,7 @@ function assignStateText(): string {
 function applyDefaultAssigns(): void {
   const sugg = suggestion.value
   if (!sugg) return
-  const next: Record<string, Dest> = {}
+  const next: Record<string, string> = {}
   for (const c of sugg.clues || []) next[c.ref] = ''
   for (const ref of sugg.defaultCollectionSegRefs || []) next[ref] = 'collection'
   for (const ref of sugg.defaultVariableSegRefs || []) next[ref] = 'variable'
@@ -339,79 +341,19 @@ function applyDefaultAssigns(): void {
   assignsBaseline = assignStateText()
 }
 
-// 供父组件在切换选中目标前读取：调整面是否有未保存指派改动
-defineExpose({
-  isFormDirty: (): boolean => adjustVisible.value && assignStateText() !== assignsBaseline
+// 弹窗内指派改动上行（dirty-change）：关窗（取消/保存后）即复位
+function onAdjustDirty(dirty: boolean): void {
+  adjustDirty.value = dirty
+}
+
+watch(adjustDialogOpen, (open) => {
+  if (!open) adjustDirty.value = false
 })
 
-// 线索指派可选目的地（按线索类别）：
-//   序号段→序号/不用（默认序号）；文件名段→集名组合/可变/作者/作品名/标签/不用；
-//   目录名分段（setDirSegN，集所在目录名的括号/分隔段）→集名组合/可变/作者/
-//   不用（数字段默认已标可变）；目录层（含剥壳变体）→作者/作品名/标签/目录
-//   锚定/不用；库根名→作者/作品名/标签/不用（以常量入规则——脚本「常量」的
-//   实现折入常量声明）。
-function destOptionsOf(c: SetRuleClue): { value: Dest; label: string }[] {
-  if (c.kind === 'setSeq') {
-    return [
-      { value: 'seq', label: '序号' },
-      { value: '', label: '不用' }
-    ]
-  }
-  if (c.kind === 'setSeg') {
-    return [
-      { value: '', label: '不用' },
-      { value: 'collection', label: '集名组合' },
-      { value: 'variable', label: '可变' },
-      { value: 'author', label: '作者' },
-      { value: 'title', label: '作品名' },
-      { value: 'tag', label: '标签' }
-    ]
-  }
-  if (c.kind === 'setDirSeg') {
-    return [
-      { value: '', label: '不用' },
-      { value: 'collection', label: '集名组合' },
-      { value: 'variable', label: '可变' },
-      { value: 'author', label: '作者' }
-    ]
-  }
-  if (c.kind === 'dirLevel' || c.kind === 'dirLevelStripped') {
-    return [
-      { value: '', label: '不用' },
-      { value: 'author', label: '作者' },
-      { value: 'title', label: '作品名' },
-      { value: 'tag', label: '标签' },
-      { value: 'anchor', label: '目录锚定' }
-    ]
-  }
-  return [
-    { value: '', label: '不用' },
-    { value: 'author', label: '作者' },
-    { value: 'title', label: '作品名' },
-    { value: 'tag', label: '标签' }
-  ]
-}
-
-// 单选目的地互斥：作者/作品名/目录锚定/序号各至多一条线索持有——新指派挤掉
-// 旧持有（集名组合/标签/可变允许多条）。
-const SINGLE_DESTS: Dest[] = ['author', 'title', 'anchor', 'seq']
-function onAssignChange(clueRef: string): void {
-  const dest = assigns.value[clueRef]
-  adjustError.value = ''
-  if (!dest || SINGLE_DESTS.indexOf(dest) < 0) return
-  for (const c of (suggestion.value && suggestion.value.clues) || []) {
-    if (c.ref !== clueRef && assigns.value[c.ref] === dest) assigns.value[c.ref] = ''
-  }
-}
-
-function resetAdjust(): void {
-  applyDefaultAssigns()
-  adjustError.value = ''
-}
-
-const clueLabel = (c: SetRuleClue): string => c.label
-const clueValueText = (c: SetRuleClue): string =>
-  c.kind === 'dirLevelStripped' ? `${c.label}（剥壳 → ${c.value}）` : c.value
+// 供父组件在切换选中目标前读取：调整面是否有未保存指派改动
+defineExpose({
+  isFormDirty: (): boolean => adjustDialogOpen.value && adjustDirty.value
+})
 
 function dimLabel(dim: string): string {
   switch (dim) {
@@ -491,16 +433,19 @@ async function doGeneralize(): Promise<void> {
   }
 }
 
-// 步4：调整面保存（指派→规则组装入档；失败原地呈现可读错误、指派不丢）
-async function doSaveAdjust(): Promise<void> {
+// 步4：调整规则弹窗保存（弹窗上行指派结果→既有 saveWorkSetRuleAdjust 组装入
+// 档，效果与原调整面一致；失败文案回填弹窗内呈现、指派不丢不关窗）
+async function onAdjustSave(payload: { assigns: Record<string, string>; memberOnly: boolean }): Promise<void> {
   const sugg = suggestion.value
   if (!sugg || !props.root || savingAdjust.value) return
   savingAdjust.value = true
   adjustError.value = ''
-  const byDest = (dest: Dest): string[] => {
+  const savedAssigns = payload.assigns
+  const savedMemberOnly = payload.memberOnly
+  const byDest = (dest: string): string[] => {
     const refs: string[] = []
     for (const c of sugg.clues || []) {
-      if ((assigns.value[c.ref] || '') === dest) refs.push(c.ref)
+      if ((savedAssigns[c.ref] || '') === dest) refs.push(c.ref)
     }
     return refs
   }
@@ -515,14 +460,18 @@ async function doSaveAdjust(): Promise<void> {
       variableSegRefs: byDest('variable'),
       seqSegRef: byDest('seq')[0] || '',
       dirAnchorRef: byDest('anchor')[0] || '',
-      setRuleMemberOnlyOff: !memberOnly.value
+      setRuleMemberOnlyOff: !savedMemberOnly
     })
     if (!resp.ok) {
       adjustError.value = resp.error || '调整规则保存失败'
       return
     }
-    genResult.value = { rule: resp.rule, rules: resp.rules }
+    // 保存落点：面板指派态更新为已保存值（弹窗再开即以此为初值=上次保存态）
+    assigns.value = savedAssigns
+    memberOnly.value = savedMemberOnly
     assignsBaseline = assignStateText()
+    adjustDialogOpen.value = false
+    genResult.value = { rule: resp.rule, rules: resp.rules }
     emit('refresh')
   } finally {
     savingAdjust.value = false
@@ -846,54 +795,7 @@ onMounted(() => {
   word-break: break-all;
 }
 
-/* 调整面（步4）：线索表（标签/值/指派下拉） */
-.li-sr-clue-table {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.li-sr-clue-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.li-sr-clue-label {
-  flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-text-primary);
-}
-
-.li-sr-clue-value {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--app-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.li-sr-clue-select {
-  flex-shrink: 0;
-  max-width: 110px;
-  font-size: 12px;
-  color: var(--app-text-regular);
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius);
-  background: var(--app-bg-surface);
-  padding: 1px 4px;
-}
-
-.li-sr-adjust-error {
-  margin: 0;
-  font-size: 12px;
-  color: var(--app-color-danger);
-  word-break: break-all;
-}
+/* 调整面线索表与行级提示样式已随调整规则弹窗迁入 RuleEditDialog（li-red-*） */
 
 .li-sr-fail {
   width: 100%;

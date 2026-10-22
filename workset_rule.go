@@ -1,22 +1,27 @@
 package main
 
-// 集规则泛化入口（已归集泛化入口 · 迭代三 · 剧本C）：泛化主体=已归集的集
-// 本身（ConfirmedCandidates 卡整体——target 寻址，key+members+confirmedSetName
-// 为推导输入），不再绕道集里单个作品的表单。三动作：
+// 集规则泛化入口（已归集泛化入口 · 迭代三 · 剧本C，剧本E 集名默认跟随识别
+// 形态）：泛化主体=已归集的集本身（ConfirmedCandidates 卡整体——target 寻
+// 址，key+members+confirmedSetName 为推导输入），不再绕道集里单个作品的表
+// 单。三动作：
 //   - ApplyWorkSetRuleSummary  集规则草稿推导（summarizeWorkSetRule）：多成员
 //     取共同形态（代表成员出形态、全员校验复现——非单样本），复用迭代二
 //     rule_summarizer_seq.go 机制（snapshotGroupOf 反查、seqNameSpanOf 跨多段
 //     含分隔符/剥壳）；命中预览走既有 MergedRecognition 全库求值；同时组装
-//     调整面线索清单（目录各层〔含剥壳变体〕+成员文件名段+序号段+库根名）。
-//     推导失败（集名对不上段组合等）如实返回原因（Failed 态，线索清单照发
-//     ——调整规则仍可用）。
+//     调整面线索清单（目录各层〔含剥壳变体〕+目录名分段+序列〔seqKey，剧本E
+//     ——序列形态在场才列〕+成员文件名段+序号段+库根名）。推导失败（集名对
+//     不上段组合等）如实返回原因（Failed 态，线索清单照发——调整规则仍可用）。
+//     草稿选族与默认指派跟随识别形态（剧本E）：两形态都在时按候选 target 的
+//     来源形态选族，序列形态默认集名=seqKey、目录形态默认=标题目录段。
 //   - ApplyWorkSetRuleGeneralize 泛化入档（generalizeWorkSetRule）：草稿即
 //     所见即所入（同一推导复跑），复用 generalize 档案写（ArchiveWriteGeneralize）
 //     与消费判据（consumeScopedAssignments，作用域=集成员）+ 验证轮。
 //   - ApplyWorkSetRuleAdjust   调整面保存（saveWorkSetRuleAdjust）：线索逐项
-//     指派（维度←线索 / 集名捕获段组合 / 可变段 / 目录锚定 / 不用；末段序号
-//     默认已指）→既有规则构造器组装（buildSequenceRule / structDirPlan / 集
-//     名捕获规则构造），全员自检后入档（效果与泛化入档相同：验证轮+声明接管）。
+//     指派（维度←线索 / 集名捕获段组合〔序列 seqKey 单指｜文件名段连续组合｜
+//     目录段连续组合（剧本E 多段）——三族互斥〕/ 可变段 / 目录锚定 / 不用；
+//     末段序号默认已指）→既有规则构造器组装（buildSequenceRule / structDirPlan
+//     / 集名捕获规则构造 / buildWorkSetSeqKeyRule 序列前缀条目），全员自检后
+//     入档（效果与泛化入档相同：验证轮+声明接管）。
 
 import (
 	"errors"
@@ -35,12 +40,18 @@ const setClueSegPrefix = "setSeg"
 // 集所在目录名的非分隔元素位序、1 起）。
 const setClueDirSegPrefix = "setDirSeg"
 
-// setClueKindSeg / setClueKindSeq / setClueKindDirSeg 文件名段 / 序号段 /
-// 目录名分段的线索类别。
+// setClueSeqRef 「序列」线索引用（剧本E）：值=该集序列群键/公共前缀——序列
+// 形态在场（群卡反查成立）才列出；指派语义=可指集名/作者等维度（与文件名段
+// 行同权限——集名指它即「集名=群键」，规则构造走 FromGroupPrefix 通路）。
+const setClueSeqRef = "seqKey"
+
+// setClueKindSeg / setClueKindSeq / setClueKindDirSeg / setClueKindSeqKey
+// 文件名段 / 序号段 / 目录名分段 / 序列的线索类别。
 const (
 	setClueKindSeg    = "setSeg"
 	setClueKindSeq    = "setSeq"
 	setClueKindDirSeg = "setDirSeg"
+	setClueKindSeqKey = "setSeqKey"
 )
 
 // SetRuleMember 集规则草稿的成员呈现（成员列表点击跳文件表单的数据源）。
@@ -51,9 +62,10 @@ type SetRuleMember struct {
 	SeqText string `json:"seqText,omitempty"`
 }
 
-// SetRuleClue 调整面线索清单条目（剧本步4）：目录各层（含剥壳变体）/ 成员
-// 文件名段 / 序号段 / 库根名。Ref 词汇：rootName / dirLevel[n] /
-// dirLevelStripped[n]（与结构分段线索集同一空间）+ setSegN（集面板自有）。
+// SetRuleClue 调整面线索清单条目（剧本步4）：目录各层（含剥壳变体）/ 集所在
+// 目录名分段 / 成员文件名各段 / 序号段 / 序列（群键，剧本E——序列形态在场才
+// 列）/ 库根名。Ref 词汇：rootName / dirLevel[n] / dirLevelStripped[n]（与
+// 结构分段线索集同一空间）+ setSegN / setDirSegN / seqKey（集面板自有）。
 type SetRuleClue struct {
 	Ref   string `json:"ref"`
 	Kind  string `json:"kind"`
@@ -94,8 +106,9 @@ type SetRuleSuggestion struct {
 	FailReason string `json:"failReason,omitempty"`
 	// Clues 调整面线索清单（成功/失败两态均携带——失败时调整规则仍可用）。
 	Clues []SetRuleClue `json:"clues,omitempty"`
-	// 调整面默认指派（草稿已带入的初值：集名捕获=自动推导的组合、末段序号
-	// 默认已指、非捕获段标可变）。
+	// 调整面默认指派（草稿已带入的初值——剧本E 起集名默认跟随识别形态：序列
+	// 形态草稿=序列行 seqKey、目录格式草稿=标题目录段；末段序号默认已指、
+	// 非捕获段标可变）。
 	DefaultCollectionSegRefs []string `json:"defaultCollectionSegRefs,omitempty"`
 	DefaultVariableSegRefs   []string `json:"defaultVariableSegRefs,omitempty"`
 	DefaultSeqSegRef         string   `json:"defaultSeqSegRef,omitempty"`
@@ -108,8 +121,10 @@ type SetRuleSuggestion struct {
 // setRuleAdjustInput 调整面保存的指派载荷（saveWorkSetRuleAdjust）：每条线索
 // 指派到「维度←线索 / 集名捕获段组合 / 可变 / 目录锚定 / 不用」之一——维度
 // 指派复用请求的 AuthorClueRef/TitleClueRef/TagClueRefs 字段（可指向目录层
-// 或文件名段线索）；集名捕获为段组合（多条 setSeg 引用，须连续）；可变段与
-// 不用段在构造上同为泛化消费（呈现意图差异）；目录锚定限定目录层线索。
+// /文件名段/序列线索）；集名捕获为段组合——序列（seqKey 单指）/ 文件名段
+// （多条 setSeg 引用，须连续）/ 目录名分段（多条 setDirSeg 引用，须连续段——
+// 剧本E 扩展），三族互斥；可变段与不用段在构造上同为泛化消费（呈现意图差
+// 异）；目录锚定限定目录层线索。
 type setRuleAdjustInput struct {
 	AuthorClueRef     string
 	TitleClueRef      string
@@ -267,19 +282,24 @@ func deriveWorkSetSeqDraft(snap *RecognitionSnapshot, ws *workSetContext) (workS
 	}, ""
 }
 
-// deriveWorkSetDraft 集草稿统一推导入口（自动草稿优先级，剧本D 步1/2）：
-// 文件名共同序列形态在→照旧（迭代二/三路径）；否则集所在目录名呈稳定格式
-// →目录格式草稿（集名=末非数字段捕获、作者=一级目录 Artist 壳剥壳〔壳在场
-// 时〕、数字段可变、每目录各自成集=天然语义——无 sibling/when 原子）；都
-// 无→失败态如实返回原因（剧本步5——两路原因并存时并列呈现，文件名侧与
-// 目录侧的不可推导事实同时可见）。
+// deriveWorkSetDraft 集草稿统一推导入口（自动草稿优先级，剧本D 步1/2 · 剧本E
+// 来源跟随）：两形态各自推导后按在场情况选族——单形态在→该形态；两形态都在
+// （群卡反查成立且目录名有稳定格式）→ 按候选产出形态选族（候选 target 的来源
+// 形态，沿群卡/目录轨来源判定：目录轨产出→目录格式草稿、群卡产出→序列形态
+// 草稿——调整面默认指派随族，两族线索行同场都在）；都无→失败态如实返回原因
+// （剧本步5——两路原因并存时并列呈现，文件名侧与目录侧的不可推导事实同时可见）。
 func deriveWorkSetDraft(snap *RecognitionSnapshot, ws *workSetContext) (workSetDraft, string) {
 	seqDraft, seqFail := deriveWorkSetSeqDraft(snap, ws)
-	if seqFail == "" {
-		return seqDraft, ""
-	}
 	dirDraft, dirFail := deriveWorkSetDirDraft(snap, ws)
-	if dirFail == "" {
+	switch {
+	case seqFail == "" && dirFail == "":
+		if ws.cand.Source == candSourceDir {
+			return dirDraft, ""
+		}
+		return seqDraft, ""
+	case seqFail == "":
+		return seqDraft, ""
+	case dirFail == "":
 		return dirDraft, ""
 	}
 	if seqFail != dirFail {
@@ -343,7 +363,7 @@ func deriveWorkSetDirDraft(snap *RecognitionSnapshot, ws *workSetContext) (workS
 			}
 		}
 	}
-	dirRule, err := buildWorkSetDirRule(ws, plan, collectionEl, -1, setRuleAdjustInput{})
+	dirRule, err := buildWorkSetDirRule(ws, plan, []int{collectionEl}, -1, setRuleAdjustInput{})
 	if err != nil {
 		return workSetDraft{}, fmt.Sprintf("无法构造目录格式规则：%v", err)
 	}
@@ -410,7 +430,7 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 		}
 		sugg.Members = append(sugg.Members, SetRuleMember{RelPath: mem.RelPath, FileName: file.FileName, SeqText: mem.SeqText})
 	}
-	clues, segPlan, dirPlan := workSetRuleClues(sess.RootPath, ws)
+	clues, segPlan, dirPlan := workSetRuleClues(sess.RootPath, sess.Snapshot, ws)
 	sugg.Clues = clues
 	sugg.DefaultSeqSegRef = segPlan.seqRef()
 	draft, failReason := deriveWorkSetDraft(sess.Snapshot, ws)
@@ -453,8 +473,11 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 	for i := range draft.rules {
 		sugg.Rules = append(sugg.Rules, generatedRuleViewOf(&draft.rules[i]))
 	}
-	sugg.DefaultCollectionSegRefs = segPlan.spanRefs(draft.span)
-	sugg.DefaultVariableSegRefs = segPlan.otherSegRefs(sugg.DefaultCollectionSegRefs)
+	// 剧本E 步1：序列形态草稿的默认集名指派=序列行（seqKey，值=群键/公共
+	// 前缀）——不再以文件名段 span 为默认（文件名段各行仍在，精细改再手动
+	// 改指）；序列草稿必经群卡反查成立，seqKey 行必在场可还原。
+	sugg.DefaultCollectionSegRefs = []string{setClueSeqRef}
+	sugg.DefaultVariableSegRefs = segPlan.otherSegRefs(nil)
 	sugg.HitCount, sugg.HitTotal, sugg.Samples = previewWorkSetRules(
 		draft.rules, sess.Snapshot, ws.cand.Dir, draft.rules[len(draft.rules)-1].ID)
 	return sugg, nil
@@ -810,13 +833,13 @@ func dirSegShapePhrase(plan *workSetDirSegPlan) string {
 	return b.String()
 }
 
-// workSetRuleClues 组装调整面线索清单（剧本步4 形态）：目录各层（含剥壳
-// 变体——DirStructCluesOf 同源）+ 集所在目录名分段（剧本D 新增：setDirSegN，
-// 括号段+分隔符感知；数字段默认标可变、标题段默认指集名捕获由默认指派承载）
-// + 成员文件名各段（代表成员元素、序号段单列类别）+ 库根名。返回线索、文件
-// 名段位序表与目录名分段位序表（目录名无段/库根时后者为仅含计划的空表——
-// 分段引用不可解析）。
-func workSetRuleClues(rootPath string, ws *workSetContext) ([]SetRuleClue, *workSetSegPlan, *workSetDirSegPlan) {
+// workSetRuleClues 组装调整面线索清单（剧本步4 形态 + 剧本E 序列行）：目录
+// 各层（含剥壳变体——DirStructCluesOf 同源）+ 集所在目录名分段（剧本D：
+// setDirSegN，括号段+分隔符感知）+ 序列（剧本E：seqKey，值=该集序列群键/
+// 公共前缀——序列形态在场〔代表成员群卡反查成立〕才列出）+ 成员文件名各段
+// （代表成员元素、序号段单列类别）+ 库根名。返回线索、文件名段位序表与目录
+// 名分段位序表（目录名无段/库根时后者为仅含计划的空表——分段引用不可解析）。
+func workSetRuleClues(rootPath string, snap *RecognitionSnapshot, ws *workSetContext) ([]SetRuleClue, *workSetSegPlan, *workSetDirSegPlan) {
 	var clues []SetRuleClue
 	for _, c := range DirStructCluesOf(rootPath, ws.cand.Dir) {
 		clues = append(clues, SetRuleClue{Ref: c.Ref, Kind: c.Kind, Label: c.Label, Value: c.Value})
@@ -834,6 +857,16 @@ func workSetRuleClues(rootPath string, ws *workSetContext) ([]SetRuleClue, *work
 				Label: fmt.Sprintf("%s段 %d", dirLevelLabel(dirPlan.level), ord),
 				Value: elValue(el), Ordinal: ord,
 				Shelled: el.Shelled, Inner: el.Inner,
+			})
+		}
+	}
+	// 序列行（剧本E 步1）：值=该集序列群键（=公共前缀）——群卡反查成立
+	//（序列形态在场）才列出；可指集名/作者等维度，与文件名段行同权限。
+	if snap != nil {
+		if group := snapshotGroupOf(snap, ws.cand.Members[ws.repIdx].RelPath); group != nil {
+			clues = append(clues, SetRuleClue{
+				Ref: setClueSeqRef, Kind: setClueKindSeqKey,
+				Label: "序列", Value: group.Key,
 			})
 		}
 	}
@@ -862,10 +895,13 @@ func workSetRuleClues(rootPath string, ws *workSetContext) ([]SetRuleClue, *work
 type setRuleDimAssign struct {
 	dim   MetadataDimension
 	clue  SetRuleClue
-	group string // 文件名段/目录名分段指派的捕获组名（目录层/库根名指派为空）
+	group string // 文件名段/目录名分段指派的捕获组名（目录层/库根名/序列指派为空）
 	// dirEl 目录名分段指派的元素下标（-1=非目录段指派——捕获组折入目录
 	// 格式规则的 LocationPattern ancestor）。
 	dirEl int
+	// seqKey 序列线索指派（剧本E：值=群组公共前缀——FromGroupPrefix 通路，
+	// 规则构造需补定群 sibling 条目；与文件名段行同权限）。
+	seqKey bool
 }
 
 // ApplyWorkSetRuleAdjust 调整面保存动作（saveWorkSetRuleAdjust）：线索指派
@@ -882,7 +918,7 @@ func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleA
 	if err != nil {
 		return nil, err
 	}
-	clues, plan, dirPlan := workSetRuleClues(sess.RootPath, ws)
+	clues, plan, dirPlan := workSetRuleClues(sess.RootPath, sess.Snapshot, ws)
 	byRef := make(map[string]SetRuleClue, len(clues))
 	for _, c := range clues {
 		byRef[c.Ref] = c
@@ -937,6 +973,10 @@ func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleA
 		switch c.Kind {
 		case setClueKindSeg:
 			assign.group = structGroupName(dim, tagIndex)
+		case setClueKindSeqKey:
+			// 序列线索可指作者/作品名/标签等维度（剧本E：与文件名段行同
+			// 权限——值=群组公共前缀，FromGroupPrefix 通路）。
+			assign.seqKey = true
 		case setClueKindDirSeg:
 			// 目录名分段仅支持作者/集名（剧本步4：作者/集名组合/可变/不用）。
 			if dim != DimAuthor {
@@ -1005,33 +1045,50 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 		return nil, fmt.Errorf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", rep.RelPath)
 	}
 
-	// 集名捕获段组合：文件名段（引用 → 元素下标，排序去重；须连续非分隔段）
-	// 或目录名分段（单段；两者不可混指）。
+	// 集名捕获段组合（剧本E 三族互斥——同维度只能有一个来源）：序列（seqKey，
+	// 单指）/ 文件名段（setSegN 引用 → 元素下标，排序去重，须连续非分隔段）/
+	// 目录名分段（setDirSegN 引用 → 元素下标，须连续段——段间分隔原文计入
+	// 捕获，镜像文件名段 span 语义）。
 	spanSet := make(map[int]bool)
 	var spanIdx []int
-	var dirSpanRef string
+	var dirSpanIdx []int
+	seqKeyCollection := false
 	for _, ref := range in.CollectionSegRefs {
-		if strings.HasPrefix(ref, setClueDirSegPrefix) {
-			if len(spanIdx) > 0 {
-				return nil, errors.New("集名捕获段组合须同为文件名段或同为目录名分段")
+		switch {
+		case ref == setClueSeqRef:
+			seqKeyCollection = true
+		case strings.HasPrefix(ref, setClueDirSegPrefix):
+			if dirPlan == nil {
+				return nil, fmt.Errorf("集所在目录名无分段可指派，线索 %q 无法使用", ref)
 			}
-			if dirSpanRef != "" {
-				return nil, errors.New("目录名分段的集名捕获须为单段（多段组合暂不支持）")
+			idx := dirPlan.elIndexOfRef(ref)
+			if idx < 0 {
+				return nil, fmt.Errorf("集名捕获段组合中的线索 %q 不是本集所在目录名的分段线索", ref)
 			}
-			dirSpanRef = ref
-			continue
+			dirSpanIdx = append(dirSpanIdx, idx)
+		default:
+			idx := plan.elIndexOfRef(ref)
+			if idx < 0 {
+				return nil, fmt.Errorf("集名捕获段组合中的线索 %q 不是本集的文件名段线索", ref)
+			}
+			if !spanSet[idx] {
+				spanSet[idx] = true
+				spanIdx = append(spanIdx, idx)
+			}
 		}
-		if dirSpanRef != "" {
-			return nil, errors.New("集名捕获段组合须同为文件名段或同为目录名分段")
-		}
-		idx := plan.elIndexOfRef(ref)
-		if idx < 0 {
-			return nil, fmt.Errorf("集名捕获段组合中的线索 %q 不是本集的文件名段线索", ref)
-		}
-		if !spanSet[idx] {
-			spanSet[idx] = true
-			spanIdx = append(spanIdx, idx)
-		}
+	}
+	families := 0
+	if seqKeyCollection {
+		families++
+	}
+	if len(spanIdx) > 0 {
+		families++
+	}
+	if len(dirSpanIdx) > 0 {
+		families++
+	}
+	if families > 1 {
+		return nil, errors.New("集名指派互斥：一个维度只能有一个来源（序列/文件名段/目录名分段不可混指）")
 	}
 	if len(spanIdx) > 1 {
 		sort.Ints(spanIdx)
@@ -1039,6 +1096,16 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 			for i := spanIdx[k-1] + 1; i < spanIdx[k]; i++ {
 				if rep.Elements[i].Kind != elKindSep {
 					return nil, errors.New("集名捕获段组合须为连续的文件名段")
+				}
+			}
+		}
+	}
+	if len(dirSpanIdx) > 1 {
+		sort.Ints(dirSpanIdx)
+		for k := 1; k < len(dirSpanIdx); k++ {
+			for i := dirSpanIdx[k-1] + 1; i < dirSpanIdx[k]; i++ {
+				if dirPlan.els[i].Kind != elKindSep {
+					return nil, errors.New("集名捕获的目录段组合须为连续段（段间不可跳段）")
 				}
 			}
 		}
@@ -1066,15 +1133,33 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 	}
 
 	var rules []RuleEntry
-	// ① sibling 定群（仅序列成员产出的条件载体）。
-	if in.MemberOnly {
-		if group := snapshotGroupOf(snap, rep.RelPath); group != nil {
-			sibling, _, err := buildSequenceRule(rep.RelPath, group.Key, group)
-			if err != nil {
-				return nil, err
-			}
-			rules = append(rules, sibling)
+	// 序列指派（剧本E）：集名/维度←序列线索（seqKey）——值=群组公共前缀，
+	// FromGroupPrefix 通路依赖分组段先定群，凡有序列指派必补 sibling 定群条目。
+	var seqKeyDims []setRuleDimAssign
+	for _, d := range dims {
+		if d.seqKey {
+			seqKeyDims = append(seqKeyDims, d)
 		}
+	}
+	seqKeyUsed := seqKeyCollection || len(seqKeyDims) > 0
+	var seqGroup *SnapGroup
+	if in.MemberOnly || seqKeyUsed {
+		seqGroup = snapshotGroupOf(snap, rep.RelPath)
+	}
+	if seqKeyUsed && seqGroup == nil {
+		return nil, fmt.Errorf("序列线索指派须以集成员构成同形序列群为前提，成员「%s」不在任何序列群内", rep.RelPath)
+	}
+	// ① sibling 定群（仅序列成员产出的条件载体；序列指派在场时兼作
+	// FromGroupPrefix 的定群供给——兄弟群组规则不参与提取段，定群与提取
+	// 分属两条目）。
+	var siblingRule *RuleEntry
+	if seqGroup != nil && (in.MemberOnly || seqKeyUsed) {
+		sibling, _, err := buildSequenceRule(rep.RelPath, seqGroup.Key, seqGroup)
+		if err != nil {
+			return nil, err
+		}
+		siblingRule = &sibling
+		rules = append(rules, sibling)
 	}
 
 	// ② 目录层维度条目（同层合一条，复用 structDirPlan；锚定名取实际目录名）。
@@ -1156,30 +1241,40 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 	}
 
 	// ⑤ 目录格式规则（集名捕获/作者←目录名分段；无捕获指派时整条缺席——
-	// 可变目录段为呈现意图，构造上未捕获段同泛化消费）。
-	dirSpanEl := -1
-	if dirSpanRef != "" {
-		if dirPlan == nil {
-			return nil, fmt.Errorf("集所在目录名无分段可指派，线索 %q 无法使用", dirSpanRef)
-		}
-		dirSpanEl = dirPlan.elIndexOfRef(dirSpanRef)
-		if dirSpanEl < 0 {
-			return nil, fmt.Errorf("集名捕获段 %q 不是本集所在目录名的分段线索", dirSpanRef)
-		}
-	}
+	// 可变目录段为呈现意图，构造上未捕获段同泛化消费）。集名捕获支持多段
+	// 连续组合（剧本E：段间分隔原文计入捕获）。
 	dirAuthorEl := -1
+	var dirAuthorDim MetadataDimension
 	for _, d := range dims {
 		if d.dirEl >= 0 {
 			dirAuthorEl = d.dirEl
+			dirAuthorDim = d.dim
 		}
 	}
+	if len(dirSpanIdx) > 0 && dirAuthorEl >= 0 && dirSpanIdx[0] <= dirAuthorEl && dirAuthorEl <= dirSpanIdx[len(dirSpanIdx)-1] {
+		return nil, fmt.Errorf("目录段 %d 同时指给了集名组合与%s，一个维度只能有一个来源",
+			dirPlan.ordinalOf(dirAuthorEl), qnaDimensionLabel(dirAuthorDim))
+	}
 	var dirRule *RuleEntry
-	if dirSpanEl >= 0 || dirAuthorEl >= 0 {
-		rule, err := buildWorkSetDirRule(ws, dirPlan, dirSpanEl, dirAuthorEl, in)
+	if len(dirSpanIdx) > 0 || dirAuthorEl >= 0 {
+		rule, err := buildWorkSetDirRule(ws, dirPlan, dirSpanIdx, dirAuthorEl, in)
 		if err != nil {
 			return nil, err
 		}
 		dirRule = &rule
+		rules = append(rules, rule)
+	}
+
+	// ⑥ 序列前缀规则（剧本E：集名/维度←序列线索——提取 FromGroupPrefix 取
+	// 群组公共前缀，值=定群键即集名捕获；模式镜像定群形态使提取对象=序列
+	// 群成员；天然仅序列成员产出——非群成员无群组分析可用，不产声明）。
+	var seqKeyRule *RuleEntry
+	if seqKeyUsed {
+		rule, err := buildWorkSetSeqKeyRule(ws, seqGroup, seqKeyCollection, seqKeyDims)
+		if err != nil {
+			return nil, err
+		}
+		seqKeyRule = &rule
 		rules = append(rules, rule)
 	}
 
@@ -1259,13 +1354,51 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 				want := ""
 				switch action.CaptureName {
 				case seqCaptureGroup:
-					want = elValue(dirPlan.els[dirSpanEl])
+					want = dirSpanExpectedValue(dirPlan, dirSpanIdx)
 				case structGroupName(DimAuthor, -1):
 					want = elValue(dirPlan.els[dirAuthorEl])
 				}
 				if decl.Value == "" || (want != "" && decl.Value != want) {
 					return nil, fmt.Errorf("目录分段指派未能在成员「%s」上复现%s：提取「%s」≠ 期望「%s」",
 						mem.RelPath, qnaDimensionLabel(action.Dimension), decl.Value, want)
+				}
+			}
+		}
+	}
+	// 序列前缀规则自检（集为主体）：每成员经 sibling 定群成立（同键 ≥2）且
+	// 群组公共前缀提取复现群键（全员一致由同键保证）；成员不构成序列群成员
+	// 时如实回错（FromGroupPrefix 对非群成员无群组分析可用、不产声明）。
+	if seqKeyRule != nil {
+		siblingsByDirKey := make(map[string][]string)
+		for i := range snap.Files {
+			key := dirRelKeyOf(snap.Files[i].RelPath)
+			siblingsByDirKey[key] = append(siblingsByDirKey[key], snap.Files[i].FileName)
+		}
+		for i := range cand.Members {
+			mem := &cand.Members[i]
+			file := snapshotFileOf(snap, mem.RelPath)
+			if file == nil {
+				return nil, fmt.Errorf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", mem.RelPath)
+			}
+			memIn := &MatchInput{
+				FileName: file.FileName, DirNames: ExtractDirLevels(mem.RelPath), RelPath: mem.RelPath,
+				Siblings: siblingsByDirKey[dirRelKeyOf(mem.RelPath)],
+			}
+			ctx := &ParseContext{}
+			if siblingRule == nil || !siblingRule.Pattern.Evaluate(memIn, nil, ctx) || ctx.Group == nil {
+				return nil, fmt.Errorf("序列指派未能在成员「%s」上定群（该成员不构成同键序列群成员）", mem.RelPath)
+			}
+			if ctx.Group.Key != seqGroup.Key {
+				return nil, fmt.Errorf("序列指派在成员「%s」上定群键不一致：「%s」≠「%s」", mem.RelPath, ctx.Group.Key, seqGroup.Key)
+			}
+			if !seqKeyRule.Pattern.Evaluate(memIn, nil, ctx) {
+				return nil, fmt.Errorf("序列指派未能在成员「%s」上命中（序列形态过窄）", mem.RelPath)
+			}
+			for _, action := range seqKeyRule.Extractions {
+				decl, ok := action.Apply(seqKeyRule.ID, ctx)
+				if !ok || decl.Value != seqGroup.Key {
+					return nil, fmt.Errorf("序列指派未能在成员「%s」上复现%s：提取「%s」≠ 期望「%s」",
+						mem.RelPath, qnaDimensionLabel(action.Dimension), decl.Value, seqGroup.Key)
 				}
 			}
 		}
@@ -1383,30 +1516,46 @@ func buildWorkSetFilenameRule(ws *workSetContext, rep *SnapCandMember, repFile *
 	}, nil
 }
 
-// buildWorkSetDirRule 目录格式规则构造（剧本D）：按集所在目录名的分段形态
-// 展开 ancestor 正则——数字类段恒 `\d+` 通配（值不当固定值参与识别）、未捕获
-// 段泛化消费（括号段=开/闭字面+排除闭括号的内名类、普通段=排除括号与分隔
-// 的段类）、分隔 run 按原文字面；集名捕获段/作者段覆写为命名捕获组（括号
-// 字面留在组外，捕获值=剥壳内名——与线索值同口径）。模式=LocationPattern
-// （层深锚定集目录层，MinDepth=MaxDepth=层深-1），提取 FromCapture 走内核
-// ancestor 捕获绑入通路。每目录各自成集=天然语义（无 sibling/when 原子；
-// MemberOnly 勾选时集名提取附「仅序列成员产出」when 原子——用户显式收窄）。
-// 自检由调用方的全员校验完成。
-func buildWorkSetDirRule(ws *workSetContext, plan *workSetDirSegPlan, collectionEl, authorEl int, in setRuleAdjustInput) (RuleEntry, error) {
+// buildWorkSetDirRule 目录格式规则构造（剧本D + 剧本E 多段组合）：按集所在
+// 目录名的分段形态展开 ancestor 正则——数字类段恒 `\d+` 通配（值不当固定值
+// 参与识别）、未捕获段泛化消费（括号段=开/闭字面+排除闭括号的内名类、普通
+// 段=排除括号与分隔的段类）、分隔 run 按原文字面；集名捕获/作者段覆写为
+// 命名捕获组——单段捕获括号字面留在组外（捕获值=剥壳内名，与线索值同口
+// 径），多段连续组合（剧本E）捕获组覆盖整段区间 `.+?`（段间分隔原文与边界
+// 括号一并入组——镜像文件名段 span 语义，尾部段类+`$` 锚收界）。模式=
+// LocationPattern（层深锚定集目录层，MinDepth=MaxDepth=层深-1），提取
+// FromCapture 走内核 ancestor 捕获绑入通路。每目录各自成集=天然语义（无
+// sibling/when 原子；MemberOnly 勾选时集名提取附「仅序列成员产出」when
+// 原子——用户显式收窄）。自检由调用方的全员校验完成。
+func buildWorkSetDirRule(ws *workSetContext, plan *workSetDirSegPlan, collectionEls []int, authorEl int, in setRuleAdjustInput) (RuleEntry, error) {
 	collectionGroup := structGroupName(DimCollection, -1)
 	authorGroup := structGroupName(DimAuthor, -1)
 	groups := make([]string, 0, 2)
+	spanStart, spanEnd := -1, -1
+	if len(collectionEls) > 0 {
+		spanStart, spanEnd = collectionEls[0], collectionEls[len(collectionEls)-1]
+	}
+	multiSpan := len(collectionEls) > 1
 	var expr strings.Builder
 	expr.WriteString("^")
-	for i := range plan.els {
+	for i := 0; i < len(plan.els); i++ {
 		el := plan.els[i]
 		if el.Kind == elKindSep {
 			expr.WriteString(regexp.QuoteMeta(el.Text))
 			continue
 		}
+		if multiSpan && i == spanStart {
+			// 多段连续组合：一个捕获组覆盖 [spanStart..spanEnd] 整段原文
+			// 区间（段间分隔与边界括号一并入组——镜像文件名段 span 语义），
+			// 区间后跳至 spanEnd 之外续写（尾部段类+`$` 锚收界）。
+			expr.WriteString("(?P<" + collectionGroup + ">.+?)")
+			groups = append(groups, collectionGroup)
+			i = spanEnd
+			continue
+		}
 		group := ""
 		switch i {
-		case collectionEl:
+		case spanStart:
 			group = collectionGroup
 		case authorEl:
 			group = authorGroup
@@ -1442,7 +1591,7 @@ func buildWorkSetDirRule(ws *workSetContext, plan *workSetDirSegPlan, collection
 		return RuleEntry{}, err
 	}
 	extractions := make([]ExtractionAction, 0, 2)
-	if collectionEl >= 0 {
+	if spanStart >= 0 {
 		collection := ExtractionAction{Dimension: DimCollection, From: FromCapture, CaptureName: collectionGroup}
 		if in.MemberOnly {
 			collection.When = seqMemberOnlyCond()
@@ -1453,8 +1602,11 @@ func buildWorkSetDirRule(ws *workSetContext, plan *workSetDirSegPlan, collection
 		extractions = append(extractions, ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: authorGroup})
 	}
 	desc := fmt.Sprintf("泛化（集规则·目录名格式）：第 %d 层目录「%s」段格式→作品集", plan.level, plan.name)
-	if collectionEl < 0 {
+	if spanStart < 0 {
 		desc = fmt.Sprintf("泛化（集规则·目录名格式）：第 %d 层目录「%s」段格式→维度提取", plan.level, plan.name)
+	} else if multiSpan {
+		desc = fmt.Sprintf("泛化（集规则·目录名格式）：第 %d 层目录「%s」段格式→作品集=第 %d..%d 段组合（段间原文保留）",
+			plan.level, plan.name, plan.ordinalOf(spanStart), plan.ordinalOf(spanEnd))
 	}
 	desc += "（每个这样的目录各自成集；源自已归集集「" + ws.setName + "」"
 	if authorEl >= 0 {
@@ -1470,6 +1622,66 @@ func buildWorkSetDirRule(ws *workSetContext, plan *workSetDirSegPlan, collection
 		Source:      RuleSourceQna,
 		Enabled:     true,
 		Pattern:     location,
+		Extractions: extractions,
+	}, nil
+}
+
+// dirSpanExpectedValue 目录段组合的期望捕获值（自检对照）：单段=剥壳内名
+// （elValue 口径——与线索值一致，既有行为）；多段=组合区间原文拼接（段间
+// 分隔与边界括号保留——与捕获组覆盖范围一致）。
+func dirSpanExpectedValue(plan *workSetDirSegPlan, spanIdx []int) string {
+	if len(spanIdx) == 0 {
+		return ""
+	}
+	if len(spanIdx) == 1 {
+		return elValue(plan.els[spanIdx[0]])
+	}
+	var b strings.Builder
+	for i := spanIdx[0]; i <= spanIdx[len(spanIdx)-1]; i++ {
+		b.WriteString(plan.els[i].Text)
+	}
+	return b.String()
+}
+
+// buildWorkSetSeqKeyRule 序列前缀规则构造（剧本E）：「序列」线索指给集名/
+// 维度的条目——提取 FromGroupPrefix 取群组公共前缀（=定群键；「序列」指给
+// 集名即 sibling 形态键作集名捕获，集名=整键形态）。FromGroupPrefix 消费
+// 语义=分组段写入的群组分析保留在同一求值上下文（pipeline.go 两段求值），
+// 故 sibling 定群条目由调用方随本条一并提供。模式镜像定群形态（结构形态
+// 群=键提取式+扩展名尾段；规则定群群=前缀字面锚），使提取对象与定群对象
+// 同一批文件；天然仅序列成员产出（非群成员无群组分析可用、不产声明）。
+// 自检由调用方的全员校验完成。
+func buildWorkSetSeqKeyRule(ws *workSetContext, group *SnapGroup, collection bool, dims []setRuleDimAssign) (RuleEntry, error) {
+	expr := "^" + regexp.QuoteMeta(group.Key)
+	if group.FormKeyExpr != "" {
+		expr = exprWithExtTail(group.FormKeyExpr)
+	}
+	pattern, err := NewRegexPattern(string(TargetFileName), expr, nil)
+	if err != nil {
+		return RuleEntry{}, fmt.Errorf("构造序列前缀规则失败: %w", err)
+	}
+	extractions := make([]ExtractionAction, 0, len(dims)+1)
+	if collection {
+		extractions = append(extractions, ExtractionAction{Dimension: DimCollection, From: FromGroupPrefix})
+	}
+	for _, d := range dims {
+		extractions = append(extractions, ExtractionAction{Dimension: d.dim, From: FromGroupPrefix})
+	}
+	desc := fmt.Sprintf("泛化（集规则调整·序列）：序列群成员→作品集=群组公共前缀「%s」（源自已归集集「%s」的调整）", group.Key, ws.setName)
+	if !collection {
+		dimNames := make([]string, 0, len(dims))
+		for _, d := range dims {
+			dimNames = append(dimNames, qnaDimensionLabel(d.dim))
+		}
+		desc = fmt.Sprintf("泛化（集规则调整·序列）：序列群成员→%s=群组公共前缀（源自已归集集「%s」的调整）",
+			strings.Join(dimNames, "、"), ws.setName)
+	}
+	return RuleEntry{
+		ID:          generatedRuleID("qna-setgrp", group.Key),
+		Description: desc,
+		Source:      RuleSourceQna,
+		Enabled:     true,
+		Pattern:     pattern,
 		Extractions: extractions,
 	}, nil
 }
