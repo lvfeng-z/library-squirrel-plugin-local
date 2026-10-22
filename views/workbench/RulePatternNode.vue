@@ -1,9 +1,10 @@
 <template>
   <div class="li-pn">
-    <!-- 形态类型行：切换类型（按 RuleEditDialog 识别段的形态清单展开） -->
+    <!-- 形态类型行：切换类型（按 RuleEditDialog 识别段的形态清单展开；库内确认
+         为 predicate 的顶层直达入口，按确认类别拆三项） -->
     <div class="li-pn-kind-line">
       <span class="li-pn-label">形态类型</span>
-      <el-select :model-value="node.kind" size="small" class="li-pn-kind" @change="changeKind">
+      <el-select :model-value="patternKindValue(node)" size="small" class="li-pn-kind" @change="changeKind">
         <el-option v-for="k in PATTERN_KINDS" :key="k.value" :label="k.label" :value="k.value" />
       </el-select>
       <span class="li-pn-kind-note">{{ kindNote }}</span>
@@ -79,16 +80,22 @@
       </div>
     </template>
 
-    <!-- 谓词命中 -->
+    <!-- 库内确认（predicate）：确认类别 + 取值来源下拉（列上半声明的捕获组；
+         引用不在声明集=行级红，当前值保底呈现「（未声明）」） -->
     <template v-else-if="node.kind === 'predicate'">
       <div class="li-pn-line">
-        <span class="li-pn-label">谓词类别</span>
+        <span class="li-pn-label">确认类别</span>
         <el-select v-model="node.predKind" size="small" class="li-pn-target">
           <el-option v-for="k in PREDICATE_KINDS" :key="k.value" :label="k.label" :value="k.value" />
         </el-select>
         <span class="li-pn-label li-pn-label-gap">取值来源</span>
-        <el-input v-model="node.from" size="small" placeholder="捕获组名（空 = 文件名去扩展名）" class="li-pn-flex" />
+        <el-select v-model="node.from" size="small" class="li-pn-flex">
+          <el-option value="" label="文件名去扩展名" />
+          <el-option v-for="name in fromNameOptions" :key="name" :value="name" :label="name" />
+          <el-option v-if="fromUndeclared" :value="node.from" :label="`${node.from}（未声明）`" />
+        </el-select>
       </div>
+      <p v-if="fromUndeclared" class="li-pn-error">{{ fromMissingHint }}</p>
     </template>
 
     <!-- 组合：子形态列表 -->
@@ -116,16 +123,18 @@
 <script setup lang="ts">
 // 识别形态的结构化编辑节点（RuleEditDialog 识别段用）：按形态类型展开字段——
 // 文件名形态〔段/分隔写进正则原文 + 捕获组声明〕、目录锚定〔层深/格式段〕、
-// 序列群组〔键/序号/成群数〕、组合〔子形态列表〕、谓词/取反补全。递归自引用
-// （SFC 文件名自引用），就地改写传入的响应式节点对象；复杂树可切 JSON 高级
-// 模式直通原文（见 RuleEditDialog）。
-import { computed } from 'vue'
+// 序列群组〔键/序号/成群数〕、库内确认〔确认类别+取值来源下拉〕、组合〔子形态
+// 列表〕、取反补全。递归自引用（SFC 文件名自引用），就地改写传入的响应式节点
+// 对象；复杂树可切 JSON 高级模式直通原文（见 RuleEditDialog）。
+import { computed, inject, type ComputedRef, type Ref } from 'vue'
 import {
   PATTERN_KINDS,
   REGEX_TARGETS,
   PREDICATE_KINDS,
   GROUP_OUTCOMES,
   defaultPatternNode,
+  patternKindValue,
+  patternNodeOfKindValue,
   type PatternNode
 } from './ruleFormModel'
 
@@ -134,19 +143,42 @@ const props = defineProps<{
 }>()
 
 const kindNote = computed(
-  () => (PATTERN_KINDS.find((k) => k.value === props.node.kind) || { note: '' }).note
+  () => (PATTERN_KINDS.find((k) => k.value === patternKindValue(props.node)) || { note: '' }).note
 )
 
 const childList = computed(() => props.node.patterns || [])
 
-// 切换形态类型：按新类型就地重建节点字段（保留 kind 之外全部重置为该类型默认）。
+// 切换形态类型：按新类型（含库内确认复合值）就地重建节点字段（保留 kind 之外
+// 全部重置为该类型默认）。
 function changeKind(kind: string): void {
-  const fresh = defaultPatternNode(kind)
+  const fresh = patternNodeOfKindValue(kind)
   for (const key of Object.keys(props.node)) {
     delete (props.node as Record<string, unknown>)[key]
   }
   Object.assign(props.node, fresh)
 }
+
+// —— 库内确认（predicate）取值来源：上半捕获组声明集由 RuleEditDialog 注入 ——
+
+// 当前声明集（随上半形态编辑即时刷新）与历史声明集（区分「从未声明」与
+// 「声明后被删」两级文案）。
+const declaredNames = inject<ComputedRef<Set<string>> | null>('liPatternDeclaredNames', null)
+const everNames = inject<Ref<Set<string>> | null>('liPatternEverNames', null)
+
+const fromNameOptions = computed(() => (declaredNames ? [...declaredNames.value] : []))
+
+const fromUndeclared = computed(
+  () =>
+    props.node.kind === 'predicate' &&
+    !!props.node.from &&
+    !(declaredNames ? declaredNames.value.has(props.node.from) : false)
+)
+
+const fromMissingHint = computed(() =>
+  everNames && everNames.value.has(props.node.from || '')
+    ? '引用的捕获组已不存在'
+    : '取值来源引用的捕获组未声明'
+)
 
 // —— regex 捕获组声明 ——
 
@@ -231,6 +263,13 @@ function removeChild(index: number): void {
   font-style: normal;
   font-size: 12px;
   color: var(--app-text-secondary);
+}
+
+/* 库内确认取值来源引用未声明的行级提示（与提取行行级红同款危险色） */
+.li-pn-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-color-danger);
 }
 
 .li-pn-kind {

@@ -66,16 +66,36 @@ export function defaultPatternNode(kind: string): PatternNode {
   }
 }
 
-// 形态类型清单（kind 判别值与主程序规则模型一致）。
+// 形态类型清单（kind 判别值与主程序规则模型一致）。库内确认为直达入口：同一
+// predicate 能力按确认类别拆为三项顶层选项（复合值 predicate:<类别>），顶层
+// 可见「作者/标签/作品集」字样、选中即预选类别。
 export const PATTERN_KINDS: { value: string; label: string; note: string }[] = [
   { value: 'regex', label: '文件名形态', note: '正则匹配文件名/目录名/路径，可声明捕获组' },
   { value: 'location', label: '目录锚定', note: '在目录深度区间内逐层匹配目录名' },
   { value: 'sibling', label: '序列群组', note: '同目录同键兄弟达数成群' },
-  { value: 'predicate', label: '谓词命中', note: '按名字查询库内作者/标签/作品集' },
+  { value: 'predicate:author', label: '库内确认·作者', note: '按名字查询库内作者集合，查不到则整个规则不命中' },
+  { value: 'predicate:tag', label: '库内确认·标签', note: '按名字查询库内标签集合，查不到则整个规则不命中' },
+  { value: 'predicate:workSet', label: '库内确认·作品集', note: '按名字查询库内作品集集合，查不到则整个规则不命中' },
   { value: 'and', label: '组合·全部命中', note: '子形态全部命中才命中' },
   { value: 'or', label: '组合·任一命中', note: '子形态任一命中即命中' },
   { value: 'not', label: '取反', note: '内层形态不命中才命中' }
 ]
+
+// 形态类型下拉的当前值（节点 → 复合值）：predicate 节点按 predKind 映射到
+// predicate:<类别> 顶层直达项（缺类别回落作者），其余 kind 原样。
+export function patternKindValue(node: { kind?: string; predKind?: string }): string {
+  if (node.kind === 'predicate') return 'predicate:' + (node.predKind || 'author')
+  return node.kind || 'regex'
+}
+
+// 复合值 → 该类型的默认节点（切换形态类型用）：库内确认三项映射 kind=predicate
+// + 预选确认类别（取值来源置空=文件名去扩展名），其余走 defaultPatternNode。
+export function patternNodeOfKindValue(value: string): PatternNode {
+  if (value.startsWith('predicate:')) {
+    return { kind: 'predicate', predKind: value.slice('predicate:'.length), from: '' }
+  }
+  return defaultPatternNode(value)
+}
 
 // 正则匹配目标（regex.target）。
 export const REGEX_TARGETS: { value: string; label: string }[] = [
@@ -167,7 +187,21 @@ export function collectPatternCaptures(node: unknown, out: CaptureDecl[] = []): 
   return out
 }
 
+// 收集形态树内全部库内确认（predicate）节点的取值来源引用（空=文件名去扩展名，
+// 不计）：保存闸门与行级红的数据源——引用不在上半捕获组声明集即非法。
+export function collectPredicateFroms(node: unknown, out: string[] = []): string[] {
+  if (node == null || typeof node !== 'object') return out
+  const n = node as PatternNode
+  if (n.kind === 'predicate' && n.from) out.push(n.from)
+  if (n.ancestor) collectPredicateFroms(n.ancestor, out)
+  if (n.inner) collectPredicateFroms(n.inner, out)
+  for (const sub of n.patterns || []) collectPredicateFroms(sub, out)
+  return out
+}
+
 // 人话摘要（识别段首行，按规则类型生成）。
+// 组合摘要递归拼接子形态摘要（与目录锚定递归格式段同取向）——子形态的语义
+//（如库内确认的取值来源句）在首行可见，不折叠为「N 个子形态」计数。
 export function patternSummaryOf(node: unknown): string {
   if (node == null || typeof node !== 'object') return '（无模式）'
   const n = node as PatternNode
@@ -186,17 +220,25 @@ export function patternSummaryOf(node: unknown): string {
       return `序列群组：键 ${n.keyExpr ? `「${n.keyExpr}」` : '（去扩展名全名）'} / 序号「${n.seqExpr || ''}」，同键 ≥${n.minGroupSize ?? 2} 成群`
     case 'predicate': {
       const kind = (PREDICATE_KINDS.find((k) => k.value === n.predKind) || { label: n.predKind || '?' }).label
-      return `谓词命中：${kind}在库内命中（取值来源 ${n.from || '文件名去扩展名'}）`
+      const fromText = n.from ? `${n.from} 捕获值` : '文件名去扩展名'
+      return `库内确认·${kind}：${fromText}在库内${kind}集合，查不到则不命中`
     }
     case 'and':
-      return `组合（全部命中）：${(n.patterns || []).length} 个子形态`
+      return `组合（全部命中）：${summarizeSubs(n.patterns)}`
     case 'or':
-      return `组合（任一命中）：${(n.patterns || []).length} 个子形态`
+      return `组合（任一命中）：${summarizeSubs(n.patterns)}`
     case 'not':
       return `取反：内层形态不命中才命中`
     default:
       return `形态类型 ${n.kind}`
   }
+}
+
+// 组合摘要的子形态拼接（空列表如实呈现）。
+function summarizeSubs(subs?: PatternNode[]): string {
+  const list = subs || []
+  if (!list.length) return '（无子形态）'
+  return list.map((s) => patternSummaryOf(s)).join('；')
 }
 
 // —— 「仅序列成员产出」when 原子（自 SubpageRules 随迁，机制不变；由全局开关

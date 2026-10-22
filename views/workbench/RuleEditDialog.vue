@@ -251,7 +251,7 @@
 // 校验不过（组引用/维度来源唯一/JSON 解析）行级就地标红、弹窗不关；JSON 高级
 // 模式解析错就地显示位置不丢输入；取消不保存（destroy-on-close，再开回上次保
 // 存态——打开时从 props 重新取值）。
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, provide } from 'vue'
 import RulePatternNode from './RulePatternNode.vue'
 import {
   DIMENSION_OPTIONS,
@@ -262,6 +262,7 @@ import {
   NEW_EXTRACTIONS_SAMPLE,
   cloneJSON,
   collectPatternCaptures,
+  collectPredicateFroms,
   patternSummaryOf,
   defaultPatternNode,
   checkRequiredConjunct,
@@ -461,6 +462,18 @@ const activePattern = computed<PatternNode | null>(() =>
 const captureDecls = computed<CaptureDecl[]>(() => collectPatternCaptures(activePattern.value))
 
 const declaredNames = computed<Set<string>>(() => new Set(captureDecls.value.map((c) => c.name)))
+
+// 库内确认取值来源的行级红两级判定数据（剧本G）：当前声明集=即时红；历史声明集
+// 区分「从未声明」（JSON 高级模式改出/旧档带入 → 未声明文案）与「声明后被删」
+// （→ 已不存在文案，与提取行同款）。供 RulePatternNode 注入消费。
+const everDeclaredNames = ref<Set<string>>(new Set())
+watch(declaredNames, (curr) => {
+  const next = new Set(everDeclaredNames.value)
+  for (const name of curr) next.add(name)
+  everDeclaredNames.value = next
+})
+provide('liPatternDeclaredNames', declaredNames)
+provide('liPatternEverNames', everDeclaredNames)
 
 const patternSummary = computed((): string => {
   if (patternJsonMode.value && !patternParsed.value) return '（JSON 待解析为合法对象后呈现摘要）'
@@ -745,6 +758,8 @@ function initFromProps(): void {
         patternError.value = parsed.ok ? '顶层须为 JSON 对象' : parsed.error || '解析失败'
       }
     }
+    // 历史声明集重置为打开时点的声明集（本次会话内新增声明随后续编辑并入）
+    everDeclaredNames.value = new Set(declaredNames.value)
     extractionsJsonMode.value = false
     extractionsText.value = ''
     const rawExtractions: unknown = !rule || rule.isNew ? NEW_EXTRACTIONS_SAMPLE : rule.extractions
@@ -788,6 +803,18 @@ function save(): void {
       if (patternError.value || !patternParsed.value) return
     }
     const pattern = patternJsonMode.value ? patternParsed.value : patternRoot.value
+    // 库内确认取值来源存在性闸门（剧本G 步4/5）：引用未声明组 → 不关窗不保存
+    //（结构化模式行内已标红；JSON 模式聚合进模式错误就地呈现）
+    if (pattern) {
+      const declared = new Set(collectPatternCaptures(pattern).map((c) => c.name))
+      const missing = [...new Set(collectPredicateFroms(pattern).filter((name) => !declared.has(name)))]
+      if (missing.length) {
+        if (patternJsonMode.value) {
+          patternError.value = `库内确认的取值来源引用了未在上半声明的捕获组：${missing.join('、')}`
+        }
+        return
+      }
+    }
     let extractions: unknown
     if (extractionsJsonMode.value) {
       const parsed = tryParseJSON(extractionsText.value)
