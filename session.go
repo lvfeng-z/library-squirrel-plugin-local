@@ -123,6 +123,12 @@ type WorkbenchSession struct {
 	// 业务键 upsert，行 id 字符串命中不到既有行而会另造新行（语义核验结论见
 	// work_fetch.go DimCollection 注释）。
 	ConfirmedSetIDs map[string]int64 `json:"confirmedSetIds,omitempty"`
+	// WorkSetRuleLineage 集→生成规则族的谱系簿记（target 键 → 该集经泛化/
+	// 调整面保存入档的规则 ID 集）：同一集再次入档=修订意图，commitWorkSetRules
+	// 先停用旧族再入档新族（旧规则不再产出旧值遮蔽新值）。会话态工件——
+	// 会话重建后簿记缺席，退化为并存（捕获组按规则隔离保证互不窃取，仅同
+	// 维度声明竞争进待裁决）。
+	WorkSetRuleLineage map[string][]string `json:"workSetRuleLineage,omitempty"`
 }
 
 // SessionStore 会话读写所需的最小存储方法集；签名与 SDK 的 dto.KVStore 同名方法

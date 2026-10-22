@@ -151,8 +151,16 @@ func NewLocationPattern(minDepth, maxDepth int, ancestor Pattern) (*LocationPatt
 func (p *LocationPattern) patternMarker() {}
 
 // Evaluate 对 [MinDepth, MaxDepth] ∩ [0, len(DirNames)-1] 内每层目录构造只含
-// 该目录名的子输入，用临时上下文求值 Ancestor（子绑定不进主 ctx）；任一层命中
-// 即向主 ctx 追加 DirHit 并返回 true；全部层不中返回 false。
+// 该目录名的子输入，用临时上下文求值 Ancestor；任一层命中即向主 ctx 追加
+// DirHit，并把 Ancestor 的命名捕获组绑定并入主 ctx（与文件名捕获同空间），
+// 返回 true；全部层不中返回 false。
+//
+// 同名冲突优先级：**文件名/路径捕获优先，ancestor 捕获仅补缺**——并入时跳过
+// 主 ctx 内已存在的组名（同一规则内 And[文件名正则, 位置模式] 与 And[位置
+// 模式, 文件名正则] 两种顺序下文件名侧的绑定恒为终值；一条规则内多个
+// LocationPattern 捕获同名时先绑入者胜，测试锚定）。跨规则不存在竞争：提取
+// 段按规则隔离捕获作用域（ruleScopedContext，见 runExtractionStage），并存
+// 规则的同名捕获互不遮蔽。
 func (p *LocationPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseContext) bool {
 	if p.Ancestor == nil {
 		return false
@@ -170,6 +178,12 @@ func (p *LocationPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Parse
 		tmp := &ParseContext{}
 		if p.Ancestor.Evaluate(sub, lib, tmp) {
 			ctx.DirHits = append(ctx.DirHits, DirHit{Depth: depth, Name: in.DirNames[depth]})
+			for _, binding := range tmp.Captures {
+				if _, exists := ctx.Capture(binding.Name); exists {
+					continue
+				}
+				ctx.Captures = append(ctx.Captures, binding)
+			}
 			return true
 		}
 	}

@@ -361,16 +361,20 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 // combinedRuleDeclarations 组合规则集在单文件上的声明求值（消费判据）：兄弟
 // 群组定群规则先于提取规则求值（首个命中的定群写入群组上下文，与流水线分组
 // 段同构；其余定群规则不再求值）——群组序号等条件操作数与群组前缀提取自该
-// 上下文取值；其余规则在共享上下文内依序求值（目录命中/捕获绑定逐规则累积，
-// 与流水线单文件单上下文同构），任一规则模式未命中即整体不产出（组合规则须
-// 全部命中才算覆盖）。带生效条件的动作按流水线两遍执行语义求值（第二遍可见
-// 全部无条件声明）。MatchInput 由快照记录构造，siblings 为同目录兄弟全集
-// （定群成群判定的求值输入，可为空——空时定群规则恒不命中）。
+// 上下文取值；其余规则依序求值，捕获组与目录/谓词命中按规则隔离（与流水线
+// 提取段同构——FromAncestorDir/FromPredicate 只读自身规则的锚定/谓词命中），
+// 任一规则模式未命中即整体不产出（组合规则须全部命中才算覆盖）。带生效条件
+// 的动作按流水线两遍执行语义求值（第二遍可见全部无条件声明）。MatchInput
+// 由快照记录构造，siblings 为同目录兄弟全集（定群成群判定的求值输入，可为
+// 空——空时定群规则恒不命中）。
 func combinedRuleDeclarations(rules []RuleEntry, f *SnapFile, siblings []string) []MetadataDeclaration {
 	in := &MatchInput{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath, Siblings: siblings}
 	ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
 	var decls []MetadataDeclaration
-	var conditional []struct{ rule *RuleEntry }
+	var conditional []struct {
+		rule    *RuleEntry
+		context *ParseContext
+	}
 	grouped := false
 	for i := range rules {
 		rule := &rules[i]
@@ -384,27 +388,33 @@ func combinedRuleDeclarations(rules []RuleEntry, f *SnapFile, siblings []string)
 			grouped = true
 			continue
 		}
-		if !rule.Pattern.Evaluate(in, nil, ctx) {
+		ruleCtx := ctx.ruleScopedContext()
+		hit := rule.Pattern.Evaluate(in, nil, ruleCtx)
+		ctx.absorbScoped(ruleCtx)
+		if !hit {
 			return nil
 		}
 		if hasConditionalAction(rule.Extractions) {
-			conditional = append(conditional, struct{ rule *RuleEntry }{rule})
+			conditional = append(conditional, struct {
+				rule    *RuleEntry
+				context *ParseContext
+			}{rule, ruleCtx})
 		}
 		for _, action := range rule.Extractions {
 			if action.When != nil {
 				continue
 			}
-			if decl, ok := action.Apply(rule.ID, ctx); ok {
+			if decl, ok := action.Apply(rule.ID, ruleCtx); ok {
 				decls = append(decls, decl)
 			}
 		}
 	}
 	for _, match := range conditional {
 		for _, action := range match.rule.Extractions {
-			if action.When == nil || !action.When.Holds(ctx, decls) {
+			if action.When == nil || !action.When.Holds(match.context, decls) {
 				continue
 			}
-			if decl, ok := action.Apply(match.rule.ID, ctx); ok {
+			if decl, ok := action.Apply(match.rule.ID, match.context); ok {
 				decls = append(decls, decl)
 			}
 		}

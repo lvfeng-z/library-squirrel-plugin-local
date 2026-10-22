@@ -97,7 +97,7 @@
           </p>
         </div>
         <label class="li-sr-cond">
-          <input type="checkbox" checked disabled>
+          <input type="checkbox" :checked="!!suggestion.memberOnly" disabled>
           <span>仅序列成员产出</span>
         </label>
         <!-- 命中预览：全库口径（含本集成员），样例偏好跨目录 -->
@@ -141,7 +141,7 @@
           调整规则
           <span class="li-sr-sec-note">线索逐项指派 · 保存即入档</span>
         </h4>
-        <p class="li-sr-hint">每条线索指派到维度/集名组合/可变/目录锚定/不用之一；末段序号默认已指；集名组合可勾选连续多段。</p>
+        <p class="li-sr-hint">每条线索指派到维度/集名组合/可变/目录锚定/不用之一；末段序号默认已指；集名组合可勾选连续多段；集所在目录名另列目录名分段行（数字段默认已标可变、标题段默认已指集名组合）。</p>
         <div class="li-sr-clue-table">
           <div v-for="c in suggestion.clues || []" :key="c.ref" class="li-sr-clue-row">
             <span class="li-sr-clue-label" :title="c.ref">{{ clueLabel(c) }}</span>
@@ -168,19 +168,23 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 
-// 集规则面板（迭代三 · 剧本C）：已归集集卡「泛化集规则」进入——泛化主体=集
-// 整体（后端对 confirmed 分仓卡按 target 寻址推导多成员共同形态），不再绕道
-// 集内单个作品的表单。面板态机：
+// 集规则面板（迭代三 · 剧本C + 迭代四 · 剧本D）：已归集集卡「泛化集规则」
+// 进入——泛化主体=集整体（后端对 confirmed 分仓卡按 target 寻址推导多成员
+// 共同形态），不再绕道集内单个作品的表单。面板态机：
 //   推导中… → 草稿态（集卡+成员列表+共同形态+规则草稿〔人话/表达式/仅序列
-//   成员产出已勾〕+命中预览〔全库含本集成员，样例偏好跨目录〕+泛化成规则/
+//   成员产出已勾——文件名共同形态优先；无共同形态时给目录格式草稿（剧本D：
+//   第 N 层目录段格式→作品集=末非数字段、每目录各自成集，默认不勾仅序列
+//   成员）〕+命中预览〔全库含本集成员，样例偏好跨目录〕+泛化成规则/
 //   调整规则）→ 泛化中… → 生成规则与差异（验证轮重识别已启动，差异随 props）；
-//   失败三分支——a) 推导失败如实呈现原因（泛化置灰、调整可用）；b) 入档写
-//   失败半程态（重试泛化/放弃，草稿不丢）；c) 集不在已归集清单内（面板不动）。
-// 调整面（步4）：线索清单（目录各层〔含剥壳变体〕+成员文件名段+序号段+库根
-// 名）逐项指派（维度←线索/集名捕获段组合/可变/目录锚定/不用；末段序号默认
-// 已指）→ 保存规则（入档+验证轮，与泛化同终点）。请求经父组件 ParseView 的
-// 唯一 workbench 请求通道（request prop 注入）；成员点行 emit selectMember 由
-// 父组件切到该文件的表单（集面板让出）。
+//   失败三分支——a) 推导失败如实呈现原因（含「无法从目录名推导稳定格式
+//   （原因）」；泛化置灰、调整可用）；b) 入档写失败半程态（重试泛化/放弃，
+//   草稿不丢）；c) 集不在已归集清单内（面板不动）。
+// 调整面（步4）：线索清单（目录各层〔含剥壳变体〕+集所在目录名分段
+// 〔setDirSegN——数字段默认可变、标题段默认指集名组合〕+成员文件名段+序号段
+// +库根名）逐项指派（维度←线索/集名捕获段组合/可变/目录锚定/不用；末段序号
+// 默认已指）→ 保存规则（入档+验证轮，与泛化同终点）。请求经父组件 ParseView
+// 的唯一 workbench 请求通道（request prop 注入）；成员点行 emit selectMember
+// 由父组件切到该文件的表单（集面板让出）。
 
 interface SetRuleMember {
   relPath: string
@@ -224,6 +228,7 @@ interface SetRuleSuggestion {
   defaultVariableSegRefs?: string[]
   defaultSeqSegRef?: string
   defaultMemberOnly?: boolean
+  defaultAuthorClueRef?: string
 }
 
 interface SetRuleDiffConclusion {
@@ -325,8 +330,12 @@ function applyDefaultAssigns(): void {
   for (const ref of sugg.defaultCollectionSegRefs || []) next[ref] = 'collection'
   for (const ref of sugg.defaultVariableSegRefs || []) next[ref] = 'variable'
   if (sugg.defaultSeqSegRef) next[sugg.defaultSeqSegRef] = 'seq'
+  // 目录格式草稿的默认作者指派（一级目录 Artist 壳在场时=dirLevelStripped1）
+  if (sugg.defaultAuthorClueRef) next[sugg.defaultAuthorClueRef] = 'author'
   assigns.value = next
-  memberOnly.value = sugg.defaultMemberOnly !== false
+  // 目录格式草稿不带「仅序列成员产出」默认（集的载体是目录名格式）——严格
+  // 按应答携带值取 true，缺席即不勾。
+  memberOnly.value = sugg.defaultMemberOnly === true
   assignsBaseline = assignStateText()
 }
 
@@ -337,8 +346,10 @@ defineExpose({
 
 // 线索指派可选目的地（按线索类别）：
 //   序号段→序号/不用（默认序号）；文件名段→集名组合/可变/作者/作品名/标签/不用；
-//   目录层（含剥壳变体）→作者/作品名/标签/目录锚定/不用；库根名→作者/作品名/
-//   标签/不用（以常量入规则——脚本「常量」的实现折入常量声明）。
+//   目录名分段（setDirSegN，集所在目录名的括号/分隔段）→集名组合/可变/作者/
+//   不用（数字段默认已标可变）；目录层（含剥壳变体）→作者/作品名/标签/目录
+//   锚定/不用；库根名→作者/作品名/标签/不用（以常量入规则——脚本「常量」的
+//   实现折入常量声明）。
 function destOptionsOf(c: SetRuleClue): { value: Dest; label: string }[] {
   if (c.kind === 'setSeq') {
     return [
@@ -354,6 +365,14 @@ function destOptionsOf(c: SetRuleClue): { value: Dest; label: string }[] {
       { value: 'author', label: '作者' },
       { value: 'title', label: '作品名' },
       { value: 'tag', label: '标签' }
+    ]
+  }
+  if (c.kind === 'setDirSeg') {
+    return [
+      { value: '', label: '不用' },
+      { value: 'collection', label: '集名组合' },
+      { value: 'variable', label: '可变' },
+      { value: 'author', label: '作者' }
     ]
   }
   if (c.kind === 'dirLevel' || c.kind === 'dirLevelStripped') {

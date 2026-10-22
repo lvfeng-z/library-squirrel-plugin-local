@@ -328,16 +328,18 @@ func TestWorkSetRuleAdjustInputValidation(t *testing.T) {
 	}
 }
 
-// TestWorkSetRuleDerivationFailsTruthfully 推导失败如实返回（剧本步5a）：目录
-// 候选整目录归集（目录名含作品号）带杂成员（封面.png 不合同形）——单首样本
-// 会漏，集整体推导以全员校验失败告终；Failed 态仍携带线索清单与序号段默认
-// 指派（调整规则仍可用），泛化入档回错误（前端置灰对应）。
+// TestWorkSetRuleDerivationFailsTruthfully 推导失败如实返回（剧本步5a；迭代四
+// 起双路都败才成失败态）：目录候选整目录归集（目录名含作品号）带杂成员
+// （封面.png 不合同形）——文件名侧全员校验失败；目录名分段侧全为数字类、无
+// 标题段可指集名——两路原因并列呈现（点名不合形成员+目录侧原因）。Failed
+// 态仍携带线索清单与序号段默认指派（调整规则仍可用），泛化入档回错误
+// （前端置灰对应）。
 func TestWorkSetRuleDerivationFailsTruthfully(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newSeqRecognitionFixture(t, root)
-	writeTestFile(t, root+"/合集[126794866]/[画师乙]_[126794866]_合集名_[01].png", "a")
-	writeTestFile(t, root+"/合集[126794866]/[画师乙]_[126794866]_合集名_[02].png", "b")
-	writeTestFile(t, root+"/合集[126794866]/封面.png", "c")
+	writeTestFile(t, root+"/[126794866]/[画师乙]_[126794866]_合集名_[01].png", "a")
+	writeTestFile(t, root+"/[126794866]/[画师乙]_[126794866]_合集名_[02].png", "b")
+	writeTestFile(t, root+"/[126794866]/封面.png", "c")
 	if err := m.runFullRecognition(root); err != nil {
 		t.Fatalf("全量识别失败: %v", err)
 	}
@@ -348,7 +350,7 @@ func TestWorkSetRuleDerivationFailsTruthfully(t *testing.T) {
 	var target string
 	for i := range sess.Snapshot.Candidates {
 		c := &sess.Snapshot.Candidates[i]
-		if c.Source == candSourceDir && c.Dir == "合集[126794866]" {
+		if c.Source == candSourceDir && c.Dir == "[126794866]" {
 			target = c.target()
 			break
 		}
@@ -365,8 +367,9 @@ func TestWorkSetRuleDerivationFailsTruthfully(t *testing.T) {
 	if err != nil {
 		t.Fatalf("推导失败应回 Failed 态而非错误: %v", err)
 	}
-	if !sugg.Failed || !strings.Contains(sugg.FailReason, "封面.png") || !strings.Contains(sugg.FailReason, "无法") {
-		t.Fatalf("失败原因应如实点名不合形成员: %+v", sugg.FailReason)
+	if !sugg.Failed || !strings.Contains(sugg.FailReason, "封面.png") ||
+		!strings.Contains(sugg.FailReason, "无法从目录名推导稳定格式") {
+		t.Fatalf("失败原因应并列点名文件名侧不合形成员与目录侧不可推导原因: %+v", sugg.FailReason)
 	}
 	if len(sugg.Rules) != 0 || sugg.Summary != "" {
 		t.Fatalf("失败态不应携带规则草稿: %+v", sugg)

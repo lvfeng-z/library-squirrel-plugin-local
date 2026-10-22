@@ -31,10 +31,16 @@ import (
 // 分隔元素位序、1 起——与呈现位序一致）；序号元素同编号空间、Kind=setSeq。
 const setClueSegPrefix = "setSeg"
 
-// setClueKindSeg / setClueKindSeq 文件名段 / 序号段的线索类别。
+// setClueDirSegPrefix 集规则调整面的目录名分段线索引用前缀（setDirSegN，N 为
+// 集所在目录名的非分隔元素位序、1 起）。
+const setClueDirSegPrefix = "setDirSeg"
+
+// setClueKindSeg / setClueKindSeq / setClueKindDirSeg 文件名段 / 序号段 /
+// 目录名分段的线索类别。
 const (
-	setClueKindSeg = "setSeg"
-	setClueKindSeq = "setSeq"
+	setClueKindSeg    = "setSeg"
+	setClueKindSeq    = "setSeq"
+	setClueKindDirSeg = "setDirSeg"
 )
 
 // SetRuleMember 集规则草稿的成员呈现（成员列表点击跳文件表单的数据源）。
@@ -94,6 +100,9 @@ type SetRuleSuggestion struct {
 	DefaultVariableSegRefs   []string `json:"defaultVariableSegRefs,omitempty"`
 	DefaultSeqSegRef         string   `json:"defaultSeqSegRef,omitempty"`
 	DefaultMemberOnly        bool     `json:"defaultMemberOnly,omitempty"`
+	// DefaultAuthorClueRef 默认作者指派的线索引用（目录格式草稿带出：一级
+	// 目录 Artist 壳在场时=dirLevelStripped1；空=无默认作者指派）。
+	DefaultAuthorClueRef string `json:"defaultAuthorClueRef,omitempty"`
 }
 
 // setRuleAdjustInput 调整面保存的指派载荷（saveWorkSetRuleAdjust）：每条线索
@@ -170,15 +179,29 @@ func loadWorkSetContext(sess *WorkbenchSession, target string) (*workSetContext,
 	return &workSetContext{cand: cand, setName: setName, repIdx: repIdx}, nil
 }
 
-// workSetDraft 集整体序列形态草稿（推导成功态产物；泛化入档复跑同一构造——
-// 建议即所见即所入）。span 供调整面默认指派（集名捕获组合）换算。
+// 集草稿类别：draftSeq=文件名共同形态（迭代三路径）；draftDir=目录名稳定
+// 格式（迭代四路径——文件名无共同形态时的回退推导）。
+const (
+	draftSeq = iota
+	draftDir
+)
+
+// workSetDraft 集整体草稿（推导成功态产物；泛化入档复跑同一构造——
+// 建议即所见即所入）。span 供调整面默认指派（集名捕获组合）换算；目录格式
+// 草稿的默认指派由 dirCollectionEl/dirAuthorRef 承载。
 type workSetDraft struct {
+	kind    int
 	setName string
 	shape   string
 	summary string
 	mapping string
 	span    seqNameSpan
 	rules   []RuleEntry
+	// dirCollectionEl 目录格式草稿的默认集名捕获段（元素下标；-1=非目录草稿）。
+	dirCollectionEl int
+	// dirAuthorRef 目录格式草稿的默认作者线索引用（dirLevelStripped[n]；空=
+	// 一级目录无 Artist 壳）。
+	dirAuthorRef string
 }
 
 // deriveWorkSetSeqDraft 集整体草稿推导（纯推导，不落库）：代表成员出共同形态
@@ -234,6 +257,7 @@ func deriveWorkSetSeqDraft(snap *RecognitionSnapshot, ws *workSetContext) (workS
 	}
 	shape := seqShapePhrase(rep.Elements, span)
 	return workSetDraft{
+		kind:    draftSeq,
 		setName: ws.setName,
 		shape:   shape,
 		summary: fmt.Sprintf("同形序列成员（%s 形态）→ 作品集 = 段组合『%s』，仅序列成员产出", shape, ws.setName),
@@ -243,10 +267,127 @@ func deriveWorkSetSeqDraft(snap *RecognitionSnapshot, ws *workSetContext) (workS
 	}, ""
 }
 
+// deriveWorkSetDraft 集草稿统一推导入口（自动草稿优先级，剧本D 步1/2）：
+// 文件名共同序列形态在→照旧（迭代二/三路径）；否则集所在目录名呈稳定格式
+// →目录格式草稿（集名=末非数字段捕获、作者=一级目录 Artist 壳剥壳〔壳在场
+// 时〕、数字段可变、每目录各自成集=天然语义——无 sibling/when 原子）；都
+// 无→失败态如实返回原因（剧本步5——两路原因并存时并列呈现，文件名侧与
+// 目录侧的不可推导事实同时可见）。
+func deriveWorkSetDraft(snap *RecognitionSnapshot, ws *workSetContext) (workSetDraft, string) {
+	seqDraft, seqFail := deriveWorkSetSeqDraft(snap, ws)
+	if seqFail == "" {
+		return seqDraft, ""
+	}
+	dirDraft, dirFail := deriveWorkSetDirDraft(snap, ws)
+	if dirFail == "" {
+		return dirDraft, ""
+	}
+	if seqFail != dirFail {
+		dirFail = seqFail + "；" + dirFail
+	}
+	return workSetDraft{}, dirFail
+}
+
+// deriveWorkSetDirDraft 目录名稳定格式草稿推导（纯推导，不落库）：成员所在
+// 目录名分段（括号段+分隔符感知）取稳定格式（段数/包裹/分隔一致，数字段值
+// 可不同），类推断（纯数字段值→数字类 `\d+` 通配、其余→泛化段）；默认集名=
+// 末非数字段捕获、作者=一级目录 Artist 壳剥壳（壳在场时）。条目：作者条目
+// （structDirPlan 同款：层深锚定+ancestorDir 剥壳）+ 目录格式条目
+// （LocationPattern 层深+段格式正则带命名捕获，提取 FromCapture——内核层
+// ancestor 捕获绑入通路）。全员自检：每成员目录命中格式且集名捕获非空。
+func deriveWorkSetDirDraft(snap *RecognitionSnapshot, ws *workSetContext) (workSetDraft, string) {
+	cand := ws.cand
+	rep := &cand.Members[ws.repIdx]
+	repFile := snapshotFileOf(snap, rep.RelPath)
+	if repFile == nil {
+		return workSetDraft{}, fmt.Sprintf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", rep.RelPath)
+	}
+	// 稳定格式判定：全部成员所在目录名（当前候选恒单目录，多目录按同格式
+	// 校验——段数/包裹/分隔一致才成稳定格式）。
+	memberDirs := make([]string, 0, len(cand.Members))
+	seen := make(map[string]bool, len(cand.Members))
+	for i := range cand.Members {
+		key := dirRelKeyOf(cand.Members[i].RelPath)
+		if !seen[key] {
+			seen[key] = true
+			memberDirs = append(memberDirs, key)
+		}
+	}
+	plan, failReason := newWorkSetDirSegPlan(cand.Dir, memberDirs)
+	if failReason != "" {
+		return workSetDraft{}, failReason
+	}
+	// 默认集名捕获 = 末非数字段。
+	collectionEl := -1
+	for k := len(plan.ordinals) - 1; k >= 0; k-- {
+		if !plan.digit[plan.ordinals[k]] {
+			collectionEl = plan.ordinals[k]
+			break
+		}
+	}
+	if collectionEl < 0 {
+		return workSetDraft{}, "无法从目录名推导稳定格式：目录名段全为数字类，无标题段可指集名（可在调整规则中手动指派）"
+	}
+	var rules []RuleEntry
+	// 作者条目：一级目录 Artist 壳在场时（集目录层深 ≥2 才有一级目录先祖）。
+	dirAuthorRef := ""
+	if plan.level >= 2 {
+		if name1 := dirNameAtLevel(rep.RelPath, 1); name1 != "" {
+			if shell, inner, ok := stripShell(name1); ok {
+				entry := &structDirPlan{level: 1, name: name1, shell: &shell,
+					slots: []*structMappingSlot{{dim: DimAuthor, value: inner}}}
+				if rule, ok := entry.build(rep.RelPath, repFile.FileName); ok {
+					rules = append(rules, rule)
+					dirAuthorRef = fmt.Sprintf("%s%d", structClueDirLevelStripped, 1)
+				}
+			}
+		}
+	}
+	dirRule, err := buildWorkSetDirRule(ws, plan, collectionEl, -1, setRuleAdjustInput{})
+	if err != nil {
+		return workSetDraft{}, fmt.Sprintf("无法构造目录格式规则：%v", err)
+	}
+	rules = append(rules, dirRule)
+	// 全员自检（集为主体）：每成员目录命中段格式且集名捕获非空复现段值。
+	for i := range cand.Members {
+		mem := &cand.Members[i]
+		file := snapshotFileOf(snap, mem.RelPath)
+		if file == nil {
+			return workSetDraft{}, fmt.Sprintf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", mem.RelPath)
+		}
+		if dirRelKeyOf(mem.RelPath) != plan.dirRelKey {
+			return workSetDraft{}, fmt.Sprintf("成员「%s」不在集目录 %s 内，无法按目录名格式推导", mem.RelPath, plan.dirRelKey)
+		}
+		ctx := &ParseContext{}
+		if !dirRule.Pattern.Evaluate(structSampleInput(mem.RelPath, file.FileName), nil, ctx) {
+			return workSetDraft{}, fmt.Sprintf("共同格式校验失败：目录格式规则未命中成员「%s」（非首样本校验）", mem.RelPath)
+		}
+		decl, ok := dirRule.Extractions[0].Apply(dirRule.ID, ctx)
+		if !ok || decl.Value == "" {
+			return workSetDraft{}, fmt.Sprintf("共同格式校验失败：成员「%s」的集名提取结果为空（非首样本校验）", mem.RelPath)
+		}
+	}
+	shape := dirSegShapePhrase(plan)
+	summary := fmt.Sprintf("%s → 作品集=第 %d 段（每个这样的目录各自成集）", shape, plan.ordinalOf(collectionEl))
+	if dirAuthorRef != "" {
+		summary += fmt.Sprintf("；作者=%s %s剥壳", dirLevelLabel(1), structWrapDesc(rep.RelPath, 1))
+	}
+	return workSetDraft{
+		kind:            draftDir,
+		setName:         ws.setName,
+		shape:           "成员文件名无共同序列形态；" + shape,
+		summary:         summary,
+		dirCollectionEl: collectionEl,
+		dirAuthorRef:    dirAuthorRef,
+		rules:           rules,
+	}, ""
+}
+
 // ApplyWorkSetRuleSummary 集规则草稿推导动作（summarizeWorkSetRule）：target
-// 寻址 confirmed 分仓卡，以集整体推导序列形态草稿 + 命中预览（全库求值）+
-// 调整面线索清单与默认指派。推导失败返回 Failed 态应答（非错误——面板呈现
-// 失败文案、「泛化成规则」置灰、「调整规则」仍可用）；target 缺席已归集
+// 寻址 confirmed 分仓卡，以集整体推导规则草稿（文件名共同形态优先；无共同
+// 形态时回退目录名稳定格式——剧本D）+ 命中预览（全库求值）+ 调整面线索清单
+// 与默认指派。推导失败返回 Failed 态应答（非错误——面板呈现失败文案、
+// 「泛化成规则」置灰、「调整规则」仍可用）；target 缺席已归集
 // （剧本步5c）回错误。
 func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleSuggestion, error) {
 	sess, err := m.loadSession(root)
@@ -269,10 +410,10 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 		}
 		sugg.Members = append(sugg.Members, SetRuleMember{RelPath: mem.RelPath, FileName: file.FileName, SeqText: mem.SeqText})
 	}
-	clues, segPlan := workSetRuleClues(sess.RootPath, ws)
+	clues, segPlan, dirPlan := workSetRuleClues(sess.RootPath, ws)
 	sugg.Clues = clues
 	sugg.DefaultSeqSegRef = segPlan.seqRef()
-	draft, failReason := deriveWorkSetSeqDraft(sess.Snapshot, ws)
+	draft, failReason := deriveWorkSetDraft(sess.Snapshot, ws)
 	if failReason != "" {
 		sugg.Failed, sugg.FailReason = true, failReason
 		// 失败态默认指派仍给出可调初值：序号段已指、集名捕获留空（手动起建）。
@@ -280,6 +421,33 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 	}
 	sugg.Shape = draft.shape
 	sugg.Summary = draft.summary
+	if draft.kind == draftDir {
+		// 目录格式草稿：默认集名捕获=末非数字目录段、数字段标可变、作者=
+		// 一级目录 Artist 壳（在场时）；「仅序列成员产出」不默认（集的载体
+		// 是目录名格式而非序列形态——乱名成员非序列群，when 原子会令规则
+		// 恒不产出=惰性规则）。DefaultMemberOnly 复位为 false（构造处预置
+		// 的 true 只属于文件名共同形态路径）。
+		sugg.DefaultMemberOnly = false
+		collectionOrd := dirPlan.ordinalOf(draft.dirCollectionEl)
+		sugg.Mappings = []RuleSuggestionMapping{{
+			Dimension: string(DimCollection),
+			From:      fmt.Sprintf("%s段 %d（末非数字段）", dirLevelLabel(dirPlan.level), collectionOrd),
+		}}
+		if draft.dirAuthorRef != "" {
+			sugg.Mappings = append(sugg.Mappings, RuleSuggestionMapping{
+				Dimension: string(DimAuthor), From: dirLevelLabel(1) + "剥壳",
+			})
+		}
+		sugg.DefaultCollectionSegRefs = []string{setDirSegRefOf(collectionOrd)}
+		sugg.DefaultVariableSegRefs = dirPlan.digitSegRefs(collectionOrd)
+		sugg.DefaultAuthorClueRef = draft.dirAuthorRef
+		for i := range draft.rules {
+			sugg.Rules = append(sugg.Rules, generatedRuleViewOf(&draft.rules[i]))
+		}
+		sugg.HitCount, sugg.HitTotal, sugg.Samples = previewWorkSetRules(
+			draft.rules, sess.Snapshot, ws.cand.Dir, draft.rules[len(draft.rules)-1].ID)
+		return sugg, nil
+	}
 	sugg.Mappings = []RuleSuggestionMapping{{Dimension: string(DimCollection), From: draft.mapping}}
 	sugg.MemberOnly = true
 	for i := range draft.rules {
@@ -293,8 +461,9 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 }
 
 // ApplyWorkSetRuleGeneralize 集规则泛化入档动作（generalizeWorkSetRule）：
-// 复跑草稿推导（建议即所见即所入）→ generalize 档案写单点入档 → 集成员
-// 作用域消费剥离（消费判据与 ad6a748 版同一实现）→ 验证轮排定。
+// 复跑草稿推导（建议即所见即所入——文件名形态优先、目录格式回退与草稿面
+// 同一判定）→ generalize 档案写单点入档 → 集成员作用域消费剥离（消费判据
+// 与 ad6a748 版同一实现）→ 验证轮排定。
 func (m *SessionManager) ApplyWorkSetRuleGeneralize(root, target string) (*GenerationResult, error) {
 	sess, err := m.loadSession(root)
 	if err != nil {
@@ -304,7 +473,7 @@ func (m *SessionManager) ApplyWorkSetRuleGeneralize(root, target string) (*Gener
 	if err != nil {
 		return nil, err
 	}
-	draft, failReason := deriveWorkSetSeqDraft(sess.Snapshot, ws)
+	draft, failReason := deriveWorkSetDraft(sess.Snapshot, ws)
 	if failReason != "" {
 		return nil, errors.New(failReason)
 	}
@@ -312,8 +481,10 @@ func (m *SessionManager) ApplyWorkSetRuleGeneralize(root, target string) (*Gener
 }
 
 // commitWorkSetRules 集规则入档共用落地（泛化入档与调整面保存同终点）：
-// 档案写（ArchiveWriteGeneralize，单点串行）→ 集成员作用域消费剥离 → 验证
-// 轮排定 → 生成结果摘要（Rules=组合规则全部条目）。
+// 同系覆写（同一 target 此前入档的规则族先停用——再次泛化/调整=修订意图，
+// 旧规则不再产出旧值遮蔽新值）→ 档案写（ArchiveWriteGeneralize，单点串行）
+// → 谱系簿记翻新 → 集成员作用域消费剥离 → 验证轮排定 → 生成结果摘要
+// （Rules=组合规则全部条目）。
 func (m *SessionManager) commitWorkSetRules(root string, ws *workSetContext, snap *RecognitionSnapshot, rules []RuleEntry) (*GenerationResult, error) {
 	scope := make([]*SnapFile, 0, len(ws.cand.Members))
 	for i := range ws.cand.Members {
@@ -321,10 +492,39 @@ func (m *SessionManager) commitWorkSetRules(root string, ws *workSetContext, sna
 			scope = append(scope, f)
 		}
 	}
-	for i := range rules {
-		if err := m.commitGeneratedRule(ArchiveWriteGeneralize, &rules[i]); err != nil {
-			return nil, err
+	// 同系旧族：会话谱系簿记里该 target 上一代入档的规则 ID。
+	var superseded []string
+	if sess, err := m.loadSession(root); err == nil {
+		superseded = sess.WorkSetRuleLineage[ws.cand.target()]
+	}
+	if err := m.UpdateProfile(ArchiveWriteGeneralize, func(p *RuleProfile) error {
+		for i := range p.Rules {
+			if p.Rules[i].Enabled && slicePos(superseded, p.Rules[i].ID) >= 0 {
+				p.Rules[i].Enabled = false
+			}
 		}
+		for i := range rules {
+			rules[i].ID = ensureRuleIDUnique(p, rules[i].ID)
+			p.Rules = append(p.Rules, rules[i])
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	// 谱系簿记翻新：新族 ID 取代旧族记录（落库失败仅告警——规则已入档，
+	// 退化为并存〔捕获组按规则隔离，互不窃取〕）。
+	ids := make([]string, 0, len(rules))
+	for i := range rules {
+		ids = append(ids, rules[i].ID)
+	}
+	if _, err := m.mutateSession(root, func(sess *WorkbenchSession) error {
+		if sess.WorkSetRuleLineage == nil {
+			sess.WorkSetRuleLineage = map[string][]string{}
+		}
+		sess.WorkSetRuleLineage[ws.cand.target()] = ids
+		return nil
+	}); err != nil {
+		m.warnf("集规则谱系簿记落盘失败（规则已入档）: %v", err)
 	}
 	if err := m.consumeScopedAssignments(root, scope, snap, rules); err != nil {
 		m.warnf("集规则泛化消费赋值失败（规则已入档）: %v", err)
@@ -438,13 +638,204 @@ func setSegOrdinalOf(ref string) (int, bool) {
 	return n, true
 }
 
+// setDirSegRefOf 位序 → setDirSegN 引用。
+func setDirSegRefOf(ordinal int) string {
+	return fmt.Sprintf("%s%d", setClueDirSegPrefix, ordinal)
+}
+
+// setDirSegOrdinalOf 引用 → 位序（非法引用返回假）。
+func setDirSegOrdinalOf(ref string) (int, bool) {
+	if !strings.HasPrefix(ref, setClueDirSegPrefix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(ref, setClueDirSegPrefix))
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
+}
+
+// workSetDirSegPlan 集所在目录名的分段位序表（剧本D 目录名分段）：元素数组
+// 来自 splitFilenameElements（括号段+分隔符感知，分隔 run 保留原文——空格/
+// 连字符经归一折叠为分隔位）；ordinals 为非分隔元素位序（1 起）→ 元素下标；
+// digit 按位标记数字类（纯数字段值→`\d+` 通配，值可不同；类推断对全部成员
+// 目录名聚合取交——任一目录该位非纯数字即归泛化段）。
+type workSetDirSegPlan struct {
+	dirRelKey string
+	level     int          // 集所在目录层深（1 起）
+	name      string       // 集所在目录名（basename）
+	els       []SnapEl     // 目录名元素数组（含分隔 run）
+	ordinals  []int        // 位序（1 起，非分隔）→ 元素下标
+	digit     map[int]bool // 元素下标 → 数字类
+}
+
+// newWorkSetDirSegPlan 集目录名 → 分段位序表；memberDirs 为全部成员所在目录
+// 键（稳定格式判定输入——段数/包裹/分隔一致才成稳定格式，数字段值可不同；
+// 当前候选恒单目录，多目录为一致性兜底）。格式不一致返回中文原因（剧本步5
+// 失败态文案来源）。
+func newWorkSetDirSegPlan(dirRelKey string, memberDirs []string) (*workSetDirSegPlan, string) {
+	levels := ExtractDirLevels(dirRelKey + "/")
+	if dirRelKey == "" || len(levels) == 0 {
+		return nil, "无法从目录名推导稳定格式：成员位于库根，无所在目录名"
+	}
+	name := levels[len(levels)-1]
+	els := splitFilenameElements(name, nil)
+	plan := &workSetDirSegPlan{
+		dirRelKey: dirRelKey, level: len(levels), name: name,
+		els: els, digit: make(map[int]bool),
+	}
+	for i := range els {
+		if els[i].Kind != elKindSep {
+			plan.ordinals = append(plan.ordinals, i)
+			plan.digit[i] = allDigits(elValue(els[i]))
+		}
+	}
+	// 稳定格式判定（多目录）：元素数、分隔 run 原文、括号包裹对逐位一致；
+	// 数字类对全部目录该位取交。
+	for _, dir := range memberDirs {
+		if dir == dirRelKey {
+			continue
+		}
+		other := ExtractDirLevels(dir + "/")
+		if len(other) == 0 {
+			return nil, "无法从目录名推导稳定格式：成员目录格式不一致（有成员位于库根）"
+		}
+		oels := splitFilenameElements(other[len(other)-1], nil)
+		if len(oels) != len(els) {
+			return nil, fmt.Sprintf("无法从目录名推导稳定格式：成员所在目录名格式不一致（段数不同：「%s」与「%s」）", name, other[len(other)-1])
+		}
+		for i := range els {
+			if els[i].Kind == elKindSep {
+				if oels[i].Text != els[i].Text {
+					return nil, fmt.Sprintf("无法从目录名推导稳定格式：成员所在目录名格式不一致（分隔不同：「%s」与「%s」）", name, other[len(other)-1])
+				}
+				continue
+			}
+			if els[i].Shelled != oels[i].Shelled {
+				return nil, fmt.Sprintf("无法从目录名推导稳定格式：成员所在目录名格式不一致（包裹不同：「%s」与「%s」）", name, other[len(other)-1])
+			}
+			if els[i].Shelled {
+				a, aok := seqShellPairOf(els[i])
+				b, bok := seqShellPairOf(oels[i])
+				if !aok || !bok || a != b {
+					return nil, fmt.Sprintf("无法从目录名推导稳定格式：成员所在目录名格式不一致（包裹不同：「%s」与「%s」）", name, other[len(other)-1])
+				}
+			}
+			if !allDigits(elValue(oels[i])) {
+				plan.digit[i] = false
+			}
+		}
+	}
+	return plan, ""
+}
+
+// ordinalOf 元素下标 → 位序（1 起；分隔元素返回 0）。
+func (p *workSetDirSegPlan) ordinalOf(elIdx int) int {
+	ord := 0
+	for i := 0; i <= elIdx && i < len(p.els); i++ {
+		if p.els[i].Kind != elKindSep {
+			ord++
+		}
+	}
+	if elIdx >= len(p.els) || p.els[elIdx].Kind == elKindSep {
+		return 0
+	}
+	return ord
+}
+
+// elIndexOfRef setDirSegN 引用 → 元素下标（非法/越界返回 -1）。
+func (p *workSetDirSegPlan) elIndexOfRef(ref string) int {
+	n, ok := setDirSegOrdinalOf(ref)
+	if !ok || n < 1 || n > len(p.ordinals) {
+		return -1
+	}
+	return p.ordinals[n-1]
+}
+
+// digitSegRefs 数字类分段引用（排除指名段；数字段默认标可变——呈现意图，
+// 构造上数字类恒为 `\d+` 通配）。
+func (p *workSetDirSegPlan) digitSegRefs(excludeEl int) []string {
+	var refs []string
+	for _, idx := range p.ordinals {
+		if idx == excludeEl || !p.digit[idx] {
+			continue
+		}
+		refs = append(refs, setDirSegRefOf(p.ordinalOf(idx)))
+	}
+	return refs
+}
+
+// dirSegPlainClass 目录名普通段（非括号包裹）的泛化段类：排除括号开/闭与
+// 元素口径分隔字符（`_` `.` `·` `．`——空格/连字符经归一折叠为 `_` 分隔位），
+// 同格式目录的该位不得含括号或分隔（包裹/分隔一致的结构性约束）。
+var dirSegPlainClass = "[^" + structOpenChars + structCloseChars + `_\.·．` + "]+"
+
+// dirSegClassEl 单段的内名类（不含包裹括号字面）：数字类→`\d+` 通配（值可
+// 不同）；括号段→排除闭括号的泛化段（内名不含闭括号——括号组按最外层计的
+// 既成口径）；普通段→dirSegPlainClass。
+func dirSegClassEl(el SnapEl, digit bool) string {
+	if digit {
+		return `\d+`
+	}
+	if el.Shelled {
+		if p, ok := seqShellPairOf(el); ok {
+			return "[^" + escapeForClass([]rune(p.close)[0]) + "]*"
+		}
+	}
+	return dirSegPlainClass
+}
+
+// dirSegShapePhrase 目录格式形态短语（剧本D 步1 摘要头）：「第 N 层目录呈
+// `[任意] [数字] [任意]` 格式」——括号段带包裹呈现、普通段裸呈现，以分隔
+// run 原文连接。
+func dirSegShapePhrase(plan *workSetDirSegPlan) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "第 %d 层目录呈 `", plan.level)
+	for i := range plan.els {
+		el := plan.els[i]
+		if el.Kind == elKindSep {
+			b.WriteString(el.Text)
+			continue
+		}
+		token := "任意"
+		if plan.digit[i] {
+			token = "数字"
+		}
+		if el.Shelled {
+			token = "[" + token + "]"
+		}
+		b.WriteString(token)
+	}
+	b.WriteString("` 格式")
+	return b.String()
+}
+
 // workSetRuleClues 组装调整面线索清单（剧本步4 形态）：目录各层（含剥壳
-// 变体——DirStructCluesOf 同源）+ 成员文件名各段（代表成员元素、序号段单列
-// 类别）+ 库根名。返回线索与位序表。
-func workSetRuleClues(rootPath string, ws *workSetContext) ([]SetRuleClue, *workSetSegPlan) {
+// 变体——DirStructCluesOf 同源）+ 集所在目录名分段（剧本D 新增：setDirSegN，
+// 括号段+分隔符感知；数字段默认标可变、标题段默认指集名捕获由默认指派承载）
+// + 成员文件名各段（代表成员元素、序号段单列类别）+ 库根名。返回线索、文件
+// 名段位序表与目录名分段位序表（目录名无段/库根时后者为仅含计划的空表——
+// 分段引用不可解析）。
+func workSetRuleClues(rootPath string, ws *workSetContext) ([]SetRuleClue, *workSetSegPlan, *workSetDirSegPlan) {
 	var clues []SetRuleClue
 	for _, c := range DirStructCluesOf(rootPath, ws.cand.Dir) {
 		clues = append(clues, SetRuleClue{Ref: c.Ref, Kind: c.Kind, Label: c.Label, Value: c.Value})
+	}
+	dirPlan, _ := newWorkSetDirSegPlan(ws.cand.Dir, nil)
+	if dirPlan != nil {
+		for i := range dirPlan.els {
+			el := dirPlan.els[i]
+			if el.Kind == elKindSep {
+				continue
+			}
+			ord := dirPlan.ordinalOf(i)
+			clues = append(clues, SetRuleClue{
+				Ref: setDirSegRefOf(ord), Kind: setClueKindDirSeg,
+				Label: fmt.Sprintf("%s段 %d", dirLevelLabel(dirPlan.level), ord),
+				Value: elValue(el), Ordinal: ord,
+				Shelled: el.Shelled, Inner: el.Inner,
+			})
+		}
 	}
 	els := ws.cand.Members[ws.repIdx].Elements
 	plan := newWorkSetSegPlan(els)
@@ -464,14 +855,17 @@ func workSetRuleClues(rootPath string, ws *workSetContext) ([]SetRuleClue, *work
 		}
 		clues = append(clues, clue)
 	}
-	return clues, plan
+	return clues, plan, dirPlan
 }
 
 // setRuleDimAssign 单条「维度←线索」指派。
 type setRuleDimAssign struct {
 	dim   MetadataDimension
 	clue  SetRuleClue
-	group string // 文件名段指派的捕获组名（目录层/库根名指派为空）
+	group string // 文件名段/目录名分段指派的捕获组名（目录层/库根名指派为空）
+	// dirEl 目录名分段指派的元素下标（-1=非目录段指派——捕获组折入目录
+	// 格式规则的 LocationPattern ancestor）。
+	dirEl int
 }
 
 // ApplyWorkSetRuleAdjust 调整面保存动作（saveWorkSetRuleAdjust）：线索指派
@@ -488,7 +882,7 @@ func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleA
 	if err != nil {
 		return nil, err
 	}
-	clues, plan := workSetRuleClues(sess.RootPath, ws)
+	clues, plan, dirPlan := workSetRuleClues(sess.RootPath, ws)
 	byRef := make(map[string]SetRuleClue, len(clues))
 	for _, c := range clues {
 		byRef[c.Ref] = c
@@ -524,8 +918,9 @@ func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleA
 		anchor = &c
 	}
 
-	// 维度←线索指派解析（文件名段线索折入文件名规则捕获组；目录层/库根名
-	// 线索单独条目）。标签逐条独立成组（tag1、tag2…——structGroupName 同形）。
+	// 维度←线索指派解析（文件名段线索折入文件名规则捕获组；目录名分段折入
+	// 目录格式规则捕获组；目录层/库根名线索单独条目）。标签逐条独立成组
+	//（tag1、tag2…——structGroupName 同形）。
 	var dims []setRuleDimAssign
 	appendDim := func(dim MetadataDimension, ref string, tagIndex int) error {
 		if ref == "" {
@@ -538,8 +933,22 @@ func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleA
 		if c.Kind == setClueKindSeq {
 			return fmt.Errorf("%s 不能指派到序号段（序号段仅可指派为序号）", qnaDimensionLabel(dim))
 		}
-		assign := setRuleDimAssign{dim: dim, clue: c}
-		if c.Kind == setClueKindSeg {
+		assign := setRuleDimAssign{dim: dim, clue: c, dirEl: -1}
+		switch c.Kind {
+		case setClueKindSeg:
+			assign.group = structGroupName(dim, tagIndex)
+		case setClueKindDirSeg:
+			// 目录名分段仅支持作者/集名（剧本步4：作者/集名组合/可变/不用）。
+			if dim != DimAuthor {
+				return fmt.Errorf("目录名分段指派仅支持作者与集名组合，不能指派%s", qnaDimensionLabel(dim))
+			}
+			if dirPlan == nil {
+				return fmt.Errorf("集所在目录名无分段可指派，线索 %q 无法使用", ref)
+			}
+			assign.dirEl = dirPlan.elIndexOfRef(ref)
+			if assign.dirEl < 0 {
+				return fmt.Errorf("指派线索 %q 无法定位到集所在目录名的分段", ref)
+			}
 			assign.group = structGroupName(dim, tagIndex)
 		}
 		dims = append(dims, assign)
@@ -563,7 +972,7 @@ func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleA
 		}
 	}
 
-	rules, err := buildWorkSetAdjustedRules(ws, sess.Snapshot, plan, anchor, dims, in)
+	rules, err := buildWorkSetAdjustedRules(ws, sess.Snapshot, plan, dirPlan, anchor, dims, in)
 	if err != nil {
 		return nil, err
 	}
@@ -572,16 +981,23 @@ func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleA
 
 // buildWorkSetAdjustedRules 指派结果 → 规则集组装（纯构造，不落库）：
 //   - sibling 定群条目（MemberOnly 且代表成员属序列群时——「仅序列成员产出」
-//     条件的取值载体；复用 buildSequenceRule）；
+//     条件的取值载体；复用 buildSequenceRule；目录格式语义天然每目录各自成
+//     集，不勾仅序列成员即无本条目）；
 //   - 目录层维度条目（维度←dirLevel/dirLevelStripped——structDirPlan 既有
 //     构造器逐层独立成条）；
 //   - 库根名维度常量（维度←rootName——独立条目，锚=至少一层目录）；
 //   - 文件名规则（集名捕获段组合 + 维度捕获组 + 序号段数字类消费 + 其余
-//     段泛化消费；目录锚定时模式=And[目录层锚, 文件名正则]）。
+//     段泛化消费；目录锚定时模式=And[目录层锚, 文件名正则]；文件名侧无任何
+//     指派时整条缺席）；
+//   - 目录格式规则（剧本D：集名捕获/作者←目录名分段——LocationPattern
+//     层深+段格式正则带命名捕获，提取 FromCapture 走内核 ancestor 捕获绑入
+//     通路；数字段恒 `\d+` 通配、未捕获段泛化消费；目录名分段无捕获指派时
+//     整条缺席）。
 //
 // 全员自检（集为主体）：每成员上文件名规则捕获值须复现集名（有组合时）
-// 与各文件名段维度的对齐取值。
-func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, plan *workSetSegPlan, anchor *SetRuleClue, dims []setRuleDimAssign, in setRuleAdjustInput) ([]RuleEntry, error) {
+// 与各文件名段维度的对齐取值；目录格式规则每成员命中且集名捕获复现该成员
+// 所在目录的段值（各目录各自成集——不要求跨目录同值）。
+func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, plan *workSetSegPlan, dirPlan *workSetDirSegPlan, anchor *SetRuleClue, dims []setRuleDimAssign, in setRuleAdjustInput) ([]RuleEntry, error) {
 	cand := ws.cand
 	rep := &cand.Members[ws.repIdx]
 	repFile := snapshotFileOf(snap, rep.RelPath)
@@ -589,10 +1005,25 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 		return nil, fmt.Errorf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", rep.RelPath)
 	}
 
-	// 集名捕获段组合：引用 → 元素下标（排序去重；须连续非分隔段）。
+	// 集名捕获段组合：文件名段（引用 → 元素下标，排序去重；须连续非分隔段）
+	// 或目录名分段（单段；两者不可混指）。
 	spanSet := make(map[int]bool)
 	var spanIdx []int
+	var dirSpanRef string
 	for _, ref := range in.CollectionSegRefs {
+		if strings.HasPrefix(ref, setClueDirSegPrefix) {
+			if len(spanIdx) > 0 {
+				return nil, errors.New("集名捕获段组合须同为文件名段或同为目录名分段")
+			}
+			if dirSpanRef != "" {
+				return nil, errors.New("目录名分段的集名捕获须为单段（多段组合暂不支持）")
+			}
+			dirSpanRef = ref
+			continue
+		}
+		if dirSpanRef != "" {
+			return nil, errors.New("集名捕获段组合须同为文件名段或同为目录名分段")
+		}
 		idx := plan.elIndexOfRef(ref)
 		if idx < 0 {
 			return nil, fmt.Errorf("集名捕获段组合中的线索 %q 不是本集的文件名段线索", ref)
@@ -712,50 +1143,130 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 		})
 	}
 
-	// ④ 文件名规则（集名捕获 + 维度捕获组 + 序号/其余段消费）。
-	fileRule, err := buildWorkSetFilenameRule(ws, rep, repFile, plan, spanIdx, captureByEl, anchor, in)
-	if err != nil {
-		return nil, err
+	// ④ 文件名规则（集名捕获 + 维度捕获组 + 序号/其余段消费；文件名侧无
+	// 任何指派时整条缺席——纯目录段/目录层指派不再强制空文件名条目）。
+	var fileRule *RuleEntry
+	if len(spanIdx) > 0 || len(captureByEl) > 0 {
+		rule, err := buildWorkSetFilenameRule(ws, rep, repFile, plan, spanIdx, captureByEl, anchor, in)
+		if err != nil {
+			return nil, err
+		}
+		fileRule = &rule
+		rules = append(rules, rule)
 	}
-	rules = append(rules, fileRule)
+
+	// ⑤ 目录格式规则（集名捕获/作者←目录名分段；无捕获指派时整条缺席——
+	// 可变目录段为呈现意图，构造上未捕获段同泛化消费）。
+	dirSpanEl := -1
+	if dirSpanRef != "" {
+		if dirPlan == nil {
+			return nil, fmt.Errorf("集所在目录名无分段可指派，线索 %q 无法使用", dirSpanRef)
+		}
+		dirSpanEl = dirPlan.elIndexOfRef(dirSpanRef)
+		if dirSpanEl < 0 {
+			return nil, fmt.Errorf("集名捕获段 %q 不是本集所在目录名的分段线索", dirSpanRef)
+		}
+	}
+	dirAuthorEl := -1
+	for _, d := range dims {
+		if d.dirEl >= 0 {
+			dirAuthorEl = d.dirEl
+		}
+	}
+	var dirRule *RuleEntry
+	if dirSpanEl >= 0 || dirAuthorEl >= 0 {
+		rule, err := buildWorkSetDirRule(ws, dirPlan, dirSpanEl, dirAuthorEl, in)
+		if err != nil {
+			return nil, err
+		}
+		dirRule = &rule
+		rules = append(rules, rule)
+	}
+
+	// 提取总量护栏：任何指派都未产生提取时如实回错（与旧版空文件名规则
+	// 同文案——纯锚定/纯可变段指派不构成规则）。
+	extractions := 0
+	for i := range rules {
+		extractions += len(rules[i].Extractions)
+	}
+	if extractions == 0 {
+		return nil, errors.New("调整指派未产生任何提取（集名捕获与维度指派至少须有其一）")
+	}
 
 	// 全员自检（集为主体，非代表成员单样本）：逐成员复现维度取值；集名捕获
 	// 以成员间一致为判据——组合可不同于确认集名（调整面正是「改集名取哪」
 	// 的入口），全员同值即形态自洽。
-	setNameValue := ""
-	for i := range cand.Members {
-		mem := &cand.Members[i]
-		file := snapshotFileOf(snap, mem.RelPath)
-		if file == nil {
-			return nil, fmt.Errorf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", mem.RelPath)
-		}
-		ctx := &ParseContext{}
-		if !fileRule.Pattern.Evaluate(structSampleInput(mem.RelPath, file.FileName), nil, ctx) {
-			return nil, fmt.Errorf("调整指派未能在成员「%s」上命中（形态或锚定过窄）", mem.RelPath)
-		}
-		for _, action := range fileRule.Extractions {
-			decl, ok := action.Apply(fileRule.ID, ctx)
-			if !ok {
-				return nil, fmt.Errorf("调整指派未能在成员「%s」上提取%s", mem.RelPath, qnaDimensionLabel(action.Dimension))
+	if fileRule != nil {
+		setNameValue := ""
+		for i := range cand.Members {
+			mem := &cand.Members[i]
+			file := snapshotFileOf(snap, mem.RelPath)
+			if file == nil {
+				return nil, fmt.Errorf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", mem.RelPath)
 			}
-			if action.Dimension == DimCollection {
-				if decl.Value == "" {
-					return nil, fmt.Errorf("调整指派的集名捕获在成员「%s」上提取为空", mem.RelPath)
+			ctx := &ParseContext{}
+			if !fileRule.Pattern.Evaluate(structSampleInput(mem.RelPath, file.FileName), nil, ctx) {
+				return nil, fmt.Errorf("调整指派未能在成员「%s」上命中（形态或锚定过窄）", mem.RelPath)
+			}
+			for _, action := range fileRule.Extractions {
+				decl, ok := action.Apply(fileRule.ID, ctx)
+				if !ok {
+					return nil, fmt.Errorf("调整指派未能在成员「%s」上提取%s", mem.RelPath, qnaDimensionLabel(action.Dimension))
 				}
-				if setNameValue == "" {
-					setNameValue = decl.Value
-				} else if decl.Value != setNameValue {
-					return nil, fmt.Errorf("调整指派的集名捕获在成员间不一致：「%s」≠「%s」（组合须取全员同值段）", decl.Value, setNameValue)
+				if action.Dimension == DimCollection {
+					if decl.Value == "" {
+						return nil, fmt.Errorf("调整指派的集名捕获在成员「%s」上提取为空", mem.RelPath)
+					}
+					if setNameValue == "" {
+						setNameValue = decl.Value
+					} else if decl.Value != setNameValue {
+						return nil, fmt.Errorf("调整指派的集名捕获在成员间不一致：「%s」≠「%s」（组合须取全员同值段）", decl.Value, setNameValue)
+					}
+					continue
 				}
-				continue
+				want := ""
+				if ord, has := groupOrdinal[action.CaptureName]; has {
+					want = segValueAtOrdinal(mem.Elements, ord)
+				}
+				if want != "" && decl.Value != want {
+					return nil, fmt.Errorf("调整指派未能在成员「%s」上复现%s：提取「%s」≠ 期望「%s」",
+						mem.RelPath, qnaDimensionLabel(action.Dimension), decl.Value, want)
+				}
 			}
-			want := ""
-			if ord, has := groupOrdinal[action.CaptureName]; has {
-				want = segValueAtOrdinal(mem.Elements, ord)
+		}
+	}
+	// 目录格式规则自检：每成员所在目录命中段格式、集名捕获复现该成员所在
+	// 目录的段值（各目录各自成集——不要求跨目录同值）、作者捕获复现段值。
+	if dirRule != nil {
+		for i := range cand.Members {
+			mem := &cand.Members[i]
+			file := snapshotFileOf(snap, mem.RelPath)
+			if file == nil {
+				return nil, fmt.Errorf("成员「%s」已不在识别全景内（可能已被重识别移除），请刷新后重试", mem.RelPath)
 			}
-			if want != "" && decl.Value != want {
-				return nil, fmt.Errorf("调整指派未能在成员「%s」上复现%s：提取「%s」≠ 期望「%s」",
-					mem.RelPath, qnaDimensionLabel(action.Dimension), decl.Value, want)
+			if dirRelKeyOf(mem.RelPath) != dirPlan.dirRelKey {
+				return nil, fmt.Errorf("成员「%s」不在集目录 %s 内，目录分段指派无法自检", mem.RelPath, dirPlan.dirRelKey)
+			}
+			ctx := &ParseContext{}
+			if !dirRule.Pattern.Evaluate(structSampleInput(mem.RelPath, file.FileName), nil, ctx) {
+				return nil, fmt.Errorf("目录分段指派未能在成员「%s」上命中（段格式过窄）", mem.RelPath)
+			}
+			for _, action := range dirRule.Extractions {
+				decl, ok := action.Apply(dirRule.ID, ctx)
+				if !ok {
+					return nil, fmt.Errorf("目录分段指派未能在成员「%s」上提取%s", mem.RelPath, qnaDimensionLabel(action.Dimension))
+				}
+				want := ""
+				switch action.CaptureName {
+				case seqCaptureGroup:
+					want = elValue(dirPlan.els[dirSpanEl])
+				case structGroupName(DimAuthor, -1):
+					want = elValue(dirPlan.els[dirAuthorEl])
+				}
+				if decl.Value == "" || (want != "" && decl.Value != want) {
+					return nil, fmt.Errorf("目录分段指派未能在成员「%s」上复现%s：提取「%s」≠ 期望「%s」",
+						mem.RelPath, qnaDimensionLabel(action.Dimension), decl.Value, want)
+				}
 			}
 		}
 	}
@@ -868,6 +1379,97 @@ func buildWorkSetFilenameRule(ws *workSetContext, rep *SnapCandMember, repFile *
 		Source:      RuleSourceQna,
 		Enabled:     true,
 		Pattern:     pattern,
+		Extractions: extractions,
+	}, nil
+}
+
+// buildWorkSetDirRule 目录格式规则构造（剧本D）：按集所在目录名的分段形态
+// 展开 ancestor 正则——数字类段恒 `\d+` 通配（值不当固定值参与识别）、未捕获
+// 段泛化消费（括号段=开/闭字面+排除闭括号的内名类、普通段=排除括号与分隔
+// 的段类）、分隔 run 按原文字面；集名捕获段/作者段覆写为命名捕获组（括号
+// 字面留在组外，捕获值=剥壳内名——与线索值同口径）。模式=LocationPattern
+// （层深锚定集目录层，MinDepth=MaxDepth=层深-1），提取 FromCapture 走内核
+// ancestor 捕获绑入通路。每目录各自成集=天然语义（无 sibling/when 原子；
+// MemberOnly 勾选时集名提取附「仅序列成员产出」when 原子——用户显式收窄）。
+// 自检由调用方的全员校验完成。
+func buildWorkSetDirRule(ws *workSetContext, plan *workSetDirSegPlan, collectionEl, authorEl int, in setRuleAdjustInput) (RuleEntry, error) {
+	collectionGroup := structGroupName(DimCollection, -1)
+	authorGroup := structGroupName(DimAuthor, -1)
+	groups := make([]string, 0, 2)
+	var expr strings.Builder
+	expr.WriteString("^")
+	for i := range plan.els {
+		el := plan.els[i]
+		if el.Kind == elKindSep {
+			expr.WriteString(regexp.QuoteMeta(el.Text))
+			continue
+		}
+		group := ""
+		switch i {
+		case collectionEl:
+			group = collectionGroup
+		case authorEl:
+			group = authorGroup
+		}
+		class := dirSegClassEl(el, plan.digit[i])
+		if el.Shelled {
+			if p, ok := seqShellPairOf(el); ok {
+				expr.WriteString(regexp.QuoteMeta(p.open))
+				if group != "" {
+					expr.WriteString("(?P<" + group + ">" + class + ")")
+					groups = append(groups, group)
+				} else {
+					expr.WriteString(class)
+				}
+				expr.WriteString(regexp.QuoteMeta(p.close))
+				continue
+			}
+		}
+		if group != "" {
+			expr.WriteString("(?P<" + group + ">" + class + ")")
+			groups = append(groups, group)
+		} else {
+			expr.WriteString(class)
+		}
+	}
+	expr.WriteString("$")
+	ancestor, err := NewRegexPattern(string(TargetFileName), expr.String(), groups)
+	if err != nil {
+		return RuleEntry{}, fmt.Errorf("构造目录名分段正则失败: %w", err)
+	}
+	location, err := NewLocationPattern(plan.level-1, plan.level-1, ancestor)
+	if err != nil {
+		return RuleEntry{}, err
+	}
+	extractions := make([]ExtractionAction, 0, 2)
+	if collectionEl >= 0 {
+		collection := ExtractionAction{Dimension: DimCollection, From: FromCapture, CaptureName: collectionGroup}
+		if in.MemberOnly {
+			collection.When = seqMemberOnlyCond()
+		}
+		extractions = append(extractions, collection)
+	}
+	if authorEl >= 0 {
+		extractions = append(extractions, ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: authorGroup})
+	}
+	desc := fmt.Sprintf("泛化（集规则·目录名格式）：第 %d 层目录「%s」段格式→作品集", plan.level, plan.name)
+	if collectionEl < 0 {
+		desc = fmt.Sprintf("泛化（集规则·目录名格式）：第 %d 层目录「%s」段格式→维度提取", plan.level, plan.name)
+	}
+	desc += "（每个这样的目录各自成集；源自已归集集「" + ws.setName + "」"
+	if authorEl >= 0 {
+		desc += fmt.Sprintf("；作者=段 %d 捕获", plan.ordinalOf(authorEl))
+	}
+	if in.MemberOnly {
+		desc += "；仅序列成员产出"
+	}
+	desc += "）"
+	return RuleEntry{
+		ID:          generatedRuleID("qna-setdir", plan.name),
+		Description: desc,
+		Source:      RuleSourceQna,
+		Enabled:     true,
+		Pattern:     location,
 		Extractions: extractions,
 	}, nil
 }

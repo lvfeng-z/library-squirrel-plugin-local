@@ -112,6 +112,26 @@ func (c *ParseContext) LastDirHit() (DirHit, bool) {
 	return best, found
 }
 
+// ruleScopedContext 派生规则私有求值作用域（提取段逐规则取用）：捕获绑定与
+// 目录/谓词命中都从空开始——同名捕获组跨规则互不遮蔽，FromAncestorDir/
+// FromPredicate 只读自身规则的锚定/谓词命中（跨规则不再共享累积：共享时代
+// 后求值的规则会读到先求值规则更深/更晚的命中，产出他目录剥壳的垃圾值，
+// 发现6）；「取最深/取最后」语义保留在规则作用域内（规则内多模式锚定取该
+// 规则内最深命中）。群组与目录名基座共享。
+func (c *ParseContext) ruleScopedContext() *ParseContext {
+	return &ParseContext{
+		Group:    c.Group,
+		DirNames: c.DirNames,
+		Depth:    c.Depth,
+	}
+}
+
+// absorbScoped 并回规则私有作用域期间变更的共享态：群组字段（定群规则求值
+// 写入）。捕获绑定与目录/谓词命中是规则私有的，不并回。
+func (c *ParseContext) absorbScoped(scoped *ParseContext) {
+	c.Group = scoped.Group
+}
+
 // BaseNameWithoutExt 去掉文件名的最后一段扩展名（filepath.Ext 语义）：
 // 多点文件（如 "a.tar.gz"）只去最后一段得 "a.tar"；无扩展名时原样返回。
 func BaseNameWithoutExt(name string) string {

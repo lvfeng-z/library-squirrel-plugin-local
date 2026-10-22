@@ -869,9 +869,10 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool) 
 }
 
 // declaredPatternCaptures 收集模式树内会绑定进解析上下文的命名捕获组名：
-// filename / relpath 目标的正则命中即绑定；dirname 目标只记目录层命中不绑定
-// 捕获组，LocationPattern 的 Ancestor 在临时上下文内求值（绑定不进主上下文），
-// 两者的捕获组声明不参与收集——条件引用这些组名会在构造期被存在性校验拒绝。
+// filename / relpath 目标的正则命中即绑定；LocationPattern 的 Ancestor 命中时
+// 其命名捕获组同样绑入主上下文（ ancestor 捕获仅补缺，见 Evaluate），故一并
+// 收集——条件与提取动作可引用。dirname 目标的正则只记目录层命中不绑定捕获组，
+// 其捕获组声明不参与收集——条件引用这些组名会在构造期被存在性校验拒绝。
 func declaredPatternCaptures(p Pattern) map[string]bool {
 	out := map[string]bool{}
 	collectPatternCaptures(p, out)
@@ -888,6 +889,8 @@ func collectPatternCaptures(p Pattern, out map[string]bool) {
 				out[name] = true
 			}
 		}
+	case *LocationPattern:
+		collectPatternCaptures(t.Ancestor, out)
 	case And:
 		for _, sub := range t {
 			collectPatternCaptures(sub, out)

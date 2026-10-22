@@ -143,9 +143,10 @@ func TestRegexPatternEvaluate(t *testing.T) {
 }
 
 // TestLocationPatternEvaluate 覆盖位置模式深度区间的含/不含命中层两种结局；
-// 并校验 Ancestor 的子绑定不泄漏进主 ctx（只追加 DirHit）。
+// 并校验 Ancestor 命中时的命名捕获组绑入主 ctx（目录名分段提取——与文件名
+// 捕获同空间，FromCapture 可引用；未命中不绑入）。
 func TestLocationPatternEvaluate(t *testing.T) {
-	// ancestor 带 named 捕获组，用于验证子绑定不进主上下文。
+	// ancestor 带 named 捕获组，用于验证命中时绑入主上下文。
 	ancestor := mustRegex(t, string(TargetFileName), `^(?P<kw>漫画)$`, []string{"kw"})
 	cases := []struct {
 		name               string
@@ -154,6 +155,7 @@ func TestLocationPatternEvaluate(t *testing.T) {
 		in                 MatchInput
 		want               bool
 		wantDirHits        []DirHit
+		wantCaptures       []CaptureBinding
 	}{
 		{
 			name:        "命中层在深度区间内",
@@ -163,6 +165,9 @@ func TestLocationPatternEvaluate(t *testing.T) {
 			in:          MatchInput{DirNames: []string{"库根", "漫画", "第01卷"}},
 			want:        true,
 			wantDirHits: []DirHit{{Depth: 1, Name: "漫画"}},
+			wantCaptures: []CaptureBinding{
+				{Name: "kw", Value: "漫画"},
+			},
 		},
 		{
 			name:     "命中层在深度区间外",
@@ -195,9 +200,9 @@ func TestLocationPatternEvaluate(t *testing.T) {
 			if !reflect.DeepEqual(ctx.DirHits, tc.wantDirHits) {
 				t.Errorf("DirHits = %+v, 期望 %+v", ctx.DirHits, tc.wantDirHits)
 			}
-			// LocationPattern 只向主 ctx 追加 DirHit，Ancestor 的子绑定不应泄漏。
-			if len(ctx.Captures) != 0 {
-				t.Errorf("子模式捕获绑定泄漏进主 ctx: %+v", ctx.Captures)
+			// 命中时 ancestor 命名捕获组绑入主 ctx（提取动作 FromCapture 可引用）。
+			if !reflect.DeepEqual(ctx.Captures, tc.wantCaptures) {
+				t.Errorf("Captures = %+v, 期望 %+v", ctx.Captures, tc.wantCaptures)
 			}
 		})
 	}

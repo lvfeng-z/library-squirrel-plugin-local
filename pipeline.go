@@ -102,11 +102,18 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // 为空的规则），并依序执行该规则的 Extractions，产出声明追加进
 // decision.Declarations；来源缺失的动作不产出声明，不中断其余动作。
 //
+// 捕获组与目录/谓词命中按规则隔离：每规则在私有作用域内求值与提取（群组
+// 共享）——同名捕获组跨规则互不遮蔽，FromAncestorDir/FromPredicate 只读自身
+// 规则的锚定/谓词命中（跨规则不再共享累积：共享单上下文时代「先绑入者胜」
+// 令后入库规则的同名捕获被占位，后求值规则又会读到先求值规则更深的目录
+// 命中而产出他目录剥壳的垃圾值——泛化后再调整的同系规则并存即触雷）；
+// 「取最深/取最后」语义保留在规则作用域内。
+//
 // 带生效条件（When，通用条件表达式树）的动作两遍执行：第一遍只跑无条件动作
 // （全部规则按序），第二遍按规则序补跑条件动作——条件对该规则命中时的解析
-// 上下文与求值时点已产出的声明集求值（见 CondExpr.Holds），两遍执行使条件
-// 可见全部无条件声明（裁决生成的条件规则居档案尾，其条件谓词引用的声明在
-// 第一遍已全部在场）。
+// 上下文（其私有作用域）与求值时点已产出的声明集求值（见 CondExpr.Holds），
+// 两遍执行使条件可见全部无条件声明（裁决生成的条件规则居档案尾，其条件谓词
+// 引用的声明在第一遍已全部在场）。
 func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) {
 	type ruleMatch struct {
 		rule    *RuleEntry
@@ -121,18 +128,21 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 		if _, ok := rule.Pattern.(*SiblingPattern); ok {
 			continue
 		}
-		if !rule.Pattern.Evaluate(in, lib, ctx) {
+		ruleCtx := ctx.ruleScopedContext()
+		hit := rule.Pattern.Evaluate(in, lib, ruleCtx)
+		ctx.absorbScoped(ruleCtx)
+		if !hit {
 			continue
 		}
 		decision.MatchedRuleIDs = append(decision.MatchedRuleIDs, rule.ID)
 		if hasConditionalAction(rule.Extractions) {
-			conditional = append(conditional, ruleMatch{rule: rule, context: ctx})
+			conditional = append(conditional, ruleMatch{rule: rule, context: ruleCtx})
 		}
 		for _, action := range rule.Extractions {
 			if action.When != nil {
 				continue
 			}
-			if decl, ok := action.Apply(rule.ID, ctx); ok {
+			if decl, ok := action.Apply(rule.ID, ruleCtx); ok {
 				decision.Declarations = append(decision.Declarations, decl)
 			}
 		}
