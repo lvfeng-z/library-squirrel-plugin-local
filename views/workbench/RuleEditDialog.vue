@@ -31,6 +31,10 @@
           <p class="li-red-summary">{{ patternSummary }}</p>
 
           <template v-if="!patternJsonMode">
+            <!-- 行式接词（帧-04 收敛）：行前 且/或 + 行级非 + 括号子组；优先级
+                 非>且>或，子组最紧——顶部摘要行实时显示解析后的括号分组 -->
+            <p v-if="patternError" class="li-red-error">{{ patternError }}</p>
+            <RulePatternRows :rows="patternRows" />
             <!-- 捕获组声明清单（名称 + 来源正则）：提取段下拉的唯一来源 -->
             <div v-if="captureDecls.length" class="li-red-caps">
               <span class="li-red-label">捕获组声明清单</span>
@@ -43,7 +47,6 @@
               未声明捕获组——提取动作引用捕获组前，须先在下方形态内声明（仅文件名 / 相对路径目标的正则参与绑定，
               目录名目标不绑定）
             </p>
-            <RulePatternNode :node="patternRoot" />
           </template>
 
           <template v-else>
@@ -80,11 +83,20 @@
             >
               <div class="li-red-ex-main">
                 <el-select v-model="row.dimension" size="small" placeholder="维度" class="li-red-ex-dim">
-                  <el-option v-for="d in DIMENSION_OPTIONS" :key="d.value" :label="d.label" :value="d.value" />
+                  <el-option v-for="d in dimOptionsOf(row)" :key="d.value" :label="d.label" :value="d.value" />
                 </el-select>
                 <span class="li-red-arrow">←</span>
                 <el-select v-model="row.from" size="small" placeholder="来源" class="li-red-ex-from">
                   <el-option v-for="f in FROM_OPTIONS" :key="f.value" :label="f.label" :value="f.value" />
+                </el-select>
+                <el-select
+                  v-if="row.from === 'scan'"
+                  v-model="row.scanScope"
+                  size="small"
+                  placeholder="扫描范围"
+                  class="li-red-ex-scan"
+                >
+                  <el-option v-for="s in SCAN_SCOPE_OPTIONS" :key="s.value" :label="s.label" :value="s.value" />
                 </el-select>
                 <el-select
                   v-if="row.from === 'capture'"
@@ -105,14 +117,22 @@
                 <el-button size="small" text type="danger" @click="removeExtractionRow(i)">删行</el-button>
               </div>
               <div class="li-red-ex-sub">
-                <el-input v-model="row.stripPrefix" size="small" placeholder="剥壳前缀（可空）" class="li-red-ex-strip" />
-                <el-input v-model="row.stripSuffix" size="small" placeholder="剥壳后缀（可空）" class="li-red-ex-strip" />
+                <template v-if="row.from === 'scan'">
+                  <span class="li-red-scan-note">
+                    贪婪识别=扫描候选片段（括号内/分隔符切分/整段）×库内{{ scanDimLabel(row.dimension) }}集合精确比对，查不到不提取；
+                    标签全收，作者/作品集歧义不填
+                  </span>
+                </template>
+                <template v-else>
+                  <el-input v-model="row.stripPrefix" size="small" placeholder="剥壳前缀（可空）" class="li-red-ex-strip" />
+                  <el-input v-model="row.stripSuffix" size="small" placeholder="剥壳后缀（可空）" class="li-red-ex-strip" />
+                </template>
                 <el-input v-model="row.roleName" size="small" placeholder="角色名（可空）" class="li-red-ex-role" />
-                <label class="li-red-cond">
+                <label v-if="row.from !== 'scan'" class="li-red-cond">
                   <input v-model="row.seqOnly" type="checkbox">
                   <span>仅序列成员产出</span>
                 </label>
-                <span v-if="extractionRowHasOtherConds(row)" class="li-red-other">含其他手写条件（高级 JSON 模式可编辑）</span>
+                <span v-if="extractionRowHasOtherConds(row) && row.from !== 'scan'" class="li-red-other">含其他手写条件（高级 JSON 模式可编辑）</span>
               </div>
               <p v-if="extractionRowHint(row)" class="li-red-row-hint">{{ extractionRowHint(row) }}</p>
             </div>
@@ -252,10 +272,12 @@
 // 模式解析错就地显示位置不丢输入；取消不保存（destroy-on-close，再开回上次保
 // 存态——打开时从 props 重新取值）。
 import { ref, computed, watch, provide } from 'vue'
-import RulePatternNode from './RulePatternNode.vue'
+import RulePatternRows from './RulePatternRows.vue'
 import {
   DIMENSION_OPTIONS,
   FROM_OPTIONS,
+  SCAN_DIMENSIONS,
+  SCAN_SCOPE_OPTIONS,
   SOURCE_KIND_OPTIONS,
   STRATEGY_OPTIONS,
   NEW_PATTERN_SAMPLE,
@@ -269,7 +291,12 @@ import {
   buildWhenWithSeqAtom,
   buildWhenWithoutSeqAtom,
   hasOtherConds,
+  treeToRows,
+  rowsToTree,
+  rowsSummaryOf,
+  rowsComplete,
   type PatternNode,
+  type PatternRow,
   type ExtractionActionJSON,
   type CaptureDecl
 } from './ruleFormModel'
@@ -382,6 +409,7 @@ interface ExtractionRow {
   from: string
   captureName: string
   constant: string
+  scanScope: string
   roleName: string
   stripPrefix: string
   stripSuffix: string
@@ -393,7 +421,9 @@ const descInput = ref('')
 const enabledInput = ref(true)
 const roleRows = ref<{ source: string; roleName: string }[]>([])
 const dimRows = ref<{ dimension: string; strategy: string }[]>([])
-const patternRoot = ref<PatternNode>(defaultPatternNode('regex'))
+// 识别段结构化编辑模型（帧-04 行式接词）：行列表为编辑态，存档时经
+// rowsToTree 归并为内核 And/Or/Not 树（优先级 非>且>或、括号子组最紧）。
+const patternRows = ref<PatternRow[]>([])
 const patternText = ref('')
 const patternJsonMode = ref(false)
 const patternError = ref('')
@@ -421,7 +451,7 @@ function normalizePattern(raw: unknown): PatternNode {
   return defaultPatternNode('regex')
 }
 
-// 提取动作 JSON → 行模型（seqOnly 由 when 内容派生）
+// 提取动作 JSON → 行模型（seqOnly 由 when 内容派生；scan 行的范围默认 path）
 function actionToRow(action: ExtractionActionJSON): ExtractionRow {
   const when = action.when ?? null
   return {
@@ -429,6 +459,7 @@ function actionToRow(action: ExtractionActionJSON): ExtractionRow {
     from: action.from || 'capture',
     captureName: action.captureName || '',
     constant: action.constant || '',
+    scanScope: action.scanScope || 'path',
     roleName: action.roleName || '',
     stripPrefix: action.stripPrefix || '',
     stripSuffix: action.stripSuffix || '',
@@ -437,9 +468,19 @@ function actionToRow(action: ExtractionActionJSON): ExtractionRow {
   }
 }
 
-// 行模型 → 提取动作 JSON（seqOnly 落到该行 when 的并入/移除；仅携带有值字段）
+// 行模型 → 提取动作 JSON（seqOnly 落到该行 when 的并入/移除；仅携带有值字段；
+// scan 行=范围 + 角色透传，不带 when/剥壳/捕获组/常量——内核校验拒绝面同构）
 function rowsToActions(): ExtractionActionJSON[] {
   return extractionRows.value.map((row) => {
+    if (row.from === 'scan') {
+      const scanAction: ExtractionActionJSON = {
+        dimension: row.dimension,
+        from: 'scan',
+        scanScope: row.scanScope || 'path'
+      }
+      if (row.roleName) scanAction.roleName = row.roleName
+      return scanAction
+    }
     const action: ExtractionActionJSON = { dimension: row.dimension, from: row.from }
     if (row.from === 'capture') action.captureName = row.captureName
     if (row.from === 'constant' || row.from === 'adjudication') action.constant = row.constant
@@ -454,9 +495,9 @@ function rowsToActions(): ExtractionActionJSON[] {
 
 // —— 识别段联动：上半改形态/删捕获组 → 捕获组清单与提取段下拉即时跟随 ——
 
-// 当前生效的形态结构（JSON 模式=最近一次成功解析；结构化模式=编辑树）
+// 当前生效的形态结构（JSON 模式=最近一次成功解析；结构化模式=行列表归并树）
 const activePattern = computed<PatternNode | null>(() =>
-  patternJsonMode.value ? patternParsed.value : patternRoot.value
+  patternJsonMode.value ? patternParsed.value : rowsToTree(patternRows.value)
 )
 
 const captureDecls = computed<CaptureDecl[]>(() => collectPatternCaptures(activePattern.value))
@@ -476,8 +517,12 @@ provide('liPatternDeclaredNames', declaredNames)
 provide('liPatternEverNames', everDeclaredNames)
 
 const patternSummary = computed((): string => {
-  if (patternJsonMode.value && !patternParsed.value) return '（JSON 待解析为合法对象后呈现摘要）'
-  return patternSummaryOf(activePattern.value)
+  if (patternJsonMode.value) {
+    if (!patternParsed.value) return '（JSON 待解析为合法对象后呈现摘要）'
+    return patternSummaryOf(patternParsed.value)
+  }
+  // 结构化模式：行式摘要实时显示按优先级解析出的括号分组（帧-04 防误读锚）。
+  return rowsSummaryOf(patternRows.value)
 })
 
 // JSON 模式下边输入边解析：合法即刷新下拉/摘要，非法就地显示错误位置、不丢输入
@@ -503,8 +548,8 @@ function togglePatternJson(): void {
       patternError.value = parsed.ok ? '顶层须为 JSON 对象' : parsed.error || '解析失败'
       return
     }
-    patternRoot.value = normalizePattern(parsed.value)
-    patternParsed.value = patternRoot.value
+    patternRows.value = treeToRows(normalizePattern(parsed.value))
+    patternParsed.value = null
     patternJsonMode.value = false
     patternError.value = ''
     return
@@ -526,10 +571,27 @@ function extractionRowHint(row: ExtractionRow): string {
     if (!row.captureName) return '须选择捕获组'
     if (!declaredNames.value.has(row.captureName)) return '引用的捕获组已不存在'
   }
+  if (row.from === 'scan') {
+    // 帧五可裁点①：仅库内集合维度可扫描（作者/标签/作品集）。
+    if (!SCAN_DIMENSIONS.includes(row.dimension)) return '贪婪识别仅支持 作者/标签/作品集（无库内集合的维度不适用）'
+    if (!SCAN_SCOPE_OPTIONS.some((s) => s.value === (row.scanScope || 'path'))) return '须选择扫描范围'
+  }
   if ((row.from === 'constant' || row.from === 'adjudication') && !row.constant.trim()) {
     return '常量来源须填写常量值'
   }
   return ''
+}
+
+// scan 行的维度下拉只列可扫描维度（作者/标签/作品集）。
+function dimOptionsOf(row: ExtractionRow): { value: string; label: string }[] {
+  if (row.from === 'scan') return DIMENSION_OPTIONS.filter((d) => SCAN_DIMENSIONS.includes(d.value))
+  return DIMENSION_OPTIONS
+}
+
+// scan 行说明文案里的库内集合名（作者/标签/作品集）。
+function scanDimLabel(dim: string): string {
+  const hit = DIMENSION_OPTIONS.find((d) => d.value === dim)
+  return hit ? hit.label : dim
 }
 
 function extractionRowHasOtherConds(row: ExtractionRow): boolean {
@@ -542,6 +604,7 @@ function addExtractionRow(): void {
     from: 'capture',
     captureName: '',
     constant: '',
+    scanScope: 'path',
     roleName: '',
     stripPrefix: '',
     stripSuffix: '',
@@ -737,11 +800,11 @@ function initFromProps(): void {
     // 内容，本组件 setup 态跨开关存留——每个字段都须重置后再按初值分支）
     patternJsonMode.value = false
     patternText.value = ''
-    patternRoot.value = defaultPatternNode('regex')
+    patternRows.value = treeToRows(defaultPatternNode('regex'))
     if (!rule || rule.isNew) {
-      patternRoot.value = cloneJSON(NEW_PATTERN_SAMPLE)
+      patternRows.value = treeToRows(cloneJSON(NEW_PATTERN_SAMPLE))
     } else if (rule.pattern != null && typeof rule.pattern === 'object' && typeof (rule.pattern as PatternNode).kind === 'string') {
-      patternRoot.value = cloneJSON(rule.pattern) as PatternNode
+      patternRows.value = treeToRows(cloneJSON(rule.pattern) as PatternNode)
     } else if (rule.pattern != null) {
       // 历史坏档（pattern 非对象/缺 kind）：原文进 JSON 高级模式，避免结构化
       // 缺省形态静默改写档案内容
@@ -802,7 +865,13 @@ function save(): void {
     if (patternJsonMode.value) {
       if (patternError.value || !patternParsed.value) return
     }
-    const pattern = patternJsonMode.value ? patternParsed.value : patternRoot.value
+    // 行式接词完整性闸门（帧-04）：行列表为空/空子组 → 不关窗不保存（行级
+    // 「（空子组）」与摘要「（无条件）」在场提示）
+    if (!patternJsonMode.value && !rowsComplete(patternRows.value)) {
+      patternError.value = '识别条件不完整——每行须有形态（或非空括号子组），至少一行'
+      return
+    }
+    const pattern = patternJsonMode.value ? patternParsed.value : rowsToTree(patternRows.value)
     // 库内确认取值来源存在性闸门（剧本G 步4/5）：引用未声明组 → 不关窗不保存
     //（结构化模式行内已标红；JSON 模式聚合进模式错误就地呈现）
     if (pattern) {
@@ -1060,6 +1129,15 @@ function save(): void {
 
 .li-red-ex-strip {
   width: 130px;
+}
+
+.li-red-ex-scan {
+  width: 150px;
+}
+
+.li-red-scan-note {
+  font-size: 12px;
+  color: var(--app-text-secondary);
 }
 
 .li-red-ex-role {

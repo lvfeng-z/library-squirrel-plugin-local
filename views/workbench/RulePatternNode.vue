@@ -5,18 +5,37 @@
     <div class="li-pn-kind-line">
       <span class="li-pn-label">形态类型</span>
       <el-select :model-value="patternKindValue(node)" size="small" class="li-pn-kind" @change="changeKind">
-        <el-option v-for="k in PATTERN_KINDS" :key="k.value" :label="k.label" :value="k.value" />
+        <el-option v-for="k in kindOptions" :key="k.value" :label="k.label" :value="k.value" />
       </el-select>
       <span class="li-pn-kind-note">{{ kindNote }}</span>
     </div>
 
-    <!-- 文件名形态：段/分隔写进正则原文；捕获组在此声明 -->
+    <!-- 文件名形态：格式模板行（帧-01，回车推导）+ 段/分隔写进正则原文；捕获组在此声明 -->
     <template v-if="node.kind === 'regex'">
       <div class="li-pn-line">
         <span class="li-pn-label">匹配目标</span>
         <el-select v-model="node.target" size="small" class="li-pn-target">
           <el-option v-for="t in REGEX_TARGETS" :key="t.value" :label="t.label" :value="t.value" />
         </el-select>
+      </div>
+      <div v-if="node.target === 'filename'" class="li-pn-line li-pn-stack">
+        <span class="li-pn-label">
+          格式模板
+          <i class="li-pn-note">（占位词回车推导下方正则与捕获组声明，占位词外文字按原文）</i>
+        </span>
+        <div class="li-pn-tpl-row">
+          <el-input
+            v-model="tplText"
+            size="small"
+            placeholder="如 {作者}_{集名}_{序号} 或 Artist[{作者}]"
+            class="li-pn-tpl"
+            spellcheck="false"
+            @keydown.enter="applyTemplate"
+          />
+          <el-button size="small" text @click="applyTemplate">推导</el-button>
+        </div>
+        <p v-if="tplError" class="li-pn-error">{{ tplError }}</p>
+        <p v-else-if="tplStale" class="li-pn-tpl-stale">正则已手改，模板仅供参考；再次推导=覆盖正则与捕获组声明</p>
       </div>
       <div class="li-pn-line li-pn-stack">
         <span class="li-pn-label">正则表达式 <i class="li-pn-note">（段与分隔直接写原文；捕获组用 (?P&lt;组名&gt;…) 书写并在下方声明）</i></span>
@@ -126,13 +145,15 @@
 // 序列群组〔键/序号/成群数〕、库内确认〔确认类别+取值来源下拉〕、组合〔子形态
 // 列表〕、取反补全。递归自引用（SFC 文件名自引用），就地改写传入的响应式节点
 // 对象；复杂树可切 JSON 高级模式直通原文（见 RuleEditDialog）。
-import { computed, inject, type ComputedRef, type Ref } from 'vue'
+import { computed, inject, ref, type ComputedRef, type Ref } from 'vue'
 import {
   PATTERN_KINDS,
+  LEAF_PATTERN_KINDS,
   REGEX_TARGETS,
   PREDICATE_KINDS,
   GROUP_OUTCOMES,
   defaultPatternNode,
+  derivePatternFromTemplate,
   patternKindValue,
   patternNodeOfKindValue,
   type PatternNode
@@ -140,10 +161,16 @@ import {
 
 const props = defineProps<{
   node: PatternNode
+  // leaf-only：行式接词（帧-04）下的叶子——组合/取反由行结构承载，类型下拉
+  // 不再含 and/or/not（RulePatternRows 的叶子以此约束；location 格式段等
+  // 嵌套编辑仍用全量清单）。
+  leafOnly?: boolean
 }>()
 
+const kindOptions = computed(() => (props.leafOnly ? LEAF_PATTERN_KINDS : PATTERN_KINDS))
+
 const kindNote = computed(
-  () => (PATTERN_KINDS.find((k) => k.value === patternKindValue(props.node)) || { note: '' }).note
+  () => (kindOptions.value.find((k) => k.value === patternKindValue(props.node)) || { note: '' }).note
 )
 
 const childList = computed(() => props.node.patterns || [])
@@ -216,6 +243,29 @@ function addChild(): void {
 function removeChild(index: number): void {
   const list = props.node.patterns || []
   list.splice(index, 1)
+}
+
+// —— 格式模板（帧-01 收敛）：占位词模板 → 正则 + 捕获组声明推导 ——
+// 组件局部态（弹窗关即弃）：推导产物记录用于「手改灰注」（正则 ≠ 最近推导
+// 产物时模板仅供参考；再推导=覆盖，灰注即预告）。
+const tplText = ref('')
+const tplError = ref('')
+const tplAppliedExpr = ref('')
+
+const tplStale = computed(
+  () => tplAppliedExpr.value !== '' && (props.node.expr || '') !== tplAppliedExpr.value
+)
+
+function applyTemplate(): void {
+  const r = derivePatternFromTemplate(tplText.value)
+  if (!r.ok || !r.expr || !r.captures) {
+    tplError.value = r.error || '模板推导失败'
+    return
+  }
+  tplError.value = ''
+  props.node.expr = r.expr
+  props.node.captures = [...r.captures]
+  tplAppliedExpr.value = r.expr
 }
 </script>
 
@@ -362,5 +412,22 @@ function removeChild(index: number): void {
 .li-pn-sub-del {
   flex-shrink: 0;
   margin-top: 4px;
+}
+
+/* 格式模板行（帧-01）：输入+推导按钮一行；错误红、手改灰注 */
+.li-pn-tpl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.li-pn-tpl {
+  max-width: 420px;
+}
+
+.li-pn-tpl-stale {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
 }
 </style>

@@ -28,6 +28,7 @@ export interface ExtractionActionJSON {
   from?: string
   captureName?: string
   constant?: string
+  scanScope?: string
   roleName?: string
   stripPrefix?: string
   stripSuffix?: string
@@ -128,15 +129,24 @@ export const DIMENSION_OPTIONS: { value: string; label: string }[] = [
 
 // 提取动作取值来源（from）——剧本F 提取段的来源下拉：捕获组／目录名／群组前缀
 // ／常量四类为主，谓词/裁决为既有模型的补全项（JSON 高级模式可手写的一切，
-// 结构化行不丢字段）。
+// 结构化行不丢字段）。贪婪识别（帧-05）：扫描候选分段×库内集合精确比对，
+// 查不到不提取（确认非线索）。
 export const FROM_OPTIONS: { value: string; label: string }[] = [
   { value: 'capture', label: '捕获组' },
+  { value: 'scan', label: '贪婪识别（库内确认）' },
   { value: 'parentDir', label: '目录名（父目录）' },
   { value: 'ancestorDir', label: '目录名（锚定命中层）' },
   { value: 'groupPrefix', label: '群组前缀' },
   { value: 'constant', label: '常量' },
   { value: 'predicate', label: '谓词命中' },
   { value: 'adjudication', label: '裁决常量' }
+]
+
+// 贪婪识别（帧-05 收敛）：可扫描维度（LibraryIndex 有集合者）与扫描范围。
+export const SCAN_DIMENSIONS = ['author', 'tag', 'collection']
+export const SCAN_SCOPE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'path', label: '文件名+各级目录名' },
+  { value: 'uncovered', label: '仅上半未覆盖片段' }
 ]
 
 // 合成策略：角色绑定的来源类别（sourceKinds）与维度策略。
@@ -239,6 +249,238 @@ function summarizeSubs(subs?: PatternNode[]): string {
   const list = subs || []
   if (!list.length) return '（无子形态）'
   return list.map((s) => patternSummaryOf(s)).join('；')
+}
+
+// 行式接词（帧-04）下的叶子形态类型清单：组合/取反由行结构承载（行前接词 +
+// 行级非 + 括号子组），不出现在叶子类型下拉（JSON 高级模式仍可写一切）。
+export const LEAF_PATTERN_KINDS: { value: string; label: string; note: string }[] = PATTERN_KINDS.filter(
+  (k) => k.value !== 'and' && k.value !== 'or' && k.value !== 'not'
+)
+
+// —— 格式模板（帧-01/收敛档 A）：{占位词} 模板 → 正则 + 捕获组声明推导 ——
+
+// 占位词词表：中文占位词 → 英文组名（Go RE2 拒绝中文组名）；numeric=数字段。
+export const TEMPLATE_VOCAB: { words: string[]; group: string; numeric: boolean }[] = [
+  { words: ['作者'], group: 'author', numeric: false },
+  { words: ['集名', '作品集', '作品集合名称'], group: 'setname', numeric: false },
+  { words: ['序号'], group: 'seq', numeric: true },
+  { words: ['标题', '作品名'], group: 'title', numeric: false },
+  { words: ['标签'], group: 'tag', numeric: false }
+]
+
+// 正则字面转义（模板的字面部分原样进正则）。
+export function escapeRegexLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function escapeForCharClass(ch: string): string {
+  return ch === ']' || ch === '\\' || ch === '^' ? '\\' + ch : ch
+}
+
+// 首/尾占位段的取值字符类：排除相邻字面首字符（无相邻字面取 '_'，收敛档 A）。
+function charClassOf(lit: string): string {
+  const ch = lit ? lit[0] : '_'
+  if (ch === '_') return '[^_]+'
+  return '[^' + escapeForCharClass(ch) + ']+'
+}
+
+export interface TemplateResult {
+  ok: boolean
+  expr?: string
+  captures?: string[]
+  error?: string
+}
+
+// derivePatternFromTemplate 把 {作者}_{集名}_{序号} 类模板推导为锚定正则与
+// 捕获组声明：词表外中文词/非法英文组名/重复占位/相邻占位无分隔 → 错误文案。
+export function derivePatternFromTemplate(tpl: string): TemplateResult {
+  const text = tpl.trim()
+  if (!text) return { ok: false, error: '模板为空' }
+  const segs: { ph: boolean; text: string }[] = []
+  let buf = ''
+  for (let i = 0; i < text.length; ) {
+    if (text[i] === '{') {
+      const close = text.indexOf('}', i + 1)
+      if (close < 0) return { ok: false, error: '占位词缺少「}」' }
+      if (buf) {
+        segs.push({ ph: false, text: buf })
+        buf = ''
+      }
+      segs.push({ ph: true, text: text.slice(i + 1, close) })
+      i = close + 1
+    } else {
+      buf += text[i]
+      i++
+    }
+  }
+  if (buf) segs.push({ ph: false, text: buf })
+  if (!segs.some((s) => s.ph)) return { ok: false, error: '模板内没有占位词（如 {作者}）' }
+  const groups: { group: string; numeric: boolean }[] = []
+  for (const s of segs) {
+    if (!s.ph) continue
+    const hit = TEMPLATE_VOCAB.find((v) => v.words.indexOf(s.text) >= 0)
+    if (hit) {
+      groups.push({ group: hit.group, numeric: hit.numeric })
+      continue
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.text)) {
+      groups.push({ group: s.text, numeric: s.text === 'seq' })
+      continue
+    }
+    return {
+      ok: false,
+      error: `占位词「${s.text}」仅支持：作者/集名/序号/标题/标签（或直接写英文组名，如 {publisher}）`
+    }
+  }
+  const names = groups.map((g) => g.group)
+  if (new Set(names).size !== names.length) return { ok: false, error: '同一模板内占位词不能重复' }
+  for (let i = 1; i < segs.length; i++) {
+    if (segs[i].ph && segs[i - 1].ph) return { ok: false, error: '相邻占位词之间需要至少一个分隔字符' }
+  }
+  let expr = '^'
+  let gi = 0
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i]
+    if (!s.ph) {
+      expr += escapeRegexLiteral(s.text)
+      continue
+    }
+    const g = groups[gi++]
+    const prevLit = i > 0 && !segs[i - 1].ph ? segs[i - 1].text : ''
+    const nextLit = i < segs.length - 1 && !segs[i + 1].ph ? segs[i + 1].text : ''
+    let body: string
+    if (g.numeric) body = '[0-9]+'
+    else if (i === 0) body = charClassOf(nextLit)
+    else if (i === segs.length - 1) body = charClassOf(prevLit)
+    else body = '.+'
+    expr += `(?P<${g.group}>${body})`
+  }
+  expr += '$'
+  return { ok: true, expr, captures: names }
+}
+
+// —— SQL WHERE 式行式接词（帧-04/收敛档 B）：行列表 ↔ And/Or/Not 树互转 ——
+
+// 行模型：conn=且/或（首行无）；negate=行级非；leaf=叶子形态；group=括号子组
+//（递归行列表，open=展开态）；leaf 与 group 互斥（group 非空即子组行）。
+export interface PatternRow {
+  conn: '' | 'and' | 'or'
+  negate: boolean
+  leaf: PatternNode | null
+  group: PatternRow[] | null
+  open?: boolean
+}
+
+// 单子组合解包（And/Or 单子 ≡ 子自身；往返规范化）。
+function unwrapSingle(node: PatternNode): PatternNode {
+  let n = node
+  while ((n.kind === 'and' || n.kind === 'or') && (n.patterns || []).length === 1) {
+    n = (n.patterns || [])[0]
+  }
+  return n
+}
+
+// Not 链 → 行：叶子取反一行；组合体取反=子组行带非（Not(Not(x)) 翻转归并）。
+function leafRowsOf(node: PatternNode): PatternRow[] {
+  if (node.kind === 'not') {
+    let negate = true
+    let inner: PatternNode | null = node.inner || null
+    while (inner && inner.kind === 'not') {
+      negate = !negate
+      inner = inner.inner
+    }
+    if (inner == null) return [{ conn: '', negate: false, leaf: defaultPatternNode('regex'), group: null }]
+    if (inner.kind === 'and' || inner.kind === 'or') {
+      return [{ conn: '', negate, leaf: null, group: treeToRows(inner), open: false }]
+    }
+    return [{ conn: '', negate, leaf: inner, group: null }]
+  }
+  return [{ conn: '', negate: false, leaf: node, group: null }]
+}
+
+// treeToRows 树 → 行列表：同类 And/Or 子树展平为连续行（统一接词）；异类组合
+// 子树成括号子组行；Not 叶子成行级非。首行 conn 置空。
+export function treeToRows(node: PatternNode | null | undefined): PatternRow[] {
+  if (node == null || typeof node !== 'object') return []
+  const n = unwrapSingle(node)
+  if (n.kind === 'and' || n.kind === 'or') {
+    const rows: PatternRow[] = []
+    for (const child of n.patterns || []) {
+      const c = unwrapSingle(child)
+      if (c.kind === n.kind) {
+        rows.push(...treeToRows(c))
+      } else if (c.kind === 'and' || c.kind === 'or') {
+        rows.push({ conn: '', negate: false, leaf: null, group: treeToRows(c), open: false })
+      } else {
+        rows.push(...leafRowsOf(c))
+      }
+    }
+    rows.forEach((r, i) => {
+      r.conn = i === 0 ? '' : n.kind === 'and' ? 'and' : 'or'
+    })
+    return rows
+  }
+  return leafRowsOf(n)
+}
+
+// rowsToTree 行列表 → 树：优先级与 SQL 相同（非>且>或；子组最紧）——且-连续段
+// 归并为 And，或-分段为 Or 的分支；单行/单分支归一为裸节点。
+export function rowsToTree(rows: PatternRow[]): PatternNode | null {
+  if (!rows.length) return null
+  const nodeOf = (row: PatternRow): PatternNode | null => {
+    const body = row.group ? rowsToTree(row.group) : row.leaf
+    if (!body) return null
+    return row.negate ? { kind: 'not', inner: body } : body
+  }
+  if (rows.length === 1) return nodeOf(rows[0])
+  const orTerms: (PatternNode | null)[][] = []
+  let current: (PatternNode | null)[] = []
+  rows.forEach((row, i) => {
+    if (i > 0 && row.conn === 'or') {
+      orTerms.push(current)
+      current = []
+    }
+    current.push(nodeOf(row))
+  })
+  orTerms.push(current)
+  const termNodes: PatternNode[] = []
+  for (const term of orTerms) {
+    const nodes = term.filter((x): x is PatternNode => x != null)
+    if (!nodes.length) continue
+    termNodes.push(nodes.length === 1 ? nodes[0] : { kind: 'and', patterns: nodes })
+  }
+  if (!termNodes.length) return null
+  return termNodes.length === 1 ? termNodes[0] : { kind: 'or', patterns: termNodes }
+}
+
+// rowsComplete 行列表完整性（保存闸门）：每行有叶子或有非空且完整的子组。
+export function rowsComplete(rows: PatternRow[] | null | undefined): boolean {
+  if (!rows || !rows.length) return false
+  return rows.every((r) =>
+    r.group && r.group.length ? rowsComplete(r.group) : !!r.leaf && typeof r.leaf === 'object'
+  )
+}
+
+// rowsSummaryOf 行列表人话摘要（帧-04：实时显示按优先级解析出的括号分组）：
+// 且-连续段为项、或-分段为支；多行且段加括号；行级非前缀「非」；子组括号。
+export function rowsSummaryOf(rows: PatternRow[] | null | undefined): string {
+  if (!rows || !rows.length) return '（无条件——至少一行）'
+  const termOf = (row: PatternRow): string => {
+    const body = row.group && row.group.length ? `（${rowsSummaryOf(row.group)}）` : patternSummaryOf(row.leaf)
+    return (row.negate ? '非' : '') + body
+  }
+  const orTerms: string[][] = []
+  let current: string[] = []
+  rows.forEach((row, i) => {
+    if (i > 0 && row.conn === 'or') {
+      orTerms.push(current)
+      current = []
+    }
+    current.push(termOf(row))
+  })
+  orTerms.push(current)
+  const terms = orTerms.map((t) => (t.length > 1 ? `（${t.join(' 且 ')}）` : t.join(' 且 ')))
+  return terms.join(' 或 ')
 }
 
 // —— 「仅序列成员产出」when 原子（自 SubpageRules 随迁，机制不变；由全局开关

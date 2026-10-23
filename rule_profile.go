@@ -63,6 +63,10 @@ const (
 	// FromAdjudication 表示取动作内声明的裁决结果常量（冲突裁决生成规则的专用
 	// 取值来源，产出声明携带裁决来源，合成时压过全部规则推导来源）。
 	FromAdjudication ExtractionFrom = "adjudication"
+	// FromScan 表示贪婪识别（库内确认）：扫描候选分段（整段/括号内容/分隔符
+	// 切分）与库内对应集合精确等值比对，命中者产出声明——查不到不提取
+	//（确认非线索口径）；多值与歧义语义见 rule_scan.go（图形帧收敛档 2026-10-23）。
+	FromScan ExtractionFrom = "scan"
 )
 
 // SynthStrategy 为同一含义维度多来源候选值的合成策略。
@@ -226,6 +230,10 @@ type ExtractionAction struct {
 	CaptureName string `json:"captureName"`
 	// Constant 为 From 为 constant / adjudication 时的常量值。
 	Constant string `json:"constant"`
+	// ScanScope 为 From 为 scan 时的扫描范围："path"=文件名去扩展名+各级目录名
+	//（默认，空串同值）；"uncovered"=同左，但排除与本规则捕获区间（同分段内）
+	// 重叠的候选（仅上半未覆盖片段）。
+	ScanScope string `json:"scanScope,omitempty"`
 	// RoleName 为声明级角色绑定，可为空；原样透传到产出声明。
 	RoleName string `json:"roleName"`
 	// StripPrefix / StripSuffix 取值后的剥壳变换（结构映射泛化产物使用）：值
@@ -661,6 +669,7 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 		From        ExtractionFrom    `json:"from"`
 		CaptureName string            `json:"captureName"`
 		Constant    string            `json:"constant"`
+		ScanScope   string            `json:"scanScope"`
 		RoleName    string            `json:"roleName"`
 		StripPrefix string            `json:"stripPrefix"`
 		StripSuffix string            `json:"stripSuffix"`
@@ -679,6 +688,7 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 		From:        in.From,
 		CaptureName: in.CaptureName,
 		Constant:    in.Constant,
+		ScanScope:   in.ScanScope,
 		RoleName:    in.RoleName,
 		StripPrefix: in.StripPrefix,
 		StripSuffix: in.StripSuffix,
@@ -748,6 +758,24 @@ func validateExtractions(ruleID string, pattern Pattern, actions []ExtractionAct
 		action := &actions[i]
 		if action.From == FromAdjudication && action.Constant == "" {
 			return fmt.Errorf("规则 %q 的第 %d 条提取动作为裁决取值但缺少常量（constant）", ruleID, i+1)
+		}
+		if action.From == FromScan {
+			switch action.Dimension {
+			case DimAuthor, DimTag, DimCollection:
+			default:
+				return fmt.Errorf("规则 %q 的第 %d 条提取动作为贪婪识别但维度 %q 无库内集合（仅作者/标签/作品集可扫描）", ruleID, i+1, action.Dimension)
+			}
+			switch action.ScanScope {
+			case "", ScanScopePath, ScanScopeUncovered:
+			default:
+				return fmt.Errorf("规则 %q 的第 %d 条提取动作的贪婪识别范围非法: %q（path / uncovered）", ruleID, i+1, action.ScanScope)
+			}
+			if action.When != nil {
+				return fmt.Errorf("规则 %q 的第 %d 条贪婪识别动作暂不支持生效条件（when）", ruleID, i+1)
+			}
+			if action.CaptureName != "" || action.Constant != "" {
+				return fmt.Errorf("规则 %q 的第 %d 条贪婪识别动作不应携带捕获组名或常量", ruleID, i+1)
+			}
 		}
 		if action.When == nil {
 			continue

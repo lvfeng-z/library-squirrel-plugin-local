@@ -106,22 +106,28 @@ func (p *RegexPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseCon
 }
 
 // matchWithCaptures 对 text 求一次子匹配：命中时把 Captures 列出的命名捕获组
-// 逐个按本次命中值追加为绑定（表达式中不存在的组名绑定空串），返回 true。
+// 逐个按本次命中值追加为绑定（表达式中不存在的组名绑定空串），并记录绑定在
+// text 内的字节区间（Segment/Start/End，供贪婪识别「未覆盖片段」范围比对；
+// 未参与本次匹配的组不记区间），返回 true。
 func (p *RegexPattern) matchWithCaptures(text string, ctx *ParseContext) bool {
-	m := p.re.FindStringSubmatch(text)
-	if m == nil {
+	idx := p.re.FindStringSubmatchIndex(text)
+	if idx == nil {
 		return false
 	}
 	groupNames := p.re.SubexpNames()
 	for _, name := range p.Captures {
-		value := ""
+		binding := CaptureBinding{Name: name, Segment: text}
 		for i, groupName := range groupNames {
 			if i > 0 && groupName == name {
-				value = m[i]
+				s, e := idx[2*i], idx[2*i+1]
+				if s >= 0 && e >= 0 {
+					binding.Value = text[s:e]
+					binding.Start, binding.End = s, e
+				}
 				break
 			}
 		}
-		ctx.Captures = append(ctx.Captures, CaptureBinding{Name: name, Value: value})
+		ctx.Captures = append(ctx.Captures, binding)
 	}
 	return true
 }

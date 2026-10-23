@@ -64,7 +64,7 @@ func TestRegexPatternEvaluate(t *testing.T) {
 			captures:     []string{"author"},
 			in:           MatchInput{FileName: "alice_001.jpg"},
 			want:         true,
-			wantCaptures: []CaptureBinding{{Name: "author", Value: "alice"}},
+			wantCaptures: []CaptureBinding{{Name: "author", Value: "alice", Segment: "alice_001.jpg", Start: 0, End: 5}},
 		},
 		{
 			name:     "filename未命中不追加绑定",
@@ -75,13 +75,15 @@ func TestRegexPatternEvaluate(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:         "filename命中但组名不存在时绑定空串",
-			target:       string(TargetFileName),
-			expr:         `^img$`,
-			captures:     []string{"missing"},
-			in:           MatchInput{FileName: "img"},
-			want:         true,
-			wantCaptures: []CaptureBinding{{Name: "missing", Value: ""}},
+			name:     "filename命中但组名不存在时绑定空串",
+			target:   string(TargetFileName),
+			expr:     `^img$`,
+			captures: []string{"missing"},
+			in:       MatchInput{FileName: "img"},
+			want:     true,
+			// 组名不存在于表达式：绑定空串与零区间（Segment 恒记录；零区间不参与
+			// 贪婪识别的覆盖排除）。
+			wantCaptures: []CaptureBinding{{Name: "missing", Value: "", Segment: "img"}},
 		},
 		{
 			name:        "dirname任一层命中追加DirHit",
@@ -166,7 +168,8 @@ func TestLocationPatternEvaluate(t *testing.T) {
 			want:        true,
 			wantDirHits: []DirHit{{Depth: 1, Name: "漫画"}},
 			wantCaptures: []CaptureBinding{
-				{Name: "kw", Value: "漫画"},
+				// 区间绑定以命中层目录名为 Segment（贪婪识别「未覆盖」范围可跨段排除）。
+				{Name: "kw", Value: "漫画", Segment: "漫画", Start: 0, End: len("漫画")},
 			},
 		},
 		{
@@ -404,7 +407,8 @@ func TestCompositePatternEvaluate(t *testing.T) {
 		if !(Or{first, second}).Evaluate(&MatchInput{FileName: "alpha_01.jpg"}, nil, ctx) {
 			t.Fatal("Or 首个子模式命中，期望 true")
 		}
-		want := []CaptureBinding{{Name: "x", Value: "alpha"}}
+		// 期望含区间绑定（Segment/Start/End，贪婪识别「未覆盖」范围的数据基座）。
+		want := []CaptureBinding{{Name: "x", Value: "alpha", Segment: "alpha_01.jpg", Start: 0, End: 5}}
 		if !reflect.DeepEqual(ctx.Captures, want) {
 			t.Errorf("Captures = %+v, 期望 %+v", ctx.Captures, want)
 		}

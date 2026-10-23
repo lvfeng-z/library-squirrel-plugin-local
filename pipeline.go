@@ -33,6 +33,19 @@ type FileDecision struct {
 	// MatchedRuleIDs 为全部命中规则的 ID（含 Extractions 为空的规则，
 	// 归属接线由后续阶段消费），按规则传入顺序追加。
 	MatchedRuleIDs []string
+	// ScanNotes 为贪婪识别动作的歧义记录（作者/作品集扫描出多个互异库内值，
+	// 宁缺勿错不产出声明时记此），供上层观察呈现。
+	ScanNotes []ScanNote
+}
+
+// ScanNote 为一条贪婪识别歧义记录。
+type ScanNote struct {
+	// Dimension 为发生歧义的维度（作者/作品集）。
+	Dimension MetadataDimension
+	// Values 为扫描出的互异库内值（按发现序）。
+	Values []string
+	// RuleID 为产出记录的规则 ID。
+	RuleID string
 }
 
 // dirGroupKey 把目录名序列编码为同目录聚合键：目录名不可包含 NUL 字节，
@@ -113,13 +126,15 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // （全部规则按序），第二遍按规则序补跑条件动作——条件对该规则命中时的解析
 // 上下文（其私有作用域）与求值时点已产出的声明集求值（见 CondExpr.Holds），
 // 两遍执行使条件可见全部无条件声明（裁决生成的条件规则居档案尾，其条件谓词
-// 引用的声明在第一遍已全部在场）。
+// 引用的声明在第一遍已全部在场）。贪婪识别（FromScan）动作第三遍执行：显式
+// 行先产出、scan 只补本规则尚未产出的维度，多值/歧义语义见 applyScanActions。
 func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) {
 	type ruleMatch struct {
 		rule    *RuleEntry
 		context *ParseContext
 	}
 	var conditional []ruleMatch
+	var scans []ruleMatch
 	for i := range rules {
 		rule := &rules[i]
 		if !rule.Enabled || rule.Pattern == nil {
@@ -138,8 +153,11 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 		if hasConditionalAction(rule.Extractions) {
 			conditional = append(conditional, ruleMatch{rule: rule, context: ruleCtx})
 		}
+		if hasScanAction(rule.Extractions) {
+			scans = append(scans, ruleMatch{rule: rule, context: ruleCtx})
+		}
 		for _, action := range rule.Extractions {
-			if action.When != nil {
+			if action.When != nil || action.From == FromScan {
 				continue
 			}
 			if decl, ok := action.Apply(rule.ID, ruleCtx); ok {
@@ -159,6 +177,19 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 				decision.Declarations = append(decision.Declarations, decl)
 			}
 		}
+	}
+	// 第三遍：贪婪识别（scan）动作——显式行（无条件+条件）先产出，scan 只补
+	// 本规则尚未产出的维度（可裁点④：显式优先）；多值/歧义语义见 applyScanActions。
+	for _, match := range scans {
+		filled := map[MetadataDimension]bool{}
+		for i := range decision.Declarations {
+			if decision.Declarations[i].RuleID == match.rule.ID {
+				filled[decision.Declarations[i].Dimension] = true
+			}
+		}
+		decls, notes := applyScanActions(match.rule, in, match.context, lib, filled)
+		decision.Declarations = append(decision.Declarations, decls...)
+		decision.ScanNotes = append(decision.ScanNotes, notes...)
 	}
 }
 

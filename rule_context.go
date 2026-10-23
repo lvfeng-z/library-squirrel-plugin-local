@@ -50,6 +50,14 @@ type CaptureBinding struct {
 	Name string
 	// Value 为该次命中的捕获文本。
 	Value string
+	// Segment 为本次匹配所作用的目标文本（文件名 / 相对路径或某层目录名）：
+	// 供贪婪识别「未覆盖片段」范围做同段区间比对；空 = 旧绑定未记录（视为
+	// 不可比对，不参与排除）。
+	Segment string
+	// Start / End 为 Value 在 Segment 内的字节区间 [Start, End)；Segment 为空
+	// 或该组未参与本次匹配时无意义（未参与时为零值）。
+	Start int
+	End   int
 }
 
 // PredicateHit 为一次谓词命中记录。
