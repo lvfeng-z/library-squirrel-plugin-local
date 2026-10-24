@@ -252,8 +252,9 @@ func TestWorkSetRuleAdjustRuleAssembly(t *testing.T) {
 	}
 
 	captureRule := findRuleByID(t, profile, result.Rules[2].ID)
-	if len(captureRule.Extractions) != 1 || captureRule.Extractions[0].CaptureName != seqCaptureGroup {
-		t.Fatalf("文件名条目应恰一条集名捕获: %+v", captureRule.Extractions)
+	if len(captureRule.Extractions) != 1 || captureRule.Extractions[0].CaptureName != condxVocab["集名"] ||
+		captureRule.Extractions[0].Row != 1 {
+		t.Fatalf("文件名条目应恰一条集名捕获（行 1）: %+v", captureRule.Extractions)
 	}
 	if captureRule.Extractions[0].When == nil {
 		t.Fatal("仅序列成员产出条件应在场（MemberOnly=true）")

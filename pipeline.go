@@ -123,14 +123,16 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 }
 
 // isGroupingRule 该规则是否为兄弟群定群规则：v3 = 顶层 SiblingPattern；v4 =
-// 单一序列条件行的规则（定群语义由序列主体承载：同键≥N 记 GroupAnalysis，
-// 群组行包装求值与 SiblingPattern 同写入群组上下文）。
+// 无提取动作且单一序列条件行的规则（定群语义由序列主体承载：同键≥N 记
+// GroupAnalysis，群组行包装求值与 SiblingPattern 同写入群组上下文；带提取
+// 动作的单 seq 行规则=序列前缀提取条目〔FromGroupPrefix〕，非定群）。
 func isGroupingRule(rule *RuleEntry) bool {
 	if rule == nil {
 		return false
 	}
 	if rule.Conditions != nil {
-		return len(rule.Conditions) == 1 && rule.Conditions[0].Condition != nil &&
+		return len(rule.Extractions) == 0 && len(rule.Conditions) == 1 &&
+			rule.Conditions[0].Condition != nil &&
 			rule.Conditions[0].Condition.Target == CondxTargetSeq
 	}
 	_, ok := rule.Pattern.(*SiblingPattern)

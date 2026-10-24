@@ -195,13 +195,16 @@ func newDirSubjectPattern(expr string, captures []string) (*DirSubjectPattern, e
 // patternMarker 实现 Pattern 接口标记。
 func (p *DirSubjectPattern) patternMarker() {}
 
-// Evaluate 逐层（浅→深）试祖先目录名，格式与全部终结谓词同时满足的首个命中
-// 层绑定该层捕获、追加 DirHit 并返回 true；全层不中返回 false。
+// Evaluate 逐层（深→浅——最具体的祖先层优先：全通配目录模板（如整目录名
+// 捕获 {集名}）须绑文件直接父层而非更浅的任意匹配层；浅层形态模板在深层
+// 不匹配时自然回退浅层命中）试祖先目录名，格式与全部终结谓词同时满足的首
+// 个命中层绑定该层捕获、追加 DirHit 并返回 true；全层不中返回 false。
 func (p *DirSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseContext) bool {
 	if p.re == nil {
 		return false
 	}
-	for depth, name := range in.DirNames {
+	for depth := len(in.DirNames) - 1; depth >= 0; depth-- {
+		name := in.DirNames[depth]
 		if !p.re.MatchString(name) {
 			continue
 		}

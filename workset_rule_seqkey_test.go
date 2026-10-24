@@ -158,8 +158,10 @@ func TestWorkSetSeqKeyCollectionAdjust(t *testing.T) {
 		seqKeyRule.Extractions[1].Dimension != DimAuthor || seqKeyRule.Extractions[1].From != FromGroupPrefix {
 		t.Fatalf("序列前缀条目应为集名+作者两条 FromGroupPrefix 提取: %+v", seqKeyRule.Extractions)
 	}
-	if re, ok := seqKeyRule.Pattern.(*RegexPattern); !ok || !strings.HasPrefix(re.Expr, "^") {
-		t.Fatalf("序列前缀条目模式应为文件名正则: %T", seqKeyRule.Pattern)
+	// v4：序列前缀条目=序列行模板（与定群条目同款 seqMemberTemplateOf）。
+	if _, ok := seqKeyRule.Pattern.(*RowSubjectPattern); !ok || seqKeyRule.Conditions == nil ||
+		seqKeyRule.Conditions[0].Condition.Target != CondxTargetSeq {
+		t.Fatalf("序列前缀条目应为 v4 序列行条件规则: %T", seqKeyRule.Pattern)
 	}
 	siblingRule := findRuleByID(t, profile, result.Rules[0].ID)
 	if !isGroupingRule(siblingRule) || siblingRule.Conditions == nil {
@@ -270,9 +272,13 @@ func TestWorkSetDirMultiSegCollection(t *testing.T) {
 	}
 	profile, _ := LoadProfile(m.store)
 	rule := findRuleByID(t, profile, result.Rules[0].ID)
-	_, expr := dirCaptureExprOf(t, rule)
-	if expr != `^(?P<collection>.+?) \[[^\]]*\]$` {
-		t.Fatalf("段1+段2 组合正则不符: %q", expr)
+	// v4：组合 span {集名} 一位盖段 1..2 区间原文（边界括号与段间空格一并
+	// 入位），第 3 段泛化消费（剥壳括号留字面）。
+	if _, ok := rule.Pattern.(*RowSubjectPattern); !ok || rule.Conditions == nil {
+		t.Fatalf("目录段组合规则应为 v4 目录行条件规则，实际 %T", rule.Pattern)
+	}
+	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "{集名} [{任意}]" {
+		t.Fatalf("段1+段2 组合模板不符: %q", tpl)
 	}
 	sess := waitWorkSetCond(t, m, root, func(s *WorkbenchSession) bool {
 		f := snapshotFileOf(s.Snapshot, "Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png")
@@ -311,7 +317,7 @@ func TestWorkSetDirMultiSegCollection(t *testing.T) {
 		}
 	}
 
-	// 段1..段3：整目录名捕获（`^(?P<collection>.+)$`），确认集名=整目录名
+	// 段1..段3：整目录名捕获（v4：{集名} 一位盖整名），确认集名=整目录名
 	//（端到端同口径）。
 	root2 := t.TempDir()
 	m2, target2 := workSetDirComboFixture(t, root2, "[Isel] [92242473] [瞬間的に絡み合う]")
@@ -322,9 +328,9 @@ func TestWorkSetDirMultiSegCollection(t *testing.T) {
 		t.Fatalf("调整面保存失败: %v", err)
 	}
 	rule2 := findRuleByID(t, LoadProfileOrFail(t, m2), result2.Rules[0].ID)
-	_, expr2 := dirCaptureExprOf(t, rule2)
-	if expr2 != `^(?P<collection>.+?)$` {
-		t.Fatalf("段1..段3 组合正则不符: %q", expr2)
+	if _, ok := rule2.Pattern.(*RowSubjectPattern); !ok || rule2.Conditions == nil ||
+		rule2.Conditions[0].Condition.Format.Tpl != "{集名}" {
+		t.Fatalf("段1..段3 组合模板不符: %T %+v", rule2.Pattern, rule2.Conditions)
 	}
 	sess2 := waitWorkSetCond(t, m2, root2, func(s *WorkbenchSession) bool {
 		f := snapshotFileOf(s.Snapshot, "Artist[Isel]/[Isel] [92242474] [別の題]/表紙.png")

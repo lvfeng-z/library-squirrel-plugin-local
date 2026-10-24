@@ -49,6 +49,7 @@ func condxTplFromEls(base string, els []SnapEl, off []int, cs, ce int, spanWord 
 		return nil
 	}
 	pos := 0
+	lastPlaceholder := false // 前一落位是否占位词（泛化消费位相邻并入判定）
 	// emitEl 单元素落位（泛化消费位词选择 + 剥壳括号留字面）。
 	emitEl := func(i int) error {
 		s, e := off[i], off[i+1]
@@ -62,9 +63,21 @@ func condxTplFromEls(base string, els []SnapEl, off []int, cs, ce int, spanWord 
 				return err
 			}
 			pos = e
+			lastPlaceholder = false
+			return nil
+		}
+		if s < pos && pos < e {
+			// 元素前部已被消费（span 覆盖至内名边界后的闭括号残余等）：
+			// 只写残余字面，不再落占位词。
+			if err := writeLiteral(base[pos:e]); err != nil {
+				return err
+			}
+			pos = e
+			lastPlaceholder = false
 			return nil
 		}
 		word, ok := wordByEl[i]
+		_, explicit := wordByEl[i]
 		if !ok {
 			// 泛化消费位词选择：语义元素种类优先取同名占位词（author→作者、
 			// workId→作品号——数字位保持数字类语义），序号位取 {序号}/数字
@@ -102,11 +115,19 @@ func condxTplFromEls(base string, els []SnapEl, off []int, cs, ce int, spanWord 
 		if covS < pos {
 			covS = pos
 		}
+		// 泛化消费位与前一占位词直接相邻（无字面分隔、非剥壳边界）→ 并入
+		// 前位（贪婪词自然覆盖相邻文本——数字段切分把「第3卷」切成相邻段
+		// 仍可模板化）；显式捕获位相邻仍由编译期相邻占位词校验拒绝。
+		if !explicit && lastPlaceholder && pos == s {
+			pos = e
+			return nil
+		}
 		if err := writeLiteral(base[pos:covS]); err != nil {
 			return err
 		}
 		b.WriteString("{" + word + "}")
 		pos = covE
+		lastPlaceholder = true
 		return nil
 	}
 	if spanWord != "" && cs < ce {

@@ -115,17 +115,18 @@ func TestWorkSetDirDraftIselForm(t *testing.T) {
 	if failReason != "" || draft.kind != draftDir {
 		t.Fatalf("推导应为目录格式草稿: kind=%d fail=%q", draft.kind, failReason)
 	}
-	loc, expr := dirCaptureExprOf(t, &draft.rules[1])
-	if loc.MinDepth != 1 || loc.MaxDepth != 1 {
-		t.Fatalf("目录格式条目应锚定第 2 层（深度区间 1..1）: %+v", loc)
+	// v4：目录格式条目=目录行模板（语义元素占同名词、数字段 {序号}、集名段
+	// {集名}——剥壳括号留字面、空格分隔字面）。
+	if _, ok := draft.rules[1].Pattern.(*RowSubjectPattern); !ok || draft.rules[1].Conditions == nil {
+		t.Fatalf("目录格式条目应为 v4 目录行条件规则，实际 %T", draft.rules[1].Pattern)
 	}
-	// 数字段类推断：`[92242473]`→`\[\d+\]` 通配；未捕获段泛化；集名段命名捕获。
-	if expr != `^\[[^\]]*\] \[\d+\] \[(?P<collection>[^\]]*)\]$` {
-		t.Fatalf("目录名分段正则不符: %q", expr)
+	if tpl := draft.rules[1].Conditions[0].Condition.Format.Tpl; tpl != "[{作者}] [{序号}] [{集名}]" {
+		t.Fatalf("目录名分段模板不符: %q", tpl)
 	}
 	dirRule := &draft.rules[1]
 	if len(dirRule.Extractions) != 1 || dirRule.Extractions[0].Dimension != DimCollection ||
-		dirRule.Extractions[0].From != FromCapture || dirRule.Extractions[0].CaptureName != seqCaptureGroup {
+		dirRule.Extractions[0].From != FromCapture || dirRule.Extractions[0].CaptureName != condxVocab["集名"] ||
+		dirRule.Extractions[0].Row != 1 {
 		t.Fatalf("目录格式条目应恰一条集名捕获提取: %+v", dirRule.Extractions)
 	}
 	if dirRule.Extractions[0].When != nil {
@@ -281,19 +282,20 @@ func TestWorkSetDirAdjustRuleAssembly(t *testing.T) {
 	}
 	profile, _ := LoadProfile(m.store)
 	rule := findRuleByID(t, profile, result.Rules[0].ID)
-	loc, expr := dirCaptureExprOf(t, rule)
-	if loc.MinDepth != 1 || loc.MaxDepth != 1 {
-		t.Fatalf("目录格式规则应锚定第 2 层: %+v", loc)
+	// v4：目录格式规则=目录行模板（作者/集名段占位词、数字段 {序号}——
+	// 剥壳括号留字面）。
+	if _, ok := rule.Pattern.(*RowSubjectPattern); !ok || rule.Conditions == nil {
+		t.Fatalf("目录格式规则应为 v4 目录行条件规则，实际 %T", rule.Pattern)
 	}
-	if expr != `^\[(?P<author>[^\]]*)\] \[\d+\] \[(?P<collection>[^\]]*)\]$` {
-		t.Fatalf("段格式正则不符: %q", expr)
+	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "[{作者}] [{序号}] [{集名}]" {
+		t.Fatalf("段格式模板不符: %q", tpl)
 	}
 	if len(rule.Extractions) != 2 {
 		t.Fatalf("应两条提取（集名+作者）: %+v", rule.Extractions)
 	}
 	for _, act := range rule.Extractions {
-		if act.From != FromCapture {
-			t.Fatalf("目录段提取应走 FromCapture: %+v", act)
+		if act.From != FromCapture || act.Row != 1 {
+			t.Fatalf("目录段提取应走 FromCapture 行 1 捕获: %+v", act)
 		}
 	}
 
