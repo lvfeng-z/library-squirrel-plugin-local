@@ -539,20 +539,67 @@ func buildBatchParentResponse(parentID, taskName, parentURL, siteKey string, chi
 // recomputeFileDecision 按 PluginData 携带的原始路径重算单文件的「档案∪赋值」
 // 合并结论：FileName/DirNames/RelPath 由路径分解重建（与识别干跑 buildScanFiles
 // 同构），Siblings 经父目录 os.ReadDir 重扫（与干跑扫描同源同键——同目录常规
-// 文件名全集、字典序）；库内谓词索引注入（lib 参数——与识别干跑同一
-// BuildLibraryIndex 产物，风险12 闭环：全景/创建/重算三点同一谓词求值基面）；
-// 任务级赋值快照（fp.Assignment）优先作为该文件的会话赋值参与合并覆盖
-// （mergedFileConclusionOf——与 MergedRecognition 同一实现，风险13），缺失时
-// 回退纯档案求值。返回合并结论与匹配输入（匹配输入供归属裁决重放规则取捕获值）。
+// 文件名全集、字典序）；各层祖先直接子文件与子目录数经 rescanAncestorView
+// 磁盘重扫注入（v4 目录终结谓词消费——子女数据缺失时保守不命中，识别批量
+// 通路经 MergedRecognitionWithTree 注入全量树，此处为单文件同义磁盘版；
+// 子目录计数为磁盘真值〔含空目录〕，与识别通路的清单聚合〔仅含有文件子目录〕
+// 在空子目录场景可能分叉，记谱系已知差异）；库内谓词索引注入（lib 参数——与
+// 识别干跑同一 BuildLibraryIndex 产物，风险12 闭环：全景/创建/重算三点同一
+// 谓词求值基面）；任务级赋值快照（fp.Assignment）优先作为该文件的会话赋值参与
+// 合并覆盖（mergedFileConclusionOf——与 MergedRecognition 同一实现，风险13），
+// 缺失时回退纯档案求值。返回合并结论与匹配输入（匹配输入供归属裁决重放规则
+// 取捕获值）。
 func (h *LocalImportWorkFetcher) recomputeFileDecision(fp *FilePluginData, rules []RuleEntry, lib *LibraryIndex) (FileConclusion, *MatchInput) {
 	dirNames := ExtractDirLevels(fp.RelPath)
+	siblings := h.rescanSiblingNames(filepath.Dir(fp.FullPath))
+	ancestorFiles, childDirCounts := h.rescanAncestorView(filepath.Dir(fp.FullPath), dirNames, siblings)
 	in := &MatchInput{
-		FileName: filepath.Base(fp.FullPath),
-		DirNames: dirNames,
-		RelPath:  fp.RelPath,
-		Siblings: h.rescanSiblingNames(filepath.Dir(fp.FullPath)),
+		FileName:               filepath.Base(fp.FullPath),
+		DirNames:               dirNames,
+		RelPath:                fp.RelPath,
+		Siblings:               siblings,
+		AncestorFiles:          ancestorFiles,
+		AncestorChildDirCounts: childDirCounts,
 	}
 	return mergedFileConclusionOf(in, rules, lib, fp.Assignment), in
+}
+
+// rescanAncestorView 各层祖先目录的直接子文件与直接子目录数（磁盘 ReadDir 重
+// 扫）：parentDir 为文件父目录（最深层的真值直接复用 siblings，避免二次读盘）；
+// 中间层逐级上溯读盘，某层不可读（路径已移动/删除）该层子文件空、计数 0——
+// 子女类终结谓词按数据缺失保守不命中，不中断整体重算。与 ancestorFilesLevels/
+// ancestorChildDirCounts（清单聚合版）同键同序。
+func (h *LocalImportWorkFetcher) rescanAncestorView(parentDir string, dirNames []string, siblings []string) ([][]string, []int) {
+	ancestorFiles := make([][]string, len(dirNames))
+	childDirCounts := make([]int, len(dirNames))
+	if len(dirNames) == 0 {
+		return ancestorFiles, childDirCounts
+	}
+	ancestorFiles[len(dirNames)-1] = siblings
+	dir := parentDir
+	for d := len(dirNames) - 2; d >= 0; d-- {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if h.ctx != nil {
+				h.ctx.Warnf("重扫祖先目录失败，该层子女类谓词保守不命中: %s: %v", dir, err)
+			}
+			dir = filepath.Dir(dir)
+			continue
+		}
+		files := make([]string, 0, len(entries))
+		subdirs := 0
+		for _, e := range entries {
+			if e.IsDir() {
+				subdirs++
+				continue
+			}
+			files = append(files, e.Name())
+		}
+		ancestorFiles[d] = files
+		childDirCounts[d] = subdirs
+		dir = filepath.Dir(dir)
+	}
+	return ancestorFiles, childDirCounts
 }
 
 // rescanSiblingNames 重扫父目录取同目录常规文件名全集（ReadDir 按名字典序返回，
