@@ -4,6 +4,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,59 @@ func TestCompileRuleConditions(t *testing.T) {
 	row, ok := p.(*RowSubjectPattern)
 	if !ok || row.Ordinal != 1 {
 		t.Fatalf("应编译为行包装（行1），得到 %T", p)
+	}
+}
+
+// TestRuleConditionsRoundTrip v4 条目档案序列化往返：conditions 落 JSON 后
+// 载入还原（条件行等价、模式树为编译缓存、提取行引用校验过）；同时锚定
+// 行引用指向未声明行时报错。
+func TestRuleConditionsRoundTrip(t *testing.T) {
+	rows := []CondxRow{
+		{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("【{作者}】{标题}"),
+			Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".jpg"}}}},
+	}
+	pat, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	rule := RuleEntry{
+		ID: "rt-1", Description: "往返", Source: RuleSourceManual, Enabled: true,
+		Conditions: rows, Pattern: pat,
+		Extractions: []ExtractionAction{
+			{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 1},
+			{Dimension: DimTitle, From: FromCapture, CaptureName: "title", Row: 1},
+		},
+	}
+	rj, err := ruleToJSON(rule)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if rj.Pattern != nil || rj.Conditions == nil {
+		t.Fatalf("v4 条目应只落 conditions（模式树为缓存不落档）: %+v", rj)
+	}
+	back, err := ruleFromJSON(rj)
+	if err != nil {
+		t.Fatalf("载入失败: %v", err)
+	}
+	if !reflect.DeepEqual(back.Conditions, rows) {
+		t.Fatalf("条件行往返不等:\n取回 %+v\n期望 %+v", back.Conditions, rows)
+	}
+	if back.Pattern == nil {
+		t.Fatal("载入应重建编译缓存")
+	}
+	ctx := &ParseContext{}
+	if !back.Pattern.Evaluate(&MatchInput{FileName: "【甲】乙.jpg"}, nil, ctx) {
+		t.Fatalf("往返后求值应命中")
+	}
+	if v, _ := ctx.Capture("r1.author"); v != "甲" {
+		t.Fatalf("往返后捕获不符: %q", v)
+	}
+	// 行引用指向未声明行：拒绝。
+	bad := *rj
+	bad.ID = "rt-2"
+	bad.Extractions = []ExtractionAction{{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 2}}
+	if _, err := ruleFromJSON(&bad); err == nil || !strings.Contains(err.Error(), "未声明的条件捕获") {
+		t.Fatalf("未声明行引用应拒绝: %v", err)
 	}
 }
 

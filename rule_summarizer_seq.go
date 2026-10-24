@@ -60,7 +60,7 @@ func trySequenceFormSummary(relPath, fileName string, assign *SessionAssignment,
 	if !ok {
 		return seqFormTry{unmatched: true}
 	}
-	siblingRule, _, err := buildSequenceRule(relPath, group.Key, group)
+	siblingRule, _, err := buildSequenceRule(relPath, fileName, group.Key, group)
 	if err != nil {
 		return seqFormTry{unmatched: true}
 	}

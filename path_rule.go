@@ -207,7 +207,7 @@ func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMe
 		if !rule.Enabled || rule.Pattern == nil {
 			continue
 		}
-		if _, ok := rule.Pattern.(*SiblingPattern); ok {
+		if isGroupingRule(&rule) {
 			// 兄弟群组规则定群文件归属，不表达目录层含义
 			continue
 		}

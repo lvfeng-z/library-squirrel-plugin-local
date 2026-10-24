@@ -299,8 +299,9 @@ func TestConditionalExtractionEvaluation(t *testing.T) {
 
 // —— 退出标准2：泛化规则按维度正确生成（三态）——
 
-// TestGeneralizeFilenameShape 按文件名形态：赋值值位升格为命名捕获组、其余文本
-// 保持字面（方括号作者样例与内置惯例同形），来源 qna、ID 前缀 qna-file-。
+// TestGeneralizeFilenameShape 按文件名形态（v4 条件行）：赋值值位升为占位词、
+// 其余文本保持字面段（方括号作者样例与例子模板同形），来源 qna、ID 前缀
+// qna-file-；提取动作带行引用（行1=文件目标行）。
 func TestGeneralizeFilenameShape(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newAdjudicationFixture(t, root)
@@ -319,27 +320,39 @@ func TestGeneralizeFilenameShape(t *testing.T) {
 
 	profile, _ := LoadProfile(m.store)
 	rule := findRuleByID(t, profile, result.Rule.ID)
-	regex, ok := rule.Pattern.(*RegexPattern)
-	if !ok || regex.Target != TargetFileName {
-		t.Fatalf("文件名形态泛化应为文件名正则模式，实际 %T", rule.Pattern)
+	if len(rule.Conditions) != 1 || rule.Conditions[0].Condition == nil ||
+		rule.Conditions[0].Condition.Target != CondxTargetFile {
+		t.Fatalf("文件名形态泛化应为单行文件条件: %+v", rule.Conditions)
 	}
-	want := `^【(?P<author>[^】]+)】(?P<title>[^.].*?)(?:\.[^.]*)?$`
-	if regex.Expr != want {
-		t.Fatalf("生成正则不符（最简充分形式）:\n取回 %s\n期望 %s", regex.Expr, want)
-	}
-	if len(regex.Captures) != 2 || regex.Captures[0] != "author" || regex.Captures[1] != "title" {
-		t.Fatalf("捕获组形态不符: %v", regex.Captures)
+	cond := rule.Conditions[0].Condition
+	if cond.Format.Mode != CondxFormatTemplate || cond.Format.Tpl != "【{作者}】{标题}" {
+		t.Fatalf("模板不符: %+v", cond.Format)
 	}
 	if len(rule.Extractions) != 2 {
 		t.Fatalf("提取动作应按文件名值位生成两维，实际 %d 条", len(rule.Extractions))
 	}
 	for _, action := range rule.Extractions {
-		if action.From != FromCapture {
-			t.Fatalf("文件名形态泛化的提取应为捕获取值: %+v", action)
+		if action.From != FromCapture || action.Row != 1 {
+			t.Fatalf("文件名形态泛化的提取应为行引用取值: %+v", action)
 		}
+	}
+	if rule.Extractions[0].CaptureName != "author" || rule.Extractions[1].CaptureName != "title" {
+		t.Fatalf("提取引用的英文组名不符: %+v", rule.Extractions)
 	}
 	if rule.Source != RuleSourceQna {
 		t.Fatalf("泛化规则来源应为 qna: %+v", rule)
+	}
+
+	// 求值面：模板行对同形文件名回放捕获（贪婪回溯切分，右闭分隔符免排除类）。
+	ctx := &ParseContext{}
+	if !rule.Pattern.Evaluate(&MatchInput{FileName: "【作者B】标题2.jpg"}, nil, ctx) {
+		t.Fatalf("同形文件名应命中")
+	}
+	if v, _ := ctx.Capture("r1.author"); v != "作者B" {
+		t.Fatalf("作者捕获不符: %q", v)
+	}
+	if v, _ := ctx.Capture("r1.title"); v != "标题2" {
+		t.Fatalf("标题捕获不符: %q", v)
 	}
 
 	// 泛化即接管（元素7）：规则完整复现赋值两维（作者+标题捕获）→ 赋值被全量
@@ -367,8 +380,9 @@ func TestGeneralizeFilenameShape(t *testing.T) {
 	}
 }
 
-// TestGeneralizeDirLayer 按目录层：直接父目录名锚定位置规则（深度=父目录索引），
-// 值同目录名的维度按目录名取值、异值的作常量声明。
+// TestGeneralizeDirLayer 按目录层（v4 目录条件行）：目录整名字面模板（任意
+// 祖先层同名命中=子树包含），值同目录名的维度按目录名取值（ancestorDir 取
+// 命中层名）、异值的作常量声明。
 func TestGeneralizeDirLayer(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newAdjudicationFixture(t, root)
@@ -387,17 +401,18 @@ func TestGeneralizeDirLayer(t *testing.T) {
 
 	profile, _ := LoadProfile(m.store)
 	rule := findRuleByID(t, profile, result.Rule.ID)
-	location, ok := rule.Pattern.(*LocationPattern)
-	if !ok {
-		t.Fatalf("目录层泛化应为位置模式，实际 %T", rule.Pattern)
+	if len(rule.Conditions) != 1 || rule.Conditions[0].Condition == nil ||
+		rule.Conditions[0].Condition.Target != CondxTargetDir {
+		t.Fatalf("目录层泛化应为单行目录条件: %+v", rule.Conditions)
 	}
-	// DirRelKey=已识别 → DirNames 索引 0、问答层深 1
-	if location.MinDepth != 0 || location.MaxDepth != 0 {
-		t.Fatalf("位置模式深度应锚定父目录索引 0: %+v", location)
+	cond := rule.Conditions[0].Condition
+	if cond.Format.Mode != CondxFormatTemplate || cond.Format.Tpl != "已识别" {
+		t.Fatalf("目录模板应为父目录名整名字面: %+v", cond.Format)
 	}
-	ancestor, ok := location.Ancestor.(*RegexPattern)
-	if !ok || ancestor.Expr != `^已识别$` {
-		t.Fatalf("锚定正则应为父目录名字面: %+v", location.Ancestor)
+	// 求值面：任意祖先层同名命中（子树包含语义）。
+	ctx := &ParseContext{}
+	if !rule.Pattern.Evaluate(&MatchInput{DirNames: []string{"库", "已识别"}}, nil, ctx) {
+		t.Fatalf("祖先层同名目录应命中")
 	}
 	if len(rule.Extractions) != 1 || rule.Extractions[0].From != FromConstant || rule.Extractions[0].Constant != "作者A" {
 		t.Fatalf("异目录名值应作常量声明: %+v", rule.Extractions)
@@ -450,15 +465,19 @@ func TestGeneralizeSequence(t *testing.T) {
 
 	profile, _ := LoadProfile(m.store)
 	rule := findRuleByID(t, profile, result.Rule.ID)
-	sibling, ok := rule.Pattern.(*SiblingPattern)
-	if !ok {
-		t.Fatalf("序列形态泛化应为兄弟群组模式，实际 %T", rule.Pattern)
+	if len(rule.Conditions) != 1 || rule.Conditions[0].Condition == nil ||
+		rule.Conditions[0].Condition.Target != CondxTargetSeq {
+		t.Fatalf("序列形态泛化应为单行序列条件: %+v", rule.Conditions)
 	}
-	if sibling.KeyExpr != `^(库内作者名)` || sibling.SeqExpr != `[\[\(]?(\d+)[\]\)]?(?:\.[^.]*)?$` {
-		t.Fatalf("定群正则不符: key=%q seq=%q", sibling.KeyExpr, sibling.SeqExpr)
+	cond := rule.Conditions[0].Condition
+	if cond.Format.Mode != CondxFormatTemplate || cond.Format.Tpl != "{键}_{序号}" {
+		t.Fatalf("成员模板不符（{键}盖住公共前缀、{序号}盖住尾缀数字）: %+v", cond.Format)
 	}
-	if sibling.MinGroupSize != 2 || sibling.Outcome != OutcomeCollection {
-		t.Fatalf("成群门槛/归属不符: %+v", sibling)
+	if len(cond.Attach) != 1 || cond.Attach[0].Kind != CondxAttachSeqMinLength || cond.Attach[0].MinCount != 2 {
+		t.Fatalf("成群门槛应为 seqMinLength=2: %+v", cond.Attach)
+	}
+	if !isGroupingRule(rule) {
+		t.Fatalf("单序列条件行规则应判为定群规则")
 	}
 	if len(rule.Extractions) != 0 {
 		t.Fatalf("定群规则不应携带提取动作（最简形式）: %+v", rule.Extractions)
@@ -493,48 +512,46 @@ func TestGeneralizeSequence(t *testing.T) {
 }
 
 // TestBuildSequenceRuleFallbackWrappedSeq 规则定群群（无形态标识）回退分支的
-// 序号提取式须容忍尾部包裹符（live-test 发现 1 回归锚：泛化入档后同形态集的
-// 快照群变规则定群，括号序号 `…_[01].png` 的 `]` 阻断数字与扩展名相邻 → 零
-// 提取 → SiblingPattern.Evaluate 全员 false → 调整面「序列」指派被定群门拒
-// 绝）；数字紧邻扩展名的既有形态（含无扩展名/单侧包裹变体）不回归。
+// v4 成员模板：包裹符原样入字面段（样本 `[01]` → 模板 `{键}_[{序号}]`，同包
+// 裹制的同形态成员可复现定群）。制式换代分歧注记：v3 提取式对括号/方括号
+// 跨制混判，v4 模板字面段严格同制——跨包裹制混编群成员不再互认（分离为更
+// 小的群或不成群，宁缺勿错）。
 func TestBuildSequenceRuleFallbackWrappedSeq(t *testing.T) {
-	rule, _, err := buildSequenceRule("集盒/[画师]_[123456789]_[集名]_[01].png", "[画师]_[123456789]_[集名]", nil)
+	rule, _, err := buildSequenceRule("集盒/[画师]_[123456789]_[集名]_[01].png",
+		"[画师]_[123456789]_[集名]_[01].png", "[画师]_[123456789]_[集名]", nil)
 	if err != nil {
 		t.Fatalf("回退分支构造失败: %v", err)
 	}
-	sibling, ok := rule.Pattern.(*SiblingPattern)
-	if !ok {
-		t.Fatalf("回退分支应为兄弟群组模式，实际 %T", rule.Pattern)
+	if len(rule.Conditions) != 1 || rule.Conditions[0].Condition.Target != CondxTargetSeq {
+		t.Fatalf("回退分支应为单行序列条件: %+v", rule.Conditions)
 	}
-	if sibling.KeyExpr != `^(\[画师\]_\[123456789\]_\[集名\])` || sibling.SeqExpr != `[\[\(]?(\d+)[\]\)]?(?:\.[^.]*)?$` {
-		t.Fatalf("回退分支定群正则不符: key=%q seq=%q", sibling.KeyExpr, sibling.SeqExpr)
+	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_[{序号}]" {
+		t.Fatalf("回退分支成员模板不符: %q", tpl)
 	}
-	// 括号序号成员经回退式定群（≥2 同键、序号=去包裹数字、键=前缀字面）。
-	bracketFiles := []string{
-		"[画师]_[123456789]_[集名]_[01].png",
-		"[画师]_[123456789]_[集名]_[02].png",
+	// 括号序号成员经模板定群（≥2 同键、序号=段内数字、键={键} 捕获=前缀）。
+	bracketFiles := []ScanFile{
+		{Path: `E:\lib\集盒\[画师]_[123456789]_[集名]_[01].png`, FileName: "[画师]_[123456789]_[集名]_[01].png", DirNames: []string{"集盒"}, RelPath: "集盒/[画师]_[123456789]_[集名]_[01].png"},
+		{Path: `E:\lib\集盒\[画师]_[123456789]_[集名]_[02].png`, FileName: "[画师]_[123456789]_[集名]_[02].png", DirNames: []string{"集盒"}, RelPath: "集盒/[画师]_[123456789]_[集名]_[02].png"},
 	}
-	ctx := &ParseContext{}
-	if !sibling.Evaluate(&MatchInput{FileName: bracketFiles[0], Siblings: bracketFiles}, nil, ctx) || ctx.Group == nil {
-		t.Fatalf("括号序号应经回退式定群: group=%+v", ctx.Group)
-	}
-	if ctx.Group.Key != "[画师]_[123456789]_[集名]" || ctx.Group.Seq != 1 {
-		t.Fatalf("括号序号定群键/序号不符: %+v", ctx.Group)
-	}
-	// 提取式形态面（含既有形态不回归）：包裹符两侧（方括号/圆括号/单侧）、
-	// 数字紧邻扩展名、无扩展名。
-	for _, tc := range []struct{ file, want string }{
-		{"[画师]_[123456789]_[集名]_[12].png", "12"},
-		{"[画师]_[123456789]_[集名]_(34).png", "34"},
-		{"[画师]_[123456789]_[集名]_[9.png", "9"},
-		{"[画师]_[123456789]_[集名]_56.png", "56"},
-		{"[画师]_[123456789]_[集名]_78", "78"},
-	} {
-		if text, ok := sibling.seqTextOf(tc.file); !ok || text != tc.want {
-			t.Fatalf("%s 序号原文应=%q，实际 %q（ok=%v）", tc.file, tc.want, text, ok)
+	decisions := RunPipeline(bracketFiles, []RuleEntry{rule}, nil)
+	for i, d := range decisions {
+		if d.Group == nil || d.Group.Key != "[画师]_[123456789]_[集名]" || d.Group.Seq != i+1 || d.Group.Size != 2 {
+			t.Fatalf("括号序号应经模板定群: %+v", d.Group)
 		}
 	}
-	if _, ok := sibling.seqTextOf("表紙.png"); ok {
+	if text, ok := groupSeqTextOf(&rule, "[画师]_[123456789]_[集名]_[02].png"); !ok || text != "02" {
+		t.Fatalf("序号原文应保留零填充，实际 %q（ok=%v）", text, ok)
+	}
+	// 同制无扩展名成员（.png 缺席）不回归：去扩展名基名同判。
+	if text, ok := groupSeqTextOf(&rule, "[画师]_[123456789]_[集名]_[03]"); !ok || text != "03" {
+		t.Fatalf("无扩展名成员序号原文不符: %q（ok=%v）", text, ok)
+	}
+	// 跨包裹制（圆括号）成员不再互认（v4 字面段严格同制）。
+	ctx := &ParseContext{}
+	if rule.Pattern.Evaluate(&MatchInput{FileName: "[画师]_[123456789]_[集名]_(04).png"}, nil, ctx) && ctx.Group != nil {
+		t.Fatalf("圆括号包裹成员不应经方括号模板定群（制式换代分歧，见注记）")
+	}
+	if _, ok := groupSeqTextOf(&rule, "表紙.png"); ok {
 		t.Fatal("无尾缀数字的文件不应提取出序号")
 	}
 }
@@ -561,35 +578,17 @@ func TestDirectSeqFormSingleCharKey(t *testing.T) {
 			t.Fatalf("纯数字基不应提取出非空键: %q -> %+v", base, m)
 		}
 	}
-	// FORM 分支配新键式复现单字符键定群（结构群 → 泛化器构造 → Evaluate：
-	// 同键 ≥2、键=组1、序号=尾缀数字）。
-	rule, _, err := buildSequenceRule("单键集/m1.jpg", "m", &SnapGroup{
+	// FORM 分支配新键式复现单字符键定群——v4 语法换代注记：直连序号
+	//（键段与序号段无分隔字面）键式 `(.+?[^\d])\d{1,4}` 在模板语法中即相邻
+	// 占位词 {键}{序号}，词法禁止（切分歧义），构造侧如实拒绝（宁缺勿错）；
+	// 识别侧该形态键由元素拼接兜底的能力不受影响（识别建群与规则定群两码
+	// 事，规则侧本就该拒绝歧义形态）。
+	if _, _, err := buildSequenceRule("单键集/m1.jpg", "m1.jpg", "m", &SnapGroup{
 		FormName: form.name, FormKeyExpr: form.keyExpr, FormSeqExpr: form.seqExpr,
-	})
-	if err != nil {
-		t.Fatalf("FORM 分支构造失败: %v", err)
-	}
-	sibling, ok := rule.Pattern.(*SiblingPattern)
-	if !ok {
-		t.Fatalf("FORM 分支应为兄弟群组模式: %T", rule.Pattern)
-	}
-	if sibling.KeyExpr != `^(.+?[^\d]|[^\d])\d{1,4}(?:\.[^.]*)?$` {
-		t.Fatalf("FORM 分支键式不符（扩展名尾段）: %q", sibling.KeyExpr)
-	}
-	files := []string{"m1.jpg", "m2.jpg"}
-	ctx := &ParseContext{}
-	if !sibling.Evaluate(&MatchInput{FileName: "m1.jpg", Siblings: files}, nil, ctx) || ctx.Group == nil {
-		t.Fatalf("单字符键应经 FORM 式定群: group=%+v", ctx.Group)
-	}
-	if ctx.Group.Key != "m" || ctx.Group.Seq != 1 {
-		t.Fatalf("单字符键定群键/序号不符: %+v", ctx.Group)
-	}
-	// 多字符键经同一键式不回归（abc1/abc12 同键 abc——已知误群边界维持）。
-	abcFiles := []string{"abc1.jpg", "abc12.jpg"}
-	ctx2 := &ParseContext{}
-	if !sibling.Evaluate(&MatchInput{FileName: "abc1.jpg", Siblings: abcFiles}, nil, ctx2) ||
-		ctx2.Group.Key != "abc" {
-		t.Fatalf("多字符键定群不符: %+v", ctx2.Group)
+	}); err == nil {
+		t.Fatal("无分隔直连序号应拒绝模板化（相邻占位词），实际构造成功")
+	} else if !strings.Contains(err.Error(), "相邻") {
+		t.Fatalf("拒绝原因应为相邻占位词: %v", err)
 	}
 }
 
@@ -633,18 +632,19 @@ func TestGeneralizeSequenceFormFollows(t *testing.T) {
 	}
 	profile, _ := LoadProfile(m.store)
 	rule := findRuleByID(t, profile, result.Rule.ID)
-	sibling, ok := rule.Pattern.(*SiblingPattern)
-	if !ok {
-		t.Fatalf("泛化规则应为兄弟群组模式，实际 %T", rule.Pattern)
+	if len(rule.Conditions) != 1 || rule.Conditions[0].Condition == nil ||
+		rule.Conditions[0].Condition.Target != CondxTargetSeq {
+		t.Fatalf("泛化规则应为单行序列条件，实际 %+v", rule.Conditions)
 	}
-	if sibling.KeyExpr != `^(.+?)_?\[\d{1,4}\](?:\.[^.]*)?$` || sibling.SeqExpr != `\[(\d{1,4})\](?:\.[^.]*)?$` {
-		t.Fatalf("括号序号形态的定群正则不符: key=%q seq=%q", sibling.KeyExpr, sibling.SeqExpr)
+	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_[{序号}]" {
+		t.Fatalf("括号序号形态的成员模板不符: %q", tpl)
 	}
 	if !strings.Contains(rule.Description, "括号序号") {
 		t.Fatalf("泛化规则描述应携带形态名: %q", rule.Description)
 	}
 
-	// 复现定群：不同前缀的同类形态新文件经规则聚群，键=剥尾 `_` 的全前缀。
+	// 复现定群：不同前缀的同类形态新文件经规则聚群，键={键} 捕获=剥尾 `_`
+	// 的全前缀。
 	replicas := []ScanFile{
 		{Path: `E:\lib\别处\[作者乙]_[999888777]_画集_[01].jpg`, FileName: "[作者乙]_[999888777]_画集_[01].jpg", DirNames: []string{"别处"}, RelPath: "别处/[作者乙]_[999888777]_画集_[01].jpg"},
 		{Path: `E:\lib\别处\[作者乙]_[999888777]_画集_[02].jpg`, FileName: "[作者乙]_[999888777]_画集_[02].jpg", DirNames: []string{"别处"}, RelPath: "别处/[作者乙]_[999888777]_画集_[02].jpg"},
@@ -655,22 +655,18 @@ func TestGeneralizeSequenceFormFollows(t *testing.T) {
 			t.Fatalf("同形态新文件应复现定群（键=前缀剥尾 _、组大小=2），实际 %+v", d.Group)
 		}
 	}
-	if text, ok := sibling.seqTextOf("[作者乙]_[999888777]_画集_[02].jpg"); !ok || text != "02" {
+	if text, ok := groupSeqTextOf(rule, "[作者乙]_[999888777]_画集_[02].jpg"); !ok || text != "02" {
 		t.Fatalf("序号原文应保留零填充，实际 %q（ok=%v）", text, ok)
 	}
 
-	// 无尾锚提取式（中段序号）原样承载，不加扩展名尾段。
-	midRule, _, err := buildSequenceRule("丁/industrial_becca_page_10_by_x.jpg", "industrial_becca",
+	// 无尾锚提取式（中段序号）形态段照搬入字面段。
+	midRule, _, err := buildSequenceRule("丁/industrial_becca_page_10_by_x.jpg", "industrial_becca_page_10_by_x.jpg", "industrial_becca",
 		&SnapGroup{FormName: "中段序号", FormKeyExpr: `^(.+?)_page_`, FormSeqExpr: `_page_(\d{1,4})_by_`})
 	if err != nil {
 		t.Fatalf("中段序号形态泛化失败: %v", err)
 	}
-	midSibling, ok := midRule.Pattern.(*SiblingPattern)
-	if !ok {
-		t.Fatalf("中段序号泛化应为兄弟群组模式，实际 %T", midRule.Pattern)
-	}
-	if midSibling.KeyExpr != `^(.+?)_page_` || midSibling.SeqExpr != `_page_(\d{1,4})_by_` {
-		t.Fatalf("无尾锚提取式应原样承载: key=%q seq=%q", midSibling.KeyExpr, midSibling.SeqExpr)
+	if tpl := midRule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_page_{序号}_by_x" {
+		t.Fatalf("中段序号成员模板不符（形态段入字面段）: %q", tpl)
 	}
 }
 

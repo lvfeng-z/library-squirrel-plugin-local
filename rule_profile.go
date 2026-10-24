@@ -440,13 +440,16 @@ type patternJSON struct {
 	Inner *patternJSON `json:"inner,omitempty"`
 }
 
-// ruleEntryJSON 为 RuleEntry 的序列化中间结构：Pattern 接口换为多态中间表示。
+// ruleEntryJSON 为 RuleEntry 的序列化中间结构：v4 条目以 conditions（条件行
+// 列表）为唯一语法（pattern 缺席）；pattern（模式树多态中间表示）为 v3 及
+// 更早条目的旧形态，档案版本翻转为仅认 4 后载入侧即拒绝。
 type ruleEntryJSON struct {
 	ID          string             `json:"id"`
 	Description string             `json:"description"`
 	Source      RuleSource         `json:"source"`
 	Enabled     bool               `json:"enabled"`
-	Pattern     *patternJSON       `json:"pattern"`
+	Conditions  []CondxRow         `json:"conditions,omitempty"`
+	Pattern     *patternJSON       `json:"pattern,omitempty"`
 	Extractions []ExtractionAction `json:"extractions"`
 	Synthesis   SynthesisPolicy    `json:"synthesis"`
 }
@@ -690,6 +693,7 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 		Dimension   MetadataDimension `json:"dimension"`
 		From        ExtractionFrom    `json:"from"`
 		CaptureName string            `json:"captureName"`
+		Row         int               `json:"row,omitempty"`
 		Constant    string            `json:"constant"`
 		ScanScope   string            `json:"scanScope"`
 		RoleName    string            `json:"roleName"`
@@ -709,6 +713,7 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 		Dimension:   in.Dimension,
 		From:        in.From,
 		CaptureName: in.CaptureName,
+		Row:         in.Row,
 		Constant:    in.Constant,
 		ScanScope:   in.ScanScope,
 		RoleName:    in.RoleName,
@@ -719,8 +724,21 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ruleToJSON 把规则转为序列化中间结构。
+// ruleToJSON 把规则转为序列化中间结构：v4 条目（Conditions 在场）只落
+// conditions——模式树是编译缓存不落档；两者皆缺（直接设置 Pattern 的内部
+// 构造，如未迁移的调整面条目）不可落档，返回中文错误。
 func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
+	if rule.Conditions != nil {
+		return &ruleEntryJSON{
+			ID:          rule.ID,
+			Description: rule.Description,
+			Source:      rule.Source,
+			Enabled:     rule.Enabled,
+			Conditions:  rule.Conditions,
+			Extractions: rule.Extractions,
+			Synthesis:   rule.Synthesis,
+		}, nil
+	}
 	pj, err := patternToJSON(rule.Pattern)
 	if err != nil {
 		return nil, fmt.Errorf("规则 %q 的模式序列化失败: %w", rule.ID, err)
@@ -736,17 +754,40 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 	}, nil
 }
 
-// ruleFromJSON 把规则中间结构构造回 RuleEntry：模式缺失或构造校验失败（含
-// 条件表达式的静态校验，捕获组存在性以构造出的模式树为据）返回中文错误。
+// ruleFromJSON 把规则中间结构构造回 RuleEntry：conditions 形态（v4）编译为
+// 模式树缓存并对提取动作做行引用存在性校验；pattern 形态（旧）走模式树
+// 载入。两形态皆缺或构造校验失败返回中文错误。
 func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
+	if rj.Conditions != nil {
+		if rj.Pattern != nil {
+			return nil, fmt.Errorf("规则 %q 同时携带 conditions 与 pattern（非法形态）", rj.ID)
+		}
+		pat, err := CompileRuleConditions(rj.Conditions)
+		if err != nil {
+			return nil, fmt.Errorf("规则 %q 的条件行非法: %w", rj.ID, err)
+		}
+		if err := validateExtractions(rj.ID, pat, rj.Extractions, declaredConditionCaptures(rj.Conditions)); err != nil {
+			return nil, err
+		}
+		return &RuleEntry{
+			ID:          rj.ID,
+			Description: rj.Description,
+			Source:      rj.Source,
+			Enabled:     rj.Enabled,
+			Conditions:  rj.Conditions,
+			Pattern:     pat,
+			Extractions: rj.Extractions,
+			Synthesis:   rj.Synthesis,
+		}, nil
+	}
 	if rj.Pattern == nil {
-		return nil, fmt.Errorf("规则 %q 缺少模式（pattern）", rj.ID)
+		return nil, fmt.Errorf("规则 %q 缺少条件行（conditions）", rj.ID)
 	}
 	pat, err := patternFromJSON(rj.Pattern)
 	if err != nil {
 		return nil, fmt.Errorf("规则 %q 的模式非法: %w", rj.ID, err)
 	}
-	if err := validateExtractions(rj.ID, pat, rj.Extractions); err != nil {
+	if err := validateExtractions(rj.ID, pat, rj.Extractions, declaredPatternCaptures(pat)); err != nil {
 		return nil, err
 	}
 	return &RuleEntry{
@@ -770,14 +811,27 @@ var knownDimensions = map[MetadataDimension]bool{
 	DimAuthor: true, DimTag: true, DimTitle: true, DimCollection: true,
 }
 
-// validateExtractions 逐条校验提取动作的承载字段（构造期静态校验，与正则
-// 编译同管线）：裁决取值缺常量、条件表达式引用不存在（谓词来源/维度、捕获组
-// 名不在模式声明内）或类型不匹配时返回含规则 ID 与动作序号的中文错误。
-// pattern 为该规则的模式树，供捕获组存在性校验。
-func validateExtractions(ruleID string, pattern Pattern, actions []ExtractionAction) error {
-	declared := declaredPatternCaptures(pattern)
+// validateExtractions 逐条校验提取动作的承载字段（构造期静态校验，与条件
+// 编译同管线）：裁决取值缺常量、捕获引用不存在（v4 行引用指向未声明行/组名，
+// 旧式裸组名不在模式声明内）、条件表达式引用不存在（谓词来源/维度、捕获组
+// 名不在声明集合内）或类型不匹配时返回含规则 ID 与动作序号的中文错误。
+// declaredCaptures 为该规则形态（条件行或模式树）声明的捕获组名集合
+// （v4 为行号前缀形态）。
+func validateExtractions(ruleID string, pattern Pattern, actions []ExtractionAction, declaredCaptures map[string]bool) error {
 	for i := range actions {
 		action := &actions[i]
+		if action.From == FromCapture && action.CaptureName != "" {
+			if action.Row > 0 {
+				if !declaredCaptures[rowCaptureName(action.Row, action.CaptureName)] &&
+					!declaredCaptures[rowCaptureName(action.Row, action.CaptureName)+"#canon"] {
+					return fmt.Errorf("规则 %q 的第 %d 条提取动作引用了未声明的条件捕获（第 %d 行 %q）",
+						ruleID, i+1, action.Row, action.CaptureName)
+				}
+			} else if !declaredCaptures[action.CaptureName] {
+				return fmt.Errorf("规则 %q 的第 %d 条提取动作引用了模式未声明的捕获组名 %q",
+					ruleID, i+1, action.CaptureName)
+			}
+		}
 		if action.From == FromAdjudication && action.Constant == "" {
 			return fmt.Errorf("规则 %q 的第 %d 条提取动作为裁决取值但缺少常量（constant）", ruleID, i+1)
 		}
@@ -802,7 +856,7 @@ func validateExtractions(ruleID string, pattern Pattern, actions []ExtractionAct
 		if action.When == nil {
 			continue
 		}
-		if _, err := validateExpr(ruleID, action.When, declared); err != nil {
+		if _, err := validateExpr(ruleID, action.When, declaredCaptures); err != nil {
 			return fmt.Errorf("规则 %q 的第 %d 条提取动作条件非法: %w", ruleID, i+1, err)
 		}
 	}

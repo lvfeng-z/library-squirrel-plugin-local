@@ -239,7 +239,7 @@ func deriveWorkSetSeqDraft(snap *RecognitionSnapshot, ws *workSetContext) (workS
 	if !ok {
 		return workSetDraft{}, fmt.Sprintf("无法从集名推导捕获：集名「%s」无法对应成员文件名的段组合（可在调整规则中手动指派集名捕获段）", ws.setName)
 	}
-	siblingRule, _, err := buildSequenceRule(rep.RelPath, group.Key, group)
+	siblingRule, _, err := buildSequenceRule(rep.RelPath, repFile.FileName, group.Key, group)
 	if err != nil {
 		return workSetDraft{}, fmt.Sprintf("无法构造序列定群规则：%v", err)
 	}
@@ -1154,7 +1154,7 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 	// 分属两条目）。
 	var siblingRule *RuleEntry
 	if seqGroup != nil && (in.MemberOnly || seqKeyUsed) {
-		sibling, _, err := buildSequenceRule(rep.RelPath, seqGroup.Key, seqGroup)
+		sibling, _, err := buildSequenceRule(rep.RelPath, repFile.FileName, seqGroup.Key, seqGroup)
 		if err != nil {
 			return nil, err
 		}
@@ -1643,6 +1643,17 @@ func dirSpanExpectedValue(plan *workSetDirSegPlan, spanIdx []int) string {
 	return b.String()
 }
 
+// exprWithExtTail 形态提取式 → 规则提取式：末尾 $ 锚定前补可选扩展名尾段
+// （结构形态表对去扩展名正文求值，正则规则对含扩展名文件名求值）；无尾锚
+// （如中段序号的提取式）或已含扩展名段的表达式原样返回。
+// （v4 序列成员模板原生锚定去扩展名基名，本助手仅服务 v3 过渡构造。）
+func exprWithExtTail(expr string) string {
+	if strings.HasSuffix(expr, "$") && !strings.HasSuffix(expr, builtinTrailingExtExpr) {
+		return strings.TrimSuffix(expr, "$") + builtinTrailingExtExpr
+	}
+	return expr
+}
+
 // buildWorkSetSeqKeyRule 序列前缀规则构造（剧本E）：「序列」线索指给集名/
 // 维度的条目——提取 FromGroupPrefix 取群组公共前缀（=定群键；「序列」指给
 // 集名即 sibling 形态键作集名捕获，集名=整键形态）。FromGroupPrefix 消费
@@ -1651,6 +1662,9 @@ func dirSpanExpectedValue(plan *workSetDirSegPlan, spanIdx []int) string {
 // 群=键提取式+扩展名尾段；规则定群群=前缀字面锚），使提取对象与定群对象
 // 同一批文件；天然仅序列成员产出（非群成员无群组分析可用、不产声明）。
 // 自检由调用方的全员校验完成。
+//
+// 过渡注记：本构造仍为 v3 正则形态（C3 调整面迁移项），随 期1-C4 档案翻转
+// 一并转 v4 序列成员模板。
 func buildWorkSetSeqKeyRule(ws *workSetContext, group *SnapGroup, collection bool, dims []setRuleDimAssign) (RuleEntry, error) {
 	expr := "^" + regexp.QuoteMeta(group.Key)
 	if group.FormKeyExpr != "" {

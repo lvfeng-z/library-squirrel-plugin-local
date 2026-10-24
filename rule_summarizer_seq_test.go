@@ -110,12 +110,12 @@ func TestSeqFormSuggestionUserShape(t *testing.T) {
 	if !out.matched || len(out.rules) != 2 {
 		t.Fatalf("序列形态构造应成立且恰两条: matched=%v %d 条", out.matched, len(out.rules))
 	}
-	sibling, ok := out.rules[0].Pattern.(*SiblingPattern)
-	if !ok {
-		t.Fatalf("首条应为 sibling 形态跟随定群规则，实际 %T", out.rules[0].Pattern)
+	if _, ok := out.rules[0].Pattern.(*RowSubjectPattern); !ok {
+		t.Fatalf("首条应为 v4 序列条件定群规则（行包装），实际 %T", out.rules[0].Pattern)
 	}
-	if sibling.KeyExpr != `^(.+?)_?\[\d{1,4}\](?:\.[^.]*)?$` || sibling.SeqExpr != `\[(\d{1,4})\](?:\.[^.]*)?$` {
-		t.Fatalf("sibling 形态跟随提取式不符: %+v", sibling)
+	if len(out.rules[0].Conditions) != 1 || out.rules[0].Conditions[0].Condition.Target != CondxTargetSeq ||
+		out.rules[0].Conditions[0].Condition.Format.Tpl != "{键}_[{序号}]" {
+		t.Fatalf("sibling 形态跟随模板不符（{键} 全前缀 + 方括号序号）: %+v", out.rules[0].Conditions)
 	}
 	capture, ok := out.rules[1].Pattern.(*RegexPattern)
 	if !ok {
@@ -307,8 +307,8 @@ func TestSeqFormGeneralizeEndToEnd(t *testing.T) {
 		r := &profile.Rules[i]
 		if strings.HasPrefix(r.ID, "qna-seq-") {
 			siblingCount++
-			if _, ok := r.Pattern.(*SiblingPattern); !ok {
-				t.Fatalf("sibling 条目模式不符: %T", r.Pattern)
+			if !isGroupingRule(r) || r.Conditions == nil {
+				t.Fatalf("sibling 条目应为 v4 序列条件定群规则: %T", r.Pattern)
 			}
 			continue
 		}

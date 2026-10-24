@@ -313,7 +313,7 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 		}
 		rules = []RuleEntry{rule}
 	case generalizeModeSequence:
-		rule, _, err := buildSequenceRule(relPath, fileRec.GroupKey, snapshotGroupOf(sess.Snapshot, relPath))
+		rule, _, err := buildSequenceRule(relPath, fileRec.FileName, fileRec.GroupKey, snapshotGroupOf(sess.Snapshot, relPath))
 		if err != nil {
 			return nil, err
 		}
@@ -378,7 +378,7 @@ func combinedRuleDeclarations(rules []RuleEntry, f *SnapFile, siblings []string)
 	grouped := false
 	for i := range rules {
 		rule := &rules[i]
-		if _, isSibling := rule.Pattern.(*SiblingPattern); isSibling {
+		if isGroupingRule(rule) {
 			if grouped {
 				continue
 			}
@@ -523,40 +523,69 @@ func (m *SessionManager) consumeScopedAssignments(root string, scope []*SnapFile
 // 分隔符的非空类，其余用非点起头的非空正文段（与内置惯例同形）。仅泛化值出现
 // 在文件名中的维度（未出现在文件名中的维度维持会话赋值承载，不作为常量烧入
 // 文件名形态规则——避免把特异性值普适化）。
+// condxTemplateBraceOK 模板词法守卫：字面段/值含花括号会被占位词词法误读，
+// 返回假（调用方报「无法模板化」拒绝生成，宁缺勿错）。
+func condxTemplateBraceOK(s string) bool {
+	return !strings.ContainsAny(s, "{}")
+}
+
+// condxWordOfDim 赋值维度 → v4 占位词（词表封闭：标签仅一位）。
+func condxWordOfDim(dim MetadataDimension) (string, bool) {
+	switch dim {
+	case DimAuthor:
+		return "作者", true
+	case DimTitle:
+		return "标题", true
+	case DimCollection:
+		return "集名", true
+	case DimTag:
+		return "标签", true
+	}
+	return "", false
+}
+
 func buildFilenameShapeRule(relPath, fileName string, assign *SessionAssignment) (RuleEntry, ArchiveWriteEntry, error) {
 	base := BaseNameWithoutExt(fileName)
 
 	// 值位收集：标量维度 + 标签逐值（各自独立捕获组）
 	type valueSlot struct {
 		start, end int
-		groupName  string
+		word       string
 		dim        MetadataDimension
 		roleName   string
 	}
 	type valueRef struct {
-		value     string
-		groupName string
-		dim       MetadataDimension
-		roleName  string
+		value    string
+		word     string
+		dim      MetadataDimension
+		roleName string
+	}
+	if len(assign.Tags) > 1 {
+		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf(
+			"赋值含 %d 个标签值，新语法词表仅一位 {标签}，暂不能按文件名形态泛化（可先精简为单标签或改按目录层形态）", len(assign.Tags))
 	}
 	refs := []valueRef{
-		{value: assign.Author, groupName: "author", dim: DimAuthor, roleName: assign.AuthorRole},
-		{value: assign.Title, groupName: "title", dim: DimTitle},
-		{value: assign.Collection, groupName: "collection", dim: DimCollection},
+		{value: assign.Author, word: "作者", dim: DimAuthor, roleName: assign.AuthorRole},
+		{value: assign.Title, word: "标题", dim: DimTitle},
+		{value: assign.Collection, word: "集名", dim: DimCollection},
 	}
-	for i, tag := range assign.Tags {
-		refs = append(refs, valueRef{value: tag, groupName: "tag" + strconv.Itoa(i+1), dim: DimTag})
+	for _, tag := range assign.Tags {
+		refs = append(refs, valueRef{value: tag, word: "标签", dim: DimTag})
 	}
 	var slots []valueSlot
 	for _, ref := range refs {
 		if ref.value == "" {
 			continue
 		}
+		if !condxTemplateBraceOK(ref.value) {
+			return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf(
+				"赋值值 %q 含花括号，与格式模板词法冲突，无法按文件名形态泛化", ref.value)
+		}
 		idx := strings.Index(base, ref.value)
 		if idx < 0 {
 			continue
 		}
-		slots = append(slots, valueSlot{start: idx, end: idx + len(ref.value), groupName: ref.groupName, dim: ref.dim, roleName: ref.roleName})
+		slots = append(slots, valueSlot{start: idx, end: idx + len(ref.value), word: ref.word, dim: ref.dim, roleName: ref.roleName})
 	}
 	if len(slots) == 0 {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("赋值各维度的值均未出现在文件名 %q 中，无法按文件名形态泛化（可改按目录层或序列形态）", fileName)
@@ -579,32 +608,45 @@ func buildFilenameShapeRule(relPath, fileName string, assign *SessionAssignment)
 	}
 	slots = kept
 
-	var expr strings.Builder
-	expr.WriteString("^")
+	// v4 模板拼接：字面段原样、值位落占位词（行1=文件目标行；捕获段语义由
+	// 贪婪回溯承载——右闭分隔符不再需要排除类，字面段锚定即切分）。
+	var tpl strings.Builder
 	cursor := 0
-	captures := make([]string, 0, len(slots))
 	extractions := make([]ExtractionAction, 0, len(slots))
 	for _, slot := range slots {
-		expr.WriteString(regexp.QuoteMeta(base[cursor:slot.start]))
-		expr.WriteString("(?P<" + slot.groupName + ">" + filenameSlotClass(base, slot.start, slot.end) + ")")
+		literal := base[cursor:slot.start]
+		if !condxTemplateBraceOK(literal) {
+			return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf(
+				"文件名 %q 的字面段 %q 含花括号，与格式模板词法冲突，无法泛化", fileName, literal)
+		}
+		tpl.WriteString(literal)
+		tpl.WriteString("{" + slot.word + "}")
 		cursor = slot.end
-		captures = append(captures, slot.groupName)
 		extractions = append(extractions, ExtractionAction{
-			Dimension: slot.dim, From: FromCapture, CaptureName: slot.groupName, RoleName: slot.roleName,
+			Dimension: slot.dim, From: FromCapture, CaptureName: condxVocab[slot.word], Row: 1, RoleName: slot.roleName,
 		})
 	}
-	expr.WriteString(regexp.QuoteMeta(base[cursor:]))
-	expr.WriteString(`(?:\.[^.]*)?$`)
+	tail := base[cursor:]
+	if !condxTemplateBraceOK(tail) {
+		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf(
+			"文件名 %q 的字面段 %q 含花括号，与格式模板词法冲突，无法泛化", fileName, tail)
+	}
+	tpl.WriteString(tail)
 
-	pattern, err := NewRegexPattern(string(TargetFileName), expr.String(), captures)
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetFile,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl.String()},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("构造文件名形态规则失败: %w", err)
 	}
 	rule := RuleEntry{
 		ID:          generatedRuleID("qna-file", BaseNameWithoutExt(fileName)),
-		Description: fmt.Sprintf("泛化（文件名形态）：由「%s」的赋值生成——%s", relPath, assignmentSummary(assign)),
+		Description: fmt.Sprintf("泛化（文件名形态）：文件名按「%s」模板，由「%s」的赋值生成——%s", tpl.String(), relPath, assignmentSummary(assign)),
 		Source:      RuleSourceQna,
 		Enabled:     true,
+		Conditions:  rows,
 		Pattern:     pattern,
 		Extractions: extractions,
 	}
@@ -637,24 +679,19 @@ func closerExclusionClass(c rune) (string, bool) {
 	return "", false
 }
 
-// buildDirLayerRule 按目录层泛化：直接父目录名锚定一条位置规则（MinDepth=
-// MaxDepth=父目录的 DirNames 索引）——赋值值与父目录名相同的维度按目录名取值
-// （ancestorDir），其余维度作为该目录层的常量声明（目录含义规则）。
+// buildDirLayerRule 按目录层泛化：v4 目录条件行（整名字面模板；任意祖先层
+// 同名命中=子树包含语义，目录名通常整树唯一，深度漂移可忽略）——赋值值与该
+// 目录名相同的维度按目录名取值（ancestorDir，取命中层名），其余维度作为该
+// 目录层的常量声明（目录含义规则）。
 func buildDirLayerRule(relPath, dirRelKey string, assign *SessionAssignment) (RuleEntry, ArchiveWriteEntry, error) {
 	if dirRelKey == "" {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("文件 %s 位于库根直下，无目录层可泛化（可改按文件名形态）", relPath)
 	}
 	segments := strings.Split(dirRelKey, "/")
 	parent := segments[len(segments)-1]
-	depth := len(segments) - 1
-
-	ancestor, err := NewRegexPattern(string(TargetFileName), "^"+regexp.QuoteMeta(parent)+"$", nil)
-	if err != nil {
-		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("构造目录层规则失败: %w", err)
-	}
-	location, err := NewLocationPattern(depth, depth, ancestor)
-	if err != nil {
-		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("构造目录层位置模式失败: %w", err)
+	if !condxTemplateBraceOK(parent) {
+		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf(
+			"目录名 %q 含花括号，与格式模板词法冲突，无法按目录层泛化", parent)
 	}
 
 	type dimValue struct {
@@ -689,72 +726,165 @@ func buildDirLayerRule(relPath, dirRelKey string, assign *SessionAssignment) (Ru
 	if len(extractions) == 0 {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("赋值未指定任何维度，无可泛化内容")
 	}
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: parent},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
+	if err != nil {
+		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("构造目录层规则失败: %w", err)
+	}
 	rule := RuleEntry{
 		ID:          generatedRuleID("qna-dir", parent),
-		Description: fmt.Sprintf("泛化（目录层）：第 %d 层目录「%s」声明%s（源自「%s」的赋值）", depth+1, parent, assignmentSummary(assign), relPath),
+		Description: fmt.Sprintf("泛化（目录层）：目录「%s」（任意祖先层同名命中）声明%s（源自「%s」的赋值）", parent, assignmentSummary(assign), relPath),
 		Source:      RuleSourceQna,
 		Enabled:     true,
-		Pattern:     location,
+		Conditions:  rows,
+		Pattern:     pattern,
 		Extractions: extractions,
 	}
 	return rule, ArchiveWriteGeneralize, nil
 }
 
-// buildSequenceRule 按序列形态泛化：该文件所属兄弟群固化一条定群规则（≥2 成群、
-// 归属作品集、纯定群不携带提取动作——顶层兄弟群组规则不参与提取段，元数据由
-// 其余规则与赋值承载）。群携带结构形态标识时（结构形态群）按群携带的键/序号
-// 提取式构造——提取式锚定去扩展名正文，规则求值域为含扩展名文件名，末尾 $
-// 锚前补可选扩展名尾段（同形态新文件可复现定群）；无形态标识时（规则定群群）
-// 按公共前缀字面锚定（分组键=前缀字面、序号=扩展名前的尾缀数字——容忍尾部
-// 包裹符：括号/方括号序号 `…_[01].png`、`…_(01).png` 同判，与形态表括号序号
-// 的括号感知序号提取同语义，包裹符阻断数字与扩展名相邻不得令提取落空）。
-func buildSequenceRule(relPath, groupKey string, group *SnapGroup) (RuleEntry, ArchiveWriteEntry, error) {
+// buildSequenceRule 按序列形态泛化：该文件所属兄弟群固化一条 v4 序列条件行
+// （成员模板 + ≥2 成群门槛，纯定群不携带提取动作——群组规则不参与提取段，
+// 元数据由其余规则与赋值承载）。模板由**样本成员名**推导：{键}盖住键段
+// （结构形态群的形态键提取式命中段，或规则定群群的公共前缀字面）、{序号}盖住
+// 尾缀数字段（包裹符 [ ] ( ) 原样入字面段——同包裹制的同形态新文件可复现
+// 定群；跨包裹制混编的群成员将不再互认，v3 的包裹容忍提取式随语法换代废止）。
+func buildSequenceRule(relPath, fileName, groupKey string, group *SnapGroup) (RuleEntry, ArchiveWriteEntry, error) {
 	if groupKey == "" {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("文件 %s 不属于任何兄弟序列群，无法按序列形态泛化", relPath)
 	}
-	if group != nil && group.FormName != "" && group.FormKeyExpr != "" && group.FormSeqExpr != "" {
-		sibling, err := NewSiblingPattern(
-			exprWithExtTail(group.FormKeyExpr),
-			exprWithExtTail(group.FormSeqExpr),
-			2, OutcomeCollection,
-		)
-		if err != nil {
-			return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("构造序列定群规则失败: %w", err)
-		}
-		return RuleEntry{
-			ID:          generatedRuleID("qna-seq", groupKey),
-			Description: fmt.Sprintf("泛化（序列形态·%s）：按%s形态的键/序号提取式定群，≥2 成员归入同一作品集（源自「%s」的赋值）", group.FormName, group.FormName, relPath),
-			Source:      RuleSourceQna,
-			Enabled:     true,
-			Pattern:     sibling,
-		}, ArchiveWriteGeneralize, nil
+	base := BaseNameWithoutExt(fileName)
+	tpl, formName, err := seqMemberTemplateOf(base, groupKey, group)
+	if err != nil {
+		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("构造序列定群模板失败: %w", err)
 	}
-	sibling, err := NewSiblingPattern(
-		"^("+regexp.QuoteMeta(groupKey)+")",
-		`[\[\(]?(\d+)[\]\)]?(?:\.[^.]*)?$`,
-		2, OutcomeCollection,
-	)
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetSeq,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+		Attach: []CondxAttach{{Kind: CondxAttachSeqMinLength, MinCount: 2}},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
 		return RuleEntry{}, ArchiveWriteGeneralize, fmt.Errorf("构造序列定群规则失败: %w", err)
 	}
-	rule := RuleEntry{
+	desc := fmt.Sprintf("泛化（序列形态）：成员按「%s」模板、同键≥2 成群归入同一作品集（源自「%s」的赋值）", tpl, relPath)
+	if formName != "" {
+		desc = fmt.Sprintf("泛化（序列形态·%s）：成员按「%s」模板、同键≥2 成群归入同一作品集（源自「%s」的赋值）", formName, tpl, relPath)
+	}
+	return RuleEntry{
 		ID:          generatedRuleID("qna-seq", groupKey),
-		Description: fmt.Sprintf("泛化（序列形态）：前缀「%s」+尾缀序号（可括号包裹）≥2 成群归入同一作品集（源自「%s」的赋值）", groupKey, relPath),
+		Description: desc,
 		Source:      RuleSourceQna,
 		Enabled:     true,
-		Pattern:     sibling,
-	}
-	return rule, ArchiveWriteGeneralize, nil
+		Conditions:  rows,
+		Pattern:     pattern,
+	}, ArchiveWriteGeneralize, nil
 }
 
-// exprWithExtTail 形态提取式 → 规则提取式：末尾 $ 锚定前补可选扩展名尾段
-// （结构形态表对去扩展名正文求值，SiblingPattern 对含扩展名文件名求值）；
-// 无尾锚（如中段序号的提取式）或已含扩展名段的表达式原样返回。
-func exprWithExtTail(expr string) string {
-	if strings.HasSuffix(expr, "$") && !strings.HasSuffix(expr, builtinTrailingExtExpr) {
-		return strings.TrimSuffix(expr, "$") + builtinTrailingExtExpr
+// seqMemberTemplateOf 由样本成员名推导 v4 序列成员模板：返回 (模板, 形态名, 错误)。
+// 结构形态群：键段=形态键提取式在样本上的命中段、序号段=形态序号提取式命中段，
+// 段外文本原样入字面段；规则定群群：{键}盖住公共前缀、尾缀数字段（含可选包裹
+// 符）入 {序号}。字面段含花括号、两段重叠或提取式不中样本时回退前缀路径；前缀
+// 路径再失败（无尾缀数字/花括号冲突）返回错误。
+func seqMemberTemplateOf(base, groupKey string, group *SnapGroup) (string, string, error) {
+	if group != nil && group.FormName != "" && group.FormKeyExpr != "" && group.FormSeqExpr != "" {
+		if tpl, ok, err := seqTemplateFromForm(base, group.FormKeyExpr, group.FormSeqExpr); err != nil {
+			return "", "", err
+		} else if ok {
+			return tpl, group.FormName, nil
+		}
 	}
-	return expr
+	tpl, err := seqTemplateFromPrefix(base, groupKey)
+	return tpl, "", err
+}
+
+// seqTemplateFromForm 形态路径：提取式定位键/序号段；不中样本或段重叠回退（ok=false）。
+func seqTemplateFromForm(base, keyExpr, seqExpr string) (string, bool, error) {
+	keyRe, err := regexp.Compile(keyExpr)
+	if err != nil {
+		return "", false, nil
+	}
+	seqRe, err := regexp.Compile(seqExpr)
+	if err != nil {
+		return "", false, nil
+	}
+	km := keyRe.FindStringSubmatchIndex(base)
+	sm := seqRe.FindStringSubmatchIndex(base)
+	if km == nil || sm == nil {
+		return "", false, nil
+	}
+	// 提取式捕获组1为段；无捕获组时整匹为段。
+	keySpan := submatchSpan(km, len(keyRe.SubexpNames()))
+	seqSpan := submatchSpan(sm, len(seqRe.SubexpNames()))
+	if keySpan[1] > seqSpan[0] {
+		// 键序重叠（或键空段）：回退前缀路径
+		return "", false, nil
+	}
+	tpl, err := condxTemplateFromSpans(base, [][2]int{keySpan, {seqSpan[0], seqSpan[1]}}, []string{"键", "序号"})
+	if err != nil {
+		return "", false, nil
+	}
+	return tpl, true, nil
+}
+
+// seqTemplateFromPrefix 前缀路径：{键}盖住公共前缀字面（群组键=前缀，集命名
+// 沿用），尾缀数字（可含单侧包裹符）为 {序号}。
+func seqTemplateFromPrefix(base, groupKey string) (string, error) {
+	if !condxTemplateBraceOK(groupKey) {
+		return "", fmt.Errorf("群前缀 %q 含花括号，与格式模板词法冲突", groupKey)
+	}
+	if !strings.HasPrefix(base, groupKey) {
+		return "", fmt.Errorf("样本 %q 不以群前缀 %q 开头，无法推导成员模板", base, groupKey)
+	}
+	rest := base[len(groupKey):]
+	m := regexp.MustCompile(`^(.*?)([\[\(]?)([0-9]+)([\]\)]?)$`).FindStringSubmatchIndex(rest)
+	if m == nil {
+		return "", fmt.Errorf("样本 %q 在群前缀后无尾缀数字段，无法推导成员模板", base)
+	}
+	span := func(i int) (int, int) { return m[2*i], m[2*i+1] }
+	midS, midE := span(1)
+	openS, openE := span(2)
+	closeS, closeE := span(4)
+	var tpl strings.Builder
+	tpl.WriteString("{键}")
+	tpl.WriteString(rest[midS:midE])
+	tpl.WriteString(rest[openS:openE])
+	tpl.WriteString("{序号}")
+	tpl.WriteString(rest[closeS:closeE])
+	return tpl.String(), nil
+}
+
+// condxTemplateFromSpans 按给定段切样本为字面段+占位词模板（words 与 spans
+// 一一对应，段须按位置升序且互不重叠）。
+func condxTemplateFromSpans(base string, spans [][2]int, words []string) (string, error) {
+	var tpl strings.Builder
+	cursor := 0
+	for i, span := range spans {
+		literal := base[cursor:span[0]]
+		if !condxTemplateBraceOK(literal) {
+			return "", fmt.Errorf("字面段 %q 含花括号，与格式模板词法冲突", literal)
+		}
+		tpl.WriteString(literal)
+		tpl.WriteString("{" + words[i] + "}")
+		cursor = span[1]
+	}
+	tail := base[cursor:]
+	if !condxTemplateBraceOK(tail) {
+		return "", fmt.Errorf("字面段 %q 含花括号，与格式模板词法冲突", tail)
+	}
+	tpl.WriteString(tail)
+	return tpl.String(), nil
+}
+
+// submatchSpan 取子匹配组1的区间；无组1时取整匹区间。
+func submatchSpan(m []int, groupCount int) [2]int {
+	if groupCount > 1 && len(m) >= 4 && m[2] >= 0 {
+		return [2]int{m[2], m[3]}
+	}
+	return [2]int{m[0], m[1]}
 }
 
 // —— 冲突裁决生成 ——
@@ -1156,6 +1286,23 @@ func patternSummary(p Pattern) string {
 			kind = "作品集"
 		}
 		return "库内" + kind + "名命中"
+	case *RowSubjectPattern:
+		summary := patternSummary(t.Inner)
+		if len(t.Gates) > 0 {
+			summary += "（值级小标 " + strconv.Itoa(len(t.Gates)) + " 项）"
+		}
+		return summary
+	case *FileSubjectPattern:
+		return fmt.Sprintf("文件名按模板 %s", t.Expr)
+	case *DirSubjectPattern:
+		if len(t.Asserts) > 0 {
+			return fmt.Sprintf("目录名按模板 %s（终结谓词 %d 项）", t.Expr, len(t.Asserts))
+		}
+		return fmt.Sprintf("目录名按模板 %s", t.Expr)
+	case *SeqSubjectPattern:
+		return fmt.Sprintf("序列成员按模板 %s（同键≥%d）", t.Expr, t.MinSize)
+	case *ParentNamePattern:
+		return fmt.Sprintf("父目录名匹配 %s", t.Expr)
 	case And:
 		return joinPatternSummaries(t, " 与 ")
 	case *And:

@@ -214,8 +214,15 @@ func mergedFileConclusionWithStructural(in *MatchInput, rules []RuleEntry, lib *
 	}
 	if decision.Group != nil && groupRuleID != "" {
 		c.GroupRuleID = groupRuleID
-		if sibling, ok := ruleByID(rules, groupRuleID).(*SiblingPattern); ok {
-			if text, has := sibling.seqTextOf(in.FileName); has {
+		var grpRule *RuleEntry
+		for i := range rules {
+			if rules[i].ID == groupRuleID {
+				grpRule = &rules[i]
+				break
+			}
+		}
+		if grpRule != nil {
+			if text, has := groupSeqTextOf(grpRule, in.FileName); has {
 				c.GroupSeqText = text
 			}
 			// 文件名元素数组（规则定群群成员）：与结构群同一拆分基座；已知名
@@ -1784,7 +1791,7 @@ func firstMeaningRuleID(rules []RuleEntry, level int, dirName string) string {
 		if !rule.Enabled || rule.Pattern == nil {
 			continue
 		}
-		if _, ok := rule.Pattern.(*SiblingPattern); ok {
+		if isGroupingRule(&rule) {
 			continue
 		}
 		ctx := &ParseContext{DirNames: dirNames, Depth: depth + 1}

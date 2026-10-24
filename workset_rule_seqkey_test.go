@@ -162,8 +162,8 @@ func TestWorkSetSeqKeyCollectionAdjust(t *testing.T) {
 		t.Fatalf("序列前缀条目模式应为文件名正则: %T", seqKeyRule.Pattern)
 	}
 	siblingRule := findRuleByID(t, profile, result.Rules[0].ID)
-	if _, ok := siblingRule.Pattern.(*SiblingPattern); !ok {
-		t.Fatalf("首条应为 sibling 定群条目（FromGroupPrefix 的定群供给）: %T", siblingRule.Pattern)
+	if !isGroupingRule(siblingRule) || siblingRule.Conditions == nil {
+		t.Fatalf("首条应为 v4 序列条件定群条目（FromGroupPrefix 的定群供给）: %T", siblingRule.Pattern)
 	}
 
 	// 验证轮后：成员（确认集名=群键，复现即接管）与跨目录同形态文件（各群
@@ -415,12 +415,11 @@ func TestWorkSetSeqKeyAdjustAfterGeneralize(t *testing.T) {
 	}
 	profile, _ := LoadProfile(m.store)
 	siblingRule := findRuleByID(t, profile, adjResult.Rules[0].ID)
-	sibling, ok := siblingRule.Pattern.(*SiblingPattern)
-	if !ok {
-		t.Fatalf("回退式定群应为兄弟群组模式，实际 %T", siblingRule.Pattern)
+	if !isGroupingRule(siblingRule) || siblingRule.Conditions == nil {
+		t.Fatalf("回退式定群应为 v4 序列条件规则，实际 %T", siblingRule.Pattern)
 	}
-	if sibling.SeqExpr != `[\[\(]?(\d+)[\]\)]?(?:\.[^.]*)?$` {
-		t.Fatalf("回退式序号提取式不符（括号包裹容忍）: %q", sibling.SeqExpr)
+	if tpl := siblingRule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_[{序号}]" {
+		t.Fatalf("回退式成员模板不符（包裹符入字面段）: %q", tpl)
 	}
 
 	// 验证轮后：本集与跨目录同形态文件的集名声明=各自群键（回退式定群供给
@@ -462,10 +461,9 @@ func TestWorkSetSeqKeyAdjustAfterGeneralize(t *testing.T) {
 }
 
 // TestWorkSetSeqKeySingleCharKeyAdjust 单字符键直连序号集的序列指派（live
-// 发现 1-fix 回归锚）：识别侧元素对齐建群（键=m、形态=直连序号——键式经
-// 形态表放宽到单字符后构造侧可复现）→ 调整面 seqKey 指集名经 FORM 分支配
-// 新键式定群 → 保存通过定群门（此前键式组1最少 2 字符、keyMatch false 被
-// 拒）→ 验证轮后成员集名=群键 m。
+// 发现 1-fix 回归锚）：识别侧元素对齐建群（键=m、形态=直连序号）不受影响；
+// v4 语法换代后规则侧对无分隔直连序号（键段与序号段相邻即模板相邻占位词）
+// 如实拒绝——词法禁相邻占位词（切分歧义），调整面保存报可读错误，宁缺勿错。
 func TestWorkSetSeqKeySingleCharKeyAdjust(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newSeqRecognitionFixture(t, root)
@@ -484,48 +482,12 @@ func TestWorkSetSeqKeySingleCharKeyAdjust(t *testing.T) {
 	}
 	target := confirmGroupCandidate(t, m, root, "单键集", "m")
 
-	result, err := m.ApplyWorkSetRuleAdjust(root, target, setRuleAdjustInput{
+	if _, err := m.ApplyWorkSetRuleAdjust(root, target, setRuleAdjustInput{
 		CollectionSegRefs: []string{setClueSeqRef},
 		SeqSegRef:         "setSeg2",
 		MemberOnly:        true,
-	})
-	if err != nil {
-		t.Fatalf("单字符键集的序列指派应通过定群门: %v", err)
-	}
-	if len(result.Rules) != 2 || !result.VerificationStarted {
-		t.Fatalf("序列指派应恰两条（FORM 式 sibling 定群+序列前缀）且验证轮启动: %+v", result.Rules)
-	}
-
-	// 验证轮后：成员集名声明=群键 m（FORM 式定群供给 FromGroupPrefix 提取）。
-	sess = waitWorkSetCond(t, m, root, func(s *WorkbenchSession) bool {
-		f := snapshotFileOf(s.Snapshot, "单键集/m1.jpg")
-		if f == nil {
-			return false
-		}
-		for _, d := range f.Final {
-			if d.Dimension == string(DimCollection) && d.Value == "m" {
-				return true
-			}
-		}
-		return false
-	})
-	for _, rel := range []string{"单键集/m1.jpg", "单键集/m2.jpg"} {
-		file := snapshotFileOf(sess.Snapshot, rel)
-		if file == nil {
-			t.Fatalf("快照内无文件 %s", rel)
-		}
-		found := false
-		for _, d := range file.Final {
-			if MetadataDimension(d.Dimension) == DimCollection {
-				found = true
-				if d.Value != "m" {
-					t.Fatalf("%s 集名应=群键 m，实际 %q", rel, d.Value)
-				}
-			}
-		}
-		if !found {
-			t.Fatalf("%s 应有集名声明（终选: %+v）", rel, file.Final)
-		}
+	}); err == nil || !strings.Contains(err.Error(), "相邻占位词") {
+		t.Fatalf("无分隔直连序号应拒绝模板化（v4 词法禁相邻占位词，识别侧建群不受影响、规则侧拒绝歧义形态）: %v", err)
 	}
 }
 

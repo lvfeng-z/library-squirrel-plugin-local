@@ -122,19 +122,82 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 	return decisions
 }
 
-// runGroupStage 分组段：对顶层 Pattern 为 SiblingPattern 的启用规则逐条求值，
-// 首个命中的规则把群组分析写入 ctx 并作为定群结果返回（同时返回定群规则 ID，
-// 供识别全景的序号形态重放与规则命中统计消费）；全部不命中返回 nil
-// （独立文件）。禁用规则与非兄弟群组模式的规则不参与本段。求值上下文的群组
-// 字段另有一类写入方：规则未定群时由合并求值路径的前置结构群对齐补位（见
-// recognition.go 的 mergedFileConclusionWithStructural）——两类群共用同一字段，
-// 群组操作数与群组前缀提取对二者统一生效。
+// isGroupingRule 该规则是否为兄弟群定群规则：v3 = 顶层 SiblingPattern；v4 =
+// 单一序列条件行的规则（定群语义由序列主体承载：同键≥N 记 GroupAnalysis，
+// 群组行包装求值与 SiblingPattern 同写入群组上下文）。
+func isGroupingRule(rule *RuleEntry) bool {
+	if rule == nil {
+		return false
+	}
+	if rule.Conditions != nil {
+		return len(rule.Conditions) == 1 && rule.Conditions[0].Condition != nil &&
+			rule.Conditions[0].Condition.Target == CondxTargetSeq
+	}
+	_, ok := rule.Pattern.(*SiblingPattern)
+	return ok
+}
+
+// groupSeqTextOf 取定群规则对某成员文件名的序号原文（识别全景的群序号文本
+// 消费）：v3 = SiblingPattern 提取式；v4 = 序列主体对去扩展名基名重演成员模板
+// 取 {序号} 段。
+func groupSeqTextOf(rule *RuleEntry, fileName string) (string, bool) {
+	if rule == nil {
+		return "", false
+	}
+	if sibling, ok := rule.Pattern.(*SiblingPattern); ok {
+		return sibling.seqTextOf(fileName)
+	}
+	seq := condxSeqSubjectOf(rule)
+	if seq == nil {
+		return "", false
+	}
+	_, text, ok := seq.seqMemberKey(BaseNameWithoutExt(fileName))
+	return text, ok
+}
+
+// condxSeqSubjectOf 从规则编译缓存中取出序列主体模式（行包装内层，可为
+// And 首子式）；非序列规则返回 nil。
+func condxSeqSubjectOf(rule *RuleEntry) *SeqSubjectPattern {
+	if rule.Pattern == nil {
+		return nil
+	}
+	inner := rule.Pattern
+	if row, ok := inner.(*RowSubjectPattern); ok {
+		inner = row.Inner
+	}
+	switch t := inner.(type) {
+	case *SeqSubjectPattern:
+		return t
+	case And:
+		if len(t) > 0 {
+			if s, ok := t[0].(*SeqSubjectPattern); ok {
+				return s
+			}
+		}
+	case *And:
+		if len(*t) > 0 {
+			if s, ok := (*t)[0].(*SeqSubjectPattern); ok {
+				return s
+			}
+		}
+	}
+	return nil
+}
+
+// runGroupStage 分组段：对启用规则逐条求值，首个命中的规则把群组分析写入
+// ctx 并作为定群结果返回（同时返回定群规则 ID，供识别全景的序号形态重放与
+// 规则命中统计消费）；全部不命中返回 nil（独立文件）。禁用规则与
+// 非定群形态（v3 SiblingPattern / v4 序列条件行）的规则不参与本段。
+// 求值上下文的群组字段另有一类写入方：规则未定群时由合并求值路径的前置
+// 结构群对齐补位（见 recognition.go 的 mergedFileConclusionWithStructural）
+// ——两类群共用同一字段，群组操作数与群组前缀提取对二者统一生效。
 func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) (*GroupAnalysis, string) {
-	for _, rule := range rules {
+	for i := range rules {
+		rule := &rules[i]
 		if !rule.Enabled {
 			continue
 		}
-		if _, ok := rule.Pattern.(*SiblingPattern); !ok {
+		if !isGroupingRule(rule) {
 			continue
 		}
 		if rule.Pattern.Evaluate(in, lib, ctx) {
@@ -174,7 +237,7 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 		if !rule.Enabled || rule.Pattern == nil {
 			continue
 		}
-		if _, ok := rule.Pattern.(*SiblingPattern); ok {
+		if isGroupingRule(rule) {
 			continue
 		}
 		ruleCtx := ctx.ruleScopedContext()

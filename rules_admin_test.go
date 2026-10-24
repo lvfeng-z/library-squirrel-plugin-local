@@ -152,10 +152,10 @@ func TestRuleAdminRejectsInvalidEntries(t *testing.T) {
 		wantError string
 	}{
 		{name: "JSON 语法坏", ruleJSON: `{"id": "x",`, wantError: "无法解析"},
-		{name: "缺少模式", ruleJSON: `{"id": "x", "description": "d", "source": "manual", "enabled": true}`, wantError: "缺少模式"},
+		{name: "缺少条件行", ruleJSON: `{"id": "x", "description": "d", "source": "manual", "enabled": true}`, wantError: "缺少条件行"},
 		{name: "正则不可编译", ruleJSON: `{"id": "x", "source": "manual", "enabled": true, "pattern": {"kind": "regex", "target": "filename", "expr": "("}, "extractions": []}`, wantError: "模式非法"},
 		{name: "条件引用未声明捕获组", ruleJSON: `{"id": "x", "source": "manual", "enabled": true, "pattern": {"kind": "regex", "target": "filename", "expr": "^a$", "captures": []}, "extractions": [{"dimension": "title", "from": "constant", "constant": "v", "when": {"kind": "capture", "captureName": "nope"}}]}`, wantError: "未声明的捕获组名"},
-		{name: "提取动作引用未声明捕获组", ruleJSON: `{"id": "x", "source": "manual", "enabled": true, "pattern": {"kind": "regex", "target": "filename", "expr": "^【(?P<author>[^】]+)】", "captures": ["author"]}, "extractions": [{"dimension": "author", "from": "capture", "captureName": "author2"}]}`, wantError: "captures 数组内显式声明"},
+		{name: "提取动作引用未声明捕获组", ruleJSON: `{"id": "x", "source": "manual", "enabled": true, "pattern": {"kind": "regex", "target": "filename", "expr": "^【(?P<author>[^】]+)】", "captures": ["author"]}, "extractions": [{"dimension": "author", "from": "capture", "captureName": "author2"}]}`, wantError: "未声明的捕获组名"},
 		{name: "来源为内置", ruleJSON: `{"id": "x", "source": "builtin", "enabled": true, "pattern": {"kind": "regex", "target": "filename", "expr": "^a$"}, "extractions": []}`, wantError: "内置"},
 	}
 	for _, tc := range cases {
