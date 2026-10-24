@@ -111,19 +111,42 @@ func (m *SessionManager) ApplySaveRule(ruleJSON []byte) (*rulesAdminView, error)
 	return m.RulesAdminView()
 }
 
-// validateCaptureExtractionDeclared 校验取值来源为捕获组的提取动作所引用的捕获组
-// 名在规则模式的声明集合内：只有 regex 节点 captures 数组显式声明（且目标为
-// filename / relpath）的捕获组会绑定进解析上下文，未声明的引用在运行期恒取值
-// 失败——规则照常命中但零声明。属编辑面的构造期即时报错。
+// validateCaptureExtractionDeclared 校验取值来源为捕获组的提取动作所引用的捕获
+// 组名在规则的捕获声明集合内，未声明的引用在运行期恒取值失败——规则照常命中但
+// 零声明。属编辑面的构造期即时报错（ruleFromJSON 内 validateExtractions 的
+// 双保险）。v4 条件行条目：声明集=declaredConditionCaptures（rN.组名 行号前缀
+// 口径，提取动作 Row 缺省按 1 兜底）；v3 pattern 条目：regex 节点 captures
+// （仅 filename / relpath 目标参与绑定）。
 func validateCaptureExtractionDeclared(rule *RuleEntry) error {
+	v4 := rule.Conditions != nil
 	declared := declaredPatternCaptures(rule.Pattern)
+	if v4 {
+		declared = declaredConditionCaptures(rule.Conditions)
+	}
 	for i := range rule.Extractions {
 		action := &rule.Extractions[i]
-		if action.From == FromCapture && action.CaptureName != "" && !declared[action.CaptureName] {
-			return fmt.Errorf(
-				"规则 %q 的第 %d 条提取动作引用捕获组 %q，但该组未在模式 regex 节点的 captures 数组内显式声明（仅 filename / relpath 目标的捕获组参与绑定），未声明的引用不会产出任何声明",
-				rule.ID, i+1, action.CaptureName)
+		if action.From != FromCapture || action.CaptureName == "" {
+			continue
 		}
+		key := action.CaptureName
+		if v4 {
+			row := action.Row
+			if row <= 0 {
+				row = 1
+			}
+			key = rowCaptureName(row, action.CaptureName)
+		}
+		if declared[key] || declared[key+"#canon"] {
+			continue
+		}
+		if v4 {
+			return fmt.Errorf(
+				"规则 %q 的第 %d 条提取动作引用捕获组 %q，但该组未在条件行模板占位词中声明（行号 %d），未声明的引用不会产出任何声明",
+				rule.ID, i+1, action.CaptureName, action.Row)
+		}
+		return fmt.Errorf(
+			"规则 %q 的第 %d 条提取动作引用捕获组 %q，但该组未在模式 regex 节点的 captures 数组内显式声明（仅 filename / relpath 目标的捕获组参与绑定），未声明的引用不会产出任何声明",
+			rule.ID, i+1, action.CaptureName)
 	}
 	return nil
 }

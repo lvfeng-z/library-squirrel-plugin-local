@@ -73,8 +73,8 @@ export const STRATEGY_OPTIONS: { value: string; label: string }[] = [
 // 新建规则的最小可改样例（v4：缺省条件行【{作者}】{标题} + 作者/标题提取行，
 // 占位词寻址=行 1）。
 export const NEW_EXTRACTIONS_SAMPLE: ExtractionActionJSON[] = [
-  { dimension: 'author', from: 'capture', captureName: '作者' },
-  { dimension: 'title', from: 'capture', captureName: '标题' }
+  { dimension: 'author', from: 'capture', captureName: 'author' },
+  { dimension: 'title', from: 'capture', captureName: 'title' }
 ]
 
 
@@ -204,19 +204,19 @@ export interface CondxRowForm {
 // 占位词词表（与内核 condxVocab 同源九词）：digit=数字类（[0-9]+）；
 // refable=false 仅 {任意}（吞位词：非捕获、可重复、不可被提取引用）；
 // note 为词条说明（chips 提示）。
-export const CONDX_VOCAB: { word: string; digit: boolean; refable: boolean; note: string }[] = [
-  { word: '作者', digit: false, refable: true, note: '贪婪取词（.+），相邻须有分隔文字' },
-  { word: '集名', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合' },
-  { word: '标题', digit: false, refable: true, note: '贪婪取词' },
-  { word: '标签', digit: false, refable: true, note: '贪婪取词' },
-  { word: '序号', digit: true, refable: true, note: '数字类（[0-9]+）' },
-  { word: '作品号', digit: true, refable: true, note: '数字类（pixiv 作品号等）' },
-  { word: '日期', digit: true, refable: true, note: '数字类（YYYYMMDD 等）' },
-  { word: '键', digit: false, refable: true, note: '序列成员模板的公共前缀位' },
-  { word: '任意', digit: false, refable: false, note: '吞位词：不产出声明、可重复出现' }
+export const CONDX_VOCAB: { word: string; group: string; digit: boolean; refable: boolean; note: string }[] = [
+  { word: '作者', group: 'author', digit: false, refable: true, note: '贪婪取词（.+），相邻须有分隔文字' },
+  { word: '集名', group: 'setname', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合' },
+  { word: '标题', group: 'title', digit: false, refable: true, note: '贪婪取词' },
+  { word: '标签', group: 'tag', digit: false, refable: true, note: '贪婪取词' },
+  { word: '序号', group: 'seq', digit: true, refable: true, note: '数字类（[0-9]+）' },
+  { word: '作品号', group: 'workid', digit: true, refable: true, note: '数字类（pixiv 作品号等）' },
+  { word: '日期', group: 'date', digit: true, refable: true, note: '数字类（YYYYMMDD 等）' },
+  { word: '键', group: 'key', digit: false, refable: true, note: '序列成员模板的公共前缀位' },
+  { word: '任意', group: 'any', digit: false, refable: false, note: '吞位词：不产出声明、可重复出现' }
 ]
 
-export function condxVocabOf(word: string): { word: string; digit: boolean; refable: boolean; note: string } | undefined {
+export function condxVocabOf(word: string): { word: string; group: string; digit: boolean; refable: boolean; note: string } | undefined {
   return CONDX_VOCAB.find((v) => v.word === word)
 }
 
@@ -419,16 +419,21 @@ export function condxRowsError(rows: CondxRowForm[]): string {
   return ''
 }
 
-// 捕获声明清单（v4：行号+占位词）：提取段「行N·{词}」选项与清单呈现。
+// 捕获声明清单（v4：行号+占位词+英文组名）：提取段「行N·{词}」选项与清单
+// 呈现用 word；captureName 落 JSON 用 group（内核寻址口径=英文组名）。
 export interface CondxCaptureDecl {
   row: number
   word: string
+  group: string
 }
 
 export function condxCaptures(rows: CondxRowForm[]): CondxCaptureDecl[] {
   const out: CondxCaptureDecl[] = []
   for (const f of condxFlatRows(rows)) {
-    for (const word of condxRowPlaceholders(f.condx)) out.push({ row: f.row, word })
+    for (const word of condxRowPlaceholders(f.condx)) {
+      const v = condxVocabOf(word)
+      out.push({ row: f.row, word, group: v ? v.group : word })
+    }
   }
   return out
 }

@@ -271,6 +271,67 @@ func TestProfileBackupAndRollback(t *testing.T) {
 // TestRulesActionDispatch 前端事件协议的规则管理族分派：getRules / saveRule（含
 // 非法条目错误回告）/ setRuleEnabled / setBuiltinDisabled / rollbackProfile 逐动作
 // 经 HandleFrontendRequest 往返，应答按序号配对并携带规则管理视图。
+// TestApplySaveRuleCondxCaptureRoundTrip v4 条件行条目保存（live-test 批次一
+// 抓到的回归：编辑面双保险校验曾误用 v3 pattern 声明集，v4 条目的行号前缀
+// 捕获引用被拒）。锚定：conditions 形态条目可存、capture 提取引用英文组名+
+// 行号、档案往返 conditions 保真。
+func TestApplySaveRuleCondxCaptureRoundTrip(t *testing.T) {
+	store := newFakeSessionStore()
+	mgr, _ := newTestManager(t, store)
+
+	ruleJSON := []byte(`{
+		"id": "", "description": "T3 散页成套", "source": "manual", "enabled": true,
+		"conditions": [
+			{"condition": {"target": "seq", "format": {"mode": "template", "tpl": "{键}_{序号}"},
+				"attach": [{"kind": "seqMinLength", "minCount": 2}, {"kind": "seqMemberType", "types": ["image"]}]}}
+		],
+		"extractions": [
+			{"dimension": "collection", "from": "capture", "captureName": "key", "row": 1}
+		],
+		"synthesis": {"dimPolicies": [], "roles": []}
+	}`)
+	view, err := mgr.ApplySaveRule(ruleJSON)
+	if err != nil {
+		t.Fatalf("v4 条件行条目保存失败: %v", err)
+	}
+	if len(view.Rules) != 1 {
+		t.Fatalf("保存后视图应有 1 条规则，实际 %d 条", len(view.Rules))
+	}
+	id := view.Rules[0].ID
+	if !strings.HasPrefix(id, "manual-") {
+		t.Fatalf("缺省 ID 应按 manual 前缀生成，实际 %q", id)
+	}
+
+	// 档案往返：conditions 原样保真（含 attach/badges）
+	profile := loadAdminProfile(t, store)
+	if len(profile.Rules) != 1 {
+		t.Fatalf("档案应有 1 条规则，实际 %d 条", len(profile.Rules))
+	}
+	entry := profile.Rules[0]
+	if entry.Conditions == nil || len(entry.Conditions) != 1 || entry.Conditions[0].Condition == nil {
+		t.Fatalf("conditions 应保真往返，实际 %+v", entry.Conditions)
+	}
+	cond := entry.Conditions[0].Condition
+	if cond.Target != CondxTargetSeq || cond.Format.Tpl != "{键}_{序号}" || len(cond.Attach) != 2 {
+		t.Fatalf("条件行内容不符: %+v", cond)
+	}
+
+	// 未声明组引用仍被拒（行号前缀口径）：第 1 行无 {作者} 却引用 author
+	bad := []byte(`{
+		"id": "bad-ref", "description": "错行引用", "source": "manual", "enabled": true,
+		"conditions": [
+			{"condition": {"target": "seq", "format": {"mode": "template", "tpl": "{键}_{序号}"}}}
+		],
+		"extractions": [
+			{"dimension": "author", "from": "capture", "captureName": "author", "row": 1}
+		],
+		"synthesis": {"dimPolicies": [], "roles": []}
+	}`)
+	if _, err := mgr.ApplySaveRule(bad); err == nil || !strings.Contains(err.Error(), "未声明") {
+		t.Fatalf("未声明组引用应被构造期拒绝，实际 err=%v", err)
+	}
+}
+
 func TestRulesActionDispatch(t *testing.T) {
 	store := newFakeSessionStore()
 	mgr, ctx := newTestManager(t, store)

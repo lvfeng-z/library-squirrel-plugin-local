@@ -256,9 +256,9 @@
                 >
                   <el-option
                     v-for="c in captureList"
-                    :key="`${c.row}/${c.word}`"
+                    :key="`${c.row}/${c.group}`"
                     :label="`第 ${c.row} 行 · {${c.word}}`"
-                    :value="`${c.row}/${c.word}`"
+                    :value="`${c.row}/${c.group}`"
                   />
                 </el-select>
                 <el-input
@@ -677,8 +677,9 @@ const activeCondxRows = computed<CondxRowForm[]>(() =>
 
 const captureList = computed(() => condxCaptures(activeCondxRows.value))
 
-// 已声明的「行N·{词}」寻址集合（提取行引用校验）
-const declaredCaptures = computed<Set<string>>(() => new Set(captureList.value.map((c) => `${c.row}/${c.word}`)))
+// 已声明的「行N·组名」寻址集合（提取行引用校验；captureName=英文组名——
+// 内核寻址口径）
+const declaredCaptures = computed<Set<string>>(() => new Set(captureList.value.map((c) => `${c.row}/${c.group}`)))
 
 const condxSummary = computed((): string => {
   const flat = condxFlatRows(activeCondxRows.value)
