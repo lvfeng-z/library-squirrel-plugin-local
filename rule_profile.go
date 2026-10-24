@@ -226,8 +226,14 @@ type ExtractionAction struct {
 	Dimension MetadataDimension `json:"dimension"`
 	// From 为取值来源。
 	From ExtractionFrom `json:"from"`
-	// CaptureName 为 From 为 capture 时的捕获组名。
+	// CaptureName 为 From 为 capture 时的捕获组名；v4 条件规则（Row>0）中为
+	// 占位词的英文组名，实际绑定名为行号前缀形态 rN.组名（见 Row 字段）。
 	CaptureName string `json:"captureName"`
+	// Row 为 v4 条件行引用（1 起先序展平行号）：From 为 capture 时取该行的
+	// 前缀绑定；库名单小标（形变归一）命中时优先取 rN.组名#canon 规范名绑定
+	//（T1 的作者产出即库内规范名），无小标回落原始绑定。0 = 旧式裸组名
+	//（机器构造的内部规则未迁移前的过渡形态）。
+	Row int `json:"row,omitempty"`
 	// Constant 为 From 为 constant / adjudication 时的常量值。
 	Constant string `json:"constant"`
 	// ScanScope 为 From 为 scan 时的扫描范围："path"=文件名去扩展名+各级目录名
@@ -258,7 +264,18 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 	var source SourceKind
 	switch a.From {
 	case FromCapture:
-		captured, ok := ctx.Capture(a.CaptureName)
+		name := a.CaptureName
+		captured, ok := "", false
+		if a.Row > 0 {
+			// 行引用优先取库名单小标的规范名绑定（形变归一命中时产出——
+			// T1 的作者产出即库内规范名）；无小标时回落原始绑定。
+			captured, ok = ctx.Capture(rowCaptureName(a.Row, a.CaptureName) + "#canon")
+			if !ok {
+				captured, ok = ctx.Capture(rowCaptureName(a.Row, a.CaptureName))
+			}
+		} else {
+			captured, ok = ctx.Capture(name)
+		}
 		if !ok {
 			return MetadataDeclaration{}, false
 		}
@@ -340,7 +357,12 @@ type RuleEntry struct {
 	Source RuleSource `json:"source"`
 	// Enabled 为启用开关；禁用的规则不参与匹配。
 	Enabled bool `json:"enabled"`
-	// Pattern 为命中判定的模式树；序列化时按 kind 判别字段多态展开。
+	// Conditions 为 v4 条件行列表（目标三分+格式+附加+小标）：v4 档案的
+	// 持久化语法。机器规则生产方（问答/泛化/裁决）与档案装载同一来源；
+	// Pattern 为其编译缓存。过渡期（生产方迁移完成为止）直接设置 Pattern
+	// 的内部构造仍可求值，但不可落档。
+	Conditions []CondxRow `json:"-"`
+	// Pattern 为命中判定的模式树；Conditions 存在时为其编译缓存。
 	Pattern Pattern `json:"pattern"`
 	// Extractions 为命中后依序执行的提取动作。
 	Extractions []ExtractionAction `json:"extractions"`

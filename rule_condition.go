@@ -722,3 +722,49 @@ func compileSeqCondx(c *Condx) (Pattern, error) {
 	}
 	return And(subs), nil
 }
+
+// CompileRuleConditions 校验并编译 v4 条件行列表为模式树（规则构造入口：
+// 问答/泛化/裁决等机器规则生产方与档案装载共用——v4 档案仅认 conditions，
+// 机器流同样以条件行产出，模式树只是编译缓存）。
+func CompileRuleConditions(rows []CondxRow) (Pattern, error) {
+	return compileCondxRows(rows)
+}
+
+// declaredConditionCaptures 收集条件行列表会绑定进解析上下文的捕获组名
+// （行号前缀形态 rN.组名；库名单小标另产出 rN.组名#canon 规范名绑定），
+// 供提取动作的捕获引用做构造期存在性校验。行号=先序展平，与编译一致。
+func declaredConditionCaptures(rows []CondxRow) map[string]bool {
+	out := map[string]bool{}
+	collectConditionCapturesAt(rows, 0, out)
+	return out
+}
+
+// collectConditionCapturesAt 在全局行号偏移 base 上递归收集条件捕获名。
+func collectConditionCapturesAt(rows []CondxRow, base int, out map[string]bool) {
+	prefix := 0
+	for i := range rows {
+		row := &rows[i]
+		if row.Condition != nil {
+			ordinal := base + prefix + 1
+			captures, err := condxCapturesOf(row.Condition)
+			if err == nil {
+				for _, en := range captures {
+					out[rowCaptureName(ordinal, en)] = true
+				}
+			}
+			for _, b := range row.Condition.Badges {
+				if b.Kind != CondxBadgeLibrary {
+					continue
+				}
+				if en, ok := condxVocab[b.Placeholder]; ok {
+					out[rowCaptureName(ordinal, en)+"#canon"] = true
+				}
+			}
+			prefix++
+		}
+		if len(row.Group) > 0 {
+			collectConditionCapturesAt(row.Group, base+prefix, out)
+			prefix += countCondxRows(row.Group)
+		}
+	}
+}
