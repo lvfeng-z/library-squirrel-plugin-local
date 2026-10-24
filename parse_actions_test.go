@@ -860,42 +860,15 @@ func TestComputeSnapshotDiff(t *testing.T) {
 	}
 }
 
-// —— 档案版本兼容与条件构造期校验 ——
-
-// TestProfileSchemaV1Compat v1 档案（无条件形态）向后兼容载入并升格当前版本；
-// 未知历史版本仍拒绝（未来更高版本的尽力解析另行由 rule_condition_test 覆盖）。
-func TestProfileSchemaV1Compat(t *testing.T) {
-	store := newFakeSessionStore()
-	v1 := `{"schemaVersion":1,"rules":[{"id":"legacy","description":"旧版规则","source":"manual","enabled":true,` +
-		`"pattern":{"kind":"regex","target":"filename","expr":"^x\\.jpg$","captures":[]},` +
-		`"extractions":[{"dimension":"title","from":"constant","constant":"旧值"}],"synthesis":{}}]}`
-	store.values[RuleProfileKVKey] = v1
-
-	profile, errs := LoadProfile(store)
-	if profile == nil || len(errs) != 0 {
-		t.Fatalf("v1 档案应兼容载入: %v %v", profile, errs)
-	}
-	if len(profile.Rules) != 1 || profile.Rules[0].ID != "legacy" {
-		t.Fatalf("v1 规则应照常载入: %+v", profile.Rules)
-	}
-	if profile.SchemaVersion != CurrentSchemaVersion {
-		t.Fatalf("载入后应升格当前版本 %d，实际 %d", CurrentSchemaVersion, profile.SchemaVersion)
-	}
-	if err := SaveProfile(store, profile); err != nil {
-		t.Fatalf("重写档案失败: %v", err)
-	}
-	reloaded, errs := LoadProfile(store)
-	if reloaded == nil || len(errs) != 0 || reloaded.SchemaVersion != CurrentSchemaVersion {
-		t.Fatalf("重写后档案应可载入: %v %v", reloaded, errs)
-	}
-}
+// —— 档案版本与条件构造期校验 ——
+// （v1..v3 旧档拒载断言由 rule_condition_test / rules_store_test 承载。）
 
 // TestConditionalRuleConstructionValidation 条件谓词引用未知来源/维度的规则在
 // 构造期被跳过并报含规则 ID 的中文错误；裁决取值缺常量同。
 func TestConditionalRuleConstructionValidation(t *testing.T) {
 	store := newFakeSessionStore()
 	base := func(when string) string {
-		return `{"schemaVersion":2,"rules":[{"id":"bad-cond","description":"坏条件规则","source":"manual","enabled":true,` +
+		return fmt.Sprintf(`{"schemaVersion":%d,"rules":[{"id":"bad-cond","description":"坏条件规则","source":"manual","enabled":true,`, CurrentSchemaVersion) +
 			`"pattern":{"kind":"regex","target":"filename","expr":"^x\\.jpg$","captures":[]},` +
 			`"extractions":[{"dimension":"title","from":"constant","constant":"值"` + when + `}],"synthesis":{}}]}`
 	}
@@ -908,7 +881,7 @@ func TestConditionalRuleConstructionValidation(t *testing.T) {
 		t.Fatalf("错误应含规则 ID 与中文原因: %v", errs[0])
 	}
 
-	store.values[RuleProfileKVKey] = `{"schemaVersion":2,"rules":[{"id":"bad-adj","description":"缺常量","source":"adjudication","enabled":true,` +
+	store.values[RuleProfileKVKey] = fmt.Sprintf(`{"schemaVersion":%d,"rules":[{"id":"bad-adj","description":"缺常量","source":"adjudication","enabled":true,`, CurrentSchemaVersion) +
 		`"pattern":{"kind":"regex","target":"filename","expr":"^x\\.jpg$","captures":[]},` +
 		`"extractions":[{"dimension":"title","from":"adjudication"}],"synthesis":{}}]}`
 	profile, errs = LoadProfile(store)

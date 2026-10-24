@@ -43,7 +43,8 @@ func (c *workbenchTestCtx) publishedCount() int {
 
 // selectionTestRules 构造选择测试的档案规则：兄弟群组定群（前缀任意非空）、
 // 群组成员集名=公共前缀（FromGroupPrefix——非群组成员来源缺失不产出）、谓词
-// 作者规则（吃库内索引）、双规则同层冲突（待裁决形态）。
+// 作者规则（吃库内索引）、双规则同层冲突（待裁决形态）、括号命名惯例
+// （内置退休后由档案条目承载——多轨目录两文件靠它完成识别）。
 func selectionTestRules(t *testing.T) []RuleEntry {
 	t.Helper()
 	sibling, err := NewSiblingPattern(`^(.+)_`, `(\d+)`, 2, OutcomeCollection)
@@ -52,6 +53,14 @@ func selectionTestRules(t *testing.T) []RuleEntry {
 	}
 	conflictA := mustRegexPattern(t, `^(?P<c1>A).+\.jpg$`, []string{"c1"})
 	conflictB := mustRegexPattern(t, `^.+(?P<c2>B)\.jpg$`, []string{"c2"})
+	bracketRows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetFile,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "【{作者}】{标题}"},
+	}}}
+	bracketPattern, err := CompileRuleConditions(bracketRows)
+	if err != nil {
+		t.Fatalf("构造括号命名惯例模板规则失败: %v", err)
+	}
 	return []RuleEntry{
 		{
 			ID: "sel-sibling-set", Description: "测试：下划线前缀+序号成群", Source: RuleSourceManual, Enabled: true,
@@ -61,6 +70,14 @@ func selectionTestRules(t *testing.T) []RuleEntry {
 			ID: "sel-set-collection", Description: "测试：群组成员集名=公共前缀", Source: RuleSourceManual, Enabled: true,
 			Pattern:     mustRegexPattern(t, `^.+$`, nil),
 			Extractions: []ExtractionAction{{Dimension: DimCollection, From: FromGroupPrefix}},
+		},
+		{
+			ID: "sel-bracket-author-title", Description: "测试：【作者】标题命名惯例", Source: RuleSourceManual, Enabled: true,
+			Conditions: bracketRows, Pattern: bracketPattern,
+			Extractions: []ExtractionAction{
+				{Dimension: DimAuthor, From: FromCapture, CaptureName: condxVocab["作者"], Row: 1},
+				{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1},
+			},
 		},
 		{
 			ID: "test-conflict-a", Description: "测试：标题冲突 A", Source: RuleSourceManual, Enabled: true,

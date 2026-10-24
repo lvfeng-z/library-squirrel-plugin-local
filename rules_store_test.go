@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -96,12 +97,6 @@ func marshalForCompare(t *testing.T, p *RuleProfile) string {
 func TestProfileStoreRoundTrip(t *testing.T) {
 	store := newFakeProfileStore()
 	rules := []RuleEntry{testRule(t, "user-round-trip", true)}
-	if builtin := BuiltinRules(); len(builtin) > 0 {
-		clone := builtin[0]
-		clone.ID = "user-round-trip-builtin-clone"
-		clone.Source = RuleSourceManual
-		rules = append(rules, clone)
-	}
 	saved := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: rules}
 
 	if err := SaveProfile(store, saved); err != nil {
@@ -252,7 +247,7 @@ func TestLoadProfileReadError(t *testing.T) {
 
 // TestLoadProfileSkipsBrokenRule 坏规则被跳过且错误携带其规则 ID，其余规则照常载入。
 func TestLoadProfileSkipsBrokenRule(t *testing.T) {
-	value := `{"schemaVersion":1,"rules":[` +
+	value := fmt.Sprintf(`{"schemaVersion":%d,"rules":[`, CurrentSchemaVersion) +
 		`{"id":"bad-regex","description":"正则非法","source":"manual","enabled":true,` +
 		`"pattern":{"kind":"regex","target":"filename","expr":"["},"extractions":[],"synthesis":{"dimPolicies":[],"roles":[]}},` +
 		`{"id":"bad-missing-pattern","description":"缺模式","source":"manual","enabled":true,` +
@@ -284,8 +279,8 @@ func TestLoadProfileSkipsBrokenRule(t *testing.T) {
 	}
 }
 
-// TestEffectiveRulesOrder 求值顺序：用户启用规则全部在前、内置启用规则全部在后，
-// 禁用规则（用户与内置）均不出现在结果中。
+// TestEffectiveRulesOrder 求值顺序（v4 内置退休后）：档案内启用规则按档案序
+// 出现，禁用规则不出现；序列收敛为纯用户规则。
 func TestEffectiveRulesOrder(t *testing.T) {
 	user := &RuleProfile{
 		SchemaVersion: CurrentSchemaVersion,
@@ -297,67 +292,38 @@ func TestEffectiveRulesOrder(t *testing.T) {
 	}
 
 	effective := EffectiveRules(user)
-	builtin := BuiltinRules()
-	enabledBuiltin := 0
-	for _, rule := range builtin {
-		if rule.Enabled {
-			enabledBuiltin++
-		}
-	}
-	if len(effective) != 2+enabledBuiltin {
-		t.Fatalf("求值序列应为 2 条用户规则 + %d 条内置规则，实际 %d 条", enabledBuiltin, len(effective))
+	if len(effective) != 2 {
+		t.Fatalf("求值序列应为 2 条用户启用规则，实际 %d 条", len(effective))
 	}
 	if effective[0].ID != "user-on" || effective[1].ID != "user-on-later" {
-		t.Fatalf("用户规则应在前且保持档案内顺序，实际前两条: %q, %q", effective[0].ID, effective[1].ID)
-	}
-	seenBuiltin := false
-	for i, rule := range effective {
-		if rule.ID == "user-off" {
-			t.Fatalf("禁用规则不应出现，实际位于下标 %d", i)
-		}
-		if rule.ID == "user-on" || rule.ID == "user-on-later" {
-			if seenBuiltin {
-				t.Fatalf("内置规则之后不应再出现用户规则，实际下标 %d 为 %q", i, rule.ID)
-			}
-			continue
-		}
-		seenBuiltin = true
-		if rule.Source != RuleSourceBuiltin {
-			t.Fatalf("用户区段之后应全为内置规则，实际 %q 来源为 %q", rule.ID, rule.Source)
-		}
-		if !rule.Enabled {
-			t.Fatalf("内置规则 %q 未启用却出现在求值序列中", rule.ID)
-		}
-	}
-	builtinIndex := 2
-	for _, want := range builtin {
-		if !want.Enabled {
-			continue
-		}
-		if effective[builtinIndex].ID != want.ID {
-			t.Fatalf("内置规则应保持声明顺序：下标 %d 期望 %q，实际 %q", builtinIndex, want.ID, effective[builtinIndex].ID)
-		}
-		builtinIndex++
+		t.Fatalf("用户规则应保持档案内顺序，实际: %q, %q", effective[0].ID, effective[1].ID)
 	}
 }
 
-// TestEffectiveRulesNilUser 用户档案缺失时仅返回内置启用规则。
+// TestEffectiveRulesNilUser 用户档案缺失时返回空序列（内置退休，无兜底规则）。
 func TestEffectiveRulesNilUser(t *testing.T) {
-	effective := EffectiveRules(nil)
-	for _, rule := range effective {
-		if rule.Source != RuleSourceBuiltin {
-			t.Fatalf("用户档案缺失时不应出现非内置规则: %+v", rule)
-		}
+	if effective := EffectiveRules(nil); len(effective) != 0 {
+		t.Fatalf("用户档案缺失时应返回空序列，实际 %d 条", len(effective))
 	}
-	builtin := BuiltinRules()
-	enabledBuiltin := 0
-	for _, rule := range builtin {
-		if rule.Enabled {
-			enabledBuiltin++
-		}
+}
+
+// TestParseProfileRejectsLegacyVersions 旧档拒载断言（v4 零迁移）：结构版本
+// 1..3 的档案整体拒绝（nil 档案 + 可读错误），不降级不部分载入。
+func TestParseProfileRejectsLegacyVersions(t *testing.T) {
+	legacy := []string{
+		`{"schemaVersion":1,"rules":[]}`,
+		`{"schemaVersion":2,"rules":[]}`,
+		`{"schemaVersion":3,"rules":[{"id":"v3-rule","description":"d","source":"manual","enabled":true,` +
+			`"pattern":{"kind":"regex","target":"filename","expr":"^a$","captures":[]},"extractions":[]}]}`,
 	}
-	if len(effective) != enabledBuiltin {
-		t.Fatalf("应返回 %d 条内置启用规则，实际 %d 条", enabledBuiltin, len(effective))
+	for _, data := range legacy {
+		profile, errs := ParseProfile([]byte(data))
+		if profile != nil {
+			t.Fatalf("旧档 %s 应整体拒载（nil 档案），实际 %+v", data, profile)
+		}
+		if len(errs) != 1 || !strings.Contains(errs[0].Error(), "已停用") {
+			t.Fatalf("旧档 %s 应回「已停用」错误，实际 %v", data, errs)
+		}
 	}
 }
 

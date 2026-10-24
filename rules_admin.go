@@ -9,18 +9,9 @@ import (
 	"fmt"
 )
 
-// builtinRuleView 内置规则的前端呈现：内置表条目 + 档案禁用清单承载的禁用态。
-type builtinRuleView struct {
-	// ID / Description 内置规则的身份与人话描述。
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	// Disabled 为禁用态：真=在档案禁用清单内、合并求值点被排除。
-	Disabled bool `json:"disabled"`
-}
-
 // rulesAdminView 规则管理面的前端视图：档案条目（ruleEntryJSON 形态，pattern/
-// extractions 即 JSON 片段编辑的原文）、内置表与禁用态、档案版本、载入告警与
-// 写前备份在场。
+// extractions 即 JSON 片段编辑的原文）、例子模板表、档案版本、载入告警与
+// 写前备份在场。v4 起内置规则退休为例子模板（不参与求值、无禁用清单）。
 type rulesAdminView struct {
 	// SchemaVersion 档案当前结构版本。
 	SchemaVersion int `json:"schemaVersion"`
@@ -28,10 +19,8 @@ type rulesAdminView struct {
 	Rules []*ruleEntryJSON `json:"rules"`
 	// Warnings 档案载入告警（坏条目被跳过等，逐条人话——呈现给用户核对档案）。
 	Warnings []string `json:"warnings,omitempty"`
-	// DisabledBuiltinIDs 档案的内置禁用清单原文。
-	DisabledBuiltinIDs []string `json:"disabledBuiltinIDs,omitempty"`
-	// Builtins 内置规则表（含各自的禁用态）。
-	Builtins []builtinRuleView `json:"builtins"`
+	// Examples 例子模板表（v4 词条演示——格式模板写法参考，不参与求值）。
+	Examples []exampleTemplate `json:"examples"`
 	// BackupAvailable 写前备份键是否有可回退的一代档案。
 	BackupAvailable bool `json:"backupAvailable"`
 }
@@ -48,11 +37,10 @@ func errorTexts(errs []error) []string {
 // rulesAdminViewOf 档案 → 规则管理视图（不含备份在场——需查存储，由调用方填充）。
 func rulesAdminViewOf(profile *RuleProfile, warnings []string) (*rulesAdminView, error) {
 	view := &rulesAdminView{
-		SchemaVersion:      profile.SchemaVersion,
-		Rules:              make([]*ruleEntryJSON, 0, len(profile.Rules)),
-		Warnings:           warnings,
-		DisabledBuiltinIDs: profile.DisabledBuiltinIDs,
-		Builtins:           make([]builtinRuleView, 0),
+		SchemaVersion: profile.SchemaVersion,
+		Rules:         make([]*ruleEntryJSON, 0, len(profile.Rules)),
+		Warnings:      warnings,
+		Examples:      exampleTemplates(),
 	}
 	for i := range profile.Rules {
 		rj, err := ruleToJSON(profile.Rules[i])
@@ -60,15 +48,6 @@ func rulesAdminViewOf(profile *RuleProfile, warnings []string) (*rulesAdminView,
 			return nil, fmt.Errorf("规则 %q 转为编辑形态失败: %w", profile.Rules[i].ID, err)
 		}
 		view.Rules = append(view.Rules, rj)
-	}
-	disabled := make(map[string]bool, len(profile.DisabledBuiltinIDs))
-	for _, id := range profile.DisabledBuiltinIDs {
-		disabled[id] = true
-	}
-	for _, rule := range BuiltinRules() {
-		view.Builtins = append(view.Builtins, builtinRuleView{
-			ID: rule.ID, Description: rule.Description, Disabled: disabled[rule.ID],
-		})
 	}
 	return view, nil
 }
@@ -189,39 +168,11 @@ func (m *SessionManager) ApplySetRuleEnabled(ruleID string, enabled bool) (*rule
 	return m.RulesAdminView()
 }
 
-// ApplySetBuiltinDisabled 内置规则启停：禁用态记入档案禁用清单（ID 加入或移出
-// DisabledBuiltinIDs），合并求值点（EffectiveRules）应用——禁用的内置规则不参与
-// 求值。ID 须命中内置表，未命中报错以阻清单积入失效 ID。返回更新后的视图。
+// ApplySetBuiltinDisabled 内置规则启停（已退役）：v4 起内置规则退休为例子
+// 模板（exampleTemplates——仅展示参考，不参与求值、无禁用态）。接口保留
+// 返回退休错误，前端旧调用得到可读回应（期2 前端三步漏斗同步撤除该入口）。
 func (m *SessionManager) ApplySetBuiltinDisabled(builtinID string, disabled bool) (*rulesAdminView, error) {
-	if builtinID == "" {
-		return nil, fmt.Errorf("内置规则启停缺少规则 ID")
-	}
-	known := false
-	for _, rule := range BuiltinRules() {
-		if rule.ID == builtinID {
-			known = true
-			break
-		}
-	}
-	if !known {
-		return nil, fmt.Errorf("内置规则表中不存在规则 %q", builtinID)
-	}
-	if err := m.UpdateProfile(ArchiveWriteRuleEdit, func(p *RuleProfile) error {
-		next := make([]string, 0, len(p.DisabledBuiltinIDs)+1)
-		for _, id := range p.DisabledBuiltinIDs {
-			if id != builtinID {
-				next = append(next, id)
-			}
-		}
-		if disabled {
-			next = append(next, builtinID)
-		}
-		p.DisabledBuiltinIDs = next
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return m.RulesAdminView()
+	return nil, fmt.Errorf("内置规则已退休为例子模板（不参与求值），规则 %q 无启停可言；如需该形态请从例子模板复制为档案条目", builtinID)
 }
 
 // ApplyRollbackProfile 档案回退一代（单点串行）：备份键内容写回档案键、现行档案

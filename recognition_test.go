@@ -132,10 +132,28 @@ func recognitionTestRules(t *testing.T) []RuleEntry {
 	if err != nil {
 		t.Fatalf("构造目录层位置模式失败: %v", err)
 	}
+	// 内置退休后的档案等价条目：【作者】标题命名惯例（样例树「已识别」目录
+	// 的识别由此承载——v4 文件行模板）。
+	bracketRows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetFile,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "【{作者}】{标题}"},
+	}}}
+	bracketPattern, err := CompileRuleConditions(bracketRows)
+	if err != nil {
+		t.Fatalf("构造括号命名惯例模板规则失败: %v", err)
+	}
 	return []RuleEntry{
 		{
 			ID: "test-sibling-set", Description: "测试：下划线前缀+序号成群", Source: RuleSourceManual, Enabled: true,
 			Pattern: siblingPattern,
+		},
+		{
+			ID: "test-bracket-author-title", Description: "测试：【作者】标题命名惯例", Source: RuleSourceManual, Enabled: true,
+			Conditions: bracketRows, Pattern: bracketPattern,
+			Extractions: []ExtractionAction{
+				{Dimension: DimAuthor, From: FromCapture, CaptureName: condxVocab["作者"], Row: 1},
+				{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1},
+			},
 		},
 		{
 			ID: "test-conflict-a", Description: "测试：标题冲突 A", Source: RuleSourceManual, Enabled: true,
@@ -443,8 +461,8 @@ func TestRunFullRecognitionSevenElements(t *testing.T) {
 	if stat := statByID["test-disabled"]; stat.Enabled || stat.HitCount != 0 {
 		t.Fatalf("禁用规则统计不符: %+v", stat)
 	}
-	if stat := statByID["builtin-bracket-author-title"]; stat.HitCount != 1 {
-		t.Fatalf("内置规则命中数不符: %+v", stat)
+	if stat := statByID["test-bracket-author-title"]; !stat.Enabled || stat.HitCount != 1 {
+		t.Fatalf("括号命名惯例规则统计不符: %+v", stat)
 	}
 
 	// —— 元素7：会话决策态骨架（死路径赋值报告；赋值/忽略/选择集计数活数据面

@@ -154,29 +154,16 @@ func ProfileBackupExists(store ProfileStore) bool {
 	return err == nil && backup != nil && backup.Value != ""
 }
 
-// EffectiveRules 返回参与求值的规则序列：用户档案中启用的规则在前、内置规则表中
-// 启用的规则在后（两段内部各自保持原有顺序）。同一对象同时命中用户规则与内置规则
-// 时，用户规则优先由「用户在前」的求值顺序承载，执行面的顺序接线在流水阶段完成。
-// 档案的内置禁用清单（DisabledBuiltinIDs）在此合并点应用——清单内的内置规则不
-// 参与求值；user 为 nil 时仅返回内置规则（无档案即无禁用信息）。
+// EffectiveRules 返回参与求值的规则序列：用户档案中启用的规则（保持原有
+// 顺序）。v4 起内置规则退休为例子模板、不再参与求值（rules_admin 仅作展示
+// 参考），合并点随之收敛为纯用户档案。
 func EffectiveRules(user *RuleProfile) []RuleEntry {
 	rules := make([]RuleEntry, 0)
-	var disabledBuiltin map[string]bool
-	if user != nil {
-		for _, rule := range user.Rules {
-			if rule.Enabled {
-				rules = append(rules, rule)
-			}
-		}
-		if len(user.DisabledBuiltinIDs) > 0 {
-			disabledBuiltin = make(map[string]bool, len(user.DisabledBuiltinIDs))
-			for _, id := range user.DisabledBuiltinIDs {
-				disabledBuiltin[id] = true
-			}
-		}
+	if user == nil {
+		return rules
 	}
-	for _, rule := range BuiltinRules() {
-		if rule.Enabled && !disabledBuiltin[rule.ID] {
+	for _, rule := range user.Rules {
+		if rule.Enabled {
 			rules = append(rules, rule)
 		}
 	}

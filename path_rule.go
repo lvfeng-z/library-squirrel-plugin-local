@@ -6,7 +6,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -246,17 +245,17 @@ func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMe
 
 // absorbResponse 把问答响应吸收为一条 qna 规则并持久化入档：答案词汇映射新体系
 // 含义维度（无可映射维度的答案逐条告警后舍弃，全部不可映射时放弃生成），规则为
-// LocationPattern（MinDepth=MaxDepth=所问层深经 qnaDirDepth 换算出的 DirNames
-// 索引）+ 目录名全匹配正则，提取动作按维度取 ancestorDir；层深 0（扫描根本身）
-// 无对应索引，不生成规则；持久化经 LoadProfile→追加→SaveProfile，同层同目录锚点
-// （同 ID）已有 qna 规则时原位替换，新答案的维度集合整体取代旧规则。插件上下文
-// 不可用或档案不可载入时不落库（不覆写既有档案），仅告警。
+// v4 目录行（目标=目录、格式模板=目录名整名字面——任意祖先层命中），提取动作
+// 按维度取 ancestorDir；层深 0（扫描根本身）无对应索引，不生成规则；持久化经
+// LoadProfile→追加→SaveProfile，同层同目录锚点（同 ID）已有 qna 规则时原位替换，
+// 新答案的维度集合整体取代旧规则。插件上下文不可用或档案不可载入时不落库（不
+// 覆写既有档案），仅告警。
 //
 // 退役注记：此档案吸收写点随旧直接创建流程退役——Create 入口已改经工作台会话
 // 分派（见 work_fetch.go CreateWithHeartbeat），ClassifyDir 弹问通道在全部创建
-// 路径上结构性不可达，本写点随之不可达，保留为不可达历史代码；档案写一律经
-// 工作台会话管理器单点串行（泛化/裁决生成/规则编辑面三入口，见 session.go
-// UpdateProfile），本写点不纳入串行接入名单。
+// 路径上结构性不可达，本写点随之不可达，保留为不可达历史代码（问答吸收机制
+// 经单元测试直驱保活）；档案写一律经工作台会话管理器单点串行（泛化/裁决生成/
+// 规则编辑面三入口，见 session.go UpdateProfile），本写点不纳入串行接入名单。
 func (c *PathClassifier) absorbResponse(level int, dirName string, resp *ClassifyResponse) {
 	if c.ctx == nil {
 		return
@@ -289,16 +288,18 @@ func (c *PathClassifier) absorbResponse(level int, dirName string, resp *Classif
 		return
 	}
 
-	// LocationPattern 把层名以子输入 FileName 形态呈现给 Ancestor，故目录名
-	// 正则的匹配目标取 filename（目标为 dirname 时子输入无目录层可试，恒不命中）
-	ancestor, err := NewRegexPattern(string(TargetFileName), "^"+regexp.QuoteMeta(dirName)+"$", nil)
-	if err != nil {
-		c.ctx.Warnf("构造问答规则目录名正则失败，放弃生成规则: %v", err)
+	// v4 目录行：目录名整名字面模板（词法含花括号时放弃——占位词词法冲突）。
+	if !condxTemplateBraceOK(dirName) {
+		c.ctx.Warnf("目录名 %q 含花括号，与格式模板词法冲突，放弃生成规则", dirName)
 		return
 	}
-	pattern, err := NewLocationPattern(depth, depth, ancestor)
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: dirName},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
-		c.ctx.Warnf("构造问答规则位置模式失败，放弃生成规则: %v", err)
+		c.ctx.Warnf("构造问答规则目录条件失败，放弃生成规则: %v", err)
 		return
 	}
 	labels := make([]string, 0, len(dims))
@@ -310,6 +311,7 @@ func (c *PathClassifier) absorbResponse(level int, dirName string, resp *Classif
 		Description: fmt.Sprintf("问答生成：第 %d 层目录「%s」的含义为%s", level, dirName, strings.Join(labels, "、")),
 		Source:      RuleSourceQna,
 		Enabled:     true,
+		Conditions:  rows,
 		Pattern:     pattern,
 		Extractions: extractions,
 	}

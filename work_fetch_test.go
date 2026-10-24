@@ -8,7 +8,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -164,13 +163,18 @@ func TestClassifyDirAbsorbsAnswerAsQnaRule(t *testing.T) {
 	if rule.ID != qnaRuleID(1, dirName) || rule.Source != RuleSourceQna || !rule.Enabled {
 		t.Fatalf("规则应为启用的 qna 规则 %q，实得 id=%q source=%q enabled=%v", qnaRuleID(1, dirName), rule.ID, rule.Source, rule.Enabled)
 	}
-	loc, ok := rule.Pattern.(*LocationPattern)
-	if !ok || loc.MinDepth != 0 || loc.MaxDepth != 0 {
-		t.Fatalf("问答层深 1（扫描根下首层）应换算为 DirNames 索引 0 的 LocationPattern(0,0)，实得 %#v", rule.Pattern)
+	// v4：目录行条件规则（行 1=目录名整名字面模板），提取 ancestorDir→作者。
+	rowRule, ok := rule.Pattern.(*RowSubjectPattern)
+	if !ok || rule.Conditions == nil {
+		t.Fatalf("问答规则应为 v4 目录行条件规则，实得 %#v", rule.Pattern)
 	}
-	re, ok := loc.Ancestor.(*RegexPattern)
-	if !ok || re.Target != TargetFileName || re.Expr != "^"+regexp.QuoteMeta(dirName)+"$" {
-		t.Fatalf("Ancestor 应为目录名全匹配正则，实得 %#v", loc.Ancestor)
+	if len(rule.Conditions) != 1 || rule.Conditions[0].Condition == nil ||
+		rule.Conditions[0].Condition.Target != CondxTargetDir ||
+		rule.Conditions[0].Condition.Format.Tpl != dirName {
+		t.Fatalf("行 1 应为目录名 %q 整名字面模板，实得 %+v", dirName, rule.Conditions)
+	}
+	if rowRule.Ordinal != 1 {
+		t.Fatalf("目录行应锚定行 1，实得 %#v", rowRule)
 	}
 	if len(rule.Extractions) != 1 || rule.Extractions[0].Dimension != DimAuthor ||
 		rule.Extractions[0].From != FromAncestorDir {

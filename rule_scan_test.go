@@ -14,7 +14,7 @@ import (
 // 构造 RuleEntry。
 func scanRuleFromJSON(t *testing.T, ruleJSON string) *RuleEntry {
 	t.Helper()
-	profile, errs := ParseProfile([]byte(fmt.Sprintf(`{"schemaVersion":3,"rules":[%s]}`, ruleJSON)))
+	profile, errs := ParseProfile([]byte(fmt.Sprintf(`{"schemaVersion":%d,"rules":[%s]}`, CurrentSchemaVersion, ruleJSON)))
 	if len(errs) > 0 {
 		t.Fatalf("规则载入失败: %v", errs)
 	}
@@ -192,7 +192,7 @@ func TestScanValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, errs := ParseProfile([]byte(fmt.Sprintf(`{"schemaVersion":3,"rules":[%s]}`, scanRuleJSON(tc.extractions))))
+			_, errs := ParseProfile([]byte(fmt.Sprintf(`{"schemaVersion":%d,"rules":[%s]}`, CurrentSchemaVersion, scanRuleJSON(tc.extractions))))
 			if len(errs) == 0 {
 				t.Fatalf("应被校验拒绝")
 			}

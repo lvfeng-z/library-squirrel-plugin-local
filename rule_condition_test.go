@@ -380,76 +380,30 @@ const v3EquivalentProfile = `{"schemaVersion":3,"rules":[` +
 	`{"dimension":"title","from":"constant","constant":"缺席值","when":{"kind":"not","inner":{"kind":"predicate","source":"dir","dimension":"author"}}}],` +
 	`"synthesis":{}}]}`
 
-// TestProfileV2ConditionCompat v2 条件档案兼容载入：载入即升格 v3、条件映射
-// 为等价表达式树；流水线求值结论与等价 v3 档案逐文件一致（升级前后行为零
-// 变化）；重写后落盘为 v3 形态且仍可载入求值。
-func TestProfileV2ConditionCompat(t *testing.T) {
-	v2Profile, errs := ParseProfile([]byte(v2ConditionProfile))
-	if v2Profile == nil || len(errs) != 0 {
-		t.Fatalf("v2 条件档案应兼容载入: %v %v", v2Profile, errs)
+// TestProfileLegacyVersionsRejected v1..v3 旧档整体拒载（v4 零迁移语义）：
+// 不升格、不降级、不部分载入——nil 档案 + 单条「已停用」错误。v2 谓词组合
+// 形态与 v3 表达式形态样例一并作拒载素材。
+func TestProfileLegacyVersionsRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"v1 无条件形态", `{"schemaVersion":1,"rules":[{"id":"v1-rule","description":"旧版规则","source":"manual","enabled":true,` +
+			`"pattern":{"kind":"regex","target":"filename","expr":"^x\\.jpg$","captures":[]},` +
+			`"extractions":[{"dimension":"title","from":"constant","constant":"旧值"}],"synthesis":{}}]}`},
+		{"v2 谓词组合形态", v2ConditionProfile},
+		{"v3 表达式形态", v3EquivalentProfile},
 	}
-	if v2Profile.SchemaVersion != CurrentSchemaVersion {
-		t.Fatalf("载入后应升格 v%d，实际 %d", CurrentSchemaVersion, v2Profile.SchemaVersion)
-	}
-	if len(v2Profile.Rules) != 2 || len(v2Profile.Rules[1].Extractions) != 2 {
-		t.Fatalf("v2 规则应照常载入: %+v", v2Profile.Rules)
-	}
-	present, absent := v2Profile.Rules[1].Extractions[0].When, v2Profile.Rules[1].Extractions[1].When
-	if present == nil || present.Kind != ExprPredicate || present.Source != SourceDir || present.Dimension != DimAuthor {
-		t.Fatalf("在场分支应映射为在场谓词节点: %+v", present)
-	}
-	if absent == nil || absent.Kind != ExprNot || !equalCondExpr(absent.Inner, present) {
-		t.Fatalf("缺席分支应映射为谓词取反节点: %+v", absent)
-	}
-
-	// 等价 v3 档案的求值结论与 v2 载入逐文件一致
-	v3Profile, errs := ParseProfile([]byte(v3EquivalentProfile))
-	if v3Profile == nil || len(errs) != 0 {
-		t.Fatalf("等价 v3 档案应可载入: %v %v", v3Profile, errs)
-	}
-	files := []ScanFile{
-		{FileName: "x.jpg", DirNames: []string{"作者甲"}, RelPath: "作者甲/x.jpg"},
-		{FileName: "y.jpg", RelPath: "y.jpg"},
-	}
-	for _, file := range files {
-		v2Decisions := RunPipeline([]ScanFile{file}, v2Profile.Rules, nil)
-		v3Decisions := RunPipeline([]ScanFile{file}, v3Profile.Rules, nil)
-		if len(v2Decisions) != 1 || len(v3Decisions) != 1 {
-			t.Fatalf("%s：两侧各应一行结论", file.RelPath)
-		}
-		if !equalDeclarations(v2Decisions[0].Declarations, v3Decisions[0].Declarations) {
-			t.Fatalf("%s：v2 载入与等价 v3 的求值结论不一致:\n%+v\n%+v", file.RelPath, v2Decisions[0].Declarations, v3Decisions[0].Declarations)
-		}
-		// 升级前语义锚定：目录源作者在场取「在场值」、缺席取「缺席值」
-		want := "在场值"
-		if len(file.DirNames) == 0 {
-			want = "缺席值"
-		}
-		found := false
-		for _, decl := range v2Decisions[0].Declarations {
-			if decl.Dimension == DimTitle && decl.Value == want {
-				found = true
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			profile, errs := ParseProfile([]byte(tc.data))
+			if profile != nil {
+				t.Fatalf("旧档应整体拒载（nil 档案），实际 %+v", profile)
 			}
-		}
-		if !found {
-			t.Fatalf("%s：条件分支值应为 %q，实际声明: %+v", file.RelPath, want, v2Decisions[0].Declarations)
-		}
-	}
-
-	// 重写落盘为 v3 形态，仍可载入
-	rewritten, err := v2Profile.MarshalJSON()
-	if err != nil {
-		t.Fatalf("重写 v2 载入档案失败: %v", err)
-	}
-	if bytes.Contains(rewritten, []byte(`"present"`)) || bytes.Contains(rewritten, []byte(`"absent"`)) {
-		t.Fatalf("重写后不应再含 v2 谓词组合字段: %s", rewritten)
-	}
-	if !bytes.Contains(rewritten, []byte(`"kind":"predicate"`)) {
-		t.Fatalf("重写后应为 v3 表达式形态: %s", rewritten)
-	}
-	reloaded, errs := ParseProfile(rewritten)
-	if reloaded == nil || len(errs) != 0 || reloaded.SchemaVersion != CurrentSchemaVersion {
-		t.Fatalf("重写后档案应可载入: %v %v", reloaded, errs)
+			if len(errs) != 1 || !strings.Contains(errs[0].Error(), "已停用") {
+				t.Fatalf("应回单条「已停用」错误，实际 %v", errs)
+			}
+		})
 	}
 }
 
@@ -464,26 +418,6 @@ func equalDeclarations(a, b []MetadataDeclaration) bool {
 		}
 	}
 	return true
-}
-
-// TestProfileV1UnconditionalZeroChange v1 无条件档案行为零变化：载入零错误、
-// 动作无条件执行、求值结论与升级前一致。
-func TestProfileV1UnconditionalZeroChange(t *testing.T) {
-	v1 := `{"schemaVersion":1,"rules":[{"id":"v1-rule","description":"旧版规则","source":"manual","enabled":true,` +
-		`"pattern":{"kind":"regex","target":"filename","expr":"^x\\.jpg$","captures":[]},` +
-		`"extractions":[{"dimension":"title","from":"constant","constant":"旧值"}],"synthesis":{}}]}`
-	profile, errs := ParseProfile([]byte(v1))
-	if profile == nil || len(errs) != 0 {
-		t.Fatalf("v1 档案应零错误载入: %v %v", profile, errs)
-	}
-	if len(profile.Rules) != 1 || profile.Rules[0].Extractions[0].When != nil {
-		t.Fatalf("v1 规则动作应为无条件: %+v", profile.Rules)
-	}
-	decisions := RunPipeline([]ScanFile{{FileName: "x.jpg", RelPath: "x.jpg"}}, profile.Rules, nil)
-	if len(decisions) != 1 || len(decisions[0].Declarations) != 1 ||
-		decisions[0].Declarations[0].Value != "旧值" {
-		t.Fatalf("v1 规则求值结论应与升级前一致: %+v", decisions)
-	}
 }
 
 // TestParseConditionLegacyEmptyJSON v2 恒真形态（when 两列表皆空）归一为无条件。
@@ -532,11 +466,11 @@ func TestProfileFutureVersionBestEffort(t *testing.T) {
 	}
 }
 
-// TestIsolatedFileConditionStrategyJSON 孤立文件场景的手写 v3 条件策略 JSON
+// TestIsolatedFileConditionStrategyJSON 孤立文件场景的手写条件策略 JSON
 // （目录源作者缺席 → 兜底常量作者并绑定角色）：完整 JSON 经 ParseProfile 构造期
 // 校验通过并入档形态参与求值（手写进阶入口的端到端锚定）。
 func TestIsolatedFileConditionStrategyJSON(t *testing.T) {
-	profileJSON := `{"schemaVersion":3,"rules":[` +
+	profileJSON := `{"schemaVersion":4,"rules":[` +
 		`{"id":"iso-dir","description":"目录层作者","source":"manual","enabled":true,` +
 		`"pattern":{"kind":"location","minDepth":0,"maxDepth":0,"ancestor":{"kind":"regex","target":"filename","expr":"^作者-.*$","captures":[]}},` +
 		`"extractions":[{"dimension":"author","from":"ancestorDir"}],"synthesis":{}},` +
@@ -546,7 +480,7 @@ func TestIsolatedFileConditionStrategyJSON(t *testing.T) {
 		`"when":{"kind":"not","inner":{"kind":"predicate","source":"dir","dimension":"author"}}}],"synthesis":{}}]}`
 	profile, errs := ParseProfile([]byte(profileJSON))
 	if profile == nil || len(errs) != 0 {
-		t.Fatalf("手写 v3 条件策略应通过构造期校验: %v %v", profile, errs)
+		t.Fatalf("手写条件策略应通过构造期校验: %v %v", profile, errs)
 	}
 	files := []ScanFile{
 		{FileName: "a.jpg", DirNames: []string{"作者-甲"}, RelPath: "作者-甲/a.jpg"},

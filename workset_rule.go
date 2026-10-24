@@ -1657,17 +1657,6 @@ func dirSpanExpectedValue(plan *workSetDirSegPlan, spanIdx []int) string {
 	return b.String()
 }
 
-// exprWithExtTail 形态提取式 → 规则提取式：末尾 $ 锚定前补可选扩展名尾段
-// （结构形态表对去扩展名正文求值，正则规则对含扩展名文件名求值）；无尾锚
-// （如中段序号的提取式）或已含扩展名段的表达式原样返回。
-// （v4 序列成员模板原生锚定去扩展名基名，本助手仅服务 v3 过渡构造。）
-func exprWithExtTail(expr string) string {
-	if strings.HasSuffix(expr, "$") && !strings.HasSuffix(expr, builtinTrailingExtExpr) {
-		return strings.TrimSuffix(expr, "$") + builtinTrailingExtExpr
-	}
-	return expr
-}
-
 // buildWorkSetSeqKeyRule 序列前缀规则构造（剧本E，v4 序列行模板）：「序列」
 // 线索指给集名/维度的条目——提取 FromGroupPrefix 取群组公共前缀（=定群键；
 // 「序列」指给集名即 sibling 形态键作集名捕获，集名=整键形态）。FromGroupPrefix

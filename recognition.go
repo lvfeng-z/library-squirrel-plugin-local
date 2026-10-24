@@ -2143,13 +2143,11 @@ func indexSize(lib *LibraryIndex) int {
 	return len(lib.AuthorNames) + len(lib.TagNames) + len(lib.WorkSetNames)
 }
 
-// allRulesWithBuiltins 全部规则（含禁用）：档案规则在前、内置规则在后，与
-// EffectiveRules 的两段顺序一致（元素6 按此序呈现）。
+// allRulesWithBuiltins 全部规则（含禁用）：v4 起内置规则退休为例子模板、
+// 不再参与求值与全景呈现，全部规则即档案规则（元素6 按此序呈现）。
 func allRulesWithBuiltins(profile *RuleProfile) []RuleEntry {
-	var rules []RuleEntry
-	if profile != nil {
-		rules = append(rules, profile.Rules...)
+	if profile == nil {
+		return nil
 	}
-	rules = append(rules, BuiltinRules()...)
-	return rules
+	return profile.Rules
 }

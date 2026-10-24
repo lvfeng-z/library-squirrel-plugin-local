@@ -590,27 +590,6 @@ func (h *LocalImportWorkFetcher) logPendingSynthesis(fullPath string, pending []
 	}
 }
 
-// pixivPageWorkIDOf 取内置 pixiv 规则重算的归属域键：流水线结论命中
-// （MatchedRuleIDs 含其 ID）时对同一匹配输入重放该规则取捕获值——锚定全匹配下
-// 捕获值即页级作品 ID（命中即真实域键）；未命中返回空串。
-func pixivPageWorkIDOf(matchedRuleIDs []string, rules []RuleEntry, in *MatchInput) string {
-	if !slices.Contains(matchedRuleIDs, builtinRuleIDPixivPageWorkID) {
-		return ""
-	}
-	for _, rule := range rules {
-		if rule.ID != builtinRuleIDPixivPageWorkID || rule.Pattern == nil {
-			continue
-		}
-		ctx := &ParseContext{}
-		if !rule.Pattern.Evaluate(in, nil, ctx) {
-			return ""
-		}
-		value, _ := ctx.Capture(builtinPageWorkIDCapture)
-		return value
-	}
-	return ""
-}
-
 // CreateWorkInfo 从 PluginData 反序列化路径元数据，并按原始路径重算「档案∪赋值」
 // 合并求值合成产出作品信息：规则解析与创建期共用同一入口（resolvePipelineRules），
 // 库内谓词索引注入（libraryIndexCached——与识别干跑同一构造，风险12 闭环），
@@ -638,7 +617,7 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 
 	// 单任务合并求值重算（注入库内索引与任务级赋值快照，与识别干跑同源）
 	rules := h.resolvePipelineRules()
-	conclusion, in := h.recomputeFileDecision(&fp, rules, h.libraryIndexCached())
+	conclusion, _ := h.recomputeFileDecision(&fp, rules, h.libraryIndexCached())
 	h.logPendingSynthesis(fp.FullPath, conclusion.Pending)
 	final := conclusion.Final
 
@@ -678,14 +657,12 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 		}
 	}
 
-	// 作品身份：内置 pixiv 规则命中即真实域键；未命中=创建期归属（真实域页级
-	// 作品 ID）或 local 回退的文件内容哈希
+	// 作品身份：创建期归属（真实域页级作品 ID）或 local 回退的文件内容哈希
+	//（v4 起内置 pixiv 页级规则退休为例子模板、不参与求值——页级域键形态
+	// 经用户档案规则覆盖，未配置时走哈希回退）。
 	siteWorkID := fp.Hash
 	if fp.hasRealAttribution() {
 		siteWorkID = fp.SiteWorkId
-	}
-	if pageID := pixivPageWorkIDOf(conclusion.MatchedRuleIDs, rules, in); pageID != "" {
-		siteWorkID = pageID
 	}
 	resp.Work.SiteWorkId = new(siteWorkID)
 	resp.Work.SiteWorkName = new(workName)

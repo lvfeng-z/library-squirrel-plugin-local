@@ -371,27 +371,19 @@ type RuleEntry struct {
 }
 
 // CurrentSchemaVersion 为规则档案当前的结构版本。
-// v3：提取动作的生效条件升级为通用条件表达式树（CondExpr）；v2 的谓词组合
-// 形态与 v1 的无条件形态均可载入（读侧向后兼容，载入即映射/升格为 v3），重写
-// 后落盘为 v3。
-const CurrentSchemaVersion = 3
-
-// legacySchemaVersions 为可向后兼容载入的历史结构版本
-// （v1=无条件形态，v2=谓词组合条件形态——载入时映射为等价表达式树）。
-var legacySchemaVersions = map[int]bool{1: true, 2: true}
+// v4：机器规则一律为条件行组合形态（CondxRow 树：目标主体〔文件/目录/序列〕
+// +格式模板/包含词 +终结谓词与锚），生产方（泛化/裁决/问答/集规则）全部直出
+// v4，内置规则退休为例子模板、不再参与求值。v1..v3 旧档停用：结构版本不是 4
+// 的档案整体拒载（零迁移——旧机器规则对用户无保留价值，重置后由新一代生产
+// 方重新生成）。
+const CurrentSchemaVersion = 4
 
 // RuleProfile 为规则档案：一批规则的容器。
 type RuleProfile struct {
-	// SchemaVersion 为档案结构版本，载入时校验。
+	// SchemaVersion 为档案结构版本，载入时校验（非 v4 档案整体拒载）。
 	SchemaVersion int `json:"schemaVersion"`
 	// Rules 为档案内的规则列表。
 	Rules []RuleEntry `json:"rules"`
-	// DisabledBuiltinIDs 为内置规则禁用清单：内置规则在代码内置表、不入档案
-	// 条目，其禁用态由本清单承载——清单内的内置规则 ID 在合并求值点
-	//（EffectiveRules）被排除、不参与求值。字段可选（omitempty），旧档案缺省
-	// 为空清单即全部内置参与求值；清单中不在内置表的 ID 原样保留、无匹配即
-	// 无效果。
-	DisabledBuiltinIDs []string `json:"disabledBuiltinIDs,omitempty"`
 }
 
 // 模式 JSON 的 kind 判别值。
@@ -458,8 +450,6 @@ type ruleEntryJSON struct {
 type ruleProfileJSON struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Rules         []ruleEntryJSON `json:"rules"`
-	// DisabledBuiltinIDs 为内置规则禁用清单（可选字段，语义见 RuleProfile 同名字段）。
-	DisabledBuiltinIDs []string `json:"disabledBuiltinIDs,omitempty"`
 }
 
 // patternToJSON 把模式树递归转为多态中间表示；nil 模式转为 nil。
@@ -1022,7 +1012,6 @@ func collectPatternCaptures(p Pattern, out map[string]bool) {
 func (p RuleProfile) MarshalJSON() ([]byte, error) {
 	out := ruleProfileJSON{
 		SchemaVersion: p.SchemaVersion, Rules: make([]ruleEntryJSON, 0, len(p.Rules)),
-		DisabledBuiltinIDs: p.DisabledBuiltinIDs,
 	}
 	for _, rule := range p.Rules {
 		rj, err := ruleToJSON(rule)
@@ -1043,7 +1032,6 @@ func (p *RuleProfile) UnmarshalJSON(data []byte) error {
 	}
 	profile := RuleProfile{
 		SchemaVersion: in.SchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules)),
-		DisabledBuiltinIDs: in.DisabledBuiltinIDs,
 	}
 	for i := range in.Rules {
 		rule, err := ruleFromJSON(&in.Rules[i])
@@ -1057,13 +1045,14 @@ func (p *RuleProfile) UnmarshalJSON(data []byte) error {
 }
 
 // ParseProfile 从 JSON 数据载入规则档案：反序列化 + 逐条构造校验。
-// 数据不可解析、或结构版本低于已知历史版本时返回 nil 档案与单个错误；历史
-// 版本（v1 无条件形态 / v2 谓词组合条件形态）兼容载入并在内存中升格为当前
-// 版本（v2 条件映射为等价表达式树）；结构版本高于当前版本（未来版本）按尽力
-// 解析载入——记一条版本告警错误（调用方落日志）、未知字段忽略、无法构造的
-// 规则逐条跳过，不中断整体。个别规则构造校验失败（正则编译、深度约束、条件
-// 表达式引用不存在等）只产生含规则 ID 与描述的中文错误并跳过该规则，不阻塞
-// 其余规则载入；无错误时错误列表为空。
+// 结构版本不是当前版本（v4）的档案**整体拒载**——v1..v3 旧档已停用（机器
+// 规则一律由新一代生产方直出 v4，旧机器规则对用户无保留价值），调用方按
+// 「重置规则档案」处置（清空重建，重新识别后由泛化/问答重新生成）。结构
+// 版本高于当前版本（未来版本）按尽力解析载入——记一条版本告警错误（调用
+// 方落日志）、未知字段忽略、无法构造的规则逐条跳过，不中断整体。个别规则
+// 构造校验失败（条件行编译、正则、深度约束、提取引用不存在等）只产生含
+// 规则 ID 与描述的中文错误并跳过该规则，不阻塞其余规则载入；无错误时错误
+// 列表为空。
 func ParseProfile(data []byte) (*RuleProfile, []error) {
 	var in ruleProfileJSON
 	if err := json.Unmarshal(data, &in); err != nil {
@@ -1075,12 +1064,15 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 		errs = append(errs, fmt.Errorf(
 			"规则档案结构版本为 %d，高于当前支持的版本 %d，按尽力解析载入：未知字段将被忽略、无法解析的规则将被跳过，重写后落盘为版本 %d",
 			in.SchemaVersion, CurrentSchemaVersion, CurrentSchemaVersion))
-	case in.SchemaVersion != CurrentSchemaVersion && !legacySchemaVersions[in.SchemaVersion]:
-		return nil, []error{fmt.Errorf("规则档案结构版本为 %d，与当前支持的版本 %d 不一致", in.SchemaVersion, CurrentSchemaVersion)}
+	case in.SchemaVersion != CurrentSchemaVersion:
+		// v1..v3 旧档整体停用：零迁移拒载（含可兼容升格的历史版本——机器
+		// 规则对用户无保留价值，重置后由新一代生产方重新生成）。
+		return nil, []error{fmt.Errorf(
+			"规则档案结构版本为 %d（当前 %d）：旧档案已停用，请重置规则档案（重新识别后可在工作台重新生成规则）",
+			in.SchemaVersion, CurrentSchemaVersion)}
 	}
 	profile := &RuleProfile{
 		SchemaVersion: CurrentSchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules)),
-		DisabledBuiltinIDs: in.DisabledBuiltinIDs,
 	}
 	for i := range in.Rules {
 		rj := &in.Rules[i]

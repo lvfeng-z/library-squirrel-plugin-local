@@ -109,13 +109,34 @@ func TestRunPipelineSiblingGrouping(t *testing.T) {
 	}
 }
 
-// TestRunPipelineBuiltinSeparatorDeclarations 覆盖同目录多格式并存场景：
-// 内置分隔规则（经 EffectiveRules 传入）对「【作者】标题.ext」与「作者 - 标题.ext」
-// 两类文件各自产出 author 与 title 声明，值正确且互不串扰。
-func TestRunPipelineBuiltinSeparatorDeclarations(t *testing.T) {
+// TestRunPipelineExampleTemplateDeclarations 覆盖同目录多格式并存场景（内置
+// 退休后的等价路径=用户从例子模板复制为档案条目）：v4 模板规则（【{作者}】
+// {标题} 与 {作者}_{任意}）对「【作者】标题.ext」与「作者_尾部码.ext」两类
+// 文件各自产出 author 与 title 声明，值正确且互不串扰。
+func TestRunPipelineExampleTemplateDeclarations(t *testing.T) {
+	mustCondRule := func(id, tpl string, extractions ...ExtractionAction) RuleEntry {
+		t.Helper()
+		rows := []CondxRow{{Condition: &Condx{
+			Target: CondxTargetFile,
+			Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+		}}}
+		pattern, err := CompileRuleConditions(rows)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		return RuleEntry{ID: id, Description: "例子模板复制的档案条目", Source: RuleSourceManual,
+			Enabled: true, Conditions: rows, Pattern: pattern, Extractions: extractions}
+	}
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{
+		mustCondRule("tpl-bracket", "【{作者}】{标题}",
+			ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: condxVocab["作者"], Row: 1},
+			ExtractionAction{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1}),
+		mustCondRule("tpl-title-any", "{标题}_{任意}",
+			ExtractionAction{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1}),
+	}}
 	files := []ScanFile{
 		{Path: `E:\lib\混合\【小明】夏天的风.jpg`, FileName: "【小明】夏天的风.jpg", DirNames: []string{"混合"}, RelPath: "混合/【小明】夏天的风.jpg"},
-		{Path: `E:\lib\混合\小明 - 夏天的风.png`, FileName: "小明 - 夏天的风.png", DirNames: []string{"混合"}, RelPath: "混合/小明 - 夏天的风.png"},
+		{Path: `E:\lib\混合\夜航船_code42.png`, FileName: "夜航船_code42.png", DirNames: []string{"混合"}, RelPath: "混合/夜航船_code42.png"},
 	}
 	cases := []struct {
 		fileName   string
@@ -123,10 +144,10 @@ func TestRunPipelineBuiltinSeparatorDeclarations(t *testing.T) {
 		wantAuthor string
 		wantTitle  string
 	}{
-		{"【小明】夏天的风.jpg", builtinRuleIDBracketAuthorTitle, "小明", "夏天的风"},
-		{"小明 - 夏天的风.png", builtinRuleIDDashAuthorTitle, "小明", "夏天的风"},
+		{"【小明】夏天的风.jpg", "tpl-bracket", "小明", "夏天的风"},
+		{"夜航船_code42.png", "tpl-title-any", "", "夜航船"},
 	}
-	decisions := RunPipeline(files, EffectiveRules(nil), nil)
+	decisions := RunPipeline(files, EffectiveRules(profile), nil)
 	byName := decisionsByName(t, decisions)
 	for _, tc := range cases {
 		decision := byName[tc.fileName]
@@ -137,11 +158,26 @@ func TestRunPipelineBuiltinSeparatorDeclarations(t *testing.T) {
 			t.Errorf("%s 的命中规则为 %v，期望 [%s]", tc.fileName, decision.MatchedRuleIDs, tc.wantRuleID)
 		}
 		wantDecls := []MetadataDeclaration{
-			{Dimension: DimAuthor, Value: tc.wantAuthor, Source: SourceFilename, RuleID: tc.wantRuleID},
 			{Dimension: DimTitle, Value: tc.wantTitle, Source: SourceFilename, RuleID: tc.wantRuleID},
 		}
-		if !reflect.DeepEqual(decision.Declarations, wantDecls) {
+		if tc.wantAuthor != "" {
+			wantDecls = append(wantDecls, MetadataDeclaration{Dimension: DimAuthor, Value: tc.wantAuthor, Source: SourceFilename, RuleID: tc.wantRuleID})
+		}
+		if len(decision.Declarations) != len(wantDecls) {
 			t.Errorf("%s 的声明为 %+v，期望 %+v", tc.fileName, decision.Declarations, wantDecls)
+			continue
+		}
+		for _, want := range wantDecls {
+			found := false
+			for _, got := range decision.Declarations {
+				if got == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s 缺少期望声明 %+v，实得 %+v", tc.fileName, want, decision.Declarations)
+			}
 		}
 	}
 }
@@ -198,19 +234,29 @@ func TestRunPipelineNoEffectiveMatches(t *testing.T) {
 	}
 }
 
-// TestRunPipelineUserRulePrecedesBuiltin 覆盖用户规则与内置规则同对象命中的顺序：
-// EffectiveRules 保证用户规则在前，用户侧声明先于内置产生——命中规则 ID 序与
-// 声明序中用户规则均居首。
+// TestRunPipelineUserRulePrecedesBuiltin 覆盖同对象多规则命中的顺序语义（内置
+// 退休后由档案序承载）：EffectiveRules 保持档案顺序，档案内先出现的规则先求值
+// ——命中规则 ID 序与声明序均按档案序排列。
 func TestRunPipelineUserRulePrecedesBuiltin(t *testing.T) {
-	userRule := RuleEntry{
-		ID:          "user-bracket-author",
-		Description: "用户自定义：方括号作者段优先按用户口径提取",
-		Source:      RuleSourceManual,
-		Enabled:     true,
-		Pattern:     mustRegex(t, string(TargetFileName), `^【(?P<`+builtinAuthorCapture+`>[^】]+)】`, []string{builtinAuthorCapture}),
-		Extractions: []ExtractionAction{{Dimension: DimAuthor, From: FromCapture, CaptureName: builtinAuthorCapture}},
+	mustCondRule := func(id, tpl string, extractions ...ExtractionAction) RuleEntry {
+		t.Helper()
+		rows := []CondxRow{{Condition: &Condx{
+			Target: CondxTargetFile,
+			Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+		}}}
+		pattern, err := CompileRuleConditions(rows)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		return RuleEntry{ID: id, Description: "档案序测试条目", Source: RuleSourceManual,
+			Enabled: true, Conditions: rows, Pattern: pattern, Extractions: extractions}
 	}
-	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{userRule}}
+	first := mustCondRule("user-bracket-author", "【{作者}】{任意}",
+		ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: condxVocab["作者"], Row: 1})
+	second := mustCondRule("user-bracket-full", "【{作者}】{标题}",
+		ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: condxVocab["作者"], Row: 1},
+		ExtractionAction{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1})
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{first, second}}
 	files := []ScanFile{
 		{Path: `E:\lib\【小明】夏天的风.jpg`, FileName: "【小明】夏天的风.jpg", DirNames: nil, RelPath: "【小明】夏天的风.jpg"},
 	}
@@ -219,16 +265,16 @@ func TestRunPipelineUserRulePrecedesBuiltin(t *testing.T) {
 		t.Fatalf("结论数 %d，期望 1", len(decisions))
 	}
 	decision := decisions[0]
-	wantIDs := []string{"user-bracket-author", builtinRuleIDBracketAuthorTitle}
+	wantIDs := []string{"user-bracket-author", "user-bracket-full"}
 	if !reflect.DeepEqual(decision.MatchedRuleIDs, wantIDs) {
-		t.Errorf("命中规则为 %v，期望 %v（用户规则在前）", decision.MatchedRuleIDs, wantIDs)
+		t.Errorf("命中规则为 %v，期望 %v（档案序）", decision.MatchedRuleIDs, wantIDs)
 	}
 	wantDecls := []MetadataDeclaration{
 		{Dimension: DimAuthor, Value: "小明", Source: SourceFilename, RuleID: "user-bracket-author"},
-		{Dimension: DimAuthor, Value: "小明", Source: SourceFilename, RuleID: builtinRuleIDBracketAuthorTitle},
-		{Dimension: DimTitle, Value: "夏天的风", Source: SourceFilename, RuleID: builtinRuleIDBracketAuthorTitle},
+		{Dimension: DimAuthor, Value: "小明", Source: SourceFilename, RuleID: "user-bracket-full"},
+		{Dimension: DimTitle, Value: "夏天的风", Source: SourceFilename, RuleID: "user-bracket-full"},
 	}
 	if !reflect.DeepEqual(decision.Declarations, wantDecls) {
-		t.Errorf("声明为 %+v，期望 %+v（用户声明在前）", decision.Declarations, wantDecls)
+		t.Errorf("声明为 %+v，期望 %+v（档案序声明在前）", decision.Declarations, wantDecls)
 	}
 }

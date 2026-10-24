@@ -174,57 +174,35 @@ func TestRuleAdminRejectsInvalidEntries(t *testing.T) {
 	}
 }
 
-// TestBuiltinDisabledAtMergePoint 退出标准3：内置规则加入禁用清单后合并求值不再
-// 产出其声明（EffectiveRules 合并点 + 全管线求值双断言），移除后恢复。
-func TestBuiltinDisabledAtMergePoint(t *testing.T) {
+// TestBuiltinRetiredAtMergePoint 内置退休断言（v4）：ApplySetBuiltinDisabled 恒
+// 回退休错误（不落库）；EffectiveRules 收敛为纯用户档案（nil=空序列）。
+func TestBuiltinRetiredAtMergePoint(t *testing.T) {
 	store := newFakeSessionStore()
 	mgr, _ := newTestManager(t, store)
-	files := []ScanFile{
-		{Path: `E:\lib\混合\【小明】夏天的风.jpg`, FileName: "【小明】夏天的风.jpg", DirNames: []string{"混合"}, RelPath: "混合/【小明】夏天的风.jpg"},
-	}
 
-	// 基线：未禁用时内置括号规则产出 author/title 声明
+	if view, err := mgr.ApplySetBuiltinDisabled("builtin-bracket-author-title", true); err == nil || view != nil {
+		t.Fatalf("内置启停应回退休错误，实际 view=%v err=%v", view, err)
+	}
+	if !strings.Contains(mustErrText(t, mgr, "builtin-bracket-author-title"), "已退休") {
+		t.Fatal("退休错误应含「已退休」")
+	}
 	profile := loadAdminProfile(t, store)
-	if decision := RunPipeline(files, EffectiveRules(profile), nil)[0]; len(decision.Declarations) != 2 {
-		t.Fatalf("基线应产出 2 条声明（author/title），实际 %+v", decision.Declarations)
+	if len(profile.Rules) != 0 {
+		t.Fatalf("退休调用不应落库，实际 %d 条", len(profile.Rules))
 	}
+	if rules := EffectiveRules(nil); len(rules) != 0 {
+		t.Fatalf("无档案时合并求值序列应为空，实际 %d 条", len(rules))
+	}
+}
 
-	// 禁用：档案禁用清单承载，合并求值点应用——求值不再产出其声明
-	if _, err := mgr.ApplySetBuiltinDisabled(builtinRuleIDBracketAuthorTitle, true); err != nil {
-		t.Fatalf("禁用内置规则失败: %v", err)
+// mustErrText 内置启停错误文本（nil 错误即测试失败）。
+func mustErrText(t *testing.T, mgr *SessionManager, id string) string {
+	t.Helper()
+	_, err := mgr.ApplySetBuiltinDisabled(id, true)
+	if err == nil {
+		t.Fatal("内置启停应恒回错误")
 	}
-	profile = loadAdminProfile(t, store)
-	if !reflect.DeepEqual(profile.DisabledBuiltinIDs, []string{builtinRuleIDBracketAuthorTitle}) {
-		t.Fatalf("禁用清单应含该内置 ID，实际 %v", profile.DisabledBuiltinIDs)
-	}
-	effective := EffectiveRules(profile)
-	for _, rule := range effective {
-		if rule.ID == builtinRuleIDBracketAuthorTitle {
-			t.Fatalf("禁用后的内置规则不应出现在合并求值序列")
-		}
-	}
-	decision := RunPipeline(files, effective, nil)[0]
-	if len(decision.Declarations) != 0 || len(decision.MatchedRuleIDs) != 0 {
-		t.Fatalf("禁用后求值不应产出该内置规则的声明/命中，实际声明 %+v 命中 %v",
-			decision.Declarations, decision.MatchedRuleIDs)
-	}
-
-	// 移除恢复：清单移出后声明恢复
-	if _, err := mgr.ApplySetBuiltinDisabled(builtinRuleIDBracketAuthorTitle, false); err != nil {
-		t.Fatalf("恢复内置规则失败: %v", err)
-	}
-	profile = loadAdminProfile(t, store)
-	if len(profile.DisabledBuiltinIDs) != 0 {
-		t.Fatalf("恢复后禁用清单应为空，实际 %v", profile.DisabledBuiltinIDs)
-	}
-	if decision := RunPipeline(files, EffectiveRules(profile), nil)[0]; len(decision.Declarations) != 2 {
-		t.Fatalf("恢复后声明应回归 2 条，实际 %+v", decision.Declarations)
-	}
-
-	// 未知内置 ID 拒绝（防清单积入失效 ID）
-	if _, err := mgr.ApplySetBuiltinDisabled("builtin-不存在", true); err == nil {
-		t.Fatalf("未知内置 ID 应被拒绝")
-	}
+	return err.Error()
 }
 
 // TestProfileBackupAndRollback 退出标准4：改→备份存在→回退→档案恢复前值；回退
@@ -271,25 +249,22 @@ func TestProfileBackupAndRollback(t *testing.T) {
 		t.Fatalf("无备份时回退应报可读错误，实际: %v", err)
 	}
 
-	// 会话管理器路径：内置禁用清单写同样经写前备份；ApplyRollbackProfile 回退后
+	// 会话管理器路径：条目写同样经写前备份；ApplyRollbackProfile 回退后
 	// 视图恢复前值
 	sessionStore := newFakeSessionStore()
 	mgr, _ := newTestManager(t, sessionStore)
 	if _, err := mgr.ApplySaveRule(adminRuleJSON(t, "before-rollback", "回退前规则", true)); err != nil {
 		t.Fatalf("写入回退前规则失败: %v", err)
 	}
-	if _, err := mgr.ApplySetBuiltinDisabled(builtinRuleIDDashAuthorTitle, true); err != nil {
-		t.Fatalf("禁用内置规则失败: %v", err)
+	if _, err := mgr.ApplySaveRule(adminRuleJSON(t, "after-first", "禁用位之后的规则", true)); err != nil {
+		t.Fatalf("写入第二条规则失败: %v", err)
 	}
 	view, err := mgr.ApplyRollbackProfile()
 	if err != nil {
 		t.Fatalf("档案回退失败: %v", err)
 	}
 	if len(view.Rules) != 1 || view.Rules[0].ID != "before-rollback" {
-		t.Fatalf("回退后视图应恢复禁用写之前的档案，实际 %d 条", len(view.Rules))
-	}
-	if len(view.DisabledBuiltinIDs) != 0 {
-		t.Fatalf("回退后禁用清单应为空，实际 %v", view.DisabledBuiltinIDs)
+		t.Fatalf("回退后视图应恢复第二条写之前的档案，实际 %d 条", len(view.Rules))
 	}
 }
 
@@ -300,10 +275,10 @@ func TestRulesActionDispatch(t *testing.T) {
 	store := newFakeSessionStore()
 	mgr, ctx := newTestManager(t, store)
 
-	// getRules：空档案 + 内置表齐全 + 无备份
+	// getRules：空档案 + 例子模板表在场 + 无备份
 	mgr.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 1, Action: workbenchActionGetRules}))
 	resp := ctx.lastResponse(t)
-	if !resp.OK || resp.RulesView == nil || len(resp.RulesView.Rules) != 0 || len(resp.RulesView.Builtins) != len(BuiltinRules()) || resp.RulesView.BackupAvailable {
+	if !resp.OK || resp.RulesView == nil || len(resp.RulesView.Rules) != 0 || len(resp.RulesView.Examples) != len(exampleTemplates()) || resp.RulesView.BackupAvailable {
 		t.Fatalf("getRules 空档案应答不符: %+v", resp.RulesView)
 	}
 
@@ -329,17 +304,17 @@ func TestRulesActionDispatch(t *testing.T) {
 		t.Fatalf("停用应答不符: %+v", resp.RulesView)
 	}
 
-	// setBuiltinDisabled：禁用 + 备份在场（前序写已产生覆写备份）
-	mgr.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 5, Action: workbenchActionSetBuiltinDisabled, BuiltinID: builtinRuleIDBracketAuthorTitle, Disabled: true}))
+	// setBuiltinDisabled：内置退休——恒回错误（不落库、应答不带视图）
+	mgr.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 5, Action: workbenchActionSetBuiltinDisabled, BuiltinID: "builtin-bracket-author-title", Disabled: true}))
 	resp = ctx.lastResponse(t)
-	if !resp.OK || len(resp.RulesView.DisabledBuiltinIDs) != 1 || !resp.RulesView.BackupAvailable {
-		t.Fatalf("内置禁用应答不符: %+v", resp.RulesView)
+	if resp.OK || !strings.Contains(resp.Error, "已退休") || resp.RulesView != nil {
+		t.Fatalf("内置启停应回退休错误且不带视图: %+v", resp)
 	}
 
-	// rollbackProfile：回退撤销的是紧邻的禁用写——dispatch-rule 仍为停用态（seq4）
+	// rollbackProfile：回退撤销的是 seq4 的停用写——dispatch-rule 恢复启用
 	mgr.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 6, Action: workbenchActionRollbackProfile}))
 	resp = ctx.lastResponse(t)
-	if !resp.OK || !resp.RolledBack || len(resp.RulesView.DisabledBuiltinIDs) != 0 || resp.RulesView.Rules[0].Enabled {
+	if !resp.OK || !resp.RolledBack || len(resp.RulesView.Rules) != 1 || !resp.RulesView.Rules[0].Enabled {
 		t.Fatalf("档案回退应答不符: %+v", resp)
 	}
 

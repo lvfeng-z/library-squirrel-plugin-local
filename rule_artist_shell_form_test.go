@@ -23,7 +23,7 @@ import (
 // 下半提取规则=作者←集目录作者捕获、集名←集目录集名捕获，两动作均挂跨层
 // 作者相等条件。
 const artistShellSetDirRuleJSON = `{
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "rules": [
     {
       "id": "manual-artist-set-dir",
@@ -236,7 +236,7 @@ func TestArtistShellSetDirFormCJKCaptureNameRejected(t *testing.T) {
 // 的作者名集）规则才命中。与壳层无关：不写上级 Artist 壳正则，作者域=库内
 // 已有作者全集（任何途径入库的作者都算「已被识别出」）。
 const artistLibPredicateRuleJSON = `{
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "rules": [
     {
       "id": "manual-setdir-author-lib-predicate",
