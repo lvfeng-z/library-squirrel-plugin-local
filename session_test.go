@@ -66,6 +66,9 @@ type publishedEvent struct {
 	data  string
 }
 
+// Infof 观测日志桩（CreateWorkInfo 产出观测等合法调用面，非测试缺口）。
+func (c *workbenchTestCtx) Infof(string, ...any) {}
+
 // workbenchTestCtx 工作台测试用的插件上下文桩：KV 走内存存储、前端事件发布被
 // 记录供断言；其余方法一旦被调用即 panic 暴露测试缺口。
 type workbenchTestCtx struct {
