@@ -143,8 +143,18 @@ type FileConclusion struct {
 // 先按规则流水线求值（注入库内谓词索引；扫描条目构造与 Create 期 buildScanFiles
 // 同构），再逐文件合成终选与待裁决，最后会话赋值按维度覆盖终选声明（特异性
 // 结果压过普适规则）。识别干跑与会话模式的任务创建共用本入口（合并逻辑唯一
-// 实现，两处结论同源）。
+// 实现，两处结论同源）。聚合视图（同目录兄弟/各层子女/子目录数）按本批 files
+// 自聚合——全集语义调用方用 MergedRecognitionWithTree 传全量树。
 func MergedRecognition(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, assigns map[string]SessionAssignment) []FileConclusion {
+	return MergedRecognitionWithTree(files, files, rules, lib, assigns)
+}
+
+// MergedRecognitionWithTree 带全量聚合视图的合并求值：treeFiles 为目录树全量
+// 文件清单（识别增量批时 evalFiles 仅含新目录文件——跨被跳目录的各层子女/
+// 子目录数必须按全量树聚合，否则目录终结谓词（childrenAllFormat/childDirCount
+// 等）在增量轮少计误判）。同目录兄弟仍按本批聚合：mtime 游标按目录整跳，本批
+// 目录的文件集完整。
+func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, assigns map[string]SessionAssignment) []FileConclusion {
 	// 同目录兄弟全集按「父目录」批量构造（与 RunPipeline 内部同键同序）；单文件
 	// 重算通道（recomputeFileDecision）经磁盘重扫预填兄弟全集后共用同一单文件
 	// 合并实现
@@ -153,13 +163,32 @@ func MergedRecognition(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, a
 		key := dirGroupKey(file.DirNames)
 		siblingsByDir[key] = append(siblingsByDir[key], file.FileName)
 	}
+	// 各层子女与子目录数按全量树聚合（v4 目录终结谓词消费；与 RunPipeline
+	// 内部同键同序——AncestorFiles 缺失时子女类谓词保守不命中）
+	treeSiblings := make(map[string][]string, len(treeFiles))
+	childDirsByParent := make(map[string]map[string]struct{})
+	for _, file := range treeFiles {
+		key := dirGroupKey(file.DirNames)
+		treeSiblings[key] = append(treeSiblings[key], file.FileName)
+		for d := 0; d+1 < len(file.DirNames); d++ {
+			parentKey := dirGroupKey(file.DirNames[:d+1])
+			set, ok := childDirsByParent[parentKey]
+			if !ok {
+				set = make(map[string]struct{})
+				childDirsByParent[parentKey] = set
+			}
+			set[file.DirNames[d+1]] = struct{}{}
+		}
+	}
 	// 结构群前置对齐每目录只算一次，成员按相对路径登记，各单文件结论取用
 	structuralByRel := precomputeStructuralMembers(files, rules, lib, siblingsByDir)
 	conclusions := make([]FileConclusion, 0, len(files))
 	for _, file := range files {
 		in := &MatchInput{
 			FileName: file.FileName, DirNames: file.DirNames, RelPath: file.RelPath,
-			Siblings: siblingsByDir[dirGroupKey(file.DirNames)],
+			Siblings:               siblingsByDir[dirGroupKey(file.DirNames)],
+			AncestorFiles:          ancestorFilesLevels(file.DirNames, treeSiblings),
+			AncestorChildDirCounts: ancestorChildDirCounts(file.DirNames, childDirsByParent),
 		}
 		var assign *SessionAssignment
 		if a, ok := assigns[file.RelPath]; ok {
@@ -2084,7 +2113,7 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		Done: indexSize(lib), Total: indexSize(lib),
 	})
 
-	conclusions := MergedRecognition(buildScanFiles(evalFiles), enabledRules, lib, sess.Assignments)
+	conclusions := MergedRecognitionWithTree(buildScanFiles(evalFiles), buildScanFiles(enumRes.AllFiles), enabledRules, lib, sess.Assignments)
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseEvaluate,
 		Done: len(conclusions), Total: len(evalFiles),
