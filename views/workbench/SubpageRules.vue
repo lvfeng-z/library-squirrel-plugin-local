@@ -84,25 +84,21 @@
         @save="onDialogSave"
       />
 
-      <!-- 三、内置规则（代码内置表 · 禁用态存档案禁用清单） -->
+      <!-- 三、例子模板（v4 词条写法参考——内置规则已退休，不参与求值不入档） -->
       <section class="li-rules-card">
         <div class="li-rules-card-head">
-          <h3 class="li-rules-card-title">内置规则 <span class="li-rules-card-note">{{ builtinActiveCount }}/{{ builtins.length }} 参与求值</span></h3>
+          <h3 class="li-rules-card-title">例子模板 <span class="li-rules-card-note">{{ examples.length }} 词条 · 格式写法参考</span></h3>
         </div>
-        <p class="li-rules-hint">内置规则在代码内置表、不占档案条目；禁用态记入档案「内置禁用清单」，合并求值时排除——禁用等价于从求值中移除，可随时恢复</p>
-        <div v-for="b in builtins" :key="b.id" class="li-rules-row">
-          <el-switch
-            size="small"
-            :model-value="!b.disabled"
-            :loading="acting"
-            @change="doToggleBuiltin(b, $event === true)"
-          />
+        <p class="li-rules-hint">
+          例子模板是 v4 条件格式的写法参考（不参与求值、不入档案）：新建/编辑规则时在格式步点词条区同名 chips
+          可一步预填；占位词词表为封闭集（作者/集名/序号/标题/标签/作品号/日期/键/任意）
+        </p>
+        <div v-for="ex in examples" :key="ex.name" class="li-rules-row">
           <div class="li-rules-row-main">
-            <div class="li-rules-row-desc" :title="b.description">{{ b.description }}</div>
-            <div class="li-rules-row-id" :title="b.id">{{ b.id }}</div>
+            <div class="li-rules-row-desc" :title="ex.description">{{ ex.name }}</div>
+            <div class="li-rules-row-id">{{ ex.template }}</div>
           </div>
-          <el-tag size="small" type="info">内置</el-tag>
-          <el-tag v-if="b.disabled" size="small" type="warning">已禁用</el-tag>
+          <el-tag size="small" type="info">{{ targetLabel(ex.target) }}</el-tag>
         </div>
       </section>
 
@@ -122,7 +118,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { Events } from '@wailsio/runtime'
 import RuleEditDialog from './RuleEditDialog.vue'
 
@@ -150,29 +146,31 @@ interface DimPolicyView {
   strategy: string
 }
 
-// 档案规则条目（ruleEntryJSON 形态：pattern / extractions 即 JSON 片段源）
+// 档案规则条目（ruleEntryJSON 形态：conditions / extractions 即 JSON 片段源——
+// v4 档案条件只落 conditions，模式树为编译缓存不落档）
 interface RuleEntryView {
   id: string
   description: string
   source: string
   enabled: boolean
-  pattern: unknown
+  conditions?: unknown
   extractions?: unknown
   synthesis?: { dimPolicies?: DimPolicyView[] | null; roles?: RoleBindingView[] | null }
 }
 
-interface BuiltinRuleView {
-  id: string
+// 例子模板词条（v4 写法参考，不参与求值不入档）。
+interface ExampleTemplateView {
+  name: string
+  template: string
+  target: string
   description: string
-  disabled: boolean
 }
 
 interface RulesAdminView {
   schemaVersion: number
   rules: RuleEntryView[]
   warnings?: string[]
-  disabledBuiltinIDs?: string[]
-  builtins: BuiltinRuleView[]
+  examples?: ExampleTemplateView[]
   backupAvailable: boolean
 }
 
@@ -215,10 +213,15 @@ const actionError = ref('')
 const acting = ref(false)
 
 const rules = ref<RuleEntryView[]>([])
-const builtins = ref<BuiltinRuleView[]>([])
+const examples = ref<ExampleTemplateView[]>([])
 const warnings = ref<string[]>([])
 const backupAvailable = ref(false)
-const builtinActiveCount = computed(() => builtins.value.filter((b) => !b.disabled).length)
+
+function targetLabel(target: string): string {
+  if (target === 'dir') return '目录'
+  if (target === 'seq') return '序列'
+  return '文件'
+}
 
 let seq = 0
 let offResponse: (() => void) | null = null
@@ -294,7 +297,7 @@ async function restoreSession(): Promise<boolean> {
 function applyRulesView(view: RulesAdminView | undefined | null): void {
   if (!view) return
   rules.value = view.rules || []
-  builtins.value = view.builtins || []
+  examples.value = view.examples || []
   warnings.value = view.warnings || []
   backupAvailable.value = view.backupAvailable === true
 }
@@ -313,7 +316,7 @@ async function loadRules(): Promise<void> {
 function openRuleById(ruleId: string): void {
   const rule = rules.value.find((r) => r.id === ruleId)
   if (!rule) {
-    actionError.value = `未在规则档案中找到规则「${ruleId}」（可能已被删除；内置规则不在档案条目内）`
+    actionError.value = `未在规则档案中找到规则「${ruleId}」（可能已被删除）`
     return
   }
   openEdit(rule)
@@ -349,15 +352,15 @@ async function doDeleteRule(rule: RuleEntryView): Promise<void> {
 
 // —— 二、单条编辑（两段式弹窗 · 剧本F，共用组件 RuleEditDialog） ——
 
-// 弹窗初始载荷（RuleEditDialog rule 模式入参的结构投影；pattern/extractions 即
-// 档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑）
+// 弹窗初始载荷（RuleEditDialog rule 模式入参的结构投影；conditions/extractions
+// 即档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑）
 interface RuleDialogInput {
   id: string
   description: string
   source: string
   enabled: boolean
   isNew: boolean
-  pattern: unknown
+  conditions?: unknown
   extractions: unknown
   synthesis: { dimPolicies: DimPolicyView[]; roles: RoleBindingView[] }
 }
@@ -386,8 +389,8 @@ function sourceTagType(source: string): 'info' | 'success' | 'warning' | 'danger
   return 'info'
 }
 
-// 新建：空载荷入弹窗（新建样例〔pattern.captures 与 extractions.captureName 同名
-// 呼应〕由弹窗侧缺省带入）
+// 新建：空载荷入弹窗（v4 缺省样例〔【{作者}】{标题} 行 + 作者/标题提取行〕
+// 由弹窗侧缺省带入）
 function openNew(): void {
   dialogRule.value = {
     id: '',
@@ -395,7 +398,7 @@ function openNew(): void {
     source: 'manual',
     enabled: true,
     isNew: true,
-    pattern: null,
+    conditions: null,
     extractions: null,
     synthesis: { dimPolicies: [], roles: [] }
   }
@@ -412,7 +415,7 @@ function openEdit(rule: RuleEntryView): void {
     source: rule.source,
     enabled: rule.enabled,
     isNew: false,
-    pattern: rule.pattern,
+    conditions: rule.conditions ?? null,
     extractions: rule.extractions ?? [],
     synthesis: {
       dimPolicies: ((synth.dimPolicies || []) as DimPolicyView[]).map((d) => ({ dimension: d.dimension, strategy: d.strategy })),
@@ -443,20 +446,7 @@ async function onDialogSave(payload: Record<string, unknown>): Promise<void> {
   dialogVisible.value = false
 }
 
-// —— 三、内置规则启停（档案禁用清单承载） ——
-
-async function doToggleBuiltin(builtin: BuiltinRuleView, enable: boolean): Promise<void> {
-  acting.value = true
-  actionError.value = ''
-  const resp = await request('setBuiltinDisabled', { builtinId: builtin.id, disabled: !enable })
-  acting.value = false
-  if (!resp.ok) {
-    actionError.value = resp.error || '内置规则启停失败'
-    return
-  }
-  applyRulesView(resp.rulesView)
-  notice.value = `内置规则「${builtin.id}」已${enable ? '恢复参与求值' : '禁用（合并求值排除）'}`
-}
+// —— 三、内置启停已随 v4 退休（例子模板为纯参考词条，无启停） ——
 
 // —— 四、档案备份回退一代 ——
 
