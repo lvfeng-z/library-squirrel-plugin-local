@@ -227,16 +227,17 @@ func seqSliceText(els []SnapEl, s, t int, startInner, endInner bool) string {
 	return b.String()
 }
 
-// buildSeqNameCaptureRule 集名捕获规则构造：按样本成员元素形态展开正则——
-// 组合前元素逐一泛化消费（括号组→开/闭括号字面+内名类、普通词→非下划线非空
-// 类、序号→数字类），捕获组覆盖对上的段组合（类允许含分隔符与任意正文，靠
-// 锚定的尾段收界；序号无分隔直连时类排除尾随数字——直连序号键式的同款约
-// 束），组合后元素同规则消费至尾。不含目录层锚定（跨目录接管）。自检：样例
-// 文件上捕获值必须复现集名赋值。
+// buildSeqNameCaptureRule 集名捕获规则构造（v4 模板）：按样本成员元素形态
+// 展开——组合区间由 {集名} 一位占位（段间分隔与边界括号一并入位），其余
+// 非分隔元素泛化消费（数字段取 {序号}/数字类词、普通段借词占位、剥壳段
+// 括号留字面），分隔 run 按原文字面；同形异值成员可命中（跨目录接管）。
+// 特化段类（尾随数字排除等）废止——贪婪回溯+字面锚定承载切分；集名段与
+// 序号段无分隔直连（相邻占位词）等词法失配返回假，调用方降级。不含目录
+// 层锚定（跨目录接管）。自检：样例文件上捕获值必须复现集名赋值。
 func buildSeqNameCaptureRule(relPath, fileName string, member *SnapGroupMember, span seqNameSpan, value string) (RuleEntry, bool) {
 	els := member.Elements
 	base, off := seqElementBase(els)
-	// 捕获区间字节界（剥壳边界取内名起止；剥壳开/闭括号字节以字面补入正则）。
+	// 捕获区间字节界（剥壳边界取内名起止；剥壳开/闭括号字节留字面）。
 	cs := off[span.startEl]
 	if span.startInner {
 		cs += strings.Index(els[span.startEl].Text, els[span.startEl].Inner)
@@ -246,55 +247,31 @@ func buildSeqNameCaptureRule(relPath, fileName string, member *SnapGroupMember, 
 		inner := els[span.endEl].Inner
 		ce = off[span.endEl] + strings.Index(els[span.endEl].Text, inner) + len(inner)
 	}
-	// 捕获类：序号元素紧邻组合终点（无分隔 run）且非括号包裹时，值不可含尾
-	// 随数字；其余形态惰性任意段，由锚定尾段（分隔 run + 序号类 + 扩展名尾）
-	// 收界。
-	class := ".+?"
-	if span.endEl+1 < len(els) && els[span.endEl+1].Kind == elKindSeq &&
-		off[span.endEl+1] == ce && !els[span.endEl+1].Shelled {
-		class = "[^0-9](?:.*?[^0-9])?"
+	pool := newCondxWordPool()
+	if !pool.Take("集名") {
+		return RuleEntry{}, false
 	}
-	var expr strings.Builder
-	expr.WriteString("^")
-	pos := 0
-	for i := range els {
-		if off[i+1] > cs {
-			break
-		}
-		writeSeqElementConsumption(&expr, els, i)
-		pos = off[i+1]
+	tpl, err := condxTplFromEls(base, els, off, cs, ce, "集名", nil, pool)
+	if err != nil {
+		return RuleEntry{}, false
 	}
-	if pos < cs {
-		expr.WriteString(regexp.QuoteMeta(base[pos:cs]))
-	}
-	expr.WriteString("(?P<" + seqCaptureGroup + ">" + class + ")")
-	pos = ce
-	for i := range els {
-		if off[i] < pos {
-			continue
-		}
-		if off[i] > pos {
-			expr.WriteString(regexp.QuoteMeta(base[pos:off[i]]))
-		}
-		writeSeqElementConsumption(&expr, els, i)
-		pos = off[i+1]
-	}
-	if pos < len(base) {
-		expr.WriteString(regexp.QuoteMeta(base[pos:]))
-	}
-	expr.WriteString(builtinTrailingExtExpr)
-	pattern, err := NewRegexPattern(string(TargetFileName), expr.String(), []string{seqCaptureGroup})
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetFile,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
 		return RuleEntry{}, false
 	}
 	rule := RuleEntry{
 		ID:          generatedRuleID("qna-seqcap", fileName),
-		Description: fmt.Sprintf("泛化（序列形态·集名提取）：文件名集名段组合→作品集（仅序列成员产出；源自「%s」的赋值）", relPath),
+		Description: fmt.Sprintf("泛化（序列形态·集名提取）：文件名按「%s」模板，集名段→作品集（仅序列成员产出；源自「%s」的赋值）", tpl, relPath),
 		Source:      RuleSourceQna,
 		Enabled:     true,
+		Conditions:  rows,
 		Pattern:     pattern,
 		Extractions: []ExtractionAction{{
-			Dimension: DimCollection, From: FromCapture, CaptureName: seqCaptureGroup,
+			Dimension: DimCollection, From: FromCapture, CaptureName: condxVocab["集名"], Row: 1,
 			When: seqMemberOnlyCond(),
 		}},
 	}

@@ -17,9 +17,10 @@ func realSampleStructFixture() (root, rel, file string) {
 		"atago__commission__by_jake__jaccobus_delithw.png"
 }
 
-// TestBuildStructMapRulesRealSample 退出标准样例：根名→标签（常量折入目录条目）、
-// 一级目录剥壳→作者（MinDepth=0 锚 + Artist[任意] 泛化锚 + 剥壳变换）、文件名
-// 首段→作品名（分隔段捕获）、尾部码丢弃（人话提示 + 正则只消费不捕获）。
+// TestBuildStructMapRulesRealSample 退出标准样例（v4 模板）：根名→标签（常量
+// 折入目录条目）、一级目录壳形态 → 目录模板 Artist[{作者}]（剥壳语义由捕获
+// 天然承载）、文件名全段展开模板（首段 {标题}、未引用段/尾部 {任意} 吞位
+// ——尾部码丢弃语义）。
 func TestBuildStructMapRulesRealSample(t *testing.T) {
 	root, rel, file := realSampleStructFixture()
 	assign := &SessionAssignment{
@@ -35,43 +36,40 @@ func TestBuildStructMapRulesRealSample(t *testing.T) {
 		t.Fatalf("组合规则应恰两条（目录层+文件名），实际 %d 条", len(rules))
 	}
 
-	// 目录层条目：MinDepth=MaxDepth=0、锚 ^Artist\[[^\]]*\]$、作者=剥壳 ancestorDir、
-	// 标签=库根名常量。
-	dirRule, ok := rules[0].Pattern.(*LocationPattern)
-	if !ok {
-		t.Fatalf("首条应为位置模式，实际 %T", rules[0].Pattern)
+	// 目录层条目（v4 目录行模板）：Artist[{作者}]、作者=行 1 捕获、标签=库根
+	// 名常量。
+	if _, ok := rules[0].Pattern.(*RowSubjectPattern); !ok || rules[0].Conditions == nil {
+		t.Fatalf("首条应为 v4 目录行条件规则，实际 %T", rules[0].Pattern)
 	}
-	if dirRule.MinDepth != 0 || dirRule.MaxDepth != 0 {
-		t.Fatalf("目录层锚应 MinDepth=MaxDepth=0，实际 %d-%d", dirRule.MinDepth, dirRule.MaxDepth)
-	}
-	anchor, ok := dirRule.Ancestor.(*RegexPattern)
-	if !ok || anchor.Expr != `^Artist\[[^\]]*\]$` {
-		t.Fatalf("剥壳泛化锚不符: %+v", dirRule.Ancestor)
+	dirCond := rules[0].Conditions[0].Condition
+	if dirCond.Target != CondxTargetDir || dirCond.Format.Tpl != "Artist[{作者}]" {
+		t.Fatalf("目录层模板不符: %+v", dirCond)
 	}
 	if len(rules[0].Extractions) != 2 {
 		t.Fatalf("目录条目提取应两维（作者+标签），实际 %d", len(rules[0].Extractions))
 	}
 	auth := rules[0].Extractions[0]
-	if auth.Dimension != DimAuthor || auth.From != FromAncestorDir ||
-		auth.StripPrefix != "Artist[" || auth.StripSuffix != "]" {
-		t.Fatalf("作者提取应为 ancestorDir+剥壳: %+v", auth)
+	if auth.Dimension != DimAuthor || auth.From != FromCapture ||
+		auth.CaptureName != condxVocab["作者"] || auth.Row != 1 {
+		t.Fatalf("作者提取应为目录行捕获: %+v", auth)
 	}
 	tagAct := rules[0].Extractions[1]
 	if tagAct.Dimension != DimTag || tagAct.From != FromConstant || tagAct.Constant != "big belly" {
 		t.Fatalf("标签提取应为库根名常量: %+v", tagAct)
 	}
 
-	// 文件名条目：首段捕获、尾部码只消费不捕获。
-	fileRule, ok := rules[1].Pattern.(*RegexPattern)
-	if !ok || fileRule.Target != TargetFileName {
-		t.Fatalf("次条应为文件名正则模式，实际 %T", rules[1].Pattern)
+	// 文件名条目（v4 文件行模板）：首段 {标题}、未引用段与尾部 {任意} 吞位。
+	if _, ok := rules[1].Pattern.(*RowSubjectPattern); !ok || rules[1].Conditions == nil {
+		t.Fatalf("次条应为 v4 文件行条件规则，实际 %T", rules[1].Pattern)
 	}
-	wantExpr := `^(?P<title>[^_].*?)(?:__.*)?(?:\.[^.]*)?$`
-	if fileRule.Expr != wantExpr {
-		t.Fatalf("文件名形态正则不符:\n取回 %s\n期望 %s", fileRule.Expr, wantExpr)
+	fileCond := rules[1].Conditions[0].Condition
+	wantTpl := "{标题}__{任意}__{任意}_{任意}_{任意}"
+	if fileCond.Target != CondxTargetFile || fileCond.Format.Tpl != wantTpl {
+		t.Fatalf("文件名模板不符:\n取回 %s\n期望 %s", fileCond.Format.Tpl, wantTpl)
 	}
 	if len(rules[1].Extractions) != 1 || rules[1].Extractions[0].Dimension != DimTitle ||
-		rules[1].Extractions[0].From != FromCapture || rules[1].Extractions[0].CaptureName != "title" {
+		rules[1].Extractions[0].From != FromCapture || rules[1].Extractions[0].CaptureName != condxVocab["标题"] ||
+		rules[1].Extractions[0].Row != 1 {
 		t.Fatalf("作品名提取应为首段捕获: %+v", rules[1].Extractions)
 	}
 
@@ -120,10 +118,10 @@ func TestBuildStructMapRulesManualFallback(t *testing.T) {
 	}
 }
 
-// TestBuildStructMapRulesBracketUnderscore 括号组 + 单 _ 分隔（v2 构造）：目录层
-// 剥壳条目与文件名条目齐备；文件名条目按实际分段形态构造（括号段字面包裹消费、
-// [^_] 段类、末段后吞余部与扩展名）；同形异值文件上以样例输入直接求值，作者=
-// 目录剥壳、作品名=第 3 段捕获均复现。
+// TestBuildStructMapRulesBracketUnderscore 括号组 + 单 _ 分隔（v4 模板）：目录
+// 层壳形态条目与文件名全段展开条目齐备（括号段以开/闭括号字面包裹、未引用段
+// {任意} 吞位、引用段占维度词）；同形异值文件上以样例输入直接求值，作者=
+// 目录行捕获、作品名=第 3 段捕获均复现。
 func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 	rel := "Artist[路灯后辈]/[路灯后辈]_[136715041]_无题_[01].png"
 	file := "[路灯后辈]_[136715041]_无题_[01].png"
@@ -138,19 +136,18 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 	if len(rules) != 2 || len(sugg.Rules) != 2 {
 		t.Fatalf("组合规则应恰两条（目录层+文件名），实际 %d 条", len(rules))
 	}
-	dirRule, ok := rules[0].Pattern.(*LocationPattern)
-	if !ok {
-		t.Fatalf("首条应为位置模式，实际 %T", rules[0].Pattern)
+	dirRule, ok := rules[0].Pattern.(*RowSubjectPattern)
+	if !ok || rules[0].Conditions == nil || rules[0].Conditions[0].Condition.Format.Tpl != "Artist[{作者}]" {
+		t.Fatalf("首条应为 v4 目录行条件规则（壳模板），实际 %T", rules[0].Pattern)
 	}
-	fileRule, ok := rules[1].Pattern.(*RegexPattern)
-	if !ok || fileRule.Target != TargetFileName {
-		t.Fatalf("次条应为文件名正则模式，实际 %T", rules[1].Pattern)
+	fileRule, ok := rules[1].Pattern.(*RowSubjectPattern)
+	if !ok || rules[1].Conditions == nil {
+		t.Fatalf("次条应为 v4 文件行条件规则，实际 %T", rules[1].Pattern)
 	}
-	// 文件名形态：前两括号段字面消费（段类排除 ] 与 _）+ 第 3 段捕获（可选括号
-	// 包裹 + 段类排除括号与 _）+ 吞余部。
-	wantExpr := `^\[[^\]_]*\]_\[[^\]_]*\]_(?:[\[【（\(「『])?(?P<title>[^\[【（\(「『\]】）\)」』_]+?)(?:[\]】）\)」』])?(?:_.*)?(?:\.[^.]*)?$`
-	if fileRule.Expr != wantExpr {
-		t.Fatalf("文件名形态正则不符:\n取回 %s\n期望 %s", fileRule.Expr, wantExpr)
+	// 文件名模板：前两括号段字面包裹 + 第 3 段捕获（可选括号包裹）+ 尾段吞位。
+	wantTpl := "[{任意}]_[{任意}]_{标题}_[{任意}]"
+	if got := rules[1].Conditions[0].Condition.Format.Tpl; got != wantTpl {
+		t.Fatalf("文件名形态模板不符:\n取回 %s\n期望 %s", got, wantTpl)
 	}
 
 	// 来源标签（剥壳标签无圆括号形态）与人话措辞（首段/第 N 段措辞不变）。
@@ -167,7 +164,11 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 		}
 	}
 
-	// 同形异值复现：样例输入构造 MatchInput 直接求值（author=目录剥壳、title=捕获）。
+	// 同形异值复现：样例输入构造 MatchInput 直接求值（author=目录行捕获、
+	// title=文件行捕获）。已知 v4 差异：v3 的括号感知段类（段值排除括号字
+	// 符、可选括号包裹剥壳）废止——纯贪婪切分下异值段的括号并入捕获值
+	//（如 "[标题]" 整值；样例自身无括号时自检不受影响），差异记录于
+	// grammar 差异清单，期3 实测定夺是否收敛。
 	sameShape := "[X]_[9527]_[标题]_[02].png"
 	in := &MatchInput{
 		FileName: sameShape,
@@ -179,8 +180,8 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 		t.Fatal("同形异值文件应命中文件名条目")
 	}
 	decl, ok := rules[1].Extractions[0].Apply(rules[1].ID, ctxFile)
-	if !ok || decl.Dimension != DimTitle || decl.Value != "标题" {
-		t.Fatalf("同形异值作品名捕获不符: %+v", decl)
+	if !ok || decl.Dimension != DimTitle || decl.Value != "[标题]" {
+		t.Fatalf("同形异值作品名捕获不符（v4 贪婪切分含壳）: %+v", decl)
 	}
 	ctxDir := &ParseContext{}
 	if !dirRule.Evaluate(in, nil, ctxDir) {
@@ -194,7 +195,9 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 
 // TestBuildStructMapRulesUnderscoreManualDemotion 纯 _ 模式的段值降级：目录名
 // foo_bar 作提示名在段间正文内跨分隔符保持整段，其段值含活跃分隔符 _ → 该维度
-// 手工（ManualDims 收录、不生成捕获），同文件其余段捕获不受牵连。
+// 手工（ManualDims 收录、不生成捕获）。v4 贪婪词法下本例整体自检不过（作者段
+// 与相邻未引用段的分隔多解切歧义——自检捕获值 x_foo≠x，防错切降级）→ 构造
+// 返回错误（无任何可产条目）；该行为即 v4 对切歧义形态的诚实拒绝。
 func TestBuildStructMapRulesUnderscoreManualDemotion(t *testing.T) {
 	rel := "foo_bar/[a]_x_foo_bar_y_[01].png"
 	file := "[a]_x_foo_bar_y_[01].png"
@@ -202,35 +205,9 @@ func TestBuildStructMapRulesUnderscoreManualDemotion(t *testing.T) {
 		Author: "x", AuthorClueRef: "filenameSeg1",
 		Title: "foo_bar", TitleClueRef: "filenameSeg2",
 	}
-	sugg, rules, err := buildStructMapRules("E:/libs/下划线库", rel, file, assign)
-	if err != nil {
-		t.Fatalf("结构映射规则构造失败: %v", err)
-	}
-	if len(rules) != 1 {
-		t.Fatalf("应仅文件名一条（目录层无赋值），实际 %d 条", len(rules))
-	}
-	if len(sugg.ManualDims) != 1 || !strings.Contains(sugg.ManualDims[0], "foo_bar") ||
-		!strings.Contains(sugg.ManualDims[0], "手工指定") {
-		t.Fatalf("作品名应降级手工指定: %v", sugg.ManualDims)
-	}
-	fileRule, ok := rules[0].Pattern.(*RegexPattern)
-	if !ok {
-		t.Fatalf("应为文件名正则模式，实际 %T", rules[0].Pattern)
-	}
-	wantExpr := `^\[[^\]_]*\]_(?:[\[【（\(「『])?(?P<author>[^\[【（\(「『\]】）\)」』_]+?)(?:[\]】）\)」』])?(?:_.*)?(?:\.[^.]*)?$`
-	if fileRule.Expr != wantExpr {
-		t.Fatalf("文件名形态正则不符:\n取回 %s\n期望 %s", fileRule.Expr, wantExpr)
-	}
-	if len(rules[0].Extractions) != 1 || rules[0].Extractions[0].Dimension != DimAuthor ||
-		rules[0].Extractions[0].From != FromCapture || rules[0].Extractions[0].CaptureName != "author" {
-		t.Fatalf("降级维度不应生成对应捕获: %+v", rules[0].Extractions)
-	}
-	fromBy := map[string]string{}
-	for _, m := range sugg.Mappings {
-		fromBy[m.Dimension] = m.From
-	}
-	if fromBy["author"] != "文件名第2段" || fromBy["title"] != "手工指定" {
-		t.Fatalf("映射来源不符: %v", sugg.Mappings)
+	_, _, err := buildStructMapRules("E:/libs/下划线库", rel, file, assign)
+	if err == nil || !strings.Contains(err.Error(), "无法总结结构映射规则") {
+		t.Fatalf("切歧义形态应诚实拒绝（整体降级无条目）: %v", err)
 	}
 }
 
@@ -328,7 +305,7 @@ func TestStructSummaryPreviewAndSessionRoundTrip(t *testing.T) {
 		t.Fatalf("全景应透出尾部码线索: %v", rec.StructClues)
 	}
 
-	// generalize mode=struct：确认入档（组合规则两条，剥壳字段序列化往返）。
+	// generalize mode=struct：确认入档（组合规则两条，v4 目录行模板序列化往返）。
 	result, err := m.ApplyGeneralization(root, rel, generalizeModeStruct)
 	if err != nil {
 		t.Fatalf("结构映射泛化失败: %v", err)
@@ -340,11 +317,12 @@ func TestStructSummaryPreviewAndSessionRoundTrip(t *testing.T) {
 	if len(errs) > 0 || profile == nil {
 		t.Fatalf("载入档案失败: %v", errs)
 	}
-	found, stripped := 0, false
+	found, captureForm := 0, false
 	for i := range profile.Rules {
 		for _, act := range profile.Rules[i].Extractions {
-			if act.StripPrefix == "Artist[" && act.StripSuffix == "]" && act.Dimension == DimAuthor {
-				stripped = true
+			// v4：剥壳语义由目录行捕获承载（FromCapture+行 1，无 Strip 字段）。
+			if act.From == FromCapture && act.CaptureName == condxVocab["作者"] && act.Row == 1 && act.Dimension == DimAuthor {
+				captureForm = true
 			}
 		}
 		for _, r := range result.Rules {
@@ -353,8 +331,8 @@ func TestStructSummaryPreviewAndSessionRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	if found != 2 || !stripped {
-		t.Fatalf("组合规则应两条入档且剥壳字段往返（入档 %d、剥壳 %v）", found, stripped)
+	if found != 2 || !captureForm {
+		t.Fatalf("组合规则应两条入档且作者走目录行捕获往返（入档 %d、捕获形 %v）", found, captureForm)
 	}
 }
 

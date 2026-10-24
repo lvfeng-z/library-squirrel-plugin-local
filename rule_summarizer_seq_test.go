@@ -98,9 +98,9 @@ func TestSeqFormSuggestionUserShape(t *testing.T) {
 		t.Fatalf("序列形态建议应恰两条（sibling 形态跟随 + 集名捕获），实际 %d 条", len(sugg.Rules))
 	}
 
-	// 条目模式形态（建议与入档共用构造）：sibling 形态跟随（括号序号提取式）
-	// + 集名捕获正则（无目录层锚定：模式即文件名正则，捕获组=段组合——类允许
-	// 含分隔符，靠锚定尾段 `_[序号](扩展名)$` 收界）。
+	// 条目模式形态（建议与入档共用构造，v4 模板）：sibling 形态跟随（序列
+	// 成员模板）+ 集名捕获（文件名全元素展开模板——语义元素占同名词、集名
+	// 组合 {集名} 一位、序号 {序号}，无目录层锚定）。
 	sess, err := m.SessionOf(root)
 	if err != nil {
 		t.Fatalf("读取会话失败: %v", err)
@@ -117,16 +117,16 @@ func TestSeqFormSuggestionUserShape(t *testing.T) {
 		out.rules[0].Conditions[0].Condition.Format.Tpl != "{键}_[{序号}]" {
 		t.Fatalf("sibling 形态跟随模板不符（{键} 全前缀 + 方括号序号）: %+v", out.rules[0].Conditions)
 	}
-	capture, ok := out.rules[1].Pattern.(*RegexPattern)
-	if !ok {
-		t.Fatalf("次条应为集名捕获正则规则，实际 %T", out.rules[1].Pattern)
+	if _, ok := out.rules[1].Pattern.(*RowSubjectPattern); !ok || out.rules[1].Conditions == nil {
+		t.Fatalf("次条应为 v4 文件行条件集名捕获规则，实际 %T", out.rules[1].Pattern)
 	}
-	wantExpr := `^\[[^\]]*\]_\[[^\]]*\]_(?P<collection>.+?)_\[\d{1,4}\](?:\.[^.]*)?$`
-	if capture.Target != TargetFileName || capture.Expr != wantExpr || len(capture.Captures) != 1 || capture.Captures[0] != "collection" {
-		t.Fatalf("集名捕获模式不符:\n取回 %s\n期望 %s", capture.Expr, wantExpr)
+	wantTpl := "[{作者}]_[{作品号}]_{集名}_[{序号}]"
+	if capCond := out.rules[1].Conditions[0].Condition; capCond.Target != CondxTargetFile || capCond.Format.Tpl != wantTpl {
+		t.Fatalf("集名捕获模板不符:\n取回 %s\n期望 %s", capCond.Format.Tpl, wantTpl)
 	}
-	if len(out.rules[1].Extractions) != 1 || out.rules[1].Extractions[0].When == nil {
-		t.Fatalf("捕获条目应恰一条带 when 原子的提取动作: %+v", out.rules[1].Extractions)
+	if len(out.rules[1].Extractions) != 1 || out.rules[1].Extractions[0].When == nil ||
+		out.rules[1].Extractions[0].CaptureName != condxVocab["集名"] || out.rules[1].Extractions[0].Row != 1 {
+		t.Fatalf("捕获条目应恰一条带 when 原子的行 1 捕获提取动作: %+v", out.rules[1].Extractions)
 	}
 
 	// 命中预览：本目录其余 2 成员 + 跨目录同形序列 2 成员；样例取跨目录在前。
@@ -176,9 +176,8 @@ func TestSeqFormSuggestionWholeKey(t *testing.T) {
 	if !out.matched || len(out.rules) != 2 {
 		t.Fatalf("整键捕获构造应成立: matched=%v", out.matched)
 	}
-	capture, ok := out.rules[1].Pattern.(*RegexPattern)
-	if !ok || capture.Expr != `^(?P<collection>.+?)_\[\d{1,4}\](?:\.[^.]*)?$` {
-		t.Fatalf("整键捕获模式不符: %+v", out.rules[1].Pattern)
+	if _, ok := out.rules[1].Pattern.(*RowSubjectPattern); !ok || out.rules[1].Conditions == nil || out.rules[1].Conditions[0].Condition.Format.Tpl != `{集名}_[{序号}]` {
+		t.Fatalf("整键捕获模板不符: %+v", out.rules[1].Conditions)
 	}
 }
 
@@ -212,9 +211,8 @@ func TestSeqFormSuggestionMultiElementSpan(t *testing.T) {
 	if !out.matched {
 		t.Fatal("跨段组合匹配应成立")
 	}
-	capture, ok := out.rules[1].Pattern.(*RegexPattern)
-	if !ok || capture.Expr != `^(?P<collection>.+?)_\[\d{1,4}\](?:\.[^.]*)?$` {
-		t.Fatalf("跨段捕获模式不符（捕获类允许含分隔符）: %+v", out.rules[1].Pattern)
+	if _, ok := out.rules[1].Pattern.(*RowSubjectPattern); !ok || out.rules[1].Conditions == nil || out.rules[1].Conditions[0].Condition.Format.Tpl != `{集名}_[{序号}]` {
+		t.Fatalf("跨段捕获模板不符（{集名} 一位盖整段组合）: %+v", out.rules[1].Conditions)
 	}
 }
 

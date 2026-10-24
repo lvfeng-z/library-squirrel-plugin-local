@@ -224,12 +224,13 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 		if firstDirIdx >= 0 {
 			rules[firstDirIdx].Extractions = append(rules[firstDirIdx].Extractions, action)
 		} else {
-			ancestor, err := NewRegexPattern(string(TargetFileName), "^.*$", nil)
-			if err != nil {
-				s.manual = true
-				continue
-			}
-			location, err := NewLocationPattern(0, -1, ancestor)
+			// 兜底条目（v4）：任意祖先层命中（{标题} 通配目录模板）承载常量
+			// 折入——命中本身无语义，取值全走常量。
+			rows := []CondxRow{{Condition: &Condx{
+				Target: CondxTargetDir,
+				Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "{标题}"},
+			}}}
+			pattern, err := CompileRuleConditions(rows)
 			if err != nil {
 				s.manual = true
 				continue
@@ -239,7 +240,8 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 				Description: fmt.Sprintf("泛化（结构映射·库根名）：库根名「%s」声明%s（源自「%s」的赋值）", s.clue.Value, qnaDimensionLabel(s.dim), relPath),
 				Source:      RuleSourceQna,
 				Enabled:     true,
-				Pattern:     location,
+				Conditions:  rows,
+				Pattern:     pattern,
 				Extractions: []ExtractionAction{action},
 			})
 			firstDirIdx = len(rules) - 1
@@ -293,45 +295,66 @@ type structDirPlan struct {
 }
 
 // build 构造目录层规则条目并自检（锚定样例目录层、逐槽提取值=赋值值）。
+// build 目录层条目构造（v4）：壳形态（前缀+内名+后缀）→ 目录模板
+// 前缀字面+{占位词}+后缀字面（占位词盖内名，剥壳语义由捕获天然承载——
+// StripPrefix/Suffix 随之废止）；无壳 → 目录名整名字面。任意祖先层同名
+// 命中=子树包含语义（目录名通常整树唯一，层深漂移可忽略）。自检：样例
+// 文件上命中且各槽提取值复现赋值值；构造失配（花括号/词法）返回假由
+// 调用方降级手工。
 func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
-	var expr string
+	pool := newCondxWordPool()
+	var tpl string
+	spanCapture := false
+	var spanWord string
 	if p.shell != nil {
-		inner := ".+"
-		if p.shell.Suffix != "" {
-			inner = "[^" + escapeForClass(rune(p.shell.Suffix[0])) + "]*"
+		if !condxTemplateBraceOK(p.shell.Prefix) || !condxTemplateBraceOK(p.shell.Suffix) {
+			return RuleEntry{}, false
 		}
-		expr = "^" + regexp.QuoteMeta(p.shell.Prefix) + inner + regexp.QuoteMeta(p.shell.Suffix) + "$"
+		word, ok := condxWordOfSlot(p.slots[0].dim, p.slots[0].tagIndex)
+		if !ok || !pool.Take(word) {
+			return RuleEntry{}, false
+		}
+		tpl = p.shell.Prefix + "{" + word + "}" + p.shell.Suffix
+		spanCapture = true
+		spanWord = word
 	} else {
-		expr = "^" + regexp.QuoteMeta(p.name) + "$"
+		if !condxTemplateBraceOK(p.name) {
+			return RuleEntry{}, false
+		}
+		tpl = p.name
 	}
-	ancestor, err := NewRegexPattern(string(TargetFileName), expr, nil)
-	if err != nil {
-		return RuleEntry{}, false
-	}
-	location, err := NewLocationPattern(p.level-1, p.level-1, ancestor)
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
 		return RuleEntry{}, false
 	}
 	extractions := make([]ExtractionAction, 0, len(p.slots))
 	for _, s := range p.slots {
-		action := ExtractionAction{Dimension: s.dim, From: FromAncestorDir, RoleName: s.roleName}
-		if p.shell != nil {
-			action.StripPrefix = p.shell.Prefix
-			action.StripSuffix = p.shell.Suffix
+		if spanCapture {
+			extractions = append(extractions, ExtractionAction{
+				Dimension: s.dim, From: FromCapture, CaptureName: condxVocab[spanWord], Row: 1, RoleName: s.roleName,
+			})
+		} else {
+			extractions = append(extractions, ExtractionAction{
+				Dimension: s.dim, From: FromAncestorDir, RoleName: s.roleName,
+			})
 		}
-		extractions = append(extractions, action)
 	}
 	rule := RuleEntry{
 		ID:          generatedRuleID("qna-struct", relPath),
-		Description: fmt.Sprintf("泛化（结构映射·目录层）：第 %d 层目录「%s」→%s（源自「%s」的赋值）", p.level, p.name, structDimPhraseOf(p.slots), relPath),
+		Description: fmt.Sprintf("泛化（结构映射·目录层）：目录「%s」模板→%s（源自「%s」的赋值）", tpl, structDimPhraseOf(p.slots), relPath),
 		Source:      RuleSourceQna,
 		Enabled:     true,
-		Pattern:     location,
+		Conditions:  rows,
+		Pattern:     pattern,
 		Extractions: extractions,
 	}
-	// 自检：样例文件上锚定命中且各槽提取值复现赋值值。
+	// 自检：样例文件上命中且各槽提取值复现赋值值。
 	ctx := &ParseContext{}
-	if !location.Evaluate(structSampleInput(relPath, fileName), nil, ctx) {
+	if !pattern.Evaluate(structSampleInput(relPath, fileName), nil, ctx) {
 		return RuleEntry{}, false
 	}
 	for i, s := range p.slots {
@@ -349,6 +372,9 @@ func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 type structFilenamePlan struct {
 	forms      []structSegForm
 	underscore bool
+	// tail 末段之后的剩余正文（含其前导分隔，如 "__jaccobus_dhecdru"）：
+	// v4 模板需为其占位（尾部码丢弃语义=占位不引用），v3 以 (?:__.*)? 吞尾。
+	tail string
 }
 
 // structSegForm 单段的构造形态：与前一段值之间的间隔原文（括号段已折出开
@@ -391,7 +417,7 @@ func structFilenamePlanOf(fileName string, segs []string) (structFilenamePlan, b
 		forms = append(forms, form)
 		pos = end
 	}
-	return structFilenamePlan{forms: forms, underscore: hasBracket && !hasDouble}, true
+	return structFilenamePlan{forms: forms, underscore: hasBracket && !hasDouble, tail: src[pos:]}, true
 }
 
 // structSegValuesOf 线索集 → 文件名段值序列（filenameSeg 线索按下标序生成，
@@ -406,12 +432,13 @@ func structSegValuesOf(clues []SnapStructClue) []string {
 	return segs
 }
 
-// buildStructFilenameRule 构造文件名分隔段规则（v2：分隔符/括号感知）：按样例
-// 文件名的实际分段形态逐段展开——段间隔以字面连接，首个捕获组前的未捕获段
-// 逐一按形态消费；括号段以开/闭括号字面包裹、段类排除闭括号；_ 模式（含括号
-// 组且段间无 __）普通段用 `[^_]` 段类、末段后以 `(?:_.*)?` 吞余部，__ 模式维持
-// `[^_].*?`+`__` 既有形态。末槽后的其余段与扩展名整体吞掉（尾部码丢弃）。
-// 自检：样例文件上各捕获值必须复现赋值值。
+// buildStructFilenameRule 构造文件名分隔段规则（v4 模板）：按样例文件名的实际
+// 分段形态逐段展开——段间隔按原文字面、括号段以开/闭括号字面包裹占位词；
+// 捕获段占该维度词，未捕获段（末槽之后的尾部段含尾部码）一律泛化消费
+// （借词占位、提取不引用——尾部码丢弃语义），分隔模式特化段类（_ 模式
+// [^_] 等）废止，贪婪回溯+字面锚定承载切分。多标签/重复维度词位冲突/
+// 词池耗尽/花括号字面/相邻占位词（编译期）→ 返回假，调用方降级手工。
+// 自检：样例文件上各占位词捕获值必须复现赋值值。
 func buildStructFilenameRule(relPath, fileName string, plan structFilenamePlan, slots []*structMappingSlot) (RuleEntry, bool) {
 	sorted := make([]*structMappingSlot, len(slots))
 	copy(sorted, slots)
@@ -420,49 +447,91 @@ func buildStructFilenameRule(relPath, fileName string, plan structFilenamePlan, 
 			sorted[j-1], sorted[j] = sorted[j], sorted[j-1]
 		}
 	}
-	var expr strings.Builder
-	expr.WriteString("^")
-	prev := 0
-	captures := make([]string, 0, len(sorted))
-	extractions := make([]ExtractionAction, 0, len(sorted))
-	for i, s := range sorted {
-		for j := prev; j < s.segIndex; j++ {
-			writeStructSegForm(&expr, plan.forms[j], "", plan.underscore)
+	pool := newCondxWordPool()
+	wordOfSeg := make(map[int]string, len(sorted))
+	for _, s := range sorted {
+		word, ok := condxWordOfSlot(s.dim, s.tagIndex)
+		if !ok || !pool.Take(word) {
+			return RuleEntry{}, false
 		}
-		writeStructSegForm(&expr, plan.forms[s.segIndex], s.group, plan.underscore)
-		if i == len(sorted)-1 {
-			if plan.underscore {
-				expr.WriteString("(?:_.*)?(?:\\.[^.]*)?$")
-			} else {
-				expr.WriteString("(?:__.*)?(?:\\.[^.]*)?$")
+		wordOfSeg[s.segIndex] = word
+	}
+	var tpl strings.Builder
+	writeLiteral := func(s string) bool {
+		if !condxTemplateBraceOK(s) {
+			return false
+		}
+		tpl.WriteString(s)
+		return true
+	}
+	for j := 0; j < len(plan.forms); j++ {
+		form := plan.forms[j]
+		if !writeLiteral(form.gap) {
+			return RuleEntry{}, false
+		}
+		word, ok := wordOfSeg[j]
+		if !ok {
+			// 未引用段：{任意} 吞位词泛化消费（不占词池、可重复）。
+			word = "任意"
+		}
+		if form.bracket != nil {
+			if !writeLiteral(form.bracket.open) {
+				return RuleEntry{}, false
 			}
 		}
-		prev = s.segIndex + 1
-		captures = append(captures, s.group)
-		extractions = append(extractions, ExtractionAction{
-			Dimension: s.dim, From: FromCapture, CaptureName: s.group, RoleName: s.roleName,
-		})
+		tpl.WriteString("{" + word + "}")
+		if form.bracket != nil {
+			if !writeLiteral(form.bracket.close) {
+				return RuleEntry{}, false
+			}
+		}
 	}
-	pattern, err := NewRegexPattern(string(TargetFileName), expr.String(), captures)
+	// 尾部正文（末段之后的残余）：前导分隔 run 留字面、剩余正文 {任意} 吞位
+	//（不引用=尾部码丢弃语义）。无前导分隔的残余直接占位（与前词相邻由
+	// 编译期相邻占位词校验拒绝→降级）。
+	if plan.tail != "" {
+		sepRun := 0
+		for sepRun < len(plan.tail) && plan.tail[sepRun] == '_' {
+			sepRun++
+		}
+		if !writeLiteral(plan.tail[:sepRun]) {
+			return RuleEntry{}, false
+		}
+		if plan.tail[sepRun:] != "" {
+			tpl.WriteString("{任意}")
+		}
+	}
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetFile,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl.String()},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
 		return RuleEntry{}, false
 	}
+	extractions := make([]ExtractionAction, 0, len(sorted))
+	for _, s := range sorted {
+		extractions = append(extractions, ExtractionAction{
+			Dimension: s.dim, From: FromCapture, CaptureName: condxVocab[wordOfSeg[s.segIndex]], Row: 1, RoleName: s.roleName,
+		})
+	}
 	rule := RuleEntry{
 		ID:          generatedRuleID("qna-struct", fileName),
-		Description: fmt.Sprintf("泛化（结构映射·文件名）：文件名分隔段形态→%s（尾部码丢弃）（源自「%s」的赋值）", structDimPhraseOf(sorted), relPath),
+		Description: fmt.Sprintf("泛化（结构映射·文件名）：文件名按「%s」模板→%s（尾部段丢弃）（源自「%s」的赋值）", tpl.String(), structDimPhraseOf(sorted), relPath),
 		Source:      RuleSourceQna,
 		Enabled:     true,
+		Conditions:  rows,
 		Pattern:     pattern,
 		Extractions: extractions,
 	}
-	// 自检：样例文件上各捕获值复现赋值值。
+	// 自检：样例文件上各占位词捕获值复现赋值值。
 	ctx := &ParseContext{}
 	if !pattern.Evaluate(structSampleInput(relPath, fileName), nil, ctx) {
 		return RuleEntry{}, false
 	}
 	for _, s := range sorted {
 		decl, ok := ExtractionAction{
-			Dimension: s.dim, From: FromCapture, CaptureName: s.group, RoleName: s.roleName,
+			Dimension: s.dim, From: FromCapture, CaptureName: condxVocab[wordOfSeg[s.segIndex]], Row: 1, RoleName: s.roleName,
 		}.Apply(rule.ID, ctx)
 		if !ok || decl.Value != s.value {
 			return RuleEntry{}, false

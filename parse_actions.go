@@ -392,7 +392,10 @@ func combinedRuleDeclarations(rules []RuleEntry, f *SnapFile, siblings []string)
 		hit := rule.Pattern.Evaluate(in, nil, ruleCtx)
 		ctx.absorbScoped(ruleCtx)
 		if !hit {
-			return nil
+			// 条目不命中=该条目对该文件无声明（独立条目并集口径：结构映射
+			// 的目录层/文件名条目各自管各自维度，某条不命中不牵连他条——
+			// v3 吞尾宽容掩盖了原 AND 绑定，v4 严格模板下按条独立求值）。
+			continue
 		}
 		if hasConditionalAction(rule.Extractions) {
 			conditional = append(conditional, struct {

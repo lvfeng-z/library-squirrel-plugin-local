@@ -173,17 +173,19 @@ type CondxRow struct {
 }
 
 // condxVocab 为占位词词表（中文词 → 捕获组英文名，RE2 不支持 CJK 组名）。
-// {键} 仅用于序列成员模板（标记跨成员恒同部分，产出走群组键）。
+// {键} 仅用于序列成员模板（标记跨成员恒同部分，产出走群组键）；
+// {任意} 为非引用吞位词（派生非捕获 (?:.+)、可重复出现、不可被提取引用）
+// ——泛化消费位（尾部码丢弃、未引用段等）专用，不与引用位争抢词表。
 var condxVocab = map[string]string{
 	"作者": "author", "集名": "setname", "序号": "seq", "标题": "title",
-	"标签": "tag", "作品号": "workid", "日期": "date", "键": "key",
+	"标签": "tag", "作品号": "workid", "日期": "date", "键": "key", "任意": "any",
 }
 
 // condxDigits 为数字类占位词（推导为 [0-9]+）。
 var condxDigits = map[string]bool{"序号": true, "作品号": true, "日期": true}
 
 // condxVocabHint 为报错提示用的词表清单（稳定顺序）。
-const condxVocabHint = "作者/集名/序号/标题/标签/作品号/日期/键"
+const condxVocabHint = "作者/集名/序号/标题/标签/作品号/日期/键/任意"
 
 // deriveOpts 为模板推导选项。
 type deriveOpts struct {
@@ -253,6 +255,12 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) 
 		}
 		if word == "键" && !opts.allowKey {
 			return "", nil, fmt.Errorf("模板占位词 {键} 仅适用于序列成员格式")
+		}
+		if word == "任意" {
+			// 非引用吞位词：非捕获贪婪段、可重复、不进捕获组清单（提取
+			// 引用 any 会被未声明捕获名校验拒绝——词法天然保证只作消费）。
+			sb.WriteString("(?:.+)")
+			continue
 		}
 		if seen[en] {
 			return "", nil, fmt.Errorf("模板占位词 {%s} 重复", word)

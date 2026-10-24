@@ -237,18 +237,18 @@ func TestWorkSetRuleAdjustRuleAssembly(t *testing.T) {
 
 	profile, _ := LoadProfile(m.store)
 	dirRule := findRuleByID(t, profile, result.Rules[1].ID)
-	loc, ok := dirRule.Pattern.(*LocationPattern)
-	if !ok {
-		t.Fatalf("目录层条目应为 LocationPattern，实际 %T", dirRule.Pattern)
+	// v4：目录层条目=目录行模板 Artist[{作者}]，剥壳语义由行 1 捕获承载。
+	if _, ok := dirRule.Pattern.(*RowSubjectPattern); !ok || dirRule.Conditions == nil ||
+		dirRule.Conditions[0].Condition.Format.Tpl != "Artist[{作者}]" {
+		t.Fatalf("目录层条目应为 v4 目录行模板规则，实际 %T", dirRule.Pattern)
 	}
-	_ = loc
 	if len(dirRule.Extractions) != 1 {
 		t.Fatalf("目录层条目应恰一条作者提取: %+v", dirRule.Extractions)
 	}
 	authAct := dirRule.Extractions[0]
-	if authAct.Dimension != DimAuthor || authAct.From != FromAncestorDir ||
-		authAct.StripPrefix != "Artist[" || authAct.StripSuffix != "]" {
-		t.Fatalf("作者←目录剥壳动作不符: %+v", authAct)
+	if authAct.Dimension != DimAuthor || authAct.From != FromCapture ||
+		authAct.CaptureName != condxVocab["作者"] || authAct.Row != 1 {
+		t.Fatalf("作者←目录行捕获动作不符: %+v", authAct)
 	}
 
 	captureRule := findRuleByID(t, profile, result.Rules[2].ID)
