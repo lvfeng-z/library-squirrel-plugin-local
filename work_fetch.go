@@ -578,12 +578,12 @@ func (h *LocalImportWorkFetcher) rescanAncestorView(parentDir string, dirNames [
 	ancestorFiles[len(dirNames)-1] = siblings
 	dir := parentDir
 	for d := len(dirNames) - 2; d >= 0; d-- {
+		dir = filepath.Dir(dir) // 先上溯：d 层目录是 d+1 层目录的父
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if h.ctx != nil {
 				h.ctx.Warnf("重扫祖先目录失败，该层子女类谓词保守不命中: %s: %v", dir, err)
 			}
-			dir = filepath.Dir(dir)
 			continue
 		}
 		files := make([]string, 0, len(entries))
@@ -597,7 +597,6 @@ func (h *LocalImportWorkFetcher) rescanAncestorView(parentDir string, dirNames [
 		}
 		ancestorFiles[d] = files
 		childDirCounts[d] = subdirs
-		dir = filepath.Dir(dir)
 	}
 	return ancestorFiles, childDirCounts
 }
