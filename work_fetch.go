@@ -665,6 +665,9 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	rules := h.resolvePipelineRules()
 	conclusion, _ := h.recomputeFileDecision(&fp, rules, h.libraryIndexCached())
 	h.logPendingSynthesis(fp.FullPath, conclusion.Pending)
+	if h.ctx != nil {
+		h.ctx.Infof("CreateWorkInfo 观测: file=%s matched=%v final=%d", fp.RelPath, conclusion.MatchedRuleIDs, len(conclusion.Final))
+	}
 	final := conclusion.Final
 
 	resp := &sdkdto.WorkResponse{Work: &sdkdto.WorkDTO{}}
