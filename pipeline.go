@@ -54,9 +54,31 @@ func dirGroupKey(dirNames []string) string {
 	return strings.Join(dirNames, "\x00")
 }
 
+// ancestorFilesLevels 从同批文件聚合派生各层祖先目录的直接子文件名列表
+// （深度 d = 目录链 dirNames[0..d] 的直接子文件；该目录本批无文件时对应层为
+// nil，目录子女谓词对此层保守不命中）。
+func ancestorFilesLevels(dirNames []string, siblingsByDir map[string][]string) [][]string {
+	levels := make([][]string, len(dirNames))
+	for d := range dirNames {
+		levels[d] = siblingsByDir[dirGroupKey(dirNames[:d+1])]
+	}
+	return levels
+}
+
+// ancestorChildDirCounts 从同批文件派生各层祖先目录的直接子目录数（仅计数
+// 不含文件；空目录本批不可见，不计数）。
+func ancestorChildDirCounts(dirNames []string, childDirsByParent map[string]map[string]struct{}) []int {
+	counts := make([]int, len(dirNames))
+	for d := range dirNames {
+		counts[d] = len(childDirsByParent[dirGroupKey(dirNames[:d+1])])
+	}
+	return counts
+}
+
 // RunPipeline 对一批扫描条目执行解析内核流水线，返回与输入同序的单文件结论：
 //  1. 按「父目录」（DirNames 整序列相同）聚合，构造各文件的 MatchInput，
-//     Siblings 为同目录全部文件名（含自身，按输入顺序）；
+//     Siblings 为同目录全部文件名（含自身，按输入顺序），并派生各层祖先的
+//     直接子文件/子目录数（v4 目录终结谓词消费）；
 //  2. 分组段：顶层 Pattern 为 SiblingPattern 的启用规则逐条求值，首个命中
 //     定群（Group 填充，用户规则先于内置由调用方 EffectiveRules 保证），
 //     无任何分组规则命中即独立文件（Group=nil）；
@@ -67,18 +89,30 @@ func dirGroupKey(dirNames []string) string {
 //     分组段写入的群组分析保留在同一 ctx 内，供 FromGroupPrefix 提取消费。
 func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileDecision {
 	siblingsByDir := make(map[string][]string, len(files))
+	childDirsByParent := make(map[string]map[string]struct{})
 	for _, file := range files {
 		key := dirGroupKey(file.DirNames)
 		siblingsByDir[key] = append(siblingsByDir[key], file.FileName)
+		for d := 0; d+1 < len(file.DirNames); d++ {
+			parentKey := dirGroupKey(file.DirNames[:d+1])
+			set, ok := childDirsByParent[parentKey]
+			if !ok {
+				set = make(map[string]struct{})
+				childDirsByParent[parentKey] = set
+			}
+			set[file.DirNames[d+1]] = struct{}{}
+		}
 	}
 	decisions := make([]FileDecision, 0, len(files))
 	for _, file := range files {
 		ctx := &ParseContext{DirNames: file.DirNames, Depth: len(file.DirNames)}
 		in := &MatchInput{
-			FileName: file.FileName,
-			DirNames: file.DirNames,
-			RelPath:  file.RelPath,
-			Siblings: siblingsByDir[dirGroupKey(file.DirNames)],
+			FileName:               file.FileName,
+			DirNames:               file.DirNames,
+			RelPath:                file.RelPath,
+			Siblings:               siblingsByDir[dirGroupKey(file.DirNames)],
+			AncestorFiles:          ancestorFilesLevels(file.DirNames, siblingsByDir),
+			AncestorChildDirCounts: ancestorChildDirCounts(file.DirNames, childDirsByParent),
 		}
 		decision := FileDecision{RelPath: file.RelPath, FileName: file.FileName}
 		decision.Group, _ = runGroupStage(rules, in, lib, ctx)

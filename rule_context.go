@@ -16,6 +16,34 @@ type MatchInput struct {
 	RelPath string
 	// Siblings 为同目录全部兄弟文件名（含自身）。
 	Siblings []string
+	// AncestorFiles 为各层祖先目录的**直接子文件名**列表，索引与 DirNames 对齐
+	//（深度 d 的元素 = 目录链 DirNames[0..d] 的直接子文件，不含更深层内容）。
+	// 由批级流水线从同批条目聚合派生；nil（构造点未提供）或对应层无元素时，
+	// 目录终结谓词（子女全部/至少N/子女类型）对该层保守不命中。
+	AncestorFiles [][]string
+	// AncestorChildDirCounts 为各层祖先目录的直接子目录数（仅目录计数，不含
+	// 文件），索引与 DirNames 对齐；未提供时子目录数谓词保守不命中。
+	AncestorChildDirCounts []int
+}
+
+// ancestorFilesAt 返回深度 d 祖先目录的直接子文件名（true=数据可用且非空）。
+func (in *MatchInput) ancestorFilesAt(depth int) ([]string, bool) {
+	if depth < 0 || depth >= len(in.AncestorFiles) {
+		return nil, false
+	}
+	files := in.AncestorFiles[depth]
+	if len(files) == 0 {
+		return nil, false
+	}
+	return files, true
+}
+
+// ancestorChildDirCountAt 返回深度 d 祖先目录的直接子目录数（false=数据未提供）。
+func (in *MatchInput) ancestorChildDirCountAt(depth int) (int, bool) {
+	if depth < 0 || depth >= len(in.AncestorChildDirCounts) {
+		return 0, false
+	}
+	return in.AncestorChildDirCounts[depth], true
 }
 
 // LibraryIndex 为谓词求值时注入的库内数据快照。

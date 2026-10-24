@@ -402,13 +402,20 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 }
 
 // validateCondxRows 校验行列表：至少一行、首行无连接词、后续行连接词合法、
-// 行内条件与子组二选一且其一非空、跨行值级相等的行号引用合法（先序展平编号，
-// 对方行须早于本行——求值顺序依赖，R6）。
+// 行内条件与子组二选一且其一非空、跨行值级相等的行号引用合法（**全局先序
+// 展平编号**，对方行须早于本行——求值顺序依赖，R6；子组内行的编号接续父级
+// 前缀，跨组引用按全局编号裁决）。
 func validateCondxRows(rows []CondxRow) error {
+	return validateCondxRowsAt(rows, 0)
+}
+
+// validateCondxRowsAt 在全局行号偏移 base 上递归校验（子组传入其先序前缀）。
+func validateCondxRowsAt(rows []CondxRow, base int) error {
 	if len(rows) == 0 {
 		return fmt.Errorf("条件行列表不能为空")
 	}
-	total := countCondxRows(rows)
+	total := base + countCondxRows(rows)
+	prefix := 0
 	for i := range rows {
 		row := &rows[i]
 		if i == 0 {
@@ -422,7 +429,7 @@ func validateCondxRows(rows []CondxRow) error {
 			return fmt.Errorf("第 %d 行须为条件行或括号子组之一（非空）", i+1)
 		}
 		if row.Condition != nil {
-			ordinal := condxRowOrdinal(rows, i)
+			ordinal := base + prefix + 1
 			if err := validateCondx(row.Condition, ordinal); err != nil {
 				return fmt.Errorf("第 %d 行: %w", ordinal, err)
 			}
@@ -438,11 +445,13 @@ func validateCondxRows(rows []CondxRow) error {
 					return fmt.Errorf("第 %d 行: 值级小标 {%s} 的对方行号 %d 须早于本行", ordinal, b.Placeholder, b.AgainstRow)
 				}
 			}
+			prefix++
 		}
 		if len(row.Group) > 0 {
-			if err := validateCondxRows(row.Group); err != nil {
-				return fmt.Errorf("第 %d 行子组: %w", i+1, err)
+			if err := validateCondxRowsAt(row.Group, base+prefix); err != nil {
+				return fmt.Errorf("第 %d 行子组: %w", base+prefix+1, err)
 			}
+			prefix += countCondxRows(row.Group)
 		}
 	}
 	return nil
@@ -462,28 +471,19 @@ func countCondxRows(rows []CondxRow) int {
 	return n
 }
 
-// condxRowOrdinal 返回顶层第 idx 行的先序展平行号（1 起；条件行编号=其前全部
-// 条件行数+1，子组在其父行位置整体计入——跨行相等引用以该编号为准）。
-func condxRowOrdinal(rows []CondxRow, idx int) int {
-	n := 0
-	for i := 0; i < idx; i++ {
-		if rows[i].Condition != nil {
-			n++
-		}
-		if len(rows[i].Group) > 0 {
-			n += countCondxRows(rows[i].Group)
-		}
-	}
-	return n + 1
-}
-
 // compileCondxRows 把行列表编译为模式树：且连接紧于或连接（或分支=按 or 切段，
 // 段内 and 链），括号子组最紧，单子归一，行级非包裹整行——与前端行式底盘的
-// 组合语义一致（前端 rowsToTree 的内核侧锚定实现）。
+// 组合语义一致（前端 rowsToTree 的内核侧锚定实现）。行号（先序展平，1 起）
+// 供行包装与小标门引用；校验先行。
 func compileCondxRows(rows []CondxRow) (Pattern, error) {
 	if err := validateCondxRows(rows); err != nil {
 		return nil, err
 	}
+	return compileCondxRowsAt(rows, 0)
+}
+
+// compileCondxRowsAt 在全局行号偏移 base 上递归编译。
+func compileCondxRowsAt(rows []CondxRow, base int) (Pattern, error) {
 	type chunk struct{ rows []CondxRow }
 	var chunks []chunk
 	current := chunk{}
@@ -495,10 +495,10 @@ func compileCondxRows(rows []CondxRow) (Pattern, error) {
 		current.rows = append(current.rows, rows[i])
 	}
 	chunks = append(chunks, current)
-	compileChunk := func(c chunk) (Pattern, error) {
+	compileChunk := func(c chunk, counter *int) (Pattern, error) {
 		var subs []Pattern
 		for i := range c.rows {
-			p, err := compileCondxRow(&c.rows[i])
+			p, err := compileCondxRow(&c.rows[i], counter)
 			if err != nil {
 				return nil, err
 			}
@@ -509,9 +509,10 @@ func compileCondxRows(rows []CondxRow) (Pattern, error) {
 		}
 		return And(subs), nil
 	}
+	counter := base
 	var branches []Pattern
 	for _, c := range chunks {
-		p, err := compileChunk(c)
+		p, err := compileChunk(c, &counter)
 		if err != nil {
 			return nil, err
 		}
@@ -523,14 +524,20 @@ func compileCondxRows(rows []CondxRow) (Pattern, error) {
 	return Or(branches), nil
 }
 
-// compileCondxRow 编译单行：条件或子组 → 模式；行级非包裹。
-func compileCondxRow(row *CondxRow) (Pattern, error) {
+// compileCondxRow 编译单行：条件或子组 → 模式（条件行为行包装主体）；行级非
+// 包裹整行。counter 为全局行号游标（先序推进，与校验编号一致）。
+func compileCondxRow(row *CondxRow, counter *int) (Pattern, error) {
 	var p Pattern
 	var err error
 	if row.Condition != nil {
-		p, err = compileCondx(row.Condition)
+		*counter++
+		p, err = compileCondx(row.Condition, *counter)
 	} else {
-		p, err = compileCondxRows(row.Group)
+		nested := countCondxRows(row.Group)
+		p, err = compileCondxRowsAt(row.Group, *counter)
+		if err == nil {
+			*counter += nested
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -541,57 +548,177 @@ func compileCondxRow(row *CondxRow) (Pattern, error) {
 	return p, nil
 }
 
-// compileCondx 编译单条条件为目标主体模式。本期实现格式段主体（文件/目录/
-// 序列模板）与 seqMinLength；其余终结谓词与值级小标的求值在后续硬化步接入，
-// 编译期显式报错（不静默恒真）。
-func compileCondx(c *Condx) (Pattern, error) {
-	if err := validateCondx(c, 0); err != nil {
+// compileCondx 编译单条条件为行包装主体（RowSubjectPattern）：行内主体（含随
+// 主体终结谓词）+ 值级小标门。fileSizeMin 因扫描快照暂无文件尺寸（数据缺口）
+// 显式拒绝；其余谓词与小标全部接入求值。
+func compileCondx(c *Condx, ordinal int) (Pattern, error) {
+	if err := validateCondx(c, ordinal); err != nil {
 		return nil, err
 	}
-	minSeq := 2
+	var gates []Pattern
+	for _, b := range c.Badges {
+		gate := &BadgeGatePattern{
+			Row: ordinal, Name: condxVocab[b.Placeholder],
+			Kind: b.Kind, Dim: b.Dim, Fold: b.Fold, Constant: b.Value,
+		}
+		if b.Kind == CondxBadgeEqual {
+			gate.RightRow = b.AgainstRow
+			gate.RightName = condxVocab[b.AgainstPh]
+		}
+		gates = append(gates, gate)
+	}
+	var inner Pattern
+	var err error
+	switch c.Target {
+	case CondxTargetFile:
+		inner, err = compileFileCondx(c)
+	case CondxTargetDir:
+		inner, err = compileDirCondx(c)
+	case CondxTargetSeq:
+		inner, err = compileSeqCondx(c)
+	default:
+		return nil, fmt.Errorf("未知的目标类别: %q", string(c.Target))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &RowSubjectPattern{Ordinal: ordinal, Inner: inner, Gates: gates}, nil
+}
+
+// compileFileCondx 编译文件主体：格式模板 + fileExt（并入主体）+ 父目录两式
+// （并列子式）；fileSizeMin 显式拒绝（扫描快照数据缺口）。
+func compileFileCondx(c *Condx) (Pattern, error) {
+	expr, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
+	if err != nil {
+		return nil, err
+	}
+	subject, err := newFileSubjectPattern(expr, captures)
+	if err != nil {
+		return nil, err
+	}
+	subs := []Pattern{subject}
+	for _, a := range c.Attach {
+		switch a.Kind {
+		case CondxAttachFileExt:
+			ext := strings.ToLower(a.Value)
+			if !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+			subject.Ext = ext
+		case CondxAttachParentFormat:
+			expr, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
+			if err != nil {
+				return nil, fmt.Errorf("附加条件 parentFormat 的迷你模板无效: %w", err)
+			}
+			p, err := newParentNamePattern(expr)
+			if err != nil {
+				return nil, err
+			}
+			subs = append(subs, p)
+		case CondxAttachParentContains:
+			expr, err := deriveCondxContains(a.Word)
+			if err != nil {
+				return nil, err
+			}
+			p, err := newParentNamePattern(expr)
+			if err != nil {
+				return nil, err
+			}
+			subs = append(subs, p)
+		case CondxAttachFileSizeMin:
+			return nil, fmt.Errorf("附加条件 fileSizeMin 待扫描快照携带文件尺寸后接入（数据缺口，显式拒绝不静默）")
+		}
+	}
+	if len(subs) == 1 {
+		return subs[0], nil
+	}
+	return And(subs), nil
+}
+
+// compileDirCondx 编译目录主体：格式 + 终结谓词集（子女全部/至少N按迷你格式、
+// 子目录数、子女类型、父目录两式——父目录谓词作用于**命中层目录**的父）。
+func compileDirCondx(c *Condx) (Pattern, error) {
+	var expr string
+	var captures []string
+	var err error
+	if c.Format.Mode == CondxFormatContains {
+		expr, err = deriveCondxContains(c.Format.Word)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		expr, captures, err = deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
+		if err != nil {
+			return nil, err
+		}
+	}
+	subject, err := newDirSubjectPattern(expr, captures)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range c.Attach {
+		assert := DirAssert{Kind: a.Kind, MinCount: a.MinCount, Types: a.Types, Word: a.Word}
+		switch a.Kind {
+		case CondxAttachChildrenAllFormat, CondxAttachChildrenAtLeastN, CondxAttachParentFormat:
+			mexpr, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
+			if err != nil {
+				return nil, fmt.Errorf("附加条件 %s 的迷你模板无效: %w", a.Kind, err)
+			}
+			re, cerr := regexp.Compile(mexpr)
+			if cerr != nil {
+				return nil, fmt.Errorf("附加条件 %s 的迷你正则编译失败: %w", a.Kind, cerr)
+			}
+			assert.re = re
+		}
+		subject.Asserts = append(subject.Asserts, assert)
+	}
+	return subject, nil
+}
+
+// compileSeqCondx 编译序列主体：成员格式模板 + seqMinLength（并入主体门槛）+
+// seqMemberType（并入成员计数限定）+ 父目录两式（并列子式）。
+func compileSeqCondx(c *Condx) (Pattern, error) {
+	expr, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{allowKey: true, requireSeq: true})
+	if err != nil {
+		return nil, err
+	}
+	subject, err := newSeqSubjectPattern(expr, captures, 2)
+	if err != nil {
+		return nil, err
+	}
+	subs := []Pattern{subject}
 	for _, a := range c.Attach {
 		switch a.Kind {
 		case CondxAttachSeqMinLength:
 			if a.MinCount > 0 {
-				minSeq = a.MinCount
+				subject.MinSize = a.MinCount
 			}
-		case CondxAttachParentFormat, CondxAttachParentContains:
-			// 上级断言可与主体共存：本期主体编译先行，上级断言下一硬化步并入。
-			return nil, fmt.Errorf("附加条件 %q 的求值将在下一硬化步接入（本期语法已收口，先拒后接）", a.Kind)
-		default:
-			return nil, fmt.Errorf("附加条件 %q 的求值将在下一硬化步接入（本期语法已收口，先拒后接）", a.Kind)
-		}
-	}
-	if len(c.Badges) > 0 {
-		return nil, fmt.Errorf("值级小标的求值将在下一硬化步接入（本期语法已收口，先拒后接）")
-	}
-	switch c.Target {
-	case CondxTargetFile:
-		expr, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
-		if err != nil {
-			return nil, err
-		}
-		return newFileSubjectPattern(expr, captures)
-	case CondxTargetDir:
-		if c.Format.Mode == CondxFormatContains {
-			expr, err := deriveCondxContains(c.Format.Word)
+		case CondxAttachSeqMemberType:
+			subject.MemberTypes = append(subject.MemberTypes, a.Types...)
+		case CondxAttachParentFormat:
+			expr, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
+			if err != nil {
+				return nil, fmt.Errorf("附加条件 parentFormat 的迷你模板无效: %w", err)
+			}
+			p, err := newParentNamePattern(expr)
 			if err != nil {
 				return nil, err
 			}
-			return newDirSubjectPattern(expr, nil)
+			subs = append(subs, p)
+		case CondxAttachParentContains:
+			expr, err := deriveCondxContains(a.Word)
+			if err != nil {
+				return nil, err
+			}
+			p, err := newParentNamePattern(expr)
+			if err != nil {
+				return nil, err
+			}
+			subs = append(subs, p)
 		}
-		expr, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
-		if err != nil {
-			return nil, err
-		}
-		return newDirSubjectPattern(expr, captures)
-	case CondxTargetSeq:
-		expr, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{allowKey: true, requireSeq: true})
-		if err != nil {
-			return nil, err
-		}
-		return newSeqSubjectPattern(expr, captures, minSeq)
-	default:
-		return nil, fmt.Errorf("未知的目标类别: %q", string(c.Target))
 	}
+	if len(subs) == 1 {
+		return subs[0], nil
+	}
+	return And(subs), nil
 }

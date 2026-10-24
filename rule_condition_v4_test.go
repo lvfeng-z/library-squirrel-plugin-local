@@ -222,16 +222,16 @@ func TestCompileCondxRowsTreeShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("或分支第二子式应为 Not，得到 %T", secondAnd[1])
 	}
-	if _, ok := notPat.Inner.(*FileSubjectPattern); !ok {
-		t.Fatalf("非的内层应为文件主体，得到 %T", notPat.Inner)
+	if row, ok := notPat.Inner.(*RowSubjectPattern); !ok || row.Ordinal != 4 {
+		t.Fatalf("非的内层应为行包装（行4），得到 %T %+v", notPat.Inner, notPat.Inner)
 	}
-	// 单行归一。
+	// 单行归一为行包装。
 	single, err := compileCondxRows([]CondxRow{{Condition: file("{作者}")}})
 	if err != nil {
 		t.Fatalf("单行编译失败: %v", err)
 	}
-	if _, ok := single.(*FileSubjectPattern); !ok {
-		t.Fatalf("单行应归一为主体模式，得到 %T", single)
+	if row, ok := single.(*RowSubjectPattern); !ok || row.Ordinal != 1 {
+		t.Fatalf("单行应归一为行包装（行1），得到 %T", single)
 	}
 	// 子组最紧：A or (B and C)。
 	grouped, err := compileCondxRows([]CondxRow{
@@ -253,27 +253,37 @@ func TestCompileCondxRowsTreeShape(t *testing.T) {
 	}
 }
 
-func TestCompileCondxRejectsUnimplemented(t *testing.T) {
+func TestCompileCondxRejectsFileSizeMin(t *testing.T) {
+	// fileSizeMin 为唯一显式拒绝件：扫描快照尚无文件尺寸（数据缺口），先拒后接。
 	c := &Condx{
+		Target: CondxTargetFile,
+		Format: condxTpl("{作者}"),
+		Attach: []CondxAttach{{Kind: CondxAttachFileSizeMin, MinCount: 500}},
+	}
+	if _, err := compileCondx(c, 1); err == nil || !strings.Contains(err.Error(), "文件尺寸") {
+		t.Fatalf("fileSizeMin 应显式拒绝，得到 %v", err)
+	}
+	// 子女谓词与值级小标本步已接入：应编译成功。
+	ok1 := &Condx{
 		Target: CondxTargetDir,
 		Format: condxTpl("[{作者}][{作品号}][{标题}]"),
 		Attach: []CondxAttach{{Kind: CondxAttachChildrenAllFormat, Tpl: "{序号}", MinCount: 2}},
 	}
-	if _, err := compileCondx(c); err == nil || !strings.Contains(err.Error(), "下一硬化步") {
-		t.Fatalf("子女谓词应显式拒绝，得到 %v", err)
+	if _, err := compileCondx(ok1, 1); err != nil {
+		t.Fatalf("子女谓词应可编译，得到 %v", err)
 	}
-	c2 := &Condx{
+	ok2 := &Condx{
 		Target: CondxTargetFile,
 		Format: condxTpl("{作者}"),
 		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true}},
 	}
-	if _, err := compileCondx(c2); err == nil || !strings.Contains(err.Error(), "下一硬化步") {
-		t.Fatalf("值级小标应显式拒绝，得到 %v", err)
+	if _, err := compileCondx(ok2, 1); err != nil {
+		t.Fatalf("值级小标应可编译，得到 %v", err)
 	}
 }
 
 func TestFileSubjectEvaluate(t *testing.T) {
-	p, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl("Isel_{集名}_{序号}_[中文翻譯][高清]")})
+	p, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl("Isel_{集名}_{序号}_[中文翻譯][高清]")}, 1)
 	if err != nil {
 		t.Fatalf("编译失败: %v", err)
 	}
@@ -282,11 +292,12 @@ func TestFileSubjectEvaluate(t *testing.T) {
 	if !p.Evaluate(in, nil, ctx) {
 		t.Fatalf("应命中")
 	}
-	setname, ok := ctx.Capture("setname")
+	// 行作用域：捕获以行号前缀并入主上下文（rN.组名）。
+	setname, ok := ctx.Capture("r1.setname")
 	if !ok || setname != "瞬間的に絡み合う" {
 		t.Fatalf("集名捕获不符: %q %v", setname, ok)
 	}
-	seq, _ := ctx.Capture("seq")
+	seq, _ := ctx.Capture("r1.seq")
 	if seq != "01" {
 		t.Fatalf("序号捕获不符: %q", seq)
 	}
@@ -301,7 +312,7 @@ func TestFileSubjectEvaluate(t *testing.T) {
 }
 
 func TestDirSubjectEvaluate(t *testing.T) {
-	p, err := compileCondx(&Condx{Target: CondxTargetDir, Format: condxTpl("[{作者}] [{作品号}] [{标题}]")})
+	p, err := compileCondx(&Condx{Target: CondxTargetDir, Format: condxTpl("[{作者}] [{作品号}] [{标题}]")}, 1)
 	if err != nil {
 		t.Fatalf("编译失败: %v", err)
 	}
@@ -313,8 +324,8 @@ func TestDirSubjectEvaluate(t *testing.T) {
 	if !p.Evaluate(in, nil, ctx) {
 		t.Fatalf("作品层目录应命中")
 	}
-	author, _ := ctx.Capture("author")
-	workid, _ := ctx.Capture("workid")
+	author, _ := ctx.Capture("r1.author")
+	workid, _ := ctx.Capture("r1.workid")
 	if author != "Isel" || workid != "92242473" {
 		t.Fatalf("目录捕获不符: author=%q workid=%q", author, workid)
 	}
@@ -322,7 +333,7 @@ func TestDirSubjectEvaluate(t *testing.T) {
 		t.Fatalf("DirHit 不符: %+v", ctx.DirHits)
 	}
 	// 包含问法：任意一层含词即命中。
-	cp, err := compileCondx(&Condx{Target: CondxTargetDir, Format: CondxFormat{Mode: CondxFormatContains, Word: "Isel"}})
+	cp, err := compileCondx(&Condx{Target: CondxTargetDir, Format: CondxFormat{Mode: CondxFormatContains, Word: "Isel"}}, 1)
 	if err != nil {
 		t.Fatalf("包含问法编译失败: %v", err)
 	}
@@ -336,13 +347,17 @@ func TestDirSubjectEvaluate(t *testing.T) {
 
 func TestSeqSubjectEvaluate(t *testing.T) {
 	p, err := compileCondx(&Condx{Target: CondxTargetSeq, Format: condxTpl("{键}_{序号}"),
-		Attach: []CondxAttach{{Kind: CondxAttachSeqMinLength, MinCount: 3}}})
+		Attach: []CondxAttach{{Kind: CondxAttachSeqMinLength, MinCount: 3}}}, 1)
 	if err != nil {
 		t.Fatalf("编译失败: %v", err)
 	}
-	seq, ok := p.(*SeqSubjectPattern)
+	row, ok := p.(*RowSubjectPattern)
 	if !ok {
-		t.Fatalf("应编译为序列主体，得到 %T", p)
+		t.Fatalf("应编译为行包装，得到 %T", p)
+	}
+	seq, ok := row.Inner.(*SeqSubjectPattern)
+	if !ok {
+		t.Fatalf("行内主体应为序列主体，得到 %T", row.Inner)
 	}
 	if seq.MinSize != 3 {
 		t.Fatalf("MinSize 应取附加条件值 3，得到 %d", seq.MinSize)
@@ -358,7 +373,7 @@ func TestSeqSubjectEvaluate(t *testing.T) {
 	if ctx.Group == nil || ctx.Group.Key != "kpop_dancer_wg" || ctx.Group.Seq != 7 || ctx.Group.Size != 3 {
 		t.Fatalf("GroupAnalysis 不符: %+v", ctx.Group)
 	}
-	key, _ := ctx.Capture("key")
+	key, _ := ctx.Capture("r1.key")
 	if key != "kpop_dancer_wg" {
 		t.Fatalf("键捕获不符: %q", key)
 	}
@@ -367,5 +382,288 @@ func TestSeqSubjectEvaluate(t *testing.T) {
 	}
 	if p.Evaluate(&MatchInput{FileName: "a_x.jpg", Siblings: []string{"a_x.jpg", "a_02.jpg", "a_03.jpg"}}, nil, &ParseContext{}) {
 		t.Fatalf("自身无序数不应命中")
+	}
+}
+
+// TestDirSubjectChildrenAsserts 子女终结谓词：作品目录里全是 {序号} 子女（T1
+// 作品目录制的结构核）。AncestorFiles 缺失（旧构造点）时子女谓词保守不命中。
+func TestDirSubjectChildrenAsserts(t *testing.T) {
+	c := &Condx{
+		Target: CondxTargetDir,
+		Format: condxTpl("[{作者}] [{作品号}] [{标题}]"),
+		Attach: []CondxAttach{{Kind: CondxAttachChildrenAllFormat, Tpl: "{序号}", MinCount: 3}},
+	}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	work := &MatchInput{
+		FileName: "01.jpg",
+		DirNames: []string{"Art", "Artist[Isel]", "[Isel] [92242473] [T]"},
+		AncestorFiles: [][]string{
+			{"index.txt"},
+			{"Artist[Isel]", "[Isel] [92242473] [T]"},
+			{"01.jpg", "02.jpg", "03.jpg", "info.txt"},
+		},
+	}
+	if p.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("含非序号子女的目录不应命中（childrenAllFormat 全称断言）")
+	}
+	work.AncestorFiles[2] = []string{"01.jpg", "02.jpg", "03.jpg", "10.png"}
+	if !p.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("全序号子女且达门槛应命中")
+	}
+	work.AncestorFiles[2] = []string{"01.jpg", "02.jpg"}
+	if p.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("子女数低于 MinCount 不应命中")
+	}
+	work.AncestorFiles = nil
+	if p.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("子女数据缺失不应命中")
+	}
+	// childrenAtLeastN：至少 2 个 {序号} 子女即命中（允许其余杂项）。
+	c2 := &Condx{Target: CondxTargetDir, Format: condxTpl("[{作者}] [{作品号}] [{标题}]"),
+		Attach: []CondxAttach{{Kind: CondxAttachChildrenAtLeastN, Tpl: "{序号}", MinCount: 2}}}
+	p2, err := compileCondx(c2, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	work.AncestorFiles = [][]string{nil, {"Artist[Isel]"}, {"01.jpg", "02.jpg", "cover.png", "info.txt"}}
+	if !p2.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("至少两个序号子女应命中")
+	}
+	// childTypeIs：全部子女类型属于指定集。
+	c3 := &Condx{Target: CondxTargetDir, Format: condxTpl("[{作者}] [{作品号}] [{标题}]"),
+		Attach: []CondxAttach{{Kind: CondxAttachChildTypeIs, Types: []string{"image"}}}}
+	p3, err := compileCondx(c3, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	work.AncestorFiles[2] = []string{"01.jpg", "cover.png"}
+	if !p3.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("全图类子女应命中")
+	}
+	work.AncestorFiles[2] = []string{"01.jpg", "info.txt"}
+	if p3.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("混杂文档子女不应命中")
+	}
+	// childDirCount：作者壳（含多个作品子目录）——作者目录层子女目录数 ≥2。
+	c4 := &Condx{Target: CondxTargetDir, Format: condxTpl("Artist[{作者}]"),
+		Attach: []CondxAttach{{Kind: CondxAttachChildDirCount, MinCount: 2}}}
+	p4, err := compileCondx(c4, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	work.AncestorChildDirCounts = []int{0, 2, 0}
+	if !p4.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("作者壳两作品子目录应命中")
+	}
+	work.AncestorChildDirCounts = []int{0, 1, 0}
+	if p4.Evaluate(work, nil, &ParseContext{}) {
+		t.Fatalf("单作品子目录不应命中 childDirCount≥2")
+	}
+}
+
+// TestDirSubjectParentAssert dir 目标的父目录谓词作用于**命中层**的父
+// （R4：仅上 1 级）：作品目录的父须为 Artist[{作者}] 壳。
+func TestDirSubjectParentAssert(t *testing.T) {
+	c := &Condx{
+		Target: CondxTargetDir,
+		Format: condxTpl("[{作者}] [{作品号}] [{标题}]"),
+		Attach: []CondxAttach{{Kind: CondxAttachParentFormat, Tpl: "Artist[{作者}]"}},
+	}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	in := &MatchInput{FileName: "01.jpg", DirNames: []string{"Art", "Artist[Isel]", "[Isel] [92242473] [T]"}}
+	if !p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("父为作者壳应命中")
+	}
+	in.DirNames[1] = "misc"
+	if p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("父不是作者壳不应命中")
+	}
+}
+
+// TestFileParentAndExt file 目标的父目录谓词（直接父）与 fileExt。
+func TestFileParentAndExt(t *testing.T) {
+	c := &Condx{
+		Target: CondxTargetFile,
+		Format: condxTpl("{标题}_{序号}"),
+		Attach: []CondxAttach{
+			{Kind: CondxAttachParentContains, Word: "pixiv"},
+			{Kind: CondxAttachFileExt, Value: ".jpg"},
+		},
+	}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	in := &MatchInput{FileName: "sunset_02.JPG", DirNames: []string{"Art", "pixiv_2024"}}
+	if !p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("父含 pixiv 且扩展名匹配（大小写不敏感）应命中")
+	}
+	in.FileName = "sunset_02.png"
+	if p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("扩展名不符不应命中")
+	}
+	in.FileName = "sunset_02.JPG"
+	in.DirNames[1] = "tumblr"
+	if p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("父不含 pixiv 不应命中")
+	}
+}
+
+// TestSeqMemberType 序列成员类型限定：散页成套排除目录内说明 txt（T3）。
+func TestSeqMemberType(t *testing.T) {
+	c := &Condx{Target: CondxTargetSeq, Format: condxTpl("{键}_{序号}"),
+		Attach: []CondxAttach{{Kind: CondxAttachSeqMemberType, Types: []string{"image"}}}}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	in := &MatchInput{
+		FileName: "trip_02.jpg",
+		Siblings: []string{"trip_01.jpg", "trip_02.jpg", "trip_03.jpg", "trip_info.txt"},
+	}
+	ctx := &ParseContext{}
+	if !p.Evaluate(in, nil, ctx) {
+		t.Fatalf("三图像成员成套应命中（txt 不计数也不否决）")
+	}
+	if ctx.Group == nil || ctx.Group.Size != 3 {
+		t.Fatalf("Group.Size 应只计图像成员，得到 %+v", ctx.Group)
+	}
+	in2 := &MatchInput{FileName: "trip_info.txt", Siblings: in.Siblings}
+	if p.Evaluate(in2, nil, &ParseContext{}) {
+		t.Fatalf("文档自身不应按图像序列成员命中")
+	}
+}
+
+// TestBadgeGates 值级小标三门：库名单（形变归一唯一才命中）、常量；折叠
+// 规范名以 #canon 后缀回绑供提取消费。
+func TestBadgeGates(t *testing.T) {
+	lib := &LibraryIndex{AuthorNames: map[string]struct{}{
+		"Jake_Jaccobus": {}, "jake--other": {},
+	}}
+	c := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{标题}"),
+		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true}}}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	ctx := &ParseContext{}
+	if !p.Evaluate(&MatchInput{FileName: "jake__jaccobus_sunset.jpg"}, lib, ctx) {
+		t.Fatalf("折叠唯一应命中")
+	}
+	if v, ok := ctx.Capture("r1.author#canon"); !ok || v != "Jake_Jaccobus" {
+		t.Fatalf("规范名绑定不符: %q %v", v, ok)
+	}
+	if len(ctx.PredHits) != 1 || ctx.PredHits[0].Name != "Jake_Jaccobus" {
+		t.Fatalf("谓词命中记录不符: %+v", ctx.PredHits)
+	}
+	if p.Evaluate(&MatchInput{FileName: "jake_moon.jpg"}, lib, &ParseContext{}) {
+		t.Fatalf("折叠零命中应不命中")
+	}
+	// library 精确（不折叠）：值须逐字在名单。
+	c2 := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{标题}"),
+		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author"}}}
+	p2, _ := compileCondx(c2, 1)
+	if !p2.Evaluate(&MatchInput{FileName: "Jake_Jaccobus_sunset.jpg"}, lib, &ParseContext{}) {
+		t.Fatalf("精确名单应命中")
+	}
+	if p2.Evaluate(&MatchInput{FileName: "jake__jaccobus_sunset.jpg"}, lib, &ParseContext{}) {
+		t.Fatalf("形变名在精确模式不应命中")
+	}
+	// constant。
+	c3 := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{标题}"),
+		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeConstant, Value: "Isel"}}}
+	p3, _ := compileCondx(c3, 1)
+	if !p3.Evaluate(&MatchInput{FileName: "Isel_x.jpg"}, nil, &ParseContext{}) {
+		t.Fatalf("常量相等应命中")
+	}
+	if p3.Evaluate(&MatchInput{FileName: "Other_x.jpg"}, nil, &ParseContext{}) {
+		t.Fatalf("常量不等不应命中")
+	}
+}
+
+// TestCrossRowEqualGate T2 作者壳制：两行 + 跨行值级相等——目录行绑定的
+// {作者} 与文件行绑定的 {作者} 相等才整体命中（行序即求值序；捕获行号前缀
+// 使两行同名占位词互不遮蔽）。
+func TestCrossRowEqualGate(t *testing.T) {
+	rows := []CondxRow{
+		{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{标题}_{序号}")}},
+		{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("Artist[{作者}]"),
+			Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeEqual, AgainstRow: 1, AgainstPh: "作者"}}}},
+	}
+	p, err := compileCondxRows(rows)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	in := &MatchInput{
+		FileName: "Isel_sunset_03.jpg",
+		DirNames: []string{"Art", "Artist[Isel]"},
+	}
+	if !p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("两行作者同值应整体命中")
+	}
+	in.DirNames[1] = "Artist[Other]"
+	if p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("作者异值不应命中")
+	}
+}
+
+// TestAncestorAggregation 流水线派生：各层祖先的直接子文件/子目录数，及
+// 目录子女谓词经派生数据可达（W1 全序号子女 ≥2 命中）。
+func TestAncestorAggregation(t *testing.T) {
+	files := []ScanFile{
+		{FileName: "01.jpg", DirNames: []string{"Art", "A", "W1"}, RelPath: "Art/A/W1/01.jpg"},
+		{FileName: "02.jpg", DirNames: []string{"Art", "A", "W1"}, RelPath: "Art/A/W1/02.jpg"},
+		{FileName: "cover.png", DirNames: []string{"Art", "B", "W2"}, RelPath: "Art/B/W2/cover.png"},
+	}
+	siblings := map[string][]string{}
+	for _, f := range files {
+		k := dirGroupKey(f.DirNames)
+		siblings[k] = append(siblings[k], f.FileName)
+	}
+	childDirs := map[string]map[string]struct{}{}
+	for _, f := range files {
+		for d := 0; d+1 < len(f.DirNames); d++ {
+			pk := dirGroupKey(f.DirNames[:d+1])
+			set, ok := childDirs[pk]
+			if !ok {
+				set = map[string]struct{}{}
+				childDirs[pk] = set
+			}
+			set[f.DirNames[d+1]] = struct{}{}
+		}
+	}
+	in := &MatchInput{
+		FileName:               "01.jpg",
+		DirNames:               files[0].DirNames,
+		Siblings:               siblings[dirGroupKey(files[0].DirNames)],
+		AncestorFiles:          ancestorFilesLevels(files[0].DirNames, siblings),
+		AncestorChildDirCounts: ancestorChildDirCounts(files[0].DirNames, childDirs),
+	}
+	if got, ok := in.ancestorFilesAt(2); !ok || len(got) != 2 {
+		t.Fatalf("作品层子女应 2 文件，得到 %v %v", got, ok)
+	}
+	if got, ok := in.ancestorFilesAt(1); ok || len(got) != 0 {
+		t.Fatalf("作者层无直接子文件（子目录不计入子女文件），得到 %v %v", got, ok)
+	}
+	if c, _ := in.ancestorChildDirCountAt(0); c != 2 {
+		t.Fatalf("根层子目录数应 2（A/B），得到 %d", c)
+	}
+	if c, _ := in.ancestorChildDirCountAt(1); c != 1 {
+		t.Fatalf("作者层子目录数应 1（W1），得到 %d", c)
+	}
+	c := &Condx{Target: CondxTargetDir, Format: condxTpl("W{作品号}"),
+		Attach: []CondxAttach{{Kind: CondxAttachChildrenAllFormat, Tpl: "{序号}", MinCount: 2}}}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	if !p.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("W1 全序号子女应命中")
 	}
 }
