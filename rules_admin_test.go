@@ -332,6 +332,51 @@ func TestApplySaveRuleCondxCaptureRoundTrip(t *testing.T) {
 	}
 }
 
+// TestApplySaveRuleFirstRowCaptureOmitted 用户实测缺陷锚（2026-10-25）：
+// 单行 dir 条件（模板 Artist[{作者}]）+ 提取动作引用第 1 行占位词但**省略
+// row 字段**——前端编辑面第 1 行引用的合法产物（仅 row>1 才显式传 row）。
+// 修复前：validateExtractions 的 Row≤0 分支按裸组名查行号前缀声明集必挂
+// （报「模式未声明的捕获组名 "author"」v3 文案）；修复后按第 1 行兜底通过。
+func TestApplySaveRuleFirstRowCaptureOmitted(t *testing.T) {
+	store := newFakeSessionStore()
+	mgr, _ := newTestManager(t, store)
+
+	ruleJSON := []byte(`{
+		"id": "", "description": "作者壳（单行）", "source": "manual", "enabled": true,
+		"conditions": [
+			{"condition": {"target": "dir", "format": {"mode": "template", "tpl": "Artist[{作者}]"},
+				"attach": [{"kind": "childDirCount", "minCount": 2}]}}
+		],
+		"extractions": [
+			{"dimension": "author", "from": "capture", "captureName": "author"}
+		],
+		"synthesis": {"dimPolicies": [], "roles": []}
+	}`)
+	view, err := mgr.ApplySaveRule(ruleJSON)
+	if err != nil {
+		t.Fatalf("第 1 行引用省略 row 应按第 1 行兜底通过，实际: %v", err)
+	}
+	if len(view.Rules) != 1 || view.Rules[0].Extractions == nil || len(view.Rules[0].Extractions) != 1 {
+		t.Fatalf("保存后视图应含 1 条规则 1 个提取动作，实际: %+v", view.Rules)
+	}
+
+	// 负例：省略 row 但组名不在第 1 行声明（模板仅 {作者}，引用 title）——
+	// 兜底后仍应按行号口径拒绝，文案为 v4 条件捕获口径。
+	wrong := []byte(`{
+		"id": "wrong-group", "description": "错组引用", "source": "manual", "enabled": true,
+		"conditions": [
+			{"condition": {"target": "dir", "format": {"mode": "template", "tpl": "Artist[{作者}]"}}}
+		],
+		"extractions": [
+			{"dimension": "title", "from": "capture", "captureName": "title"}
+		],
+		"synthesis": {"dimPolicies": [], "roles": []}
+	}`)
+	if _, err := mgr.ApplySaveRule(wrong); err == nil || !strings.Contains(err.Error(), "未声明的条件捕获") {
+		t.Fatalf("未声明组引用应按 v4 条件捕获口径拒绝，实际 err=%v", err)
+	}
+}
+
 func TestRulesActionDispatch(t *testing.T) {
 	store := newFakeSessionStore()
 	mgr, ctx := newTestManager(t, store)

@@ -108,7 +108,7 @@ func TestMergedRecognitionTreeInjectionAncestorAsserts(t *testing.T) {
 		t.Fatalf("编译失败: %v", err)
 	}
 	rule.Pattern = pat
-	if err := validateExtractions(rule.ID, pat, rule.Extractions, declaredConditionCaptures(rule.Conditions)); err != nil {
+	if err := validateExtractions(rule.ID, pat, rule.Extractions, declaredConditionCaptures(rule.Conditions), true); err != nil {
 		t.Fatalf("提取校验失败: %v", err)
 	}
 

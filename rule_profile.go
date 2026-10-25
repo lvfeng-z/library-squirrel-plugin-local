@@ -756,7 +756,7 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("规则 %q 的条件行非法: %w", rj.ID, err)
 		}
-		if err := validateExtractions(rj.ID, pat, rj.Extractions, declaredConditionCaptures(rj.Conditions)); err != nil {
+		if err := validateExtractions(rj.ID, pat, rj.Extractions, declaredConditionCaptures(rj.Conditions), true); err != nil {
 			return nil, err
 		}
 		return &RuleEntry{
@@ -777,7 +777,7 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("规则 %q 的模式非法: %w", rj.ID, err)
 	}
-	if err := validateExtractions(rj.ID, pat, rj.Extractions, declaredPatternCaptures(pat)); err != nil {
+	if err := validateExtractions(rj.ID, pat, rj.Extractions, declaredPatternCaptures(pat), false); err != nil {
 		return nil, err
 	}
 	return &RuleEntry{
@@ -802,20 +802,27 @@ var knownDimensions = map[MetadataDimension]bool{
 }
 
 // validateExtractions 逐条校验提取动作的承载字段（构造期静态校验，与条件
-// 编译同管线）：裁决取值缺常量、捕获引用不存在（v4 行引用指向未声明行/组名，
-// 旧式裸组名不在模式声明内）、条件表达式引用不存在（谓词来源/维度、捕获组
-// 名不在声明集合内）或类型不匹配时返回含规则 ID 与动作序号的中文错误。
-// declaredCaptures 为该规则形态（条件行或模式树）声明的捕获组名集合
-// （v4 为行号前缀形态）。
-func validateExtractions(ruleID string, pattern Pattern, actions []ExtractionAction, declaredCaptures map[string]bool) error {
+// 编译同管线）：裁决取值缺常量、捕获引用不存在（v4 行引用指向未声明行/组名
+// ——Row 缺省按第 1 行兜底，与 validateCaptureExtractionDeclared 同口径；
+// 前端编辑面第 1 行省略 row 字段为合法形态）、条件表达式引用不存在（谓词
+// 来源/维度、捕获组名不在声明集合内）或类型不匹配时返回含规则 ID 与动作
+// 序号的中文错误。declaredCaptures 为该规则形态（条件行或模式树）声明的
+// 捕获组名集合（v4 为行号前缀形态，rowPrefixed=true）。
+func validateExtractions(ruleID string, pattern Pattern, actions []ExtractionAction, declaredCaptures map[string]bool, rowPrefixed bool) error {
 	for i := range actions {
 		action := &actions[i]
 		if action.From == FromCapture && action.CaptureName != "" {
-			if action.Row > 0 {
-				if !declaredCaptures[rowCaptureName(action.Row, action.CaptureName)] &&
-					!declaredCaptures[rowCaptureName(action.Row, action.CaptureName)+"#canon"] {
+			if rowPrefixed {
+				// v4 条件行形态：Row 缺省（0/负）按第 1 行兜底——第 1 行
+				// 引用省略 row 是前端编辑面的合法产物。
+				row := action.Row
+				if row <= 0 {
+					row = 1
+				}
+				if !declaredCaptures[rowCaptureName(row, action.CaptureName)] &&
+					!declaredCaptures[rowCaptureName(row, action.CaptureName)+"#canon"] {
 					return fmt.Errorf("规则 %q 的第 %d 条提取动作引用了未声明的条件捕获（第 %d 行 %q）",
-						ruleID, i+1, action.Row, action.CaptureName)
+						ruleID, i+1, row, action.CaptureName)
 				}
 			} else if !declaredCaptures[action.CaptureName] {
 				return fmt.Errorf("规则 %q 的第 %d 条提取动作引用了模式未声明的捕获组名 %q",
