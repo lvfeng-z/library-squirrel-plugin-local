@@ -274,7 +274,18 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 				captured, ok = ctx.Capture(rowCaptureName(a.Row, a.CaptureName))
 			}
 		} else {
-			captured, ok = ctx.Capture(name)
+			// Row 缺省（0/负）按第 1 行兜底取绑定——与 validateExtractions
+			// 的 rowPrefixed 口径一致（前端编辑面第 1 行捕获引用合法省略
+			// row 字段；v4 求值上下文的捕获键恒为 rN. 前缀形态，裸名直取
+			// 恒落空曾令编辑保存后的规则「命中但零声明」）。裸名终备兼容
+			// 历史无前缀上下文。
+			captured, ok = ctx.Capture(rowCaptureName(1, a.CaptureName) + "#canon")
+			if !ok {
+				captured, ok = ctx.Capture(rowCaptureName(1, a.CaptureName))
+			}
+			if !ok {
+				captured, ok = ctx.Capture(name)
+			}
 		}
 		if !ok {
 			return MetadataDeclaration{}, false
