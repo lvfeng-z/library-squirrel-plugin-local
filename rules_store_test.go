@@ -192,40 +192,90 @@ func (nilValueStore) GetValue(string) (*sdkdto.StorageValue, error) { return nil
 // SetValue 为占位实现，测试中不会被调用。
 func (nilValueStore) SetValue(string, string) error { return nil }
 
-// TestLoadProfileBrokenData JSON 损坏或未知历史版本时返回 nil 档案与单个错误；
-// 未来更高版本不中断：返回非 nil 档案（尽力解析）与单条版本告警。
+// TestLoadProfileBrokenData JSON 损坏或未知历史版本时自动重置（拒载死锁收
+// 口）：返回空档案与单条「已自动重置」知会警告、档案键被覆写为空 v4 档、原
+// 文进入备份键；未来更高版本不中断：返回非 nil 档案（尽力解析）与单条版本
+// 告警、不动存储。
 func TestLoadProfileBrokenData(t *testing.T) {
 	cases := []struct {
-		name    string
-		value   string
-		wantNil bool
+		name      string
+		value     string
+		wantReset bool
 	}{
-		{name: "JSON 截断", value: `{"schemaVersion":1,"rules":[`, wantNil: true},
-		{name: "非 JSON 文本", value: "不是 JSON", wantNil: true},
-		{name: "未知历史版本", value: `{"schemaVersion":0,"rules":[]}`, wantNil: true},
-		{name: "未来更高版本", value: `{"schemaVersion":99,"rules":[]}`, wantNil: false},
+		{name: "JSON 截断", value: `{"schemaVersion":1,"rules":[`, wantReset: true},
+		{name: "非 JSON 文本", value: "不是 JSON", wantReset: true},
+		{name: "未知历史版本", value: `{"schemaVersion":0,"rules":[]}`, wantReset: true},
+		{name: "未来更高版本", value: `{"schemaVersion":99,"rules":[]}`, wantReset: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: tc.value}}
 			loaded, errs := LoadProfile(store)
-			if tc.wantNil {
-				if loaded != nil {
-					t.Fatalf("数据不可用时档案应为 nil，实际: %+v", loaded)
+			if loaded == nil {
+				t.Fatal("档案应可用（重置为空档或尽力解析），不中断整体")
+			}
+			if len(errs) != 1 {
+				t.Fatalf("应返回单个错误（重置知会或版本告警），实际 %d 个: %v", len(errs), errs)
+			}
+			if tc.wantReset {
+				// 损坏/历史版本：自动重置知会 + 存储双写（档案键空档、备份键原文）
+				if !strings.Contains(errs[0].Error(), "已自动重置为空档案") {
+					t.Fatalf("历史/损坏档案应返回重置知会，实际: %v", errs[0])
 				}
-				if len(errs) != 1 {
-					t.Fatalf("数据不可用时应返回单个错误，实际 %d 个: %v", len(errs), errs)
+				if backup, _ := store.GetValue(RuleProfileBackupKVKey); backup == nil || backup.Value != tc.value {
+					t.Fatalf("原文应进入备份键，实际: %+v", backup)
+				}
+				if cur, _ := store.GetValue(RuleProfileKVKey); cur == nil || cur.Value == tc.value {
+					t.Fatalf("档案键应被覆写为空档（不再保留原文），实际: %+v", cur)
 				}
 				return
 			}
-			// 未来更高版本：告警且不中断（空规则档案照常可用）
-			if loaded == nil {
-				t.Fatal("未来更高版本应尽力解析返回非 nil 档案，不中断整体")
+			// 未来更高版本：告警且不动存储
+			if !strings.Contains(errs[0].Error(), "高于当前支持的版本") {
+				t.Fatalf("未来更高版本应返回单条版本告警，实际: %v", errs[0])
 			}
-			if len(errs) != 1 || !strings.Contains(errs[0].Error(), "高于当前支持的版本") {
-				t.Fatalf("未来更高版本应返回单条版本告警，实际: %v", errs)
+			if cur, _ := store.GetValue(RuleProfileKVKey); cur == nil || cur.Value != tc.value {
+				t.Fatalf("未来版本档案不应被重置，实际: %+v", cur)
 			}
 		})
+	}
+}
+
+// TestLoadProfileLegacyAutoReset v3 旧档自动重置闭环（用户实测缺陷锚：拒载提
+// 示指引「重置规则档案」但无重置入口，重新识别也不触碰档案存储键——旧档用
+// 户被永久锁死）。断言：一次 LoadProfile 后返回空 v4 档+知会警告（含停用原
+// 因）、KV 档案键已是 v4 空档、旧档原文在备份键；**二次 LoadProfile 干净**
+// （无警告）；此后保存规则（UpdateProfile 链）畅通。
+func TestLoadProfileLegacyAutoReset(t *testing.T) {
+	v3 := `{"schemaVersion":3,"rules":[{"id":"old-expr","description":"v3 表达式规则","source":"manual","enabled":true,` +
+		`"pattern":{"kind":"regex","target":"filename","expr":"^x\\.jpg$","captures":[]},` +
+		`"extractions":[{"dimension":"title","from":"constant","constant":"旧值"}],"synthesis":{}}]}`
+	store := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: v3}}
+
+	first, errs := LoadProfile(store)
+	if first == nil {
+		t.Fatalf("旧档应自动重置返回空档案，实际 nil（errs=%v）", errs)
+	}
+	if first.SchemaVersion != CurrentSchemaVersion || len(first.Rules) != 0 {
+		t.Fatalf("重置应返回空 v4 档案，实际: 版本 %d、规则 %d 条", first.SchemaVersion, len(first.Rules))
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "已自动重置为空档案") || !strings.Contains(errs[0].Error(), "已停用") {
+		t.Fatalf("应返回单条含停用原因的重置知会，实际: %v", errs)
+	}
+	if backup, _ := store.GetValue(RuleProfileBackupKVKey); backup == nil || backup.Value != v3 {
+		t.Fatalf("旧档原文应进入备份键，实际: %+v", backup)
+	}
+	cur, _ := store.GetValue(RuleProfileKVKey)
+	if cur == nil || strings.Contains(cur.Value, "old-expr") {
+		t.Fatalf("档案键应为空 v4 档（旧规则不再在场），实际: %s", cur.Value)
+	}
+
+	second, errs2 := LoadProfile(store)
+	if len(errs2) != 0 {
+		t.Fatalf("重置后二次载入应无警告，实际: %v", errs2)
+	}
+	if second == nil || second.SchemaVersion != CurrentSchemaVersion || len(second.Rules) != 0 {
+		t.Fatalf("二次载入应为空 v4 档案，实际: %+v", second)
 	}
 }
 

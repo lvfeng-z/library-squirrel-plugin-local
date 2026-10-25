@@ -59,8 +59,10 @@ func emptyProfile() *RuleProfile {
 }
 
 // LoadProfile 从 KV 读取规则档案：键不存在（存储值为 nil 或明文为空）时返回空
-// 档案且无错误；数据不可解析或结构版本与当前版本不符时返回 nil 档案与单个错误；
-// 个别规则构造校验失败时经 ParseProfile 跳过该规则，并返回带规则 ID 的错误，
+// 档案且无错误；数据不可解析或结构版本为旧版（v1..v3）时**自动重置**——原文
+// 备份进单代备份键、覆写为空 v4 档案、返回空档案与一条知会警告（拒载死锁收
+// 口：旧档用户无重置入口、保存/裁决/泛化全被「档案不可载入」阻断）；个别
+// 规则构造校验失败时经 ParseProfile 跳过该规则，并返回带规则 ID 的错误，
 // 其余规则照常载入，不阻塞整体。
 func LoadProfile(store ProfileStore) (*RuleProfile, []error) {
 	if store == nil {
@@ -73,7 +75,23 @@ func LoadProfile(store ProfileStore) (*RuleProfile, []error) {
 	if stored == nil || stored.Value == "" {
 		return emptyProfile(), nil
 	}
-	return ParseProfile([]byte(stored.Value))
+	profile, errs := ParseProfile([]byte(stored.Value))
+	if profile != nil {
+		return profile, errs
+	}
+	// 整体拒载（旧版/损坏）：自动重置。重置自身失败（存储只读故障）时维持
+	// 拒载语义透传——不静默吞错，调用方按存储故障处置。
+	empty := emptyProfile()
+	data, mErr := empty.MarshalJSON()
+	if mErr == nil {
+		if sErr := store.SetValue(RuleProfileBackupKVKey, stored.Value); sErr == nil {
+			if wErr := store.SetValue(RuleProfileKVKey, string(data)); wErr == nil {
+				warn := fmt.Errorf("规则档案不可载入（%s），已自动重置为空档案；原档案原文已备份，重新识别后可在工作台重新生成规则", errs[0])
+				return empty, []error{warn}
+			}
+		}
+	}
+	return nil, errs
 }
 
 // SaveProfile 把规则档案序列化为多态 JSON 后写入 KV；档案为 nil 时按空档案写入。
