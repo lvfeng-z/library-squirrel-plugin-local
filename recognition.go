@@ -47,9 +47,10 @@ type SessionAssignment struct {
 	TitleClueRef      string   `json:"titleClueRef,omitempty"`
 	CollectionClueRef string   `json:"collectionClueRef,omitempty"`
 	TagClueRefs       []string `json:"tagClueRefs,omitempty"`
-	// Generalized 该赋值是否已参与泛化（泛化即接管语义：新入档规则完整复现的
-	// 维度已从赋值剥离、全维度剥空的赋值已删除——标记仅对有残存未消费维度的
-	// 赋值保留意义，供残存维度的清理提示）。
+	// Generalized 该赋值是否已参与泛化（2026-10-25 用户裁决：废除「泛化即接
+	// 管」消费剥离——赋值全量保留与规则声明双源互证，显式维度覆盖规则终选
+	// 的合并语义不变；本标记仅作「已参与泛化」的谱系记录，不再意味着维度
+	// 被剥离或删除）。
 	Generalized bool `json:"generalized,omitempty"`
 	// UpdatedAtMs 最近更新时间（Unix 毫秒）。
 	UpdatedAtMs int64 `json:"updatedAtMs,omitempty"`

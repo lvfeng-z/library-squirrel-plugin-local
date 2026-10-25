@@ -1,6 +1,7 @@
 // 手动解析动作族：单次赋值与目录赋值（会话态知识写入，不升格规则）、泛化成
-// 规则（按文件名形态/目录层/序列形态/结构映射四维度选择；入档后泛化即接管——
-// 新规则复现的赋值维度被消费剥离）、冲突裁决生成（双命中 And 组合/单侧缺席
+// 规则（按文件名形态/目录层/序列形态/结构映射四维度选择；入档后赋值保留
+// ——与新规则双源互证，2026-10-25 用户裁决废除「泛化即接管」消费剥离）、
+// 冲突裁决生成（双命中 And 组合/单侧缺席
 // 改绑的谓词条件策略，生成物不消费赋值）。生成物一律为最简充分形式——不生成
 // 超出必要的模式复杂度与条件复杂度；每次生成规则或赋值变更后经识别刷新调度
 // 自动排定一轮重识别（差异集高亮，过窄=差异里仍有未覆盖、过泛=差异里错套）。
@@ -243,26 +244,26 @@ func (m *SessionManager) ClearDirAssignments(root, dirRelKey string) (*Workbench
 	return sess, cleared, nil
 }
 
-// —— 泛化成规则（入档后即接管：消费剥离）——
+// —— 泛化成规则（入档后赋值保留：双源互证）——
 
 // ApplyGeneralization 泛化动作（单文件寻址）：从单次赋值样例与该文件的识别上下文
-// （快照记录）出发生成对应 PatternKind 的规则（来源 qna）入档案，并以新入档规则
-// 消费作用域内赋值（复现维度剥离、全剥空删除、残存者置已泛化标记），随即启动
-// 强制验证轮。mode 为空时按文件名形态（缺省维度）。
+// （快照记录）出发生成对应 PatternKind 的规则（来源 qna）入档案，作用域内赋值
+// 全量保留（用户裁决 2026-10-25：废除「泛化即接管」消费剥离——赋值显式维度
+// 覆盖规则求值终选的合并语义本就存在，双源共存互为印证；Generalized 标记仅作
+// 「已参与泛化」记录），随即启动强制验证轮。mode 为空时按文件名形态（缺省维度）。
 func (m *SessionManager) ApplyGeneralization(root, relPath, mode string) (*GenerationResult, error) {
 	return m.applyGeneralization(root, relPath, "", mode)
 }
 
 // ApplyDirGeneralization 泛化动作（目录寻址）：样本文件取子树内首个有赋值的
-// 文件，消费剥离作用域=子树全部文件。
+// 文件，赋值标记作用域=子树全部文件。
 func (m *SessionManager) ApplyDirGeneralization(root, dirRelKey, mode string) (*GenerationResult, error) {
 	return m.applyGeneralization(root, "", dirRelKey, mode)
 }
 
 // applyGeneralization 泛化落地单一实现：作用域解析（单文件=该文件；目录=子树
 // 全部文件、样本=首个有赋值文件）→ 规则构造（各模式分支）→ 档案写单点入档 →
-// 泛化即接管消费（入档后、自动增量重识别求值前生效，重识别后声明来源=规则名）
-// → 验证轮排定。
+// 作用域赋值标记（赋值保留：双源互证，见 markScopedAssignments）→ 验证轮排定。
 func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode string) (*GenerationResult, error) {
 	if mode == "" {
 		mode = generalizeModeFilename
@@ -341,8 +342,8 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 			return nil, err
 		}
 	}
-	if err := m.consumeScopedAssignments(root, scope, sess.Snapshot, rules); err != nil {
-		m.warnf("泛化消费赋值失败（规则已入档）: %v", err)
+	if err := m.markScopedAssignments(root, scope); err != nil {
+		m.warnf("泛化标记赋值失败（规则已入档）: %v", err)
 	}
 	started := m.scheduleRecognitionRefresh(root)
 	if len(rules) == 1 {
@@ -358,162 +359,25 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 	return &GenerationResult{Rule: views[0], Rules: views, VerificationStarted: started}, nil
 }
 
-// combinedRuleDeclarations 组合规则集在单文件上的声明求值（消费判据）：兄弟
-// 群组定群规则先于提取规则求值（首个命中的定群写入群组上下文，与流水线分组
-// 段同构；其余定群规则不再求值）——群组序号等条件操作数与群组前缀提取自该
-// 上下文取值；其余规则依序求值，捕获组与目录/谓词命中按规则隔离（与流水线
-// 提取段同构——FromAncestorDir/FromPredicate 只读自身规则的锚定/谓词命中），
-// 任一规则模式未命中即整体不产出（组合规则须全部命中才算覆盖）。带生效条件
-// 的动作按流水线两遍执行语义求值（第二遍可见全部无条件声明）。MatchInput
-// 由快照记录构造，siblings 为同目录兄弟全集（定群成群判定的求值输入，可为
-// 空——空时定群规则恒不命中）。
-func combinedRuleDeclarations(rules []RuleEntry, f *SnapFile, siblings []string) []MetadataDeclaration {
-	in := &MatchInput{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath, Siblings: siblings}
-	ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
-	var decls []MetadataDeclaration
-	var conditional []struct {
-		rule    *RuleEntry
-		context *ParseContext
-	}
-	grouped := false
-	for i := range rules {
-		rule := &rules[i]
-		if isGroupingRule(rule) {
-			if grouped {
-				continue
-			}
-			if !rule.Pattern.Evaluate(in, nil, ctx) {
-				return nil
-			}
-			grouped = true
-			continue
-		}
-		ruleCtx := ctx.ruleScopedContext()
-		hit := rule.Pattern.Evaluate(in, nil, ruleCtx)
-		ctx.absorbScoped(ruleCtx)
-		if !hit {
-			// 条目不命中=该条目对该文件无声明（独立条目并集口径：结构映射
-			// 的目录层/文件名条目各自管各自维度，某条不命中不牵连他条——
-			// v3 吞尾宽容掩盖了原 AND 绑定，v4 严格模板下按条独立求值）。
-			continue
-		}
-		if hasConditionalAction(rule.Extractions) {
-			conditional = append(conditional, struct {
-				rule    *RuleEntry
-				context *ParseContext
-			}{rule, ruleCtx})
-		}
-		for _, action := range rule.Extractions {
-			if action.When != nil {
-				continue
-			}
-			if decl, ok := action.Apply(rule.ID, ruleCtx); ok {
-				decls = append(decls, decl)
-			}
-		}
-	}
-	for _, match := range conditional {
-		for _, action := range match.rule.Extractions {
-			if action.When == nil || !action.When.Holds(match.context, decls) {
-				continue
-			}
-			if decl, ok := action.Apply(match.rule.ID, match.context); ok {
-				decls = append(decls, decl)
-			}
-		}
-	}
-	return decls
-}
-
-// stripConsumedDimensions 从赋值剥离被规则声明复现的维度（值等价判定）：作者需
-// 值等价且 roleName 随规则 extraction 携带（赋值未指定角色时不作要求）；标签需
-// 每个标签值都有同值 tag 声明；出处引用随维度一并剥离。未复现维度（含手工值）
-// 原样保留。返回残存赋值（全维度剥空时无任何指定维度）。
-func stripConsumedDimensions(assign SessionAssignment, decls []MetadataDeclaration) SessionAssignment {
-	declared := func(dim MetadataDimension, value string) bool {
-		for i := range decls {
-			if decls[i].Dimension == dim && decls[i].Value == value {
-				return true
-			}
-		}
-		return false
-	}
-	if assign.Author != "" {
-		reproduced := false
-		for i := range decls {
-			d := &decls[i]
-			if d.Dimension != DimAuthor || d.Value != assign.Author {
-				continue
-			}
-			if assign.AuthorRole != "" && d.RoleName != assign.AuthorRole {
-				continue
-			}
-			reproduced = true
-			break
-		}
-		if reproduced {
-			assign.Author, assign.AuthorRole, assign.AuthorClueRef = "", "", ""
-		}
-	}
-	if assign.Title != "" && declared(DimTitle, assign.Title) {
-		assign.Title, assign.TitleClueRef = "", ""
-	}
-	if assign.Collection != "" && declared(DimCollection, assign.Collection) {
-		assign.Collection, assign.CollectionClueRef = "", ""
-	}
-	if len(assign.Tags) > 0 {
-		all := true
-		for _, tag := range assign.Tags {
-			if !declared(DimTag, tag) {
-				all = false
-				break
-			}
-		}
-		if all {
-			assign.Tags, assign.TagClueRefs = nil, nil
-		}
-	}
-	return assign
-}
-
-// consumeScopedAssignments 泛化即接管的消费剥离：以本次新入档的规则对作用域内
-// 每个文件求值，某赋值维度的全部指定值被规则声明复现即从该文件赋值剥离该维度；
-// 全维度剥空→删除赋值；残存赋值保留并置已泛化标记（全消费的赋值删除即无标记）。
-// 定群规则的成群判定携带同目录兄弟全集（快照口径）——序列形态条目（sibling +
-// 集名捕获 + 仅序列成员产出条件）的消费与入档后重识别同一求值口径。裁决
-// （adjudicate）生成物不经此消费。
-func (m *SessionManager) consumeScopedAssignments(root string, scope []*SnapFile, snap *RecognitionSnapshot, rules []RuleEntry) error {
-	if len(scope) == 0 || len(rules) == 0 {
+// markScopedAssignments 泛化入档后的赋值标记（用户裁决 2026-10-25：废除「泛化
+// 即接管」消费剥离）：作用域内赋值**全量保留**——赋值显式维度覆盖规则求值终选
+// 的合并语义本就存在，赋值（手动知识）与规则声明双源共存互为印证，手动赋值
+// 永不因泛化被自动剥离或删除（用户不再需要时自行清除）；Generalized 标记仅作
+// 「该文件赋值已参与过泛化」的谱系记录（识别与泛化观测面用）。
+func (m *SessionManager) markScopedAssignments(root string, scope []*SnapFile) error {
+	if len(scope) == 0 {
 		return nil
-	}
-	siblingsByDir := make(map[string][]string)
-	if snap != nil {
-		for i := range snap.Files {
-			f := &snap.Files[i]
-			siblingsByDir[f.DirRelKey] = append(siblingsByDir[f.DirRelKey], f.FileName)
-		}
-	}
-	declsByRel := make(map[string][]MetadataDeclaration, len(scope))
-	for _, f := range scope {
-		declsByRel[f.RelPath] = combinedRuleDeclarations(rules, f, siblingsByDir[f.DirRelKey])
 	}
 	now := time.Now().UnixMilli()
 	_, err := m.mutateSession(root, func(sess *WorkbenchSession) error {
-		for rel, decls := range declsByRel {
-			assign, ok := sess.Assignments[rel]
-			if !ok {
+		for _, f := range scope {
+			assign, ok := sess.Assignments[f.RelPath]
+			if !ok || assign.Generalized {
 				continue
 			}
-			residual := stripConsumedDimensions(assign, decls)
-			if len(residual.coveredDimensions()) == 0 {
-				delete(sess.Assignments, rel)
-				sess.AssignRevision++
-				continue
-			}
-			residual.Generalized = true
-			residual.UpdatedAtMs = now
-			sess.Assignments[rel] = residual
-			sess.AssignRevision++
+			assign.Generalized = true
+			assign.UpdatedAtMs = now
+			sess.Assignments[f.RelPath] = assign
 		}
 		return nil
 	})

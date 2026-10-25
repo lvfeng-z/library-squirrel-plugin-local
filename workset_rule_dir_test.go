@@ -314,10 +314,11 @@ func TestWorkSetDirAdjustRuleAssembly(t *testing.T) {
 	})
 	cases := []struct {
 		relPath, collection, author string
+		fromRule                    bool // 跨目录接管=规则承载；本集成员=赋值覆盖（2026-10-25 裁决赋值保留）
 	}{
-		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "瞬間的に絡み合う", "Isel"},
+		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "瞬間的に絡み合う", "Isel", false},
 		// 跨目录同格式接管：各自目录第 3 段成集、作者=各自段 1。
-		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "別の題", "Isel"},
+		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "別の題", "Isel", true},
 	}
 	for _, c := range cases {
 		file := snapshotFileOf(sess.Snapshot, c.relPath)
@@ -326,7 +327,7 @@ func TestWorkSetDirAdjustRuleAssembly(t *testing.T) {
 		}
 		var collection, author string
 		for _, d := range file.Final {
-			if d.RuleID != rule.ID {
+			if c.fromRule && d.RuleID != rule.ID {
 				continue
 			}
 			switch MetadataDimension(d.Dimension) {
@@ -363,7 +364,7 @@ func TestWorkSetDirAdjustRuleAssembly(t *testing.T) {
 // TestWorkSetDirGeneralizeEndToEnd 目录格式草稿泛化入档端到端（剧本D 步3）：
 // 草稿两规则（一级目录剥壳+目录格式）入档、验证轮后各同格式目录下文件声明
 // （本集=瞬間的に絡み合う、跨目录=別の題——各自目录第 3 段；作者=各自 Artist
-// 剥壳）、成员集维度赋值被消费剥离（集名捕获复现确认集名）。
+// 剥壳）、成员赋值保留并置已泛化标记（2026-10-25 裁决赋值保留双源互证）。
 func TestWorkSetDirGeneralizeEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	m, target := workSetDirFixture(t, root)
@@ -377,8 +378,10 @@ func TestWorkSetDirGeneralizeEndToEnd(t *testing.T) {
 	}
 	authorID, captureID := result.Rules[0].ID, result.Rules[1].ID
 
+	// 等待条件须绑定「泛化后才可能成立」的跨目录规则命中（成员集名值在确认
+	// 轮旧快照即满足，按值等待会抓到泛化前快照）。
 	sess := waitWorkSetCond(t, m, root, func(s *WorkbenchSession) bool {
-		f := snapshotFileOf(s.Snapshot, "Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png")
+		f := snapshotFileOf(s.Snapshot, "Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg")
 		if f == nil {
 			return false
 		}
@@ -389,13 +392,17 @@ func TestWorkSetDirGeneralizeEndToEnd(t *testing.T) {
 		}
 		return false
 	})
+	// 本集成员（表紙/おまけ）：集名由确认赋值覆盖承载（2026-10-25 裁决赋值
+	// 保留）、作者由新壳形规则承载（赋值只覆盖集名维度）；跨目录文件（別の
+	// 題）两维均由新规则承载（接管本质）。
 	cases := []struct {
 		relPath, collection, author string
+		fromRule                    bool
 	}{
-		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "瞬間的に絡み合う", "Isel"},
-		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/おまけ.jpg", "瞬間的に絡み合う", "Isel"},
-		{"Artist[Isel]/[Isel] [92242474] [別の題]/表紙.png", "別の題", "Isel"},
-		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "別の題", "Isel"},
+		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "瞬間的に絡み合う", "Isel", false},
+		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/おまけ.jpg", "瞬間的に絡み合う", "Isel", false},
+		{"Artist[Isel]/[Isel] [92242474] [別の題]/表紙.png", "別の題", "Isel", true},
+		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "別の題", "Isel", true},
 	}
 	for _, c := range cases {
 		file := snapshotFileOf(sess.Snapshot, c.relPath)
@@ -405,9 +412,10 @@ func TestWorkSetDirGeneralizeEndToEnd(t *testing.T) {
 		var collection, author string
 		for _, d := range file.Final {
 			switch {
-			case d.RuleID == captureID && MetadataDimension(d.Dimension) == DimCollection:
+			case MetadataDimension(d.Dimension) == DimCollection && (c.fromRule == (d.RuleID == captureID)):
 				collection = d.Value
-			case d.RuleID == authorID && MetadataDimension(d.Dimension) == DimAuthor:
+			case MetadataDimension(d.Dimension) == DimAuthor && (d.RuleID == authorID):
+				// 作者两情形均由壳形规则承载（赋值未覆盖作者维度）
 				author = d.Value
 			}
 		}
@@ -415,13 +423,14 @@ func TestWorkSetDirGeneralizeEndToEnd(t *testing.T) {
 			t.Fatalf("%s 声明不符：集名 %q（期望 %q）、作者 %q（期望 %q）", c.relPath, collection, c.collection, author, c.author)
 		}
 	}
-	// 集名捕获复现确认集名→成员集维度赋值被全消费删除。
+	// 赋值保留（废除消费剥离）：成员赋值在场并置已泛化标记。
 	for _, rel := range []string{
 		"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png",
 		"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/おまけ.jpg",
 	} {
-		if _, kept := sess.Assignments[rel]; kept {
-			t.Fatalf("成员 %s 的赋值应被全消费删除", rel)
+		assign, kept := sess.Assignments[rel]
+		if !kept || !assign.Generalized {
+			t.Fatalf("成员 %s 的赋值应保留并置已泛化标记: %+v", rel, assign)
 		}
 	}
 }
@@ -475,7 +484,8 @@ func TestWorkSetDirAdjustSupersedesLineage(t *testing.T) {
 		t.Fatalf("新规则 %s 应启用", newID)
 	}
 
-	// 重识别终态：声明翻新——四文件集名/作者全部来自新规则，旧族零产出。
+	// 重识别终态：声明翻新——作者来自新规则（成员作者无赋值）；集名按赋值
+	// 覆盖（本集成员）/新规则（跨目录）承载，旧族零产出。
 	sess := waitWorkSetCond(t, m, root, func(s *WorkbenchSession) bool {
 		f := snapshotFileOf(s.Snapshot, "Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png")
 		if f == nil {
@@ -490,9 +500,10 @@ func TestWorkSetDirAdjustSupersedesLineage(t *testing.T) {
 	})
 	cases := []struct {
 		relPath, collection, author string
+		collectionFromRule          bool
 	}{
-		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "瞬間的に絡み合う", "Isel"},
-		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "別の題", "Isel"},
+		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "瞬間的に絡み合う", "Isel", false},
+		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "別の題", "Isel", true},
 	}
 	for _, c := range cases {
 		file := snapshotFileOf(sess.Snapshot, c.relPath)
@@ -505,14 +516,14 @@ func TestWorkSetDirAdjustSupersedesLineage(t *testing.T) {
 				t.Fatalf("%s 旧族规则不应再有产出（声明翻新）: %+v", c.relPath, d)
 			}
 			switch {
-			case d.RuleID == newID && MetadataDimension(d.Dimension) == DimCollection:
+			case MetadataDimension(d.Dimension) == DimCollection && (c.collectionFromRule == (d.RuleID == newID)):
 				collection = d.Value
 			case d.RuleID == newID && MetadataDimension(d.Dimension) == DimAuthor:
 				author = d.Value
 			}
 		}
 		if collection != c.collection || author != c.author {
-			t.Fatalf("%s 声明应来自新规则：集名 %q（期望 %q）、作者 %q（期望 %q）", c.relPath, collection, c.collection, author, c.author)
+			t.Fatalf("%s 声明不符：集名 %q（期望 %q）、作者 %q（期望 %q）", c.relPath, collection, c.collection, author, c.author)
 		}
 	}
 	// 谱系簿记翻新：target → 新族 ID（旧族不再占据）。

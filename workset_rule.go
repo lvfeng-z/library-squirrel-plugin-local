@@ -15,7 +15,8 @@ package main
 //     来源形态选族，序列形态默认集名=seqKey、目录形态默认=标题目录段。
 //   - ApplyWorkSetRuleGeneralize 泛化入档（generalizeWorkSetRule）：草稿即
 //     所见即所入（同一推导复跑），复用 generalize 档案写（ArchiveWriteGeneralize）
-//     与消费判据（consumeScopedAssignments，作用域=集成员）+ 验证轮。
+//     与赋值标记（markScopedAssignments，作用域=集成员；赋值保留双源互证）
+//     + 验证轮。
 //   - ApplyWorkSetRuleAdjust   调整面保存（saveWorkSetRuleAdjust）：线索逐项
 //     指派（维度←线索 / 集名捕获段组合〔序列 seqKey 单指｜文件名段连续组合｜
 //     目录段连续组合（剧本E 多段）——三族互斥〕/ 可变段 / 目录锚定 / 不用；
@@ -485,8 +486,8 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 
 // ApplyWorkSetRuleGeneralize 集规则泛化入档动作（generalizeWorkSetRule）：
 // 复跑草稿推导（建议即所见即所入——文件名形态优先、目录格式回退与草稿面
-// 同一判定）→ generalize 档案写单点入档 → 集成员作用域消费剥离（消费判据
-// 与 ad6a748 版同一实现）→ 验证轮排定。
+// 同一判定）→ generalize 档案写单点入档 → 集成员作用域赋值标记（赋值保留
+// 双源互证）→ 验证轮排定。
 func (m *SessionManager) ApplyWorkSetRuleGeneralize(root, target string) (*GenerationResult, error) {
 	sess, err := m.loadSession(root)
 	if err != nil {
@@ -506,8 +507,8 @@ func (m *SessionManager) ApplyWorkSetRuleGeneralize(root, target string) (*Gener
 // commitWorkSetRules 集规则入档共用落地（泛化入档与调整面保存同终点）：
 // 同系覆写（同一 target 此前入档的规则族先停用——再次泛化/调整=修订意图，
 // 旧规则不再产出旧值遮蔽新值）→ 档案写（ArchiveWriteGeneralize，单点串行）
-// → 谱系簿记翻新 → 集成员作用域消费剥离 → 验证轮排定 → 生成结果摘要
-// （Rules=组合规则全部条目）。
+// → 谱系簿记翻新 → 集成员作用域赋值标记（赋值保留）→ 验证轮排定 → 生成
+// 结果摘要（Rules=组合规则全部条目）。
 func (m *SessionManager) commitWorkSetRules(root string, ws *workSetContext, snap *RecognitionSnapshot, rules []RuleEntry) (*GenerationResult, error) {
 	scope := make([]*SnapFile, 0, len(ws.cand.Members))
 	for i := range ws.cand.Members {
@@ -549,8 +550,8 @@ func (m *SessionManager) commitWorkSetRules(root string, ws *workSetContext, sna
 	}); err != nil {
 		m.warnf("集规则谱系簿记落盘失败（规则已入档）: %v", err)
 	}
-	if err := m.consumeScopedAssignments(root, scope, snap, rules); err != nil {
-		m.warnf("集规则泛化消费赋值失败（规则已入档）: %v", err)
+	if err := m.markScopedAssignments(root, scope); err != nil {
+		m.warnf("集规则泛化标记赋值失败（规则已入档）: %v", err)
 	}
 	started := m.scheduleRecognitionRefresh(root)
 	views := make([]*GeneratedRuleView, 0, len(rules))

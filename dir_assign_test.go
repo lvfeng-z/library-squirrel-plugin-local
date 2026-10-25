@@ -1,9 +1,9 @@
 package main
 
-// 目录赋值通路与泛化即接管的单元测试：assignDir 子树展开合并写（非空维度
+// 目录赋值通路与泛化赋值保留的单元测试：assignDir 子树展开合并写（非空维度
 // 覆盖/空维度不动/出处随维度写入/应答计数）、空目录与不在全景目录的错误路径、
-// clearDirAssignments 计数与清空、泛化即接管的消费剥离四情形（复现剥离/值不同
-// 保留/手工维度保留/全剥空删除，单文件与子树两作用域）、裁决生成物不消费、
+// clearDirAssignments 计数与清空、泛化后赋值保留（双源互证——2026-10-25 用户
+// 裁决废除消费剥离；单文件与子树两作用域）、裁决生成物不标记、
 // 目录寻址的总结与泛化分派。
 import (
 	"os"
@@ -140,14 +140,14 @@ func TestClearDirAssignmentsCounts(t *testing.T) {
 	}
 }
 
-// TestGeneralizeConsumesAssignmentDimensions 泛化即接管（单文件作用域）：规则
-// 复现值→剥离、手工维度→保留（残存赋值置已泛化标记）、全剥空→删除赋值、
-// 序列定群无提取→整份保留。
-func TestGeneralizeConsumesAssignmentDimensions(t *testing.T) {
+// TestGeneralizeKeepsAssignments 泛化后赋值保留（2026-10-25 用户裁决：废除
+// 「泛化即接管」消费剥离）：规则入档但赋值全量保留（双源互证——赋值显式维度
+// 继续覆盖规则终选），Generalized 仅作已参与泛化标记；序列定群同样保留。
+func TestGeneralizeKeepsAssignments(t *testing.T) {
 	root := t.TempDir()
 	m, _ := dirAssignFixture(t, root)
 
-	// 复现剥离 + 手工维度保留：文件名形态规则捕获复现作者/标题，手工集不入规则
+	// 复现维度保留 + 标记：文件名形态规则捕获复现作者/标题
 	rel := "已识别/【作者A】标题1.jpg"
 	if _, _, err := m.ApplyAssignment(root, rel, SessionAssignment{
 		Author: "作者A", Title: "标题1", Collection: "手工集",
@@ -163,16 +163,16 @@ func TestGeneralizeConsumesAssignmentDimensions(t *testing.T) {
 	}
 	assign, ok := sess.Assignments[rel]
 	if !ok {
-		t.Fatal("有手工维度残存的赋值不应被删除")
+		t.Fatal("泛化后赋值应全量保留（不剥离不删除）")
 	}
-	if assign.Author != "" || assign.Title != "" {
-		t.Fatalf("被规则复现的维度应剥离: %+v", assign)
+	if assign.Author != "作者A" || assign.Title != "标题1" || assign.Collection != "手工集" {
+		t.Fatalf("全部维度（含被规则复现者）应保留: %+v", assign)
 	}
-	if assign.Collection != "手工集" || !assign.Generalized {
-		t.Fatalf("手工维度应保留且残存赋值置已泛化标记: %+v", assign)
+	if !assign.Generalized {
+		t.Fatalf("赋值应置已泛化标记: %+v", assign)
 	}
 
-	// 全剥空→删除：目录层规则常量复现标题（唯一维度）
+	// 目录层泛化：同样保留（原「全剥空→删除」语义废除）
 	rel2 := "冲突/AB.jpg"
 	if _, _, err := m.ApplyAssignment(root, rel2, SessionAssignment{Title: "协议标题"}); err != nil {
 		t.Fatalf("写入赋值失败: %v", err)
@@ -183,11 +183,11 @@ func TestGeneralizeConsumesAssignmentDimensions(t *testing.T) {
 	if sess, err = m.SessionOf(root); err != nil {
 		t.Fatalf("读取会话失败: %v", err)
 	}
-	if _, still := sess.Assignments[rel2]; still {
-		t.Fatalf("全剥空的赋值应被删除: %+v", sess.Assignments[rel2])
+	if a2 := sess.Assignments[rel2]; a2.Title != "协议标题" || !a2.Generalized {
+		t.Fatalf("目录层泛化后赋值应保留并标记: %+v", a2)
 	}
 
-	// 序列定群无提取动作：不消费任何维度 → 整份保留 + 已泛化标记
+	// 序列定群：保留 + 标记
 	rel3 := "序列/库内作者名_002.jpg"
 	if _, _, err := m.ApplyAssignment(root, rel3, SessionAssignment{Collection: "库内作者名"}); err != nil {
 		t.Fatalf("写入赋值失败: %v", err)
@@ -199,15 +199,14 @@ func TestGeneralizeConsumesAssignmentDimensions(t *testing.T) {
 		t.Fatalf("读取会话失败: %v", err)
 	}
 	if seq := sess.Assignments[rel3]; seq.Collection != "库内作者名" || !seq.Generalized {
-		t.Fatalf("定群规则不消费赋值维度，应整份保留: %+v", seq)
+		t.Fatalf("定群泛化后赋值应保留并标记: %+v", seq)
 	}
 }
 
-// TestGeneralizeDirScopeConsumption 泛化即接管（子树作用域）：目录寻址泛化以
-// 子树首个有赋值文件为样本，消费作用于子树全部文件——样本复现维度剥离（手工
-// 集保留）、子目录文件作者值不同→保留、仅复现维度的文件全剥空删除、子树外
-// 赋值不受影响。
-func TestGeneralizeDirScopeConsumption(t *testing.T) {
+// TestGeneralizeDirScopeMarksAssignments 泛化（子树作用域）：目录寻址泛化以
+// 子树首个有赋值文件为样本，标记作用于子树全部文件——赋值全量保留（双源互
+// 证）、子树外赋值不受影响（无标记）。
+func TestGeneralizeDirScopeMarksAssignments(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newAdjudicationFixture(t, root)
 	writeTestFile(t, root+"/Artist[X]/a__title__code.png", "a")
@@ -226,7 +225,7 @@ func TestGeneralizeDirScopeConsumption(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("写入样本赋值失败: %v", err)
 	}
-	// 子树内其余文件：c 仅作者（将被复现→删除）、嵌套 b 作者异值（保留）
+	// 子树内其余文件：c 仅作者（将被规则复现）、嵌套 b 作者异值
 	if _, _, err := m.ApplyAssignment(root, "Artist[X]/c__code.png", SessionAssignment{Author: "X"}); err != nil {
 		t.Fatalf("写入 c 赋值失败: %v", err)
 	}
@@ -249,21 +248,19 @@ func TestGeneralizeDirScopeConsumption(t *testing.T) {
 		t.Fatalf("读取会话失败: %v", err)
 	}
 	sample := sess.Assignments["Artist[X]/a__title__code.png"]
-	if sample.Author != "" || sample.Title != "" {
-		t.Fatalf("样本被规则复现的维度应剥离: %+v", sample)
+	if sample.Author != "X" || sample.Title != "a" || sample.Collection != "手填集" || !sample.Generalized {
+		t.Fatalf("样本赋值应全量保留（含被规则复现维度）并置标记: %+v", sample)
 	}
-	if sample.Collection != "手填集" || !sample.Generalized {
-		t.Fatalf("样本手工维度应保留并置已泛化标记: %+v", sample)
-	}
-	if _, still := sess.Assignments["Artist[X]/c__code.png"]; still {
-		t.Fatalf("仅复现维度的文件应全剥空删除: %+v", sess.Assignments["Artist[X]/c__code.png"])
+	c := sess.Assignments["Artist[X]/c__code.png"]
+	if c.Author != "X" || !c.Generalized {
+		t.Fatalf("仅复现维度的文件赋值也应保留并置标记: %+v", c)
 	}
 	nested := sess.Assignments["Artist[X]/sub/b__code.png"]
 	if nested.Author != "别的作者" || !nested.Generalized {
-		t.Fatalf("规则声明异值的维度应保留（残存赋值置标记）: %+v", nested)
+		t.Fatalf("子树内异值赋值应保留并置标记: %+v", nested)
 	}
 	if outer := sess.Assignments["其他/out.png"]; outer.Author != "外面" || outer.Generalized {
-		t.Fatalf("子树外赋值不应被消费或置标记: %+v", outer)
+		t.Fatalf("子树外赋值不应被标记: %+v", outer)
 	}
 }
 

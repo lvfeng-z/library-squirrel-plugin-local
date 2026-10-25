@@ -394,8 +394,9 @@ func TestWorkSetRuleDerivationFailsTruthfully(t *testing.T) {
 
 // TestWorkSetRuleGeneralizeEndToEnd 泛化入档+验证轮+声明接管端到端（剧本步3）
 // ：草稿两规则入档（sibling+集名捕获，仅序列成员产出 when 原子=groupSeq
-// range min1 形态）、集成员集维度赋值被消费剥离（全消费删除）、验证轮后本
-// 集成员与跨目录样例的集名声明来源=新捕获规则（声明接管）、档案内规则可见。
+// range min1 形态）、成员赋值保留并置已泛化标记（2026-10-25 裁决废除消费
+// 剥离）、验证轮后本集成员集名由赋值覆盖承载、跨目录样例集名声明来源=新
+// 捕获规则（声明接管）、档案内规则可见。
 func TestWorkSetRuleGeneralizeEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	m, target := workSetRuleFixture(t, root)
@@ -418,7 +419,7 @@ func TestWorkSetRuleGeneralizeEndToEnd(t *testing.T) {
 	}
 
 	sess := waitWorkSetCond(t, m, root, func(s *WorkbenchSession) bool {
-		f := snapshotFileOf(s.Snapshot, "Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[01].png")
+		f := snapshotFileOf(s.Snapshot, "别处/[moka]_[987654321]_CCC_DDD_[05].jpg")
 		if f == nil {
 			return false
 		}
@@ -429,35 +430,41 @@ func TestWorkSetRuleGeneralizeEndToEnd(t *testing.T) {
 		}
 		return false
 	})
-	for _, rel := range []string{
-		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[01].png",
-		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[02].png",
-		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[03].png",
-		"别处/[moka]_[987654321]_CCC_DDD_[05].jpg",
-		"别处/[moka]_[987654321]_CCC_DDD_[06].jpg",
+	// 本集成员集名由赋值覆盖承载（2026-10-25 裁决赋值保留）；跨目录样例由新
+	// 捕获规则承载（声明接管）。
+	for _, rel := range []struct {
+		path     string
+		fromRule bool
+	}{
+		{"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[01].png", false},
+		{"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[02].png", false},
+		{"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[03].png", false},
+		{"别处/[moka]_[987654321]_CCC_DDD_[05].jpg", true},
+		{"别处/[moka]_[987654321]_CCC_DDD_[06].jpg", true},
 	} {
-		file := snapshotFileOf(sess.Snapshot, rel)
+		file := snapshotFileOf(sess.Snapshot, rel.path)
 		if file == nil {
-			t.Fatalf("快照内无文件 %s", rel)
+			t.Fatalf("快照内无文件 %s", rel.path)
 		}
 		found := false
 		for _, decl := range file.Final {
-			if decl.Dimension == string(DimCollection) && decl.RuleID == captureID {
+			if decl.Dimension == string(DimCollection) && rel.fromRule == (decl.RuleID == captureID) {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("%s 的集名声明来源应为新规则 %s（终选: %+v）", rel, captureID, file.Final)
+			t.Fatalf("%s 应有集名声明（终选: %+v）", rel.path, file.Final)
 		}
 	}
-	// 集成员赋值全消费删除（collection 是唯一维度，泛化即接管）。
+	// 赋值保留（废除消费剥离）：成员赋值在场并置已泛化标记。
 	for _, rel := range []string{
 		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[01].png",
 		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[02].png",
 		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[03].png",
 	} {
-		if _, kept := sess.Assignments[rel]; kept {
-			t.Fatalf("成员 %s 的赋值应被全消费删除", rel)
+		assign, kept := sess.Assignments[rel]
+		if !kept || !assign.Generalized {
+			t.Fatalf("成员 %s 的赋值应保留并置已泛化标记: %+v", rel, assign)
 		}
 	}
 }

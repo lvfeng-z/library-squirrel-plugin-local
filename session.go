@@ -1019,8 +1019,8 @@ type workbenchFrontendResponse struct {
 // workbenchSessionDecisionsView 会话决策态投影（元素7 的活数据——赋值/忽略/
 // 选择集随用户操作即时变化，不入识别快照）。
 type workbenchSessionDecisionsView struct {
-	// Assignments 已手动解析项（泛化即接管后仅残存未消费维度的赋值在场，
-	// 含已泛化标记）。
+	// Assignments 已手动解析项（泛化后赋值全量保留——2026-10-25 用户裁决
+	// 废除消费剥离，与规则声明双源互证；含已泛化标记）。
 	Assignments []workbenchAssignmentView `json:"assignments,omitempty"`
 	// Ignored 已忽略项；Selection 已选定为任务的作品键集合（两类前缀见
 	// selection.go——作品原子，半作品不可表达）。

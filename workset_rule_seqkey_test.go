@@ -126,12 +126,12 @@ func TestWorkSetDraftFollowsCandidateSource(t *testing.T) {
 	}
 }
 
-// TestWorkSetSeqKeyCollectionAdjust 「序列」指给集名的规则构造与消费（剧本E
+// TestWorkSetSeqKeyCollectionAdjust 「序列」指给集名的规则构造与赋值保留（剧本E
 // 实施要点）：调整面集名=seqKey → sibling 定群条目 + 序列前缀条目（提取
-// FromGroupPrefix，sibling 形态键即集名捕获）；入档+验证轮后成员与跨目录
-// 同形态文件的集名声明=各自群组公共前缀、来源=新规则；确认集名=群键时成员
-// 赋值被消费剥离（复现即接管）。作者←seqKey 同条目共载（与文件名段行同
-// 权限）。
+// FromGroupPrefix，sibling 形态键即集名捕获）；入档+验证轮后成员集名声明由
+// 赋值覆盖承载、作者与跨目录同形态文件的声明=各自群组公共前缀、来源=新规则
+// （2026-10-25 裁决：赋值保留双源互证，废除消费剥离）。作者←seqKey 同条目
+// 共载（与文件名段行同权限）。
 func TestWorkSetSeqKeyCollectionAdjust(t *testing.T) {
 	root := t.TempDir()
 	m, target := workSetSeqKeyFixture(t, root)
@@ -168,10 +168,11 @@ func TestWorkSetSeqKeyCollectionAdjust(t *testing.T) {
 		t.Fatalf("首条应为 v4 序列条件定群条目（FromGroupPrefix 的定群供给）: %T", siblingRule.Pattern)
 	}
 
-	// 验证轮后：成员（确认集名=群键，复现即接管）与跨目录同形态文件（各群
-	// 各自前缀）的集名/作者声明来源=新规则。
+	// 验证轮后：成员集名声明由赋值覆盖承载（2026-10-25 裁决赋值保留）、作者由
+	// 新规则承载；跨目录同形态文件（各群各自前缀）两维均=新规则。等待条件须
+	// 绑定泛化后才成立的跨目录规则命中（成员按值等待会抓到确认轮旧快照）。
 	sess := waitWorkSetCond(t, m, root, func(s *WorkbenchSession) bool {
-		f := snapshotFileOf(s.Snapshot, "集盒/[画师]_[123456789]_[集名]_[01].png")
+		f := snapshotFileOf(s.Snapshot, "他盒/[画师乙]_[987654321]_[他集]_[01].png")
 		if f == nil {
 			return false
 		}
@@ -184,11 +185,12 @@ func TestWorkSetSeqKeyCollectionAdjust(t *testing.T) {
 	})
 	cases := []struct {
 		relPath, collection, author string
+		fromRule                    bool
 	}{
-		{"集盒/[画师]_[123456789]_[集名]_[01].png", "[画师]_[123456789]_[集名]", "[画师]_[123456789]_[集名]"},
-		{"集盒/[画师]_[123456789]_[集名]_[02].png", "[画师]_[123456789]_[集名]", "[画师]_[123456789]_[集名]"},
+		{"集盒/[画师]_[123456789]_[集名]_[01].png", "[画师]_[123456789]_[集名]", "[画师]_[123456789]_[集名]", false},
+		{"集盒/[画师]_[123456789]_[集名]_[02].png", "[画师]_[123456789]_[集名]", "[画师]_[123456789]_[集名]", false},
 		// 跨目录同形态接管：各群键=各自公共前缀。
-		{"他盒/[画师乙]_[987654321]_[他集]_[01].png", "[画师乙]_[987654321]_[他集]", "[画师乙]_[987654321]_[他集]"},
+		{"他盒/[画师乙]_[987654321]_[他集]_[01].png", "[画师乙]_[987654321]_[他集]", "[画师乙]_[987654321]_[他集]", true},
 	}
 	for _, c := range cases {
 		file := snapshotFileOf(sess.Snapshot, c.relPath)
@@ -197,9 +199,10 @@ func TestWorkSetSeqKeyCollectionAdjust(t *testing.T) {
 		}
 		collection, author := "", ""
 		for _, d := range file.Final {
-			if d.RuleID != seqKeyRule.ID {
+			if c.fromRule && d.RuleID != seqKeyRule.ID {
 				continue
 			}
+			// 成员（fromRule=false）：两维均走赋值覆盖（赋值保留）
 			switch MetadataDimension(d.Dimension) {
 			case DimCollection:
 				collection = d.Value
@@ -211,13 +214,14 @@ func TestWorkSetSeqKeyCollectionAdjust(t *testing.T) {
 			t.Fatalf("%s 声明不符：集名 %q（期望 %q）、作者 %q（期望 %q）", c.relPath, collection, c.collection, author, c.author)
 		}
 	}
-	// 确认集名=群键 → 成员集维度赋值被消费剥离（复现即接管）。
+	// 赋值保留（废除消费剥离）：成员赋值在场并置已泛化标记。
 	for _, rel := range []string{
 		"集盒/[画师]_[123456789]_[集名]_[01].png",
 		"集盒/[画师]_[123456789]_[集名]_[02].png",
 	} {
-		if _, kept := sess.Assignments[rel]; kept {
-			t.Fatalf("成员 %s 的赋值应被消费删除（复现即接管）", rel)
+		assign, kept := sess.Assignments[rel]
+		if !kept || !assign.Generalized {
+			t.Fatalf("成员 %s 的赋值应保留并置已泛化标记: %+v", rel, assign)
 		}
 	}
 
@@ -281,22 +285,26 @@ func TestWorkSetDirMultiSegCollection(t *testing.T) {
 		t.Fatalf("段1+段2 组合模板不符: %q", tpl)
 	}
 	sess := waitWorkSetCond(t, m, root, func(s *WorkbenchSession) bool {
-		f := snapshotFileOf(s.Snapshot, "Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png")
+		f := snapshotFileOf(s.Snapshot, "Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg")
 		if f == nil {
 			return false
 		}
 		for _, d := range f.Final {
 			if d.RuleID == rule.ID && d.Dimension == string(DimCollection) {
-				return true
+				return d.Value == "[Isel] [92242474]"
 			}
 		}
 		return false
 	})
-	cases := []struct{ relPath, collection string }{
-		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "[Isel] [92242473]"},
-		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/おまけ.jpg", "[Isel] [92242473]"},
+	// 成员集名由赋值覆盖承载（赋值保留）；跨目录同格式接管=新规则承载。
+	cases := []struct {
+		relPath, collection string
+		fromRule            bool
+	}{
+		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png", "[Isel] [92242473]", false},
+		{"Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/おまけ.jpg", "[Isel] [92242473]", false},
 		// 跨目录同格式接管：各自目录段 1..2 原文成集。
-		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "[Isel] [92242474]"},
+		{"Artist[Isel]/[Isel] [92242474] [別の題]/おまけ.jpg", "[Isel] [92242474]", true},
 	}
 	for _, c := range cases {
 		file := snapshotFileOf(sess.Snapshot, c.relPath)
@@ -305,15 +313,19 @@ func TestWorkSetDirMultiSegCollection(t *testing.T) {
 		}
 		found := false
 		for _, d := range file.Final {
-			if d.RuleID == rule.ID && MetadataDimension(d.Dimension) == DimCollection {
-				found = true
-				if d.Value != c.collection {
-					t.Fatalf("%s 集名应=%q（段间原文保留）: %q", c.relPath, c.collection, d.Value)
-				}
+			if MetadataDimension(d.Dimension) != DimCollection {
+				continue
+			}
+			if c.fromRule != (d.RuleID == rule.ID) {
+				continue
+			}
+			found = true
+			if d.Value != c.collection {
+				t.Fatalf("%s 集名应=%q（段间原文保留）: %q", c.relPath, c.collection, d.Value)
 			}
 		}
 		if !found {
-			t.Fatalf("%s 应有来自新规则的集名声明（终选: %+v）", c.relPath, file.Final)
+			t.Fatalf("%s 应有集名声明（终选: %+v）", c.relPath, file.Final)
 		}
 	}
 
@@ -344,21 +356,23 @@ func TestWorkSetDirMultiSegCollection(t *testing.T) {
 		}
 		return false
 	})
+	// 主体集成员：集名由赋值覆盖承载（赋值保留）
 	file2 := snapshotFileOf(sess2.Snapshot, "Artist[Isel]/[Isel] [92242473] [瞬間的に絡み合う]/表紙.png")
 	if file2 == nil {
 		t.Fatal("快照内无主体集成员")
 	}
 	found2 := false
 	for _, d := range file2.Final {
-		if d.RuleID == rule2.ID && MetadataDimension(d.Dimension) == DimCollection {
-			found2 = true
-			if d.Value != "[Isel] [92242473] [瞬間的に絡み合う]" {
-				t.Fatalf("主体集集名应=整目录名: %q", d.Value)
-			}
+		if MetadataDimension(d.Dimension) != DimCollection {
+			continue
+		}
+		found2 = true
+		if d.Value != "[Isel] [92242473] [瞬間的に絡み合う]" {
+			t.Fatalf("主体集集名应=整目录名: %q", d.Value)
 		}
 	}
 	if !found2 {
-		t.Fatalf("主体集成员应有来自新规则的集名声明（终选: %+v）", file2.Final)
+		t.Fatalf("主体集成员应有集名声明（终选: %+v）", file2.Final)
 	}
 
 	// 作者段落在组合区间内 → 互斥可读错误（一个维度只能有一个来源）。

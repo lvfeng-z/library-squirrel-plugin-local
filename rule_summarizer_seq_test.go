@@ -4,7 +4,7 @@ package main
 //（用户实例形态——`[作者]_[作品号]_集名段组合_[序号]`）、集名=序号前整键的
 // 捕获=整段、集名对不上段组合的退回+说明行（目录层映射与纯手打两态）、非群
 // 样本完全走既有形态、when 原子「仅序列成员产出」随规则入档且档案 JSON 形态
-// 与规则编辑面复选的判读口径一致、泛化即接管的端到端（本目录成员与跨目录
+// 与规则编辑面复选的判读口径一致、泛化后赋值保留的端到端（本目录成员与跨目录
 // 同形序列的声明来源=新规则）。
 import (
 	"encoding/json"
@@ -277,9 +277,9 @@ func TestSeqFormSuggestionNonGroupSample(t *testing.T) {
 // TestSeqFormGeneralizeEndToEnd 泛化入档与接管（剧本A 步3）：generalize
 // mode=struct 入档 sibling+集名捕获两条（建议即所见即所入）；when 原子
 // 「群组序号 ≥1」随捕获条目入档，档案 JSON 形态与规则编辑面「仅序列成员产出」
-// 复选的判读口径一致（kind=range、operand=groupSeq、min=1、无上界）；消费
-// 剥离后集名赋值整组删除；验证轮重识别后本目录成员与跨目录样例的集名声明
-// 来源=新捕获规则（跨目录接管）。
+// 复选的判读口径一致（kind=range、operand=groupSeq、min=1、无上界）；赋值保留
+// 并置已泛化标记（2026-10-25 裁决废除消费剥离）；验证轮重识别后本目录成员的
+// 集名声明由赋值显式覆盖承载、跨目录样例由新捕获规则承载（跨目录接管）。
 func TestSeqFormGeneralizeEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	m, seq := seqFormFixture(t, root)
@@ -335,15 +335,17 @@ func TestSeqFormGeneralizeEndToEnd(t *testing.T) {
 		t.Fatalf("when 原子档案 JSON 不符: %s", raw)
 	}
 
-	// 消费剥离：本目录三成员的集名赋值被新规则完整复现 → 赋值整组删除。
+	// 赋值保留（2026-10-25 用户裁决：废除消费剥离）：本目录三成员的集名赋值
+	// 保留并置已泛化标记（双源互证）。
 	sess, err := m.SessionOf(root)
 	if err != nil {
 		t.Fatalf("读取会话失败: %v", err)
 	}
 	for _, n := range []string{"01", "02", "03"} {
 		rel := seq + "/[hakosaku]_[126794866]_" + seq + "_[" + n + "].png"
-		if _, hit := sess.Assignments[rel]; hit {
-			t.Fatalf("集名赋值应被消费剥离: %s", rel)
+		assign, hit := sess.Assignments[rel]
+		if !hit || assign.Collection != seq || !assign.Generalized {
+			t.Fatalf("集名赋值应保留并置标记: %s %+v", rel, assign)
 		}
 	}
 
@@ -353,9 +355,9 @@ func TestSeqFormGeneralizeEndToEnd(t *testing.T) {
 		t.Fatal("泛化入档后应排定验证轮")
 	}
 
-	// 全量重识别：本目录成员的集名声明来源=新捕获规则；跨目录同形序列的接管
-	// （序列形态的本质差异——无目录层锚定）与同形落单文件的不产出（仅序列
-	// 成员产出）在同一口径下断言。
+	// 全量重识别：本目录成员的集名声明由赋值显式覆盖承载（赋值=最强源）；
+	// 跨目录同形序列的接管（序列形态的本质差异——无目录层锚定）由新捕获
+	// 规则承载；同形落单文件不产出（仅序列成员产出）在同一口径下断言。
 	if err := m.runFullRecognition(root); err != nil {
 		t.Fatalf("全量重识别失败: %v", err)
 	}
@@ -363,8 +365,28 @@ func TestSeqFormGeneralizeEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取会话失败: %v", err)
 	}
+	// 本目录成员：赋值覆盖（来源=assignment）
+	for _, n := range []string{"01", "02", "03"} {
+		rel := seq + "/[hakosaku]_[126794866]_" + seq + "_[" + n + "].png"
+		file := snapshotFileOf(sess.Snapshot, rel)
+		if file == nil {
+			t.Fatalf("快照内无文件 %s", rel)
+		}
+		found := false
+		for _, decl := range file.Final {
+			if decl.Dimension == string(DimCollection) && decl.Value == seq {
+				if decl.Source != string(SourceAssignment) {
+					t.Fatalf("%s 集名声明来源应为赋值覆盖，实际 %q", rel, decl.Source)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s 应有集名声明 %q（终选: %+v）", rel, seq, file.Final)
+		}
+	}
+	// 跨目录样例：无赋值 → 新捕获规则承载
 	for rel, want := range map[string]string{
-		seq + "/[hakosaku]_[126794866]_" + seq + "_[01].png":  seq,
 		"别处/[moka]_[987654321]_Y_Misskeyまとめ 2_2～2_8_[05].jpg": "Y_Misskeyまとめ 2_2～2_8",
 		"别处/[moka]_[987654321]_Y_Misskeyまとめ 2_2～2_8_[06].jpg": "Y_Misskeyまとめ 2_2～2_8",
 	} {
