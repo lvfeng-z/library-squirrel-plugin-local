@@ -191,6 +191,9 @@
               <div v-for="(c, i) in captureList" :key="`${c.row}/${c.word}/${i}`" class="li-red-cap-row">
                 <span class="li-red-cap-name">第 {{ c.row }} 行 · {{ '{' + c.word + '}' }}</span>
               </div>
+              <p class="li-red-hint">
+                {占位词}＝命名捕获槽：只负责在匹配时捕获文本，本身不识别也不产生元数据——槽名与维度同字只是习惯叫法，无绑定
+              </p>
             </div>
             <p v-else class="li-red-hint">
               尚无可引用的占位词——在行模板中写入 {作者}/{标题} 等词条后，提取段才能引用其捕获值
@@ -221,6 +224,9 @@
               {{ extractionsJsonMode ? '切回结构化编辑' : '高级（JSON）' }}
             </el-button>
           </div>
+          <p class="li-red-hint">
+            元数据只在这里产生：把上半某个捕获槽的值「赋给维度」才是识别——上半匹配命中而下半没有赋值行时，不产出任何元数据
+          </p>
 
           <template v-if="!extractionsJsonMode">
             <div
