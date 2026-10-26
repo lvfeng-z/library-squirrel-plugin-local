@@ -20,8 +20,10 @@
           <el-switch v-model="enabledInput" active-text="启用" inactive-text="停用" />
         </div>
 
-        <!-- 上半「识别规则」（v4 条件行 · 三步漏斗）：目标三卡 → 格式模板 →
-             附加条件+值级小标；行前 且/或 + 行级非 + 括号子组（子组走高级 JSON） -->
+        <!-- 上半「识别规则」（v4 条件行 · 三步漏斗）：目标四卡（文件/目录/序列/
+             引用规则）→ 格式模板 → 附加条件+值级小标；行前 且/或 + 行级非 + 括号
+             子组（子组走高级 JSON）；引用行恒置条件行上方、独立编号「引用 N」、
+             不占条件行「第 N 行」（W4 规则组合引用） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">识别规则<span class="li-red-sec-note">上半 · 决定规则命中哪些文件</span></h4>
@@ -33,6 +35,37 @@
 
           <template v-if="!condxJsonMode">
             <p v-if="condxError" class="li-red-error">{{ condxError }}</p>
+            <!-- 引用行（W4 剧本一·帧4/帧5）：一卡一行一条成员规则；恒置条件行上方、
+                 独立编号「引用 N」、不带且/或；候选＝档案里其余非组合规则且非本条自身 -->
+            <div
+              v-for="(r, i) in refRows"
+              :key="`ref${i}`"
+              class="li-condx-row li-ref-row"
+              :class="{ 'is-invalid': !r.ruleId }"
+            >
+              <div class="li-condx-row-head">
+                <span class="li-ref-no">引用 {{ i + 1 }}{{ r.ruleId ? '' : '（新行）' }}</span>
+                <span class="li-ref-desc">{{ r.ruleId ? `引用规则：${refRuleLabel(r.ruleId)}` : '引用规则' }}</span>
+                <el-button size="small" text type="danger" class="li-condx-del" @click="refRows.splice(i, 1)">删行</el-button>
+              </div>
+              <el-select
+                v-if="!r.ruleId"
+                :model-value="r.ruleId"
+                size="small"
+                placeholder="选择要引用的规则"
+                class="li-ref-select"
+                @update:model-value="r.ruleId = String($event)"
+              >
+                <el-option v-for="m in refCandidates" :key="m.id" :label="m.description || m.id" :value="m.id">
+                  <div class="li-ref-opt">
+                    <span class="li-ref-opt-desc">{{ m.description || m.id }}</span>
+                    <span class="li-ref-opt-id">{{ m.id }}</span>
+                  </div>
+                </el-option>
+              </el-select>
+              <p v-if="!r.ruleId" class="li-red-row-hint">须选择要引用的规则</p>
+            </div>
+            <div v-if="refRows.length && condxRows.length" class="li-ref-divider"></div>
             <div v-for="(row, i) in condxRows" :key="i" class="li-condx-row" :class="{ 'is-invalid': !!condxRowHint(i) }">
               <div class="li-condx-row-head">
                 <el-select v-if="i > 0" v-model="row.connector" size="small" class="li-condx-conn">
@@ -45,7 +78,7 @@
                 <el-button v-else size="small" text type="danger" class="li-condx-del" @click="condxRows.splice(i, 1)">删行</el-button>
               </div>
               <template v-if="!row.group">
-                <!-- Step 1 目标三分（三卡一次点选） -->
+                <!-- Step 1 目标四卡（一次点选；第四卡＝W4 引用规则，帧3） -->
                 <div class="li-condx-targets">
                   <button
                     v-for="t in CONDX_TARGETS"
@@ -58,6 +91,15 @@
                   >
                     <span class="li-condx-card-label">{{ t.label }}</span>
                     <span class="li-condx-card-note">{{ t.note }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="li-condx-card"
+                    title="引用另一条规则——被引规则命中才算命中；成员停用或删除后本规则整体不产出"
+                    @click="setRowToRef(row)"
+                  >
+                    <span class="li-condx-card-label">引用规则</span>
+                    <span class="li-condx-card-note">引用另一条规则——被引规则命中才算命中；成员停用或删除后本规则整体不产出</span>
                   </button>
                 </div>
                 <template v-if="row.condition">
@@ -267,6 +309,35 @@
                     :value="`${c.row}/${c.group}`"
                   />
                 </el-select>
+                <el-select
+                  v-else-if="row.from === 'refCapture'"
+                  :model-value="`${row.refRule}/${row.captureRow}/${row.captureName}`"
+                  size="small"
+                  placeholder="成员规则·占位词"
+                  class="li-red-ex-capture"
+                  @update:model-value="setRowRefCapture(row, $event)"
+                >
+                  <el-option-group
+                    v-for="g in refCaptureGroups"
+                    :key="`${g.ruleId}/${g.index}`"
+                    :label="`${g.label}（引用 ${g.index}）`"
+                  >
+                    <el-option
+                      v-for="c in g.captures"
+                      :key="`${g.ruleId}/${c.row}/${c.group}`"
+                      :label="`${g.label} · 第 ${c.row} 行 · {${c.word}}`"
+                      :value="`${g.ruleId}/${c.row}/${c.group}`"
+                    />
+                  </el-option-group>
+                  <!-- 失效占位词残影选项（剧本三·帧1）：仅供行上呈现，不可重选 -->
+                  <el-option
+                    v-for="o in refCaptureStaleOptions"
+                    :key="`stale-${o.value}`"
+                    :label="o.label"
+                    :value="o.value"
+                    disabled
+                  />
+                </el-select>
                 <el-input
                   v-else-if="row.from === 'constant' || row.from === 'adjudication'"
                   v-model="row.constant"
@@ -431,6 +502,10 @@
 // 校验不过（组引用/维度来源唯一/JSON 解析）行级就地标红、弹窗不关；JSON 高级
 // 模式解析错就地显示位置不丢输入；取消不保存（destroy-on-close，再开回上次保
 // 存态——打开时从 props 重新取值）。
+// W4 组合引用（规则组合引用剧本）：上半目标四卡新增「引用规则」卡——点选后该行
+// 转为引用行（恒置条件行上方、独立编号「引用 N」、不带且/或、不占条件行行号）；
+// 提取来源新增「被引规则捕获」＝成员规则·占位词（按引用行顺序分组）；引用行在
+// 场时空条件表合法；保存载荷增 refs（成员 ID 列表随既有 saveRule 原样入档）。
 import { ref, computed, watch } from 'vue'
 import {
   DIMENSION_OPTIONS,
@@ -462,19 +537,31 @@ import {
   type CondxForm,
   type CondxBadgeForm,
   type CondxAttachForm,
+  type CondxCaptureDecl,
   type ExtractionActionJSON
 } from './ruleFormModel'
 
 // —— 入口载荷形态（父组件组装的普通对象） ——
 
+// 档案规则条目最小投影（W4 引用通路：引用行候选过滤与成员占位词声明取值用——
+// SubpageRules 把完整规则列表经 allRules prop 传入）。
+interface RuleArchiveItem {
+  id: string
+  description: string
+  refs?: string[] | null
+  conditions?: unknown
+}
+
 // rule 模式初始档案条目（SubpageRules 的 RuleEntryView 投影；conditions 为
-// v4 条件行列表——v4 档案条目唯一条件载体，模式树不再落档）。
+// v4 条件行列表——v4 档案条目唯一条件载体，模式树不再落档；refs 为 W4 组合
+// 引用的成员规则 ID 列表——非组合规则缺省空）。
 interface RuleInput {
   id: string
   description: string
   source: string
   enabled: boolean
   isNew: boolean
+  refs?: string[] | null
   conditions?: unknown
   extractions: unknown
   synthesis?: { dimPolicies?: { dimension: string; strategy: string }[] | null; roles?: { source: string; roleName: string }[] | null }
@@ -512,18 +599,22 @@ const props = defineProps<{
   suggestion?: SuggestionInput | null
   initialAssigns?: Record<string, string>
   initialMemberOnly?: boolean
+  // 档案全量规则列表（W4：引用行候选与成员占位词声明的数据源，SubpageRules 传入）
+  allRules?: RuleArchiveItem[] | null
   // 父组件回填的保存失败文案（后端构造期校验拒绝等）：弹窗内呈现、不关窗
   saveError?: string
   saving?: boolean
 }>()
 
 // rule 模式保存载荷（完整规则条目 JSON——父组件原样进 saveRule；conditions
-// 为 v4 条件行，pattern 不再发送）。
+// 为 v4 条件行，pattern 不再发送；refs 为 W4 引用行成员列表，随载荷原样走
+// 既有 saveRule）。
 interface RuleSavePayload {
   id: string
   description: string
   source: string
   enabled: boolean
+  refs: string[]
   conditions: unknown
   extractions: unknown
   synthesis: { dimPolicies: { dimension: string; strategy: string }[]; roles: { source: string; roleName: string }[] }
@@ -570,12 +661,14 @@ const headerNote = computed((): string => {
 
 // 提取段行模型：when 为原样透传的条件树，seqOnly 为「仅序列成员产出」勾选
 //（保存时并入/移除「群组序号 ≥ 1」原子，其余手写条件原样保留）；row 为
-// capture 来源行号（v4：占位词捕获按「行N·{词}」寻址，1 起）。
+// capture 来源行号（v4：占位词捕获按「行N·{词}」寻址，1 起）；refRule 为
+// W4 refCapture 来源的成员规则 ID（refRule/row/captureName 三元寻址）。
 interface ExtractionRow {
   dimension: string
   from: string
   captureName: string
   captureRow: number
+  refRule: string
   constant: string
   scanScope: string
   roleName: string
@@ -592,6 +685,12 @@ const dimRows = ref<{ dimension: string; strategy: string }[]>([])
 // 识别段结构化编辑模型（v4 条件行）：行列表为编辑态（行前接词+行级非+Condx
 // 或括号子组占位），保存时整表直落 conditions（内核按行序编译为模式树）。
 const condxRows = ref<CondxRowForm[]>([])
+// 引用行列表（W4：组合引用的成员规则——恒置条件行上方、独立编号「引用 N」，
+// 不占条件行「第 N 行」；ruleId 空＝新行未选成员）
+interface RefRowForm {
+  ruleId: string
+}
+const refRows = ref<RefRowForm[]>([])
 const condxText = ref('')
 const condxJsonMode = ref(false)
 const condxError = ref('')
@@ -627,6 +726,7 @@ function actionToRow(action: ExtractionActionJSON): ExtractionRow {
     from: action.from || 'capture',
     captureName: action.captureName || '',
     captureRow: action.row || 1,
+    refRule: action.refRule || '',
     constant: action.constant || '',
     scanScope: action.scanScope || 'path',
     roleName: action.roleName || '',
@@ -643,6 +743,18 @@ function setRowCapture(row: ExtractionRow, value: string): void {
   if (idx < 0) return
   row.captureRow = Number(value.slice(0, idx)) || 1
   row.captureName = value.slice(idx + 1)
+}
+
+// refCapture 行的「成员规则·占位词」下拉取值拆装（值编码 refRule/row/captureName
+// 三元——从右侧拆两刀，兼容含「/」的规则 ID）
+function setRowRefCapture(row: ExtractionRow, value: string): void {
+  const rowIdx = value.lastIndexOf('/')
+  if (rowIdx < 0) return
+  const nameIdx = value.lastIndexOf('/', rowIdx - 1)
+  if (nameIdx < 0) return
+  row.refRule = value.slice(0, nameIdx)
+  row.captureRow = Number(value.slice(nameIdx + 1, rowIdx)) || 1
+  row.captureName = value.slice(rowIdx + 1)
 }
 
 // 行模型 → 提取动作 JSON（seqOnly 落到该行 when 的并入/移除；仅携带有值字段；
@@ -662,6 +774,12 @@ function rowsToActions(): ExtractionActionJSON[] {
     if (row.from === 'capture') {
       action.captureName = row.captureName
       // v4 寻址=行号+占位词（行 1 缺省不落 JSON，与内核 omitempty 同口径）
+      if (row.captureRow > 1) action.row = row.captureRow
+    }
+    if (row.from === 'refCapture') {
+      // W4 寻址=成员规则+行号+占位词三元（refRule 往返不丢；行 1 缺省同口径）
+      action.refRule = row.refRule
+      action.captureName = row.captureName
       if (row.captureRow > 1) action.row = row.captureRow
     }
     if (row.from === 'constant' || row.from === 'adjudication') action.constant = row.constant
@@ -687,9 +805,93 @@ const captureList = computed(() => condxCaptures(activeCondxRows.value))
 // 内核寻址口径）
 const declaredCaptures = computed<Set<string>>(() => new Set(captureList.value.map((c) => `${c.row}/${c.group}`)))
 
+// —— W4 引用行（规则组合引用剧本一·帧3-帧5 / 剧本三）：候选、成员占位词声明
+// 与行编辑 ——
+
+function refRuleById(ruleId: string): RuleArchiveItem | undefined {
+  return (props.allRules || []).find((r) => r.id === ruleId)
+}
+
+// 成员候选（帧4）：档案里其余非组合规则（refs 空者——一期禁嵌套）且非本条自身
+const refCandidates = computed<RuleArchiveItem[]>(() => {
+  const selfId = props.rule && !props.rule.isNew ? props.rule.id : ''
+  return (props.allRules || []).filter((r) => r.id !== selfId && !(r.refs && r.refs.length))
+})
+
+function refRuleLabel(ruleId: string): string {
+  const hit = refRuleById(ruleId)
+  return hit ? hit.description || hit.id : ruleId
+}
+
+// 成员·占位词分组（帧8）：按引用行顺序分组列出各成员上半声明的「第 N 行 · {词}」；
+// 成员当前档案声明为真源——成员改过模板后旧引用自然不在列（剧本三·帧2）
+interface RefCaptureGroup {
+  ruleId: string
+  label: string
+  index: number
+  captures: CondxCaptureDecl[]
+}
+
+const refCaptureGroups = computed<RefCaptureGroup[]>(() => {
+  const out: RefCaptureGroup[] = []
+  refRows.value.forEach((r, i) => {
+    if (!r.ruleId) return
+    const member = refRuleById(r.ruleId)
+    if (!member) return
+    const rows = Array.isArray(member.conditions) ? (member.conditions as CondxRowForm[]) : []
+    out.push({ ruleId: r.ruleId, label: member.description || member.id, index: i + 1, captures: condxCaptures(rows) })
+  })
+  return out
+})
+
+// 已声明的「成员/行N/组名」寻址集合（refCapture 提取行引用校验）
+const declaredRefCaptures = computed<Set<string>>(() =>
+  new Set(refCaptureGroups.value.flatMap((g) => g.captures.map((c) => `${g.ruleId}/${c.row}/${c.group}`)))
+)
+
+// 英文组名 → 中文词（失效行残影呈现用；词表九词组名唯一）
+function groupWordOf(group: string): string {
+  const hit = CONDX_VOCAB.find((v) => v.group === group)
+  return hit ? hit.word : group
+}
+
+// 失效占位词残影选项（剧本三·帧1）：行值不在成员现声明中时补一枚禁用选项，
+// 让行上仍按「成员 · 第 N 行 · {词}」呈现且不可重选
+const refCaptureStaleOptions = computed<{ value: string; label: string }[]>(() => {
+  const declared = declaredRefCaptures.value
+  const out: { value: string; label: string }[] = []
+  const seen = new Set<string>()
+  for (const row of extractionRows.value) {
+    if (row.from !== 'refCapture' || !row.refRule || !row.captureName) continue
+    const key = `${row.refRule}/${row.captureRow}/${row.captureName}`
+    if (declared.has(key) || seen.has(key)) continue
+    seen.add(key)
+    out.push({ value: key, label: `${refRuleLabel(row.refRule)} · 第 ${row.captureRow} 行 · {${groupWordOf(row.captureName)}}` })
+  }
+  return out
+})
+
+// 点「引用规则」卡（帧3）：该行转出条件行列表、追加为引用行——恒置条件行上方、
+// 独立编号「引用 N」、不占条件行「第 N 行」（占位词寻址不受影响）、不带且/或
+function setRowToRef(row: CondxRowForm): void {
+  const idx = condxRows.value.indexOf(row)
+  if (idx < 0) return
+  condxRows.value.splice(idx, 1)
+  refRows.value.push({ ruleId: '' })
+}
+
+// 条件行完整性（W4）：引用行在场时空条件表合法——组合可仅由成员门控（帧5→帧6
+// 删光自身条件行后摘要为「引用 N 条成员规则；（无条件行）」且可保存）
+function condxRowsErrorWithRefs(rows: CondxRowForm[]): string {
+  if (!condxFlatRows(rows).length && refRows.value.length) return ''
+  return condxRowsError(rows)
+}
+
 const condxSummary = computed((): string => {
+  // 引用存在时前缀「引用 N 条成员规则；」接条件行摘要或「（无条件行）」（帧5/帧6）
+  const refPrefix = refRows.value.length ? `引用 ${refRows.value.length} 条成员规则；` : ''
   const flat = condxFlatRows(activeCondxRows.value)
-  if (!flat.length) return '（无条件行）'
+  if (!flat.length) return `${refPrefix}（无条件行）`
   const parts = flat.map((f) => {
     const c = f.condx
     const target = CONDX_TARGETS.find((t) => t.value === c.target)
@@ -698,7 +900,7 @@ const condxSummary = computed((): string => {
     const attach = (c.attach || []).length ? ` ·${(c.attach || []).length} 条附加` : ''
     return `第${f.row}行 ${target ? target.label : c.target}「${fmt}」${badges}${attach}`
   })
-  return parts.join('；')
+  return `${refPrefix}${parts.join('；')}`
 })
 
 // 结构化模式的行级校验提示（含 JSON 模式聚合错误的呈现位）
@@ -838,7 +1040,7 @@ watch(condxText, () => {
   const parsed = tryParseJSON(condxText.value)
   if (parsed.ok && Array.isArray(parsed.value)) {
     condxParsed.value = parsed.value as CondxRowForm[]
-    condxError.value = condxRowsError(condxParsed.value)
+    condxError.value = condxRowsErrorWithRefs(condxParsed.value)
   } else if (parsed.ok) {
     condxError.value = '顶层须为 JSON 数组（条件行列表）'
   } else {
@@ -863,7 +1065,7 @@ function toggleCondxJson(): void {
     condxRows.value = rows
     condxParsed.value = null
     condxJsonMode.value = false
-    condxError.value = condxRowsError(condxRows.value)
+    condxError.value = condxRowsErrorWithRefs(condxRows.value)
     return
   }
   condxText.value = JSON.stringify(activeCondxRows.value, null, 2)
@@ -871,7 +1073,7 @@ function toggleCondxJson(): void {
   const parsed = tryParseJSON(condxText.value)
   if (parsed.ok && Array.isArray(parsed.value)) {
     condxParsed.value = parsed.value as CondxRowForm[]
-    condxError.value = condxRowsError(condxParsed.value)
+    condxError.value = condxRowsErrorWithRefs(condxParsed.value)
   }
 }
 
@@ -882,6 +1084,14 @@ function extractionRowHint(row: ExtractionRow): string {
   if (row.from === 'capture') {
     if (!row.captureName) return '须选择占位词'
     if (!declaredCaptures.value.has(`${row.captureRow}/${row.captureName}`)) return '引用的占位词已不在上半声明'
+  }
+  if (row.from === 'refCapture') {
+    if (!row.refRule || !row.captureName) return '须选择成员规则·占位词'
+    if (!refRows.value.some((r) => r.ruleId === row.refRule)) return '被引规则不在上方引用行中'
+    // 失效＝成员改过模板（剧本三·帧1）/悬空成员——行级标红锚文案
+    if (!declaredRefCaptures.value.has(`${row.refRule}/${row.captureRow}/${row.captureName}`)) {
+      return '引用的占位词已不在被引规则声明'
+    }
   }
   if (row.from === 'scan') {
     // 帧五可裁点①：仅库内集合维度可扫描（作者/标签/作品集）。
@@ -916,6 +1126,7 @@ function addExtractionRow(): void {
     from: 'capture',
     captureName: '',
     captureRow: 1,
+    refRule: '',
     constant: '',
     scanScope: 'path',
     roleName: '',
@@ -1114,6 +1325,9 @@ function initFromProps(): void {
     condxJsonMode.value = false
     condxText.value = ''
     tplSelections.clear()
+    // 引用行复位（W4）：档案 refs（组合规则成员）逐条转为引用行；坏档非字符串项滤除
+    const initRefs = rule && Array.isArray(rule.refs) ? rule.refs : []
+    refRows.value = initRefs.filter((id): id is string => typeof id === 'string').map((id) => ({ ruleId: id }))
     const defaultRows = (): CondxRowForm[] => [
       {
         connector: '',
@@ -1132,8 +1346,12 @@ function initFromProps(): void {
       condxJsonMode.value = true
       condxText.value = JSON.stringify(rule.conditions, null, 2)
     } else {
-      // 无 conditions（v3 残档等）：空行集起步
-      condxRows.value = defaultRows()
+      // 无 conditions 键的两义分流：组合规则（refs 在场）＝空条件表的落档形态
+      //（内核 omitempty 序列化无键，剧本一·帧6 语义）——空行集起步，不得缺省
+      // 补模板行（否则编辑再存会把缺省行写成组合自身条件、破坏成员门控求值，
+      // 2026-10-26 live-test 抓出）；普通规则按 v3 残档处理，缺省模板行起步
+      //（既有行为不变）。
+      condxRows.value = refRows.value.length > 0 ? [] : defaultRows()
     }
     condxError.value = ''
     condxParsed.value = null
@@ -1145,7 +1363,7 @@ function initFromProps(): void {
         condxError.value = parsed.ok ? '顶层须为 JSON 数组（条件行列表）' : parsed.error || '解析失败'
       }
     } else {
-      condxError.value = condxRowsError(condxRows.value)
+      condxError.value = condxRowsErrorWithRefs(condxRows.value)
     }
     extractionsJsonMode.value = false
     extractionsText.value = ''
@@ -1189,10 +1407,12 @@ function save(): void {
     if (condxJsonMode.value) {
       if (condxError.value || !condxParsed.value) return
     }
+    // 引用行完整性闸门（W4）：未选成员的引用行 → 行内已标红，此处拦住不保存
+    if (refRows.value.some((r) => !r.ruleId)) return
     // 条件行完整性闸门（v4）：行表校验不过（词表外/相邻占位/附加缺字段等）
-    // → 行内已标红，此处拦住不保存
-    if (!condxJsonMode.value && condxRowsError(condxRows.value)) {
-      condxError.value = condxRowsError(condxRows.value)
+    // → 行内已标红，此处拦住不保存；引用行在场时空条件表合法（组合可仅由成员门控）
+    if (!condxJsonMode.value && condxRowsErrorWithRefs(condxRows.value)) {
+      condxError.value = condxRowsErrorWithRefs(condxRows.value)
       return
     }
     const conditions = condxJsonMode.value ? condxParsed.value : condxRows.value
@@ -1218,6 +1438,13 @@ function save(): void {
             problems.push(`第 ${i + 1} 行引用占位词「第 ${rowNo} 行·{${action.captureName}}」未在上半声明`)
           }
         }
+        if (action && action.from === 'refCapture') {
+          const rowNo = action.row || 1
+          const inRefs = refRows.value.some((r) => r.ruleId === action.refRule)
+          if (!action.refRule || !action.captureName || !inRefs || !declaredRefCaptures.value.has(`${action.refRule}/${rowNo}/${action.captureName}`)) {
+            problems.push(`第 ${i + 1} 行：引用的占位词已不在被引规则声明`)
+          }
+        }
       })
       if (problems.length) {
         extractionsError.value = problems.join('；')
@@ -1235,6 +1462,7 @@ function save(): void {
       description: descInput.value,
       source: (rule && rule.source) || 'manual',
       enabled: enabledInput.value,
+      refs: refRows.value.map((r) => r.ruleId),
       conditions: conditions,
       extractions: extractions,
       synthesis: {
@@ -1669,6 +1897,50 @@ function save(): void {
 
 .li-condx-del {
   margin-left: auto;
+}
+
+/* W4 引用行（剧本一·帧4/帧5）：独立编号 + 引用规则描述 + 删行；候选下拉两行
+   （描述 + ID 小字）；与条件行之间的分隔线 */
+.li-ref-no {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.li-ref-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--app-text-primary);
+  word-break: break-all;
+}
+
+.li-ref-select {
+  width: 100%;
+  max-width: 420px;
+}
+
+.li-ref-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.4;
+  padding: 2px 0;
+}
+
+.li-ref-opt-desc {
+  font-size: 13px;
+  color: var(--app-text-primary);
+}
+
+.li-ref-opt-id {
+  font-size: 11px;
+  color: var(--app-text-secondary);
+}
+
+.li-ref-divider {
+  border-top: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
 }
 
 .li-condx-targets {

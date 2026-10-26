@@ -31,7 +31,8 @@ type FileDecision struct {
 	// Declarations 为提取阶段产出的元数据声明，按规则序与动作序追加。
 	Declarations []MetadataDeclaration
 	// MatchedRuleIDs 为全部命中规则的 ID（含 Extractions 为空的规则，
-	// 归属接线由后续阶段消费），按规则传入顺序追加。
+	// 归属接线由后续阶段消费），按规则传入顺序追加。组合规则（refs 非空）
+	// 额外要求门段全体成员命中才计入（见 runExtractionStage 门段）。
 	MatchedRuleIDs []string
 	// ScanNotes 为贪婪识别动作的歧义记录（作者/作品集扫描出多个互异库内值，
 	// 宁缺勿错不产出声明时记此），供上层观察呈现。
@@ -227,6 +228,15 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // 两遍执行使条件可见全部无条件声明（裁决生成的条件规则居档案尾，其条件谓词
 // 引用的声明在第一遍已全部在场）。贪婪识别（FromScan）动作第三遍执行：显式
 // 行先产出、scan 只补本规则尚未产出的维度，多值/歧义语义见 applyScanActions。
+//
+// 组合规则（refs 非空）门段先行：主循环前先对会被求值的组合规则的被引用成员
+// 全体求值（runRefGateStage），成员全体命中是组合规则的求值前提——任一未命中
+// （含停用/被跳过/不在场）即整体零产出、不进 MatchedRuleIDs（严格语义，不降
+// 级）；门段不写 MatchedRuleIDs，成员命中由其自身独立段单点登记（不重复计数），
+// 追加序保持既有规则序面。门过后成员捕获快照以限定键挂入组合规则私有作用域
+// 的注入区（ParseContext.RefCaptures，仅组合规则可见；refCapture 提取取值见
+// Apply 的 FromRefCapture 分支，when 限定名解析见 conditionOperandValue）。
+// 非组合规则与非组合路径零变化。
 func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) {
 	type ruleMatch struct {
 		rule    *RuleEntry
@@ -234,6 +244,7 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 	}
 	var conditional []ruleMatch
 	var scans []ruleMatch
+	gate := runRefGateStage(rules, in, lib, ctx)
 	for i := range rules {
 		rule := &rules[i]
 		if !rule.Enabled || rule.Pattern == nil {
@@ -243,6 +254,15 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 			continue
 		}
 		ruleCtx := ctx.ruleScopedContext()
+		if len(rule.Refs) > 0 {
+			// refs 门＝组合规则求值前提：任一成员门段未命中→整体零产出、
+			// 不进 MatchedRuleIDs（严格语义，不降级）。
+			if !gate.allHit(rule.Refs) {
+				continue
+			}
+			// 门过：成员捕获快照以限定键挂入本规则可见的注入区（仅组合规则）。
+			injectRefSnapshots(ruleCtx, gate, rule.Refs)
+		}
 		hit := rule.Pattern.Evaluate(in, lib, ruleCtx)
 		ctx.absorbScoped(ruleCtx)
 		if !hit {
@@ -302,6 +322,91 @@ func hasConditionalAction(actions []ExtractionAction) bool {
 	return false
 }
 
+// refGateState 门段产物：被引用成员规则的先行求值结论——命中事实与限定键捕获
+// 快照。命中只在此登记为组合规则的门判据，不写 decision.MatchedRuleIDs（命中
+// 单点登记＝成员自身独立段，风险5：门段双求值不重复计数）；捕获快照只注入
+// 组合规则的私有作用域（捕获私有不变式不动，限定名通道为加法式注入——发现6）。
+type refGateState struct {
+	// hits 为成员 ID → 门段命中结论；缺席（不在场/停用/被跳过/未求值）按未命中。
+	hits map[string]bool
+	// snapshots 为成员 ID → 限定键捕获快照（命中成员私有作用域捕获的副本，
+	// 键形态「成员ID.rN.组名」，#canon 规范名变体一并快照）。
+	snapshots map[string][]CaptureBinding
+}
+
+// allHit 门判据：refs 全体成员门段命中（严格语义，不降级——决策2）：任一
+// 未命中即组合规则整体零产出、不进 MatchedRuleIDs。
+func (g *refGateState) allHit(refs []string) bool {
+	for _, ref := range refs {
+		if !g.hits[ref] {
+			return false
+		}
+	}
+	return true
+}
+
+// snapshot 取某成员的限定键捕获快照（成员未命中时为空）。
+func (g *refGateState) snapshot(memberID string) []CaptureBinding {
+	return g.snapshots[memberID]
+}
+
+// runRefGateStage 门段（求值两段化的第一段，先于提取段主循环——与「定群段
+// 先于提取段」同款机制）：对本批规则中会被求值的组合规则（启用、模式在场、
+// 非定群形态、refs 非空）的被引用成员全体先求值。
+//   - 成员仍在各自私有作用域求值（ruleScopedContext）；求值结论不并回共享
+//     上下文（不调 absorbScoped——门段不得扰动主循环的求值次序面，非组合
+//     路径零变化；群组基线取门段时点即定群/结构群补位后的状态）；
+//   - 成员停用、被跳过（定群形态或模式缺失）或不在本规则集内＝未命中
+//     （决策2 严格语义：含成员删除后悬空引用的求值期形态）；
+//   - 门段不写 MatchedRuleIDs——成员命中由其自身独立段单点登记，追加序保持
+//     既有规则序面（风险2）。
+//
+// 本批无会被求值的组合规则时零工作（空门，主循环行为与既有完全一致）。
+// 成员求值彼此独立纯函数，needed 集合的遍历序不影响结论。
+func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) *refGateState {
+	gate := &refGateState{hits: map[string]bool{}, snapshots: map[string][]CaptureBinding{}}
+	needed := map[string]bool{}
+	for i := range rules {
+		rule := &rules[i]
+		if !rule.Enabled || rule.Pattern == nil || len(rule.Refs) == 0 || isGroupingRule(rule) {
+			continue
+		}
+		for _, ref := range rule.Refs {
+			needed[ref] = true
+		}
+	}
+	if len(needed) == 0 {
+		return gate
+	}
+	byID := make(map[string]*RuleEntry, len(rules))
+	for i := range rules {
+		if _, seen := byID[rules[i].ID]; !seen {
+			byID[rules[i].ID] = &rules[i]
+		}
+	}
+	for memberID := range needed {
+		member, ok := byID[memberID]
+		if !ok || !member.Enabled || member.Pattern == nil || isGroupingRule(member) {
+			continue // 不在场/停用/被跳过＝未命中（hits 缺席即 false）
+		}
+		memberCtx := ctx.ruleScopedContext()
+		hit := member.Pattern.Evaluate(in, lib, memberCtx)
+		gate.hits[memberID] = hit
+		if hit {
+			gate.snapshots[memberID] = refCaptureSnapshot(memberID, memberCtx)
+		}
+	}
+	return gate
+}
+
+// injectRefSnapshots 按 refs 序把门段捕获快照以限定键挂入组合规则的私有作用域
+// （仅本规则可见的注入区；非组合规则零注入）。
+func injectRefSnapshots(ruleCtx *ParseContext, gate *refGateState, refs []string) {
+	for _, ref := range refs {
+		ruleCtx.RefCaptures = append(ruleCtx.RefCaptures, gate.snapshot(ref)...)
+	}
+}
+
 // Holds 对求值时点已产出的声明集求值：Present 内谓词须全部在场、Absent 内
 // 谓词须全部缺席（谓词的 And 组合），两列表皆空为恒真。
 //
@@ -336,9 +441,10 @@ func (p DeclPredicate) Holds(decls []MetadataDeclaration) bool {
 }
 
 // Holds 对解析上下文与求值时点已产出的声明集求值条件表达式树：nil 恒真。
-// 操作数取值不可用（捕获组未绑定、非群组成员——既不在规则定群也不在结构群
-// 中——的群组字段）时含该操作数的相等/不等/区间比较一律为假——条件无法确立
-// 则动作不产出（保守取向）；未知判别类别在构造期已被拦截，此处防御性为假。
+// 操作数取值不可用（捕获组未绑定、限定键形操作数未注入或未绑定、非群组成员
+// ——既不在规则定群也不在结构群中——的群组字段）时含该操作数的相等/不等/
+// 区间比较一律为假——条件无法确立则动作不产出（保守取向）；未知判别类别在
+// 构造期已被拦截，此处防御性为假。
 func (e *CondExpr) Holds(ctx *ParseContext, decls []MetadataDeclaration) bool {
 	if e == nil {
 		return true
@@ -408,7 +514,9 @@ type condOperand struct {
 }
 
 // conditionOperandValue 求值比较类操作数（capture / depth / groupSize /
-// groupSeq / 字面量）；其余判别类别（谓词、比较、逻辑）不是操作数，返回不可用。
+// groupSeq / 字面量）；capture 操作数为限定键形（组合规则 when 引用成员捕获，
+// 显式形「成员ID.rN.组名」）时从注入区取值（refCaptureValue），非限定名走
+// 自有捕获。其余判别类别（谓词、比较、逻辑）不是操作数，返回不可用。
 func conditionOperandValue(e *CondExpr, ctx *ParseContext) condOperand {
 	if e == nil {
 		return condOperand{}
@@ -417,6 +525,17 @@ func conditionOperandValue(e *CondExpr, ctx *ParseContext) condOperand {
 	case ExprCapture:
 		if ctx == nil {
 			return condOperand{}
+		}
+		// 限定键形操作数（组合规则 when 引用成员捕获，显式形「成员ID.rN.组名」，
+		// 可带 #canon 后缀）：从注入区按书写名直接取值（RefCaptures——规范名
+		// 变体是普通限定键、按书写名命中，与自有捕获操作数的直取口径一致，
+		// 不做自动 #canon 回退）。限定键未注入/未绑定＝取值不可用（比较为假，
+		// 保守取向）；非组合规则的注入区恒空且构造期已拒绝其限定名操作数
+		//（validateExpr），两侧口径一致（共用 parseRefCaptureName 解析）。
+		// 非限定名照旧走自有捕获，行为零变化。
+		if memberID, binding, ok := parseRefCaptureName(e.CaptureName); ok {
+			value, found := ctx.refCaptureValue(memberID, binding)
+			return condOperand{text: value, ok: found}
 		}
 		value, ok := ctx.Capture(e.CaptureName)
 		return condOperand{text: value, ok: ok}

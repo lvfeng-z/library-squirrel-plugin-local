@@ -4,11 +4,13 @@
 
 
 // 提取动作 JSON 的前端镜像（when 为原样透传的条件表达式树；row 为 v4 capture
-// 来源行号——「行N·{词}」寻址，1 起缺省）。
+// 来源行号——「行N·{词}」寻址，1 起缺省；refRule 为 W4 refCapture 来源的成员
+// 规则 ID——refRule/row/captureName 三元寻址，与 refs 顶层字段配套）。
 export interface ExtractionActionJSON {
   dimension?: string
   from?: string
   captureName?: string
+  refRule?: string
   row?: number
   constant?: string
   scanScope?: string
@@ -44,7 +46,10 @@ export const FROM_OPTIONS: { value: string; label: string }[] = [
   { value: 'groupPrefix', label: '群组前缀' },
   { value: 'constant', label: '常量' },
   { value: 'predicate', label: '谓词命中' },
-  { value: 'adjudication', label: '裁决常量' }
+  { value: 'adjudication', label: '裁决常量' },
+  // W4 组合引用（规则组合引用剧本·帧7）：值取自被引成员规则上半声明的捕获槽；
+  // 选中后出现「成员规则·占位词」下拉——选项按引用行顺序分组列出（帧8）
+  { value: 'refCapture', label: '被引规则捕获' }
 ]
 
 // 贪婪识别（帧-05 收敛）：可扫描维度（LibraryIndex 有集合者）与扫描范围。

@@ -120,6 +120,13 @@ type ParseContext struct {
 	PredHits []PredicateHit
 	// DirHits 为全部目录层命中记录，按命中顺序追加。
 	DirHits []DirHit
+	// RefCaptures 为组合规则可见的被引成员捕获快照：提取段门段（runRefGateStage）
+	// 把成员规则私有作用域的捕获以限定键「成员ID.rN.组名」（含 #canon 规范名变体）
+	// 注入此处——仅组合规则的私有作用域非空，非组合规则恒为空。捕获私有不变式
+	// （发现6）不动：跨规则捕获仍隔离，限定名通道为加法式注入，是引用成员捕获值
+	// 的唯一通道。ruleScopedContext 不继承（每规则从空开始）、absorbScoped 不并回
+	// （不外溢），贪婪识别的未覆盖片段排除也只读规则自身 Captures、不读此处。
+	RefCaptures []CaptureBinding
 }
 
 // Capture 返回组名为 name 的最后一条绑定值；不存在时返回 ("", false)。
@@ -166,6 +173,82 @@ func (c *ParseContext) ruleScopedContext() *ParseContext {
 // 写入）。捕获绑定与目录/谓词命中是规则私有的，不并回。
 func (c *ParseContext) absorbScoped(scoped *ParseContext) {
 	c.Group = scoped.Group
+}
+
+// refCaptureKey 限定键形态：成员ID.捕获绑定名。v4 成员规则的捕获绑定名本身
+// 已为行号前缀形态 rN.组名（#canon 规范名为 rN.组名#canon），成员 ID 全局
+// 唯一，天然消歧。
+func refCaptureKey(memberID, bindingName string) string {
+	return memberID + "." + bindingName
+}
+
+// refCaptureSnapshot 把成员规则私有作用域的捕获快照为限定键绑定序列：原绑定
+// 名冠以成员 ID 前缀，#canon 规范名变体是普通绑定名、一并快照；区间字段原样
+// 保留只为快照保真（本通道的取值消费只用 Name/Value）。
+func refCaptureSnapshot(memberID string, scoped *ParseContext) []CaptureBinding {
+	if scoped == nil {
+		return nil
+	}
+	snapshot := make([]CaptureBinding, 0, len(scoped.Captures))
+	for _, binding := range scoped.Captures {
+		snapshot = append(snapshot, CaptureBinding{
+			Name: refCaptureKey(memberID, binding.Name), Value: binding.Value,
+			Segment: binding.Segment, Start: binding.Start, End: binding.End,
+		})
+	}
+	return snapshot
+}
+
+// refCaptureValue 按成员 ID 与捕获绑定名取限定键快照值：取最后一条绑定（与
+// Capture 的取最后语义一致）。供组合规则的 refCapture 提取（Apply 的
+// FromRefCapture 分支）与 when 限定名解析（conditionOperandValue）消费；
+// #canon 同序回退由调用方先行尝试（先 rN.组名#canon 后 rN.组名，对齐
+// FromCapture 的取值序）。
+func (c *ParseContext) refCaptureValue(memberID, bindingName string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	value, found := "", false
+	for _, binding := range c.RefCaptures {
+		if binding.Name == refCaptureKey(memberID, bindingName) {
+			value, found = binding.Value, true
+		}
+	}
+	return value, found
+}
+
+// parseRefCaptureName 解析限定键形捕获名「成员ID.rN.组名」（when 条件操作数的
+// 显式限定形）：首段为成员规则 ID（生成器产出的 ID 仅含字母/数字/连字符，
+// 不含点），次段为行号前缀 rN（与 rowCaptureName 同型），末段为捕获组名
+//（可带 #canon 规范名后缀——规范名变体是普通限定键、按书写名直接命中）。
+// 返回成员 ID 与行号前缀形态的捕获绑定名（rN.组名 原样，供 refCaptureValue
+// 直接消费）。非该形态（段数不是三、次段非行号前缀、首/末段为空）返回
+// ok=false，调用方按自有捕获名处理（非限定名照旧走自有捕获，行为零变化）。
+// 构造校验（validateExpr 的限定名放行）与求值（conditionOperandValue 的限定
+// 名解析）共用本解析，两侧口径一致。
+func parseRefCaptureName(name string) (memberID, bindingName string, ok bool) {
+	parts := strings.Split(name, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	if !isRowOrdinalPrefix(parts[1]) {
+		return "", "", false
+	}
+	return parts[0], parts[1] + "." + parts[2], true
+}
+
+// isRowOrdinalPrefix 判定 s 是否为行号前缀 rN（N≥1、无前导零，rowCaptureName
+// 的产出形态）。
+func isRowOrdinalPrefix(s string) bool {
+	if len(s) < 2 || s[0] != 'r' || s[1] == '0' {
+		return false
+	}
+	for _, ch := range s[1:] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // BaseNameWithoutExt 去掉文件名的最后一段扩展名（filepath.Ext 语义）：

@@ -45,7 +45,8 @@
         </ul>
       </el-alert>
 
-      <!-- 一、档案规则列表 -->
+      <!-- 一、档案规则列表（W4：组合行「组合·引用 N 条」、被引用行「被 N 条组合引用」
+            小字标记——由全列表 refs 统计） -->
       <section class="li-rules-card">
         <div class="li-rules-card-head">
           <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条</span></h3>
@@ -61,6 +62,9 @@
           />
           <div class="li-rules-row-main">
             <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
+            <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
+            <div v-else-if="comboRefCount(r.id) > 0" class="li-rules-row-refnote">被 {{ comboRefCount(r.id) }} 条组合引用</div>
+            <div v-if="isComboRule(r) && hasDisabledMember(r)" class="li-rules-row-combo-off">成员已停用——本组合不产出</div>
             <div class="li-rules-row-id" :title="r.id">{{ r.id }}</div>
           </div>
           <el-tag size="small" :type="sourceTagType(r.source)">{{ sourceLabel(r.source) }}</el-tag>
@@ -79,10 +83,28 @@
         v-model:state="dialogVisible"
         mode="rule"
         :rule="dialogRule"
+        :all-rules="rules"
         :saving="savingRule"
         :save-error="dialogSaveError"
         @save="onDialogSave"
       />
+
+      <!-- 级联管理确认框（W5 剧本二·帧2/帧4）：停用/删除被组合规则引用的成员规则
+           前先列后果清单；〔取消〕= 关闭、零变化，〔仍要停用/删除〕才走既有 RPC -->
+      <el-dialog
+        v-model="confirmVisible"
+        :title="confirmTitle"
+        width="460px"
+        append-to-body
+      >
+        <p class="li-rules-confirm-body">{{ confirmMessage }}</p>
+        <template #footer>
+          <el-button @click="cancelRuleConfirm">取消</el-button>
+          <el-button :type="confirmAction === 'delete' ? 'danger' : 'primary'" @click="onRuleConfirmProceed">
+            {{ confirmOkText }}
+          </el-button>
+        </template>
+      </el-dialog>
 
       <!-- 三、例子模板（v4 词条写法参考——内置规则已退休，不参与求值不入档） -->
       <section class="li-rules-card">
@@ -118,7 +140,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Events } from '@wailsio/runtime'
 import RuleEditDialog from './RuleEditDialog.vue'
 
@@ -147,12 +169,14 @@ interface DimPolicyView {
 }
 
 // 档案规则条目（ruleEntryJSON 形态：conditions / extractions 即 JSON 片段源——
-// v4 档案条件只落 conditions，模式树为编译缓存不落档）
+// v4 档案条件只落 conditions，模式树为编译缓存不落档；refs 为 W4 组合引用的
+// 成员规则 ID 列表——非组合规则缺省空）
 interface RuleEntryView {
   id: string
   description: string
   source: string
   enabled: boolean
+  refs?: string[]
   conditions?: unknown
   extractions?: unknown
   synthesis?: { dimPolicies?: DimPolicyView[] | null; roles?: RoleBindingView[] | null }
@@ -322,9 +346,18 @@ function openRuleById(ruleId: string): void {
   openEdit(rule)
 }
 
-// —— 一、列表操作：启停 / 删除 ——
+// —— 一、列表操作：启停 / 删除（W5 级联管理：被组合引用的规则先确认后果） ——
 
 async function doToggleRule(rule: RuleEntryView, enable: boolean): Promise<void> {
+  // 关向且被组合引用：先弹确认框（帧2），取消＝零变化
+  if (!enable && comboRefCount(rule.id) > 0) {
+    requestRuleConfirm('disable', rule)
+    return
+  }
+  await doToggleRuleConfirmed(rule, enable)
+}
+
+async function doToggleRuleConfirmed(rule: RuleEntryView, enable: boolean): Promise<void> {
   acting.value = true
   actionError.value = ''
   const resp = await request('setRuleEnabled', { ruleId: rule.id, enabled: enable })
@@ -338,6 +371,15 @@ async function doToggleRule(rule: RuleEntryView, enable: boolean): Promise<void>
 }
 
 async function doDeleteRule(rule: RuleEntryView): Promise<void> {
+  // 被组合引用：先弹确认框（帧4），取消＝零变化
+  if (comboRefCount(rule.id) > 0) {
+    requestRuleConfirm('delete', rule)
+    return
+  }
+  await doDeleteRuleConfirmed(rule)
+}
+
+async function doDeleteRuleConfirmed(rule: RuleEntryView): Promise<void> {
   acting.value = true
   actionError.value = ''
   const resp = await request('deleteRule', { ruleId: rule.id })
@@ -350,16 +392,81 @@ async function doDeleteRule(rule: RuleEntryView): Promise<void> {
   notice.value = `规则「${rule.description || rule.id}」已删除（可在档案备份回退一代找回）`
 }
 
+// —— 一·二、级联管理确认框（W5 剧本二·帧2/帧4）：后果清单逐字对齐剧本 ——
+
+type RuleConfirmAction = 'disable' | 'delete'
+
+const confirmVisible = ref(false)
+const confirmAction = ref<RuleConfirmAction | null>(null)
+const confirmRule = ref<RuleEntryView | null>(null)
+
+function ruleDisplayName(rule: RuleEntryView): string {
+  return rule.description || rule.id
+}
+
+// 引用目标规则的组合规则（列表统计 refs 含其 ID，与列表小字同源）
+const confirmComboRules = computed<RuleEntryView[]>(() => {
+  const target = confirmRule.value
+  if (!target) return []
+  return rules.value.filter((r) => (r.refs || []).indexOf(target.id) >= 0)
+})
+
+const confirmTitle = computed<string>(() =>
+  confirmAction.value === 'delete' ? '删除被引用的规则？' : '停用被引用的规则？'
+)
+
+const confirmOkText = computed<string>(() => (confirmAction.value === 'delete' ? '仍要删除' : '仍要停用'))
+
+// 正文＝帧2/帧4 逐字文案（组合描述列表以顿号连接，与列表标记同源）
+const confirmMessage = computed<string>(() => {
+  const target = confirmRule.value
+  if (!target) return ''
+  const combos = confirmComboRules.value
+  const names = combos.map(ruleDisplayName).join('、')
+  const head = `『${ruleDisplayName(target)}』被 ${combos.length} 条组合规则引用：${names}。`
+  if (confirmAction.value === 'delete') {
+    return `${head}删除后该组合的成员引用悬空，下次载入档案时该组合将被跳过，并在「档案载入告警」中列出。`
+  }
+  return `${head}停用后这些组合规则将整体不产出（不会降级为仅其余成员命中）。`
+})
+
+function requestRuleConfirm(action: RuleConfirmAction, rule: RuleEntryView): void {
+  confirmAction.value = action
+  confirmRule.value = rule
+  confirmVisible.value = true
+  actionError.value = ''
+}
+
+// 取消：只关框，不触碰开关/档案（帧2/帧4 的失败路径）
+function cancelRuleConfirm(): void {
+  confirmVisible.value = false
+}
+
+// 仍要停用/删除：关框后照旧走既有 RPC（帧2/帧4 的确认路径）
+async function onRuleConfirmProceed(): Promise<void> {
+  const target = confirmRule.value
+  const action = confirmAction.value
+  confirmVisible.value = false
+  if (!target || !action) return
+  if (action === 'delete') {
+    await doDeleteRuleConfirmed(target)
+  } else {
+    await doToggleRuleConfirmed(target, false)
+  }
+}
+
 // —— 二、单条编辑（两段式弹窗 · 剧本F，共用组件 RuleEditDialog） ——
 
 // 弹窗初始载荷（RuleEditDialog rule 模式入参的结构投影；conditions/extractions
-// 即档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑）
+// 即档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑；refs 为 W4 组合
+// 引用成员列表）
 interface RuleDialogInput {
   id: string
   description: string
   source: string
   enabled: boolean
   isNew: boolean
+  refs?: string[] | null
   conditions?: unknown
   extractions: unknown
   synthesis: { dimPolicies: DimPolicyView[]; roles: RoleBindingView[] }
@@ -389,6 +496,26 @@ function sourceTagType(source: string): 'info' | 'success' | 'warning' | 'danger
   return 'info'
 }
 
+// —— W4 列表引用标记（帧10）：组合行「组合·引用 N 条」、被引用行「被 N 条组合引用」 ——
+
+// 组合规则＝refs 非空（引用了成员规则）
+function isComboRule(rule: RuleEntryView): boolean {
+  return (rule.refs || []).length > 0
+}
+
+// 被引用计数：全列表 refs 统计
+function comboRefCount(ruleId: string): number {
+  return rules.value.reduce((n, r) => n + ((r.refs || []).indexOf(ruleId) >= 0 ? 1 : 0), 0)
+}
+
+// 组合行「成员已停用——本组合不产出」（W5 剧本二·帧3）：任一被引成员当前停用
+function hasDisabledMember(rule: RuleEntryView): boolean {
+  return (rule.refs || []).some((refId) => {
+    const member = rules.value.find((r) => r.id === refId)
+    return member !== undefined && member.enabled === false
+  })
+}
+
 // 新建：空载荷入弹窗（v4 缺省样例〔【{作者}】{标题} 行 + 作者/标题提取行〕
 // 由弹窗侧缺省带入）
 function openNew(): void {
@@ -398,6 +525,7 @@ function openNew(): void {
     source: 'manual',
     enabled: true,
     isNew: true,
+    refs: null,
     conditions: null,
     extractions: null,
     synthesis: { dimPolicies: [], roles: [] }
@@ -415,6 +543,7 @@ function openEdit(rule: RuleEntryView): void {
     source: rule.source,
     enabled: rule.enabled,
     isNew: false,
+    refs: rule.refs ?? null,
     conditions: rule.conditions ?? null,
     extractions: rule.extractions ?? [],
     synthesis: {
@@ -620,6 +749,27 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* W4 引用标记小字（帧10）：组合·引用 N 条 / 被 N 条组合引用 */
+.li-rules-row-refnote {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* W5 级联管理（剧本二·帧3）：组合行「成员已停用——本组合不产出」灰字 */
+.li-rules-row-combo-off {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* W5 确认框正文（剧本二·帧2/帧4）：后果清单整段呈现 */
+.li-rules-confirm-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--app-text-regular);
+  word-break: break-word;
 }
 
 .li-rules-row-side {
