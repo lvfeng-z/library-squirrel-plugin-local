@@ -267,12 +267,23 @@
                    成员文件名序列块底色（区间=后端形态表单一事实源）；两段式归集（预填可改）；
                    已归集/已忽略收纳分组（会话内，忽略可恢复）；确认走集维度批量赋值+既有建议卡通路 -->
               <div v-show="listMode === 'sets'" class="li-ws-sets" :style="{ height: `${listBodyH}px` }">
+                <!-- 已识别候选过滤（2026-10-27 用户拍板：默认隐藏、只滤「归入既有集」档；
+                     crossMatch 同名互证不滤——名字佐证≠文件属那集） -->
+                <div class="li-ws-cand-filterbar">
+                  <button
+                    type="button"
+                    class="li-ws-filter-btn"
+                    :class="{ 'is-active': hideIdentifiedCandidates }"
+                    :title="hideIdentifiedCandidates ? `已隐藏 ${identifiedCandidateCount} 条能归入库内既有集（作品号唯一命中）的候选` : '隐藏已能归入库内既有集（作品号唯一命中）的候选'"
+                    @click="hideIdentifiedCandidates = !hideIdentifiedCandidates"
+                  >隐藏已识别{{ identifiedCandidateCount ? ` ${identifiedCandidateCount}` : '' }}</button>
+                </div>
                 <p
-                  v-if="candidates.length === 0 && !(snapshot.ignoredCandidates || []).length && !(snapshot.confirmedCandidates || []).length"
+                  v-if="visibleCandidates.length === 0 && !(snapshot.ignoredCandidates || []).length && !(snapshot.confirmedCandidates || []).length"
                   class="li-ws-empty"
-                >无疑似作品集候选</p>
+                >无疑似作品集候选{{ hideIdentifiedCandidates && identifiedCandidateCount ? `（已隐藏已识别 ${identifiedCandidateCount} 条）` : '' }}</p>
                 <div
-                  v-for="c in candidates"
+                  v-for="c in visibleCandidates"
                   :key="candKey(c)"
                   class="li-ws-cand"
                   :class="{ 'is-confirming': confirming === candTarget(c) }"
@@ -925,6 +936,13 @@ const listMode = ref<'tree' | 'flat' | 'sets'>('tree')
 // 候选/两分仓清单来自快照（后端 buildSnapshotCandidates 三类合流）；动作走本组件唯一
 // workbench 请求通道，应答先回、分仓随自动重识别的快照事件刷新（既有事件通路联动）
 const candidates = computed<SnapCandidate[]>(() => (snapshot.value && snapshot.value.candidates) || [])
+// 已识别候选过滤（2026-10-27 用户拍板）：existingSetId=候选键作品号与库内既有集
+// 唯一命中（后端 matchExistingWorkSet 注记）→ 默认隐藏可关；crossMatch（同名
+// 互证）不滤。已归集/已忽略收纳分组不受此过滤影响。
+const hideIdentifiedCandidates = ref(true)
+const identifiedCandidateCount = computed(() => candidates.value.filter(c => !!c.existingSetId).length)
+const visibleCandidates = computed(() =>
+  hideIdentifiedCandidates.value ? candidates.value.filter(c => !c.existingSetId) : candidates.value)
 const confirming = ref('')
 const confirmName = ref('')
 const candBusy = ref(false)
@@ -2660,6 +2678,11 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 10px;
   padding: 8px 10px;
+}
+
+.li-ws-cand-filterbar {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .li-ws-cand {
