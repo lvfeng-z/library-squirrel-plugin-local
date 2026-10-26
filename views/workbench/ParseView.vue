@@ -267,14 +267,14 @@
                    成员文件名序列块底色（区间=后端形态表单一事实源）；两段式归集（预填可改）；
                    已归集/已忽略收纳分组（会话内，忽略可恢复）；确认走集维度批量赋值+既有建议卡通路 -->
               <div v-show="listMode === 'sets'" class="li-ws-sets" :style="{ height: `${listBodyH}px` }">
-                <!-- 已识别候选过滤（2026-10-27 用户拍板：默认隐藏、只滤「归入既有集」档；
-                     crossMatch 同名互证不滤——名字佐证≠文件属那集） -->
+                <!-- 已识别候选过滤（2026-10-27 用户二拍板：默认隐藏；口径=候选成员
+                     全部已带集维度最终结论〔规则识别或赋值存档〕=已被识别为作品集） -->
                 <div class="li-ws-cand-filterbar">
                   <button
                     type="button"
                     class="li-ws-filter-btn"
                     :class="{ 'is-active': hideIdentifiedCandidates }"
-                    :title="hideIdentifiedCandidates ? `已隐藏 ${identifiedCandidateCount} 条能归入库内既有集（作品号唯一命中）的候选` : '隐藏已能归入库内既有集（作品号唯一命中）的候选'"
+                    :title="hideIdentifiedCandidates ? `已隐藏 ${identifiedCandidateCount} 条成员均已识别出作品集（集维度结论在档）的候选` : '隐藏成员均已识别出作品集（集维度结论在档）的候选'"
                     @click="hideIdentifiedCandidates = !hideIdentifiedCandidates"
                   >隐藏已识别{{ identifiedCandidateCount ? ` ${identifiedCandidateCount}` : '' }}</button>
                 </div>
@@ -936,13 +936,27 @@ const listMode = ref<'tree' | 'flat' | 'sets'>('tree')
 // 候选/两分仓清单来自快照（后端 buildSnapshotCandidates 三类合流）；动作走本组件唯一
 // workbench 请求通道，应答先回、分仓随自动重识别的快照事件刷新（既有事件通路联动）
 const candidates = computed<SnapCandidate[]>(() => (snapshot.value && snapshot.value.candidates) || [])
-// 已识别候选过滤（2026-10-27 用户拍板）：existingSetId=候选键作品号与库内既有集
-// 唯一命中（后端 matchExistingWorkSet 注记）→ 默认隐藏可关；crossMatch（同名
-// 互证）不滤。已归集/已忽略收纳分组不受此过滤影响。
+// 已识别候选过滤（2026-10-27 用户二拍板改口径）：候选成员**全部**已带集维度
+// 最终结论（snapshot.files 的 final 含 dimension=collection——规则识别与赋值
+// 存档同源计入，后端 applyAssignmentToConclusion 合并）= 已被识别为作品集 →
+// 默认隐藏可关；existingSetId（库内作品号比对）/crossMatch（同名互证）不再
+// 作隐藏依据；部分成员未识别的候选保留（残员仍需人工处理）。已归集/已忽略
+// 收纳分组不受此过滤影响。
 const hideIdentifiedCandidates = ref(true)
-const identifiedCandidateCount = computed(() => candidates.value.filter(c => !!c.existingSetId).length)
+const fileHasCollection = computed(() => {
+  const m = new Map<string, boolean>()
+  for (const f of (snapshot.value && snapshot.value.files) || []) {
+    m.set(f.relPath, !!(f.final && f.final.some(d => d.dimension === 'collection')))
+  }
+  return m
+})
+function candidateIdentified(c: SnapCandidate): boolean {
+  if (!c.members.length) return false
+  return c.members.every(m => fileHasCollection.value.get(m.relPath) === true)
+}
+const identifiedCandidateCount = computed(() => candidates.value.filter(candidateIdentified).length)
 const visibleCandidates = computed(() =>
-  hideIdentifiedCandidates.value ? candidates.value.filter(c => !c.existingSetId) : candidates.value)
+  hideIdentifiedCandidates.value ? candidates.value.filter(c => !candidateIdentified(c)) : candidates.value)
 const confirming = ref('')
 const confirmName = ref('')
 const candBusy = ref(false)
