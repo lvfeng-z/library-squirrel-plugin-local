@@ -1629,6 +1629,9 @@ function save(): void {
   flex-direction: column;
   gap: 6px;
   border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  /* 2026-10-28 行区域标识·左缘色条：提取条件行左缘 success 绿 3px 竖条（与识别行
+     主色蓝条分野，见 .li-condx-row 注） */
+  border-left: 3px solid var(--el-color-success);
   border-radius: var(--app-radius);
   padding: 8px 10px;
 }
@@ -1863,6 +1866,11 @@ function save(): void {
   flex-direction: column;
   gap: 8px;
   border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  /* 2026-10-28 行区域标识·左缘色条（第三版，用户裁决「换方案」）：识别条件行
+     左缘主色 3px 竖条——不动任何底色（行/分区透明复原，行内组件配色环境即原
+     白底设计），逐行成块且与提取行（success 绿条）色彩分野；前两版（行级淡底/
+     分区淡底+白卡行）均因观感被否 */
+  border-left: 3px solid var(--el-color-primary);
   border-radius: var(--app-radius);
   padding: 10px;
 }
