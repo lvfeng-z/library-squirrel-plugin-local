@@ -1,81 +1,119 @@
 <template>
-  <div class="li-rules">
-    <header class="li-rules-header">
-      <h2 class="li-rules-title">规则管理</h2>
-      <span v-if="session" class="li-rules-root">{{ session.rootPath }}</span>
-      <span class="li-rules-header-side">
-        <span class="li-rules-note">规则档案全库单份 · 编辑事务单点串行</span>
-        <a class="li-rules-back" :href="parseRoute()">返回解析视图</a>
-      </span>
-    </header>
+  <BaseView>
+    <div class="li-rules">
+      <el-scrollbar class="li-rules-scroll">
+        <div class="li-rules-body">
+          <header class="li-rules-header">
+            <h2 class="li-rules-title">规则管理</h2>
+            <span v-if="session" class="li-rules-root">{{ session.rootPath }}</span>
+            <span class="li-rules-header-side">
+              <span class="li-rules-note">规则档案全库单份 · 编辑事务单点串行</span>
+              <a class="li-rules-back" :href="parseRoute()">返回解析视图</a>
+            </span>
+          </header>
 
-    <el-alert
-      v-if="loadError"
-      class="li-rules-banner"
-      type="error"
-      :closable="false"
-      show-icon
-      :title="loadError"
-    >
-      <a class="li-rules-back" :href="`${ROUTE_BASE}workbench`">返回本地导入工作台</a>
-    </el-alert>
-    <el-empty
-      v-else-if="!session"
-      description="未找到进行中的解析会话：请从工作台新建或恢复会话"
-    >
-      <a class="li-rules-back" :href="`${ROUTE_BASE}workbench`">返回本地导入工作台</a>
-    </el-empty>
+          <el-alert
+            v-if="loadError"
+            class="li-rules-banner"
+            type="error"
+            :closable="false"
+            show-icon
+            :title="loadError"
+          >
+            <a class="li-rules-back" :href="`${ROUTE_BASE}workbench`">返回本地导入工作台</a>
+          </el-alert>
+          <el-empty
+            v-else-if="!session"
+            description="未找到进行中的解析会话：请从工作台新建或恢复会话"
+          >
+            <a class="li-rules-back" :href="`${ROUTE_BASE}workbench`">返回本地导入工作台</a>
+          </el-empty>
 
-    <template v-else>
-      <!-- 操作反馈区 -->
-      <el-alert v-if="notice" class="li-rules-banner" type="success" :closable="false" show-icon :title="notice" />
-      <el-alert v-if="actionError" class="li-rules-banner" type="error" :closable="false" show-icon :title="actionError" />
+          <template v-else>
+            <!-- 操作反馈区 -->
+            <el-alert v-if="notice" class="li-rules-banner" type="success" :closable="false" show-icon :title="notice" />
+            <el-alert v-if="actionError" class="li-rules-banner" type="error" :closable="false" show-icon :title="actionError" />
 
-      <!-- 档案载入告警：坏条目被跳过等（核对档案的透出入口） -->
-      <el-alert
-        v-if="warnings.length"
-        class="li-rules-banner"
-        type="warning"
-        :closable="false"
-        show-icon
-        :title="`档案载入告警 ${warnings.length} 条（对应规则已被跳过、不参与求值）`"
-      >
-        <ul class="li-rules-warnlist">
-          <li v-for="(w, i) in warnings" :key="i">{{ w }}</li>
-        </ul>
-      </el-alert>
+            <!-- 档案载入告警：坏条目被跳过等（核对档案的透出入口） -->
+            <el-alert
+              v-if="warnings.length"
+              class="li-rules-banner"
+              type="warning"
+              :closable="false"
+              show-icon
+              :title="`档案载入告警 ${warnings.length} 条（对应规则已被跳过、不参与求值）`"
+            >
+              <ul class="li-rules-warnlist">
+                <li v-for="(w, i) in warnings" :key="i">{{ w }}</li>
+              </ul>
+            </el-alert>
 
-      <!-- 一、档案规则列表（W4：组合行「组合·引用 N 条」、被引用行「被 N 条组合引用」
-            小字标记——由全列表 refs 统计） -->
-      <section class="li-rules-card">
-        <div class="li-rules-card-head">
-          <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条</span></h3>
-          <el-button type="primary" size="small" @click="openNew">新建规则…</el-button>
+            <!-- 一、档案规则列表（W4：组合行「组合·引用 N 条」、被引用行「被 N 条组合引用」
+                  小字标记——由全列表 refs 统计） -->
+            <section class="li-rules-card">
+              <div class="li-rules-card-head">
+                <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条</span></h3>
+                <el-button type="primary" size="small" @click="openNew">新建规则…</el-button>
+              </div>
+              <p v-if="!rules.length" class="li-rules-empty">档案为空：可从手动解析页泛化生成，或在此新建手写规则</p>
+              <div v-for="r in rules" :key="r.id" class="li-rules-row">
+                <el-switch
+                  size="small"
+                  :model-value="r.enabled"
+                  :loading="acting"
+                  @change="doToggleRule(r, $event === true)"
+                />
+                <div class="li-rules-row-main">
+                  <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
+                  <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
+                  <div v-else-if="comboRefCount(r.id) > 0" class="li-rules-row-refnote">被 {{ comboRefCount(r.id) }} 条组合引用</div>
+                  <div v-if="isComboRule(r) && hasDisabledMember(r)" class="li-rules-row-combo-off">成员已停用——本组合不产出</div>
+                  <div class="li-rules-row-id" :title="r.id">{{ r.id }}</div>
+                </div>
+                <el-tag size="small" :type="sourceTagType(r.source)">{{ sourceLabel(r.source) }}</el-tag>
+                <span class="li-rules-row-side">
+                  <el-button size="small" @click="openEdit(r)">编辑</el-button>
+                  <el-button size="small" type="danger" @click="doDeleteRule(r)">删除</el-button>
+                </span>
+              </div>
+              <p class="li-rules-hint">删除立即覆写档案（写前自动备份一代，误删可在下方「档案备份」回退）</p>
+            </section>
+
+            <!-- 三、例子模板（v4 词条写法参考——内置规则已退休，不参与求值不入档） -->
+            <section class="li-rules-card">
+              <div class="li-rules-card-head">
+                <h3 class="li-rules-card-title">例子模板 <span class="li-rules-card-note">{{ examples.length }} 词条 · 格式写法参考</span></h3>
+              </div>
+              <p class="li-rules-hint">
+                例子模板是 v4 条件格式的写法参考（不参与求值、不入档案）：新建/编辑规则时在格式步点词条区同名 chips
+                可一步预填；占位词词表为封闭集（作者/集名/序号/标题/标签/作品号/日期/键/任意）
+              </p>
+              <div v-for="ex in examples" :key="ex.name" class="li-rules-row">
+                <div class="li-rules-row-main">
+                  <div class="li-rules-row-desc" :title="ex.description">{{ ex.name }}</div>
+                  <div class="li-rules-row-id">{{ ex.template }}</div>
+                </div>
+                <el-tag size="small" type="info">{{ targetLabel(ex.target) }}</el-tag>
+              </div>
+            </section>
+
+            <!-- 四、档案备份（写前单代备份 · 回退一代） -->
+            <section class="li-rules-card">
+              <div class="li-rules-card-head">
+                <h3 class="li-rules-card-title">档案备份 <span class="li-rules-card-note">单代 · 每次覆写前自动留存</span></h3>
+                <el-button size="small" :disabled="!backupAvailable || acting" @click="doRollback">回退一代</el-button>
+              </div>
+              <p class="li-rules-hint">
+                每次覆写档案前，现行档案自动存入单代备份键（rule-profile.backup）——误删规则、禁用错内置或覆写中断均可回退一代；
+                回退时当前档案换位进备份（再点一次即撤销回退）。回退后既有识别会话会在恢复时提示档案已变更，建议重新识别。
+              </p>
+            </section>
+          </template>
         </div>
-        <p v-if="!rules.length" class="li-rules-empty">档案为空：可从手动解析页泛化生成，或在此新建手写规则</p>
-        <div v-for="r in rules" :key="r.id" class="li-rules-row">
-          <el-switch
-            size="small"
-            :model-value="r.enabled"
-            :loading="acting"
-            @change="doToggleRule(r, $event === true)"
-          />
-          <div class="li-rules-row-main">
-            <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
-            <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
-            <div v-else-if="comboRefCount(r.id) > 0" class="li-rules-row-refnote">被 {{ comboRefCount(r.id) }} 条组合引用</div>
-            <div v-if="isComboRule(r) && hasDisabledMember(r)" class="li-rules-row-combo-off">成员已停用——本组合不产出</div>
-            <div class="li-rules-row-id" :title="r.id">{{ r.id }}</div>
-          </div>
-          <el-tag size="small" :type="sourceTagType(r.source)">{{ sourceLabel(r.source) }}</el-tag>
-          <span class="li-rules-row-side">
-            <el-button size="small" @click="openEdit(r)">编辑</el-button>
-            <el-button size="small" type="danger" @click="doDeleteRule(r)">删除</el-button>
-          </span>
-        </div>
-        <p class="li-rules-hint">删除立即覆写档案（写前自动备份一代，误删可在下方「档案备份」回退）</p>
-      </section>
+      </el-scrollbar>
+    </div>
 
+    <template #dialog>
       <!-- 二、单条编辑（两段式弹窗 · 剧本F）：列表行「编辑」/「新建规则…」挂共用
            组件 RuleEditDialog——上半=识别规则、下半=提取规则；旧内联 JSON 表单与
            「仅序列成员产出」开关由弹窗取代、不并存（开关化为提取段逐行条件勾选） -->
@@ -105,38 +143,8 @@
           </el-button>
         </template>
       </el-dialog>
-
-      <!-- 三、例子模板（v4 词条写法参考——内置规则已退休，不参与求值不入档） -->
-      <section class="li-rules-card">
-        <div class="li-rules-card-head">
-          <h3 class="li-rules-card-title">例子模板 <span class="li-rules-card-note">{{ examples.length }} 词条 · 格式写法参考</span></h3>
-        </div>
-        <p class="li-rules-hint">
-          例子模板是 v4 条件格式的写法参考（不参与求值、不入档案）：新建/编辑规则时在格式步点词条区同名 chips
-          可一步预填；占位词词表为封闭集（作者/集名/序号/标题/标签/作品号/日期/键/任意）
-        </p>
-        <div v-for="ex in examples" :key="ex.name" class="li-rules-row">
-          <div class="li-rules-row-main">
-            <div class="li-rules-row-desc" :title="ex.description">{{ ex.name }}</div>
-            <div class="li-rules-row-id">{{ ex.template }}</div>
-          </div>
-          <el-tag size="small" type="info">{{ targetLabel(ex.target) }}</el-tag>
-        </div>
-      </section>
-
-      <!-- 四、档案备份（写前单代备份 · 回退一代） -->
-      <section class="li-rules-card">
-        <div class="li-rules-card-head">
-          <h3 class="li-rules-card-title">档案备份 <span class="li-rules-card-note">单代 · 每次覆写前自动留存</span></h3>
-          <el-button size="small" :disabled="!backupAvailable || acting" @click="doRollback">回退一代</el-button>
-        </div>
-        <p class="li-rules-hint">
-          每次覆写档案前，现行档案自动存入单代备份键（rule-profile.backup）——误删规则、禁用错内置或覆写中断均可回退一代；
-          回退时当前档案换位进备份（再点一次即撤销回退）。回退后既有识别会话会在恢复时提示档案已变更，建议重新识别。
-        </p>
-      </section>
     </template>
-  </div>
+  </BaseView>
 </template>
 
 <script setup lang="ts">
@@ -610,12 +618,23 @@ onUnmounted(() => {
 
 <style scoped>
 .li-rules {
-  max-width: 860px;
-  margin: 0 auto;
-  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  width: calc(100% - 20px);
+  height: calc(100% - 20px);
+  margin: 10px;
+}
+
+.li-rules-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.li-rules-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 10px;
 }
 
 .li-rules-header {
@@ -627,7 +646,8 @@ onUnmounted(() => {
 
 .li-rules-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 16px;
+  font-weight: 600;
   color: var(--app-text-primary);
 }
 
@@ -670,7 +690,7 @@ onUnmounted(() => {
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius);
   background: var(--app-bg-surface);
-  padding: 16px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;

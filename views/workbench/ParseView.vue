@@ -1,19 +1,43 @@
 <template>
-  <div class="li-ws">
-    <!-- 头部：解析工作台 · 库根 · 识别于 · 重新识别 · 规则管理/解析观测子页链接 -->
+  <BaseView>
+    <div class="li-ws">
+    <!-- 头部：解析工作台 · 库根 · 识别于 · 重新识别 · 待裁决·决策态融合弹窗入口 · 子页链接 -->
     <header class="li-ws-header">
       <h2 class="li-ws-title">解析工作台</h2>
       <span v-if="session" class="li-ws-root">{{ session.rootPath }}</span>
       <span v-if="snapshot" class="li-ws-time">识别于 {{ formatTime(snapshot.generatedAtMs) }}</span>
       <span class="li-ws-header-actions">
+        <!-- 创建任务/开始全量识别移页头（2026-10-27 裁决A：统计行并入卡头行，
+             卡头动作钮让位；与重新识别同排，全部 el-button small 统一款式） -->
+        <el-button
+          v-if="snapshot"
+          type="primary"
+          size="small"
+          :loading="creating"
+          :disabled="selectedWorks.size === 0"
+          @click="openCreateDialog"
+        >创建任务</el-button>
+        <el-button
+          v-else-if="!recognizing"
+          type="primary"
+          size="small"
+          :loading="starting"
+          @click="startRecognition"
+        >开始全量识别</el-button>
         <el-button
           v-if="snapshot"
           size="small"
           :loading="starting"
           @click="startRecognition"
         >重新识别</el-button>
-        <a class="li-ws-header-link" :href="subRoute('workbench-rules')">规则管理</a>
-        <a class="li-ws-header-link" :href="subRoute('workbench-observation')">解析观测</a>
+        <!-- 待裁决·决策态融合弹窗入口：徽标计数=待裁决项数，弹窗承载只读总览与清单行跳转 -->
+        <el-button
+          v-if="snapshot"
+          size="small"
+          @click="fusionDialogVisible = true"
+        >⚑ 待裁决·决策态 {{ pendingCount }}</el-button>
+        <el-button size="small" @click="goSub('workbench-rules')">规则管理</el-button>
+        <el-button size="small" @click="goSub('workbench-observation')">解析观测</el-button>
       </span>
     </header>
 
@@ -37,6 +61,15 @@
       title="规则档案在会话外被变更"
       description="既有识别结论可能与最新规则不一致，建议重新识别。"
     />
+    <!-- 识别失败横幅（页头下方，常态不占行） -->
+    <el-alert
+      v-if="recognError"
+      class="li-ws-banner"
+      type="error"
+      :closable="false"
+      show-icon
+      :title="recognError"
+    />
 
     <!-- 空会话态 -->
     <el-empty
@@ -47,87 +80,69 @@
     </el-empty>
 
     <template v-if="session">
-      <!-- 边界：未识别会话（无快照）→ 开始全量识别入口（干跑 = 纯求值，零任务产出、零弹问） -->
-      <section v-if="!snapshot && !recognizing" class="li-ws-card">
-        <p class="li-ws-desc">
-          对库根做全量识别干跑：按「规则档案 ∪ 会话赋值」合并求值全部文件，产出
-          识别全景（目录结构含义、已识别资源、有价值未识别、序列群、待裁决项、
-          规则命中与决策态）。识别不创建任何任务。
-        </p>
-        <el-button type="primary" :loading="starting" @click="startRecognition">
-          开始全量识别
-        </el-button>
-      </section>
+      <!-- 重识别差异行（单行小字，验证轮提示语并入同行，不占独立卡片） -->
+      <p v-if="snapshot && diff && diffTotal > 0" class="li-ws-diffline">
+        重识别差异（生成规则后的验证轮）：
+        <span class="li-ws-diff-chip is-changed">变更 {{ diff.changed ? diff.changed.length : 0 }}</span>
+        <span class="li-ws-diff-chip is-added">新增 {{ diff.added ? diff.added.length : 0 }}</span>
+        <span class="li-ws-diff-chip is-removed">消失 {{ diff.removed ? diff.removed.length : 0 }}</span>
+        <span>过窄＝差异里仍有未覆盖、过泛＝差异里错套——请在清单核对标色行</span>
+      </p>
 
-      <!-- 识别中：流式进度（阶段跃迁 + 计数）；赋值变更后的自动增量重识别共用此状态条 -->
-      <section v-if="recognizing" class="li-ws-card">
-        <div class="li-ws-progress-head">
-          <span class="li-ws-progress-phase">{{ phaseLabel(progress.phase) }}</span>
-          <span v-if="progress.total > 0" class="li-ws-progress-count">{{ progress.done }} / {{ progress.total }}</span>
-        </div>
-        <div class="li-ws-progress-track">
-          <div class="li-ws-progress-bar" :style="{ width: progressPercent }"></div>
-        </div>
-      </section>
-
-      <!-- 识别失败提示 -->
-      <el-alert
-        v-if="recognError"
-        class="li-ws-banner"
-        type="error"
-        :closable="false"
-        show-icon
-        :title="recognError"
-      />
-
-      <template v-if="snapshot">
-        <!-- 区3 重识别差异行（H5：单行小字，验证轮提示语并入同行，不占独立卡片） -->
-        <p v-if="diff && diffTotal > 0" class="li-ws-diffline">
-          重识别差异（生成规则后的验证轮）：
-          <span class="li-ws-diff-chip is-changed">变更 {{ diff.changed ? diff.changed.length : 0 }}</span>
-          <span class="li-ws-diff-chip is-added">新增 {{ diff.added ? diff.added.length : 0 }}</span>
-          <span class="li-ws-diff-chip is-removed">消失 {{ diff.removed ? diff.removed.length : 0 }}</span>
-          <span>过窄＝差异里仍有未覆盖、过泛＝差异里错套——请在清单核对标色行</span>
-        </p>
-
-        <!-- 双栏主从主体：左栏自适应（保底 ~480px），右栏固定 ~400px 可收起 -->
-        <section class="li-ws-main">
-          <div class="li-ws-left">
-            <!-- 区5 资源清单：统计并入标题行（H2）+ 过滤与组合操作单行（H3）+ 虚拟滚动/树体（H4 体高自适应） -->
-            <section class="li-ws-card">
-              <h3 class="li-ws-card-title">
-                资源清单
-                <!-- 剧本F F1：清单浏览模式切换「▦ 清单 / ⛁ 目录树」，默认目录树（决策2），会话内记忆不持久化 -->
-                <span class="li-ws-mode-toggle">
-                  <button
-                    type="button"
-                    class="li-ws-filter-btn li-ws-mode-btn"
-                    :class="{ 'is-active': listMode === 'tree' }"
-                    title="目录树模式：库根 → 目录 → 文件层级归属"
-                    @click="listMode = 'tree'"
-                  >⛁ 目录树</button>
-                  <button
-                    type="button"
-                    class="li-ws-filter-btn li-ws-mode-btn"
-                    :class="{ 'is-active': listMode === 'flat' }"
-                    title="平铺清单模式：全量文件平铺"
-                    @click="listMode = 'flat'"
-                  >▦ 清单</button>
-                  <!-- 剧本v2 第三标签：疑似作品集候选卡墙（目录候选/序列群/A 档库内集比对合流；
-                       原「序列群」折叠区能力并入此处退役） -->
-                  <button
-                    type="button"
-                    class="li-ws-filter-btn li-ws-mode-btn"
-                    :class="{ 'is-active': listMode === 'sets' }"
-                    title="候选卡墙：目录候选 / 序列群 / 库内集比对（确认归集或忽略）"
-                    @click="listMode = 'sets'"
-                  >疑似作品集</button>
-                </span>
-                <!-- H2：识别统计随快照刷新；增量跳过目录>0 时串内追加 -->
-                <span class="li-ws-card-stats">文件 {{ snapshot.stats.totalFiles }} · 已识别 {{ snapshot.stats.identified }} · 有线索 {{ snapshot.stats.clueful }} · 无线索 {{ snapshot.stats.plain }} · 序列群 {{ snapshot.stats.groupCount }} · 待裁决 {{ snapshot.stats.pendingFiles }}<template v-if="snapshot.stats.skippedDirs > 0"> · 增量跳过目录 {{ snapshot.stats.skippedDirs }}</template></span>
-              </h3>
-              <!-- H3：过滤器与批量/组合操作合并单行（flex-wrap，窄窗自然折行） -->
-              <div class="li-ws-combos">
+      <!-- 双栏主从主体（视口锁定）：左=资源清单卡 flex 自适应（min-width:0），右=解析面板卡
+           固定 400px；align-items:stretch 令双卡等高填满——各自卡内滚动，页面级滚动归零 -->
+      <section class="li-ws-main">
+        <div class="li-ws-left">
+          <!-- 资源清单卡（唯一左卡）：卡头=已选计数+创建任务入口（原选择创建栏融入，无快照时
+                为开始全量识别入口）；卡体在无快照时承载引导/识别进度/空态占位，有快照时=
+                过滤器行+统计行+模式切换+三标签滚动体+卡底创建反馈条 -->
+          <section class="li-ws-card">
+            <!-- 卡头行（2026-10-27 裁决A）：标题+已选计数+统计行同排（flex-wrap 窄窗折行）；
+                 创建任务/开始全量识别已移页头 -->
+            <h3 class="li-ws-card-title">
+              资源清单
+              <template v-if="snapshot"><span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">（可选 {{ selectableWorks.length }} / 共 {{ allWorks.length }}）</span></span></template>
+              <span v-if="snapshot" class="li-ws-card-stats">文件 {{ snapshot.stats.totalFiles }} · 已识别 {{ snapshot.stats.identified }} · 有线索 {{ snapshot.stats.clueful }} · 无线索 {{ snapshot.stats.plain }} · 序列群 {{ snapshot.stats.groupCount }} · 待裁决 {{ snapshot.stats.pendingFiles }}<template v-if="snapshot.stats.skippedDirs > 0"> · 增量跳过目录 {{ snapshot.stats.skippedDirs }}</template></span>
+            </h3>
+            <!-- 识别中：流式进度（阶段跃迁 + 计数）；赋值变更后的自动增量重识别共用此状态条 -->
+            <div v-if="recognizing" class="li-ws-progress">
+              <div class="li-ws-progress-head">
+                <span class="li-ws-progress-phase">{{ phaseLabel(progress.phase) }}</span>
+                <span v-if="progress.total > 0" class="li-ws-progress-count">{{ progress.done }} / {{ progress.total }}</span>
+              </div>
+              <div class="li-ws-progress-track">
+                <div class="li-ws-progress-bar" :style="{ width: progressPercent }"></div>
+              </div>
+            </div>
+            <template v-if="snapshot">
+              <!-- 标签页行（2026-10-27 重整：三项置顶，其下=按标签页适配的筛选工具栏）；
+                   会话内记忆不持久化 -->
+              <div class="li-ws-mode-toggle">
+                <button
+                  type="button"
+                  class="li-ws-filter-btn li-ws-mode-btn"
+                  :class="{ 'is-active': listMode === 'tree' }"
+                  title="目录树模式：库根 → 目录 → 文件层级归属"
+                  @click="listMode = 'tree'"
+                >⛁ 目录树</button>
+                <button
+                  type="button"
+                  class="li-ws-filter-btn li-ws-mode-btn"
+                  :class="{ 'is-active': listMode === 'flat' }"
+                  title="平铺清单模式：全量文件平铺"
+                  @click="listMode = 'flat'"
+                >▦ 清单</button>
+                <button
+                  type="button"
+                  class="li-ws-filter-btn li-ws-mode-btn"
+                  :class="{ 'is-active': listMode === 'sets' }"
+                  title="候选卡墙：目录候选 / 序列群 / 库内集比对（确认归集或忽略）"
+                  @click="listMode = 'sets'"
+                >疑似作品集</button>
+              </div>
+              <!-- 筛选工具栏（目录树/清单）：文件过滤器与批量/组合操作合并单行
+                   （flex-wrap，窄窗自然折行）；对疑似作品集卡墙无作用故在该标签页下隐藏 -->
+              <div v-show="listMode !== 'sets'" class="li-ws-combos">
                 <button
                   v-for="f in fileFilters"
                   :key="f.key"
@@ -152,16 +167,33 @@
                   @click="rightCollapsed = false"
                 >« 展开解析面板</button>
               </div>
-              <!-- 平铺模式（虚拟滚动切片渲染；H4：体高随视口剩余空间自适应，切片窗口随容器尺寸持续同步；
-                    模式切换时过滤与选择集保持） -->
-              <div
+              <!-- 筛选工具栏（疑似作品集·适配）：隐藏已识别上移自卡墙顶部过滤条
+                   （口径=候选成员全部已带集维度最终结论=已被识别为作品集） -->
+              <div v-show="listMode === 'sets'" class="li-ws-combos">
+                <button
+                  type="button"
+                  class="li-ws-filter-btn"
+                  :class="{ 'is-active': hideIdentifiedCandidates }"
+                  :title="hideIdentifiedCandidates ? `已隐藏 ${identifiedCandidateCount} 条成员均已识别出作品集（集维度结论在档）的候选` : '隐藏成员均已识别出作品集（集维度结论在档）的候选'"
+                  @click="hideIdentifiedCandidates = !hideIdentifiedCandidates"
+                >隐藏已识别{{ identifiedCandidateCount ? ` ${identifiedCandidateCount}` : '' }}</button>
+                <button
+                  v-if="rightCollapsed"
+                  class="li-ws-filter-btn li-ws-panel-reopen"
+                  @click="rightCollapsed = false"
+                >« 展开解析面板</button>
+              </div>
+              <!-- 平铺模式（虚拟滚动切片渲染；滚动承载=el-scrollbar 宿主样式条，高度由卡内
+                    flex 链分配，切片窗口随 wrap 实测高度持续同步；模式切换时过滤与选择集保持）。
+                    2026-10-27 滚轮缺陷修复：虚拟化改为「头/尾静态占位条夹切片行」，行回归常规流
+                    （原绝对定位+translateY 会被 WebView2 合成器滚轮命中链切断，滚轮失效） -->
+              <el-scrollbar
                 v-show="listMode === 'flat'"
                 ref="listViewport"
                 class="li-ws-list"
-                :style="{ height: `${listBodyH}px` }"
                 @scroll="onListScroll"
               >
-                <div class="li-ws-list-spacer" :style="{ height: `${filteredFiles.length * ROW_H}px` }"></div>
+                <div class="li-ws-list-spacer" :style="{ height: `${visibleRange.start * ROW_H}px` }"></div>
                 <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 声明/线索摘要 + 差异标 + 已赋值标；
                      行点击 = 选中联动右栏（选中键 = 文件相对路径），与复选不互斥 -->
                 <div
@@ -169,7 +201,6 @@
                   :key="row.relPath"
                   class="li-ws-row"
                   :class="row.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.relPath) ? `is-diff-${diffMark(row.relPath)}` : '')"
-                  :style="{ transform: `translateY(${row.index * ROW_H}px)` }"
                   @click="selectFile(row.relPath)"
                 >
                   <el-checkbox
@@ -194,18 +225,15 @@
                     <span v-if="row.assigned" class="li-ws-row-assigned">已赋值</span>
                   </span>
                 </div>
+                <!-- 尾部占位条：与头部占位条相加=全列表高度（见 visibleRange 注释） -->
+                <div class="li-ws-list-spacer" :style="{ height: `${Math.max(0, (filteredFiles.length - visibleRange.end) * ROW_H)}px` }"></div>
                 <p v-if="filteredFiles.length === 0" class="li-ws-empty">当前过滤条件下无文件</p>
-              </div>
-              <!-- 树模式（剧本F F1/F2：库根 → 目录 → 文件全量渲染，246 行级数据量不虚拟化；H4：体高与平铺同享自适应）；
-                   目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录解析面板，剧本J）
-                   + 文件数 + 含义覆盖标记（复用旧「目录结构」折叠区数据源）；
-                   文件行 = 行首作品级复选（H6：勾选/禁用语义同平铺，目录行全选/半选态由选择集派生）+ 平铺同款元数据，点行 = 现有联动 -->
-              <div
-                v-show="listMode === 'tree'"
-                ref="treeViewport"
-                class="li-ws-tree"
-                :style="{ height: `${listBodyH}px` }"
-              >
+              </el-scrollbar>
+              <!-- 树模式（库根 → 目录 → 文件全量渲染，行级数据量不虚拟化；滚动承载=el-scrollbar）；
+                   目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录解析面板）
+                   + 文件数 + 含义覆盖标记；
+                   文件行 = 行首作品级复选（勾选/禁用语义同平铺，目录行全选/半选态由选择集派生）+ 平铺同款元数据，点行 = 现有联动 -->
+              <el-scrollbar v-show="listMode === 'tree'" ref="treeViewport" class="li-ws-tree">
                 <template v-for="row in treeRows" :key="row.key">
                   <div v-if="row.kind === 'dir' && row.dir" class="li-ws-tree-dir" :style="{ paddingLeft: `${row.depth * 16 + 4}px` }">
                     <button
@@ -261,23 +289,16 @@
                   </div>
                 </template>
                 <p v-if="treeRows.length === 0" class="li-ws-empty">当前过滤条件下无文件</p>
-              </div>
-              <!-- 剧本v2 疑似作品集候选卡墙（第三标签体）：三类候选合流出卡——目录候选（整目录像一集）/
-                   序列群（结构/规则/页级）/A 档库内集比对（集名互证徽标 + 作品号命中→归入既有集）；
-                   成员文件名序列块底色（区间=后端形态表单一事实源）；两段式归集（预填可改）；
-                   已归集/已忽略收纳分组（会话内，忽略可恢复）；确认走集维度批量赋值+既有建议卡通路 -->
-              <div v-show="listMode === 'sets'" class="li-ws-sets" :style="{ height: `${listBodyH}px` }">
-                <!-- 已识别候选过滤（2026-10-27 用户二拍板：默认隐藏；口径=候选成员
+              </el-scrollbar>
+              <!-- 疑似作品集候选卡墙（第三标签体；滚动承载=el-scrollbar）：三类候选合流出卡——
+                   目录候选（整目录像一集）/序列群（结构/规则/页级）/库内集比对（集名互证徽标 +
+                   作品号命中→归入既有集）；成员文件名序列块底色（区间=后端形态表单一事实源）；
+                   两段式归集（预填可改）；已归集/已忽略收纳分组（会话内，忽略可恢复）；
+                   确认走集维度批量赋值+既有建议卡通路 -->
+              <el-scrollbar v-show="listMode === 'sets'" class="li-ws-sets">
+                <div class="li-ws-sets-inner">
+                <!-- 已识别候选过滤条已上移工具栏位（2026-10-27 重整：口径=候选成员
                      全部已带集维度最终结论〔规则识别或赋值存档〕=已被识别为作品集） -->
-                <div class="li-ws-cand-filterbar">
-                  <button
-                    type="button"
-                    class="li-ws-filter-btn"
-                    :class="{ 'is-active': hideIdentifiedCandidates }"
-                    :title="hideIdentifiedCandidates ? `已隐藏 ${identifiedCandidateCount} 条成员均已识别出作品集（集维度结论在档）的候选` : '隐藏成员均已识别出作品集（集维度结论在档）的候选'"
-                    @click="hideIdentifiedCandidates = !hideIdentifiedCandidates"
-                  >隐藏已识别{{ identifiedCandidateCount ? ` ${identifiedCandidateCount}` : '' }}</button>
-                </div>
                 <p
                   v-if="visibleCandidates.length === 0 && !(snapshot.ignoredCandidates || []).length && !(snapshot.confirmedCandidates || []).length"
                   class="li-ws-empty"
@@ -411,112 +432,10 @@
                     </div>
                   </div>
                 </div>
-              </div>
-            </section>
-
-            <!-- 区4 目录结构折叠区已退役（剧本F：层含义/递选/覆盖标记能力已被清单树模式吸收） -->
-            <!-- 区6 序列群折叠区已退役（剧本v2：能力并入「疑似作品集」第三标签候选卡墙——群全量出卡，动作与收纳在卡墙） -->
-
-            <!-- 区7 待裁决项折叠区（合成层声明冲突全量清单；单文件就地裁决在右栏·阶段3接入） -->
-            <section class="li-ws-fold">
-              <button type="button" class="li-ws-fold-head" :aria-expanded="!folded.pending" @click="folded.pending = !folded.pending">
-                <span class="li-ws-fold-arrow" :class="{ 'is-open': !folded.pending }">▸</span>
-                <span class="li-ws-fold-title">待裁决项</span>
-                <span class="li-ws-fold-note">{{ snapshot.pending ? snapshot.pending.length : 0 }} 项</span>
-              </button>
-              <div v-show="!folded.pending" class="li-ws-fold-body">
-                <p v-if="!snapshot.pending || snapshot.pending.length === 0" class="li-ws-empty">无声明冲突</p>
-                <div v-for="(p, i) in snapshot.pending || []" :key="i" class="li-ws-pending">
-                  <div class="li-ws-pending-head">
-                    <span
-                      class="li-ws-pending-file"
-                      :class="{ 'is-selected': p.relPath === selectedRelPath }"
-                      @click="selectFile(p.relPath)"
-                    >{{ p.relPath }}</span>
-                    <span class="li-ws-pending-dim">{{ dimLabel(p.dimension) }}</span>
-                  </div>
-                  <div class="li-ws-pending-cands">
-                    <span v-for="(c, j) in p.candidates || []" :key="j" class="li-ws-pending-cand">
-                      {{ dimLabel(c.dimension) }}={{ c.value }}（{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(c.ruleId)" :title="`跳规则管理子页并打开「${c.ruleId}」编辑`">{{ c.ruleId }}</a></template>）
-                    </span>
-                  </div>
-                  <p class="li-ws-pending-reason">{{ p.reason }}</p>
                 </div>
-              </div>
-            </section>
-
-            <!-- 区8 规则档案态折叠区（来源/启用态/命中数） -->
-            <section class="li-ws-fold">
-              <button type="button" class="li-ws-fold-head" :aria-expanded="!folded.rules" @click="folded.rules = !folded.rules">
-                <span class="li-ws-fold-arrow" :class="{ 'is-open': !folded.rules }">▸</span>
-                <span class="li-ws-fold-title">规则档案态</span>
-                <span class="li-ws-fold-note">{{ (snapshot.ruleStats || []).length }} 条</span>
-              </button>
-              <div v-show="!folded.rules" class="li-ws-fold-body">
-                <div class="li-ws-rules">
-                  <div class="li-ws-rule-row li-ws-rule-head">
-                    <span class="li-ws-rule-id">规则</span>
-                    <span class="li-ws-rule-src">来源</span>
-                    <span class="li-ws-rule-enabled">启用</span>
-                    <span class="li-ws-rule-hits">命中</span>
-                  </div>
-                  <div v-for="r in snapshot.ruleStats || []" :key="r.id" class="li-ws-rule-row" :title="r.description">
-                    <span class="li-ws-rule-id">{{ r.id }}</span>
-                    <span class="li-ws-rule-src">{{ sourceLabel(r.source) }}</span>
-                    <span class="li-ws-rule-enabled" :class="{ 'is-off': !r.enabled }">{{ r.enabled ? '启用' : '停用' }}</span>
-                    <span class="li-ws-rule-hits">{{ r.hitCount }}</span>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <!-- 区9 会话决策态折叠区（赋值/忽略/选择集计数 + 失效赋值提示） -->
-            <section class="li-ws-fold">
-              <button type="button" class="li-ws-fold-head" :aria-expanded="!folded.decisions" @click="folded.decisions = !folded.decisions">
-                <span class="li-ws-fold-arrow" :class="{ 'is-open': !folded.decisions }">▸</span>
-                <span class="li-ws-fold-title">会话决策态</span>
-                <span class="li-ws-fold-note">
-                  已解析 {{ decisions && decisions.assignments ? decisions.assignments.length : 0 }} · 已忽略 {{ decisions && decisions.ignored ? decisions.ignored.length : 0 }} · 已选 {{ selectedWorks.size }}
-                  <template v-if="snapshot.staleAssignments && snapshot.staleAssignments.length"> · 失效赋值 {{ snapshot.staleAssignments.length }}</template>
-                </span>
-              </button>
-              <div v-show="!folded.decisions" class="li-ws-fold-body">
-                <div class="li-ws-decisions">
-                  <div class="li-ws-decision">
-                    <span class="li-ws-decision-count">{{ decisions ? decisions.assignments ? decisions.assignments.length : 0 : 0 }}</span>
-                    <span class="li-ws-decision-label">已手动解析</span>
-                  </div>
-                  <div class="li-ws-decision">
-                    <span class="li-ws-decision-count">{{ decisions ? (decisions.ignored ? decisions.ignored.length : 0) : 0 }}</span>
-                    <span class="li-ws-decision-label">已忽略</span>
-                  </div>
-                  <div class="li-ws-decision">
-                    <span class="li-ws-decision-count">{{ selectedWorks.size }}</span>
-                    <span class="li-ws-decision-label">已选定为任务</span>
-                  </div>
-                </div>
-                <p class="li-ws-empty">手动解析（单次赋值/泛化/裁决）在右栏解析面板操作（点清单行进入）；资源选择与任务创建用下方创建栏（创建后选择集自动清理）。</p>
-                <div v-if="snapshot.staleAssignments && snapshot.staleAssignments.length" class="li-ws-stale">
-                  <p class="li-ws-stale-title">失效赋值（引用的路径已不存在）：</p>
-                  <span v-for="s in snapshot.staleAssignments" :key="s" class="li-ws-stale-item">{{ s }}</span>
-                </div>
-              </div>
-            </section>
-
-            <!-- 区2 选择创建栏：作品级原子选择集 → 创建任务（剧本K：点按钮先弹名称确认
-                 对话框，确认后才走创建链路；含对账/创建结果横幅与悬空对账提示） -->
-            <section class="li-ws-card">
-              <div class="li-ws-createbar">
-                <span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">（可选 {{ selectableWorks.length }} 件 / 共 {{ allWorks.length }} 件）</span></span>
-                <el-button
-                  type="primary"
-                  size="small"
-                  :loading="creating"
-                  :disabled="selectedWorks.size === 0"
-                  @click="openCreateDialog"
-                >创建任务</el-button>
-                <span class="li-ws-create-note">创建前经磁盘对账核验；创建后任务为 Created 状态，由任务管理手动开始</span>
-              </div>
+              </el-scrollbar>
+              <!-- 创建反馈条落位区（卡底、常态不占行）：红=对账/创建失败、绿=创建成功、
+                   黄字=悬空选择提示（重识别后选择集引用了已不存在的作品） -->
               <el-alert
                 v-if="createError"
                 class="li-ws-banner"
@@ -536,13 +455,23 @@
               <p v-if="danglingSelection > 0" class="li-ws-stale-hint">
                 选择集中 {{ danglingSelection }} 项已不在当前识别全景内（可能已重识别），创建前请刷新重选
               </p>
-            </section>
-          </div>
+            </template>
+            <!-- 边界：未识别会话（无快照）→ 引导说明 + 空态占位（干跑 = 纯求值，零任务产出、零弹问） -->
+            <div v-else-if="!recognizing" class="li-ws-nosnap">
+              <p class="li-ws-desc">
+                对库根做全量识别干跑：按「规则档案 ∪ 会话赋值」合并求值全部文件，产出
+                识别全景（目录结构含义、已识别资源、有价值未识别、序列群、待裁决项、
+                规则命中与决策态）。识别不创建任何任务。
+              </p>
+              <el-empty description="尚未生成识别全景" />
+            </div>
+          </section>
+        </div>
 
-          <!-- 右栏解析面板（固定 ~400px、可收起）：随选中联动显示文件路径与状态，
-               赋值表单/泛化/裁决完整交互见 ParsePanel.vue（阶段3接入）；目录解析
-               面板（阶段4 剧本J：点树中目录名进入）亦由 ParsePanel 目录模式承载 -->
-          <aside v-if="!rightCollapsed" class="li-ws-right">
+          <!-- 右栏解析面板卡（固定 ~400px、可收起；高度由主体 stretch 链锁定，卡内滚动）：
+               随选中联动显示文件路径与状态，赋值表单/泛化/裁决完整交互见 ParsePanel.vue；
+               目录解析面板（点树中目录名进入）亦由 ParsePanel 目录模式承载 -->
+          <aside v-if="snapshot && !rightCollapsed" class="li-ws-right">
             <div class="li-ws-panel-head">
               <span class="li-ws-panel-title">解析面板</span>
               <button type="button" class="li-ws-panel-btn" title="收起面板" @click="rightCollapsed = true">收起 »</button>
@@ -555,7 +484,9 @@
                 <button type="button" class="li-ws-panel-btn" @click="pendingSwitch = null">留在当前去保存</button>
               </span>
             </div>
-            <div class="li-ws-panel-body">
+            <!-- 面板内容滚动体：卡内 flex 链分配高度，宿主样式条内滚 -->
+            <el-scrollbar class="li-ws-panel-scroll">
+              <div class="li-ws-panel-body">
               <!-- 剧本C 集规则面板（已归集卡「泛化集规则」进入）：泛化主体=集整体
                    （target 寻址 confirmed 分仓卡），推导/命中预览/泛化入档/调整面全由
                    SetRulePanel 承载；与文件/目录面板互斥——点文件行/目录名让出、点
@@ -649,14 +580,15 @@
                   @open-rule="openRuleEdit"
                 />
               </template>
-            </div>
+              </div>
+            </el-scrollbar>
           </aside>
         </section>
-      </template>
     </template>
 
-    <!-- 剧本K 创建任务名称确认对话框：任务名预填默认名（空=用默认，后端同规则兜底），
-         确认「创建」才走既有创建链路；「取消」= 关闭弹窗、无副作用 -->
+    <!-- 创建任务名称确认对话框：任务名预填默认名（空=用默认，后端同规则兜底），
+         确认「创建」才走既有创建链路（磁盘对账核验→创建→选择集清理）；
+         「取消」= 关闭弹窗、无副作用 -->
     <el-dialog
       v-model="createDialogVisible"
       title="创建导入任务"
@@ -670,14 +602,64 @@
         :placeholder="`默认：${defaultTaskName}`"
       />
       <p class="li-ws-create-dialog-note">
-        一次创建为一个父任务，包含全部 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）；识别出站点归属的文件按站点分组为额外父行（罕见）
+        一次创建为一个父任务，包含全部 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）；识别出站点归属的文件按站点分组为额外父行（罕见）。创建前经磁盘对账核验；创建后任务为 Created 状态，由任务管理手动开始
       </p>
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="createTasks">创建</el-button>
       </template>
     </el-dialog>
+
+    <!-- 待裁决·决策态融合弹窗（只读总览）：决策计数三格 + 失效赋值提示 + 待裁决全量清单
+         （长内容经 AutoHeightDialog 内置 el-scrollbar 弹窗内滚）；点文件名关弹窗并定位
+         清单行、右栏走既有 selectFile 链路；裁决动作仍在右栏解析面板就地完成 -->
+    <AutoHeightDialog v-model:state="fusionDialogVisible" width="min(720px, 94vw)">
+      <template #header>
+        <span class="li-ws-fusion-title">待裁决 · 决策态</span>
+      </template>
+      <div class="li-ws-fusion">
+        <div class="li-ws-decisions">
+          <div class="li-ws-decision">
+            <span class="li-ws-decision-count">{{ decisions ? decisions.assignments ? decisions.assignments.length : 0 : 0 }}</span>
+            <span class="li-ws-decision-label">已手动解析</span>
+          </div>
+          <div class="li-ws-decision">
+            <span class="li-ws-decision-count">{{ decisions ? (decisions.ignored ? decisions.ignored.length : 0) : 0 }}</span>
+            <span class="li-ws-decision-label">已忽略</span>
+          </div>
+          <div class="li-ws-decision">
+            <span class="li-ws-decision-count">{{ selectedWorks.size }}</span>
+            <span class="li-ws-decision-label">已选定为任务</span>
+          </div>
+        </div>
+        <div v-if="snapshot && snapshot.staleAssignments && snapshot.staleAssignments.length" class="li-ws-stale">
+          <p class="li-ws-stale-title">失效赋值 {{ snapshot.staleAssignments.length }}（引用的路径已不存在）：</p>
+          <span v-for="s in snapshot.staleAssignments" :key="s" class="li-ws-stale-item">{{ s }}</span>
+        </div>
+        <h4 class="li-ws-fusion-sec">待裁决项（{{ pendingCount }}）</h4>
+        <p v-if="pendingCount === 0" class="li-ws-empty">无声明冲突</p>
+        <div v-for="(p, i) in (snapshot && snapshot.pending) || []" :key="i" class="li-ws-pending">
+          <div class="li-ws-pending-head">
+            <span
+              class="li-ws-pending-file"
+              :class="{ 'is-selected': p.relPath === selectedRelPath }"
+              title="定位清单行并联动右栏解析面板"
+              @click="jumpToPendingFile(p.relPath)"
+            >{{ p.relPath }}</span>
+            <span class="li-ws-pending-dim">{{ dimLabel(p.dimension) }}</span>
+          </div>
+          <div class="li-ws-pending-cands">
+            <span v-for="(c, j) in p.candidates || []" :key="j" class="li-ws-pending-cand">
+              {{ dimLabel(c.dimension) }}={{ c.value }}（{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(c.ruleId)" :title="`跳规则管理子页并打开「${c.ruleId}」编辑`">{{ c.ruleId }}</a></template>）
+            </span>
+          </div>
+          <p class="li-ws-pending-reason">{{ p.reason }}</p>
+        </div>
+        <p class="li-ws-fusion-note">弹窗只读总览；裁决在右栏解析面板就地操作</p>
+      </div>
+    </AutoHeightDialog>
   </div>
+  </BaseView>
 </template>
 
 <script setup lang="ts">
@@ -686,10 +668,12 @@ import { Events } from '@wailsio/runtime'
 import ParsePanel from './ParsePanel.vue'
 import SetRulePanel from './SetRulePanel.vue'
 
-// 双栏主从解析工作区（识别全景 × 手动解析合一）：
-// 左栏 = 清单全景（过滤器 + 资源清单 + 目录树/序列群/待裁决/规则态/决策态折叠区 + 选择创建栏），
-// 右栏 = 解析面板（本阶段占位：点行联动显示文件路径与状态；赋值/泛化/裁决交互属阶段3）。
-// 九区呈现场自 SubpagePan.vue 逐区迁入，事件协议零改动（request/response/event 三通道原样）。
+// 双栏主从解析工作区（识别全景 × 手动解析合一，视口锁定：双卡等高填满、各自卡内滚动）：
+// 左卡 = 资源清单（过滤器 + 统计 + 目录树/平铺/疑似作品集三标签滚动体 + 卡头创建任务入口 +
+// 卡底创建反馈条；无快照时卡体承载引导/识别进度/空态占位），
+// 右卡 = 解析面板（文件/目录/集规则三模式互斥挂载，点清单行联动选中）。
+// 待裁决项与会话决策态融合为头部入口弹窗（只读总览+清单行定位）；事件协议零改动
+// （request/response/event 三通道原样）。
 
 // 工作台事件协议通道（与插件 Go 侧 session.go 约定一致）
 const TOPIC_REQUEST = 'plugin:local-import:workbench:request'
@@ -924,9 +908,12 @@ const recognError = ref('')
 const progress = ref({ phase: '', done: 0, total: 0 })
 
 // —— 双栏布局态（会话内记忆，不持久化） ——
-// 右栏收起态与折叠区开合态：默认右栏展开、折叠区全收起（目录结构区已退役，能力并入清单树模式）
+// 右栏收起态：默认展开；收起后左卡独占整行宽度
 const rightCollapsed = ref(false)
-const folded = ref({ pending: true, rules: true, decisions: true })
+
+// —— 待裁决·决策态融合弹窗（头部「重新识别」右侧入口；只读总览 + 待裁决文件定位清单行） ——
+const fusionDialogVisible = ref(false)
+const pendingCount = computed(() => ((snapshot.value && snapshot.value.pending) || []).length)
 
 // —— 清单浏览模式（剧本F：平铺 ↔ 目录树；默认=目录树〔决策2〕，会话内记忆不持久化。
 // 剧本v2 增第三标签 sets=疑似作品集候选卡墙） ——
@@ -1245,6 +1232,11 @@ function subRoute(key: string): string {
   return `${ROUTE_BASE}${key}?root=${encodeURIComponent(root)}`
 }
 
+// 头部子页跳转动作（2026-10-27 按钮统一：原文字链接改 el-button，hash 导航保留）
+function goSub(key: string): void {
+  location.hash = subRoute(key)
+}
+
 // 声明来源规则名直达编辑：跳规则管理子页并携规则 ID——子页载入规则档案后按 ID
 // 打开该规则编辑态。规则名出现在待裁决候选/终选声明的来源小字处（含泛化规则），
 // 点击即达修改口，消除「泛化规则无修改口」的认知缺口
@@ -1398,12 +1390,16 @@ const fileFilters = [
 ]
 const fileFilter = ref('all')
 
-const listViewport = ref<HTMLDivElement | null>(null)
-const treeViewport = ref<HTMLDivElement | null>(null)
+// el-scrollbar 组件实例公开面（宿主全局组件，零 import）：wrapRef = 滚动承载元素
+// （隐藏原生条的实际滚动容器），虚拟切片窗口与选中行回滚均经它读写
+interface ScrollbarInst {
+  wrapRef?: HTMLDivElement | null
+}
+const listViewport = ref<ScrollbarInst | null>(null)
+const treeViewport = ref<ScrollbarInst | null>(null)
 const scrollTop = ref(0)
+// 虚拟切片窗口高度：初值 420 供首帧渲染，挂载后随 wrap 元素实测高度持续同步
 const viewportH = ref(420)
-// H4：清单/树体高度（视口剩余空间实测，保底 240px；初值 420 供首帧渲染，挂载后同步）
-const listBodyH = ref(420)
 
 const pendingRelSet = computed<Set<string>>(() => {
   const set = new Set<string>()
@@ -1421,15 +1417,26 @@ const filteredFiles = computed<SnapFile[]>(() => {
   return files.filter((f) => f.state === key)
 })
 
-const visibleFiles = computed(() => {
+// 可见切片窗口（含上下过扫）：2026-10-27 滚轮缺陷修复——虚拟行由「绝对定位+
+// translateY」改为「静态占位条+常规流行」，占位条高度由本窗口派生（头条=start*行高、
+// 尾条=总行数-end*行高，两者夹住切片行即还原全列表高度）。
+// 根因（live 实测定位）：WebView2 合成器滚轮命中链遇到「绝对定位元素垫在滚动容器
+// 与命中目标之间」即断链——滚轮落在虚拟行上时不再滚 wrap（规则页/树页常规流行正常，
+// 同一 canvas 仅改 position:absolute 即复现失效）。故弃绝对定位，全部回归常规流。
+const visibleRange = computed(() => {
   const start = Math.max(0, Math.floor(scrollTop.value / ROW_H) - 8)
   const end = Math.min(filteredFiles.value.length, start + Math.ceil(viewportH.value / ROW_H) + 16)
+  return { start, end }
+})
+
+const visibleFiles = computed(() => {
+  const { start, end } = visibleRange.value
   return filteredFiles.value.slice(start, end).map((f, i) => ({ ...f, index: start + i }))
 })
 
-function onListScroll(e: Event): void {
-  const target = e.target as HTMLDivElement
-  scrollTop.value = target.scrollTop
+// el-scrollbar 的 @scroll 载荷为 { scrollTop, scrollLeft }（宿主组件转发的滚动承载元素位移）
+function onListScroll(pos: { scrollTop: number }): void {
+  scrollTop.value = pos.scrollTop
 }
 
 // —— 主从联动：点清单行 → 选中键落右栏（与复选不互斥：行选中不改选择集，
@@ -1496,16 +1503,50 @@ function selectFile(relPath: string): void {
   selectedRelPath.value = relPath
 }
 
-// 自动刷新（重识别）后清单虚拟滚动重排：选中行滚回可视区
+// 自动刷新（重识别）后清单虚拟滚动重排：选中行滚回可视区（平铺虚拟清单专用；
+// 滚动承载=el-scrollbar 的 wrap 元素）
 function scrollSelectedIntoView(): void {
-  if (!selectedRelPath.value || !listViewport.value) return
+  if (!selectedRelPath.value || listMode.value !== 'flat') return
+  const view = listViewport.value ? listViewport.value.wrapRef : null
+  if (!view) return
   const idx = filteredFiles.value.findIndex((f) => f.relPath === selectedRelPath.value)
   if (idx < 0) return
   const top = idx * ROW_H
-  const view = listViewport.value
   const bottomEdge = view.scrollTop + view.clientHeight
   if (top < view.scrollTop || top + ROW_H > bottomEdge) {
     view.scrollTop = Math.max(0, top - Math.floor(view.clientHeight / 2))
+  }
+}
+
+// 融合弹窗点待裁决文件名：关弹窗 → 清单定位该行 → 既有 selectFile 链路联动右栏。
+// 定位含三步兜底：文件被当前过滤器隐藏时回全量过滤；候选卡墙标签下切到平铺（行级
+// 呈现面）；树模式下展开该文件目录链（库根 → 各级目录）后滚到选中行
+function jumpToPendingFile(relPath: string): void {
+  fusionDialogVisible.value = false
+  if (!filteredFiles.value.some((f) => f.relPath === relPath)) fileFilter.value = 'all'
+  if (listMode.value === 'sets') listMode.value = 'flat'
+  if (listMode.value === 'tree') {
+    const file = fileByRel.value.get(relPath)
+    if (file && file.dirRelKey) {
+      const next = new Set(treeExpanded.value)
+      let key = file.dirRelKey
+      while (key) {
+        next.add(key)
+        const cut = key.lastIndexOf('/')
+        key = cut >= 0 ? key.slice(0, cut) : ''
+      }
+      treeExpanded.value = next
+    }
+    selectFile(relPath)
+    void nextTick(() => {
+      const row = treeViewport.value && treeViewport.value.wrapRef
+        ? treeViewport.value.wrapRef.querySelector('.li-ws-tree-file.is-selected')
+        : null
+      if (row) row.scrollIntoView({ block: 'center' })
+    })
+  } else {
+    selectFile(relPath)
+    void nextTick(() => scrollSelectedIntoView())
   }
 }
 
@@ -2076,71 +2117,42 @@ const formatTime = (ms: number): string => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-// —— H4 清单体高自适应与切片窗口持续同步 —— //
-
-const LIST_MIN_H = 240
-const LIST_BOTTOM_PAD = 16
+// —— 清单滚动体与切片窗口持续同步（清单高度由卡内 flex 链分配，无需 JS 注入） —— //
 
 let viewportRO: ResizeObserver | null = null
-let layoutRO: ResizeObserver | null = null
 
-// 平铺隐藏（树模式）时树体在同一位置，测可见者即可
-function visibleListEl(): HTMLElement | null {
-  const flat = listViewport.value
-  if (flat && flat.offsetParent !== null) return flat
-  return treeViewport.value
-}
-
-function syncListBodyH(): void {
-  const el = visibleListEl()
-  if (!el || el.offsetParent === null) return
-  // offsetTop 链求文档级顶部偏移：与滚动位置无关，高度不随滚动抖动
-  let top = 0
-  let node: HTMLElement | null = el
-  while (node) {
-    top += node.offsetTop
-    node = node.offsetParent as HTMLElement | null
-  }
-  listBodyH.value = Math.max(LIST_MIN_H, window.innerHeight - top - LIST_BOTTOM_PAD)
-}
-
-// 容器尺寸变化 → viewportH 同步（窗口缩放/体高调整/模式切换后切片窗口正确）；元素重建时重挂观察
+// 滚动承载元素尺寸变化 → viewportH 同步（窗口缩放/右栏收起/模式切换后切片窗口正确）
 function bindViewportRO(): void {
-  const el = listViewport.value
-  if (!el) return
+  const wrap = listViewport.value ? listViewport.value.wrapRef : null
+  if (!wrap) return
   if (viewportRO) viewportRO.disconnect()
   viewportRO = new ResizeObserver(() => {
-    if (listViewport.value) viewportH.value = listViewport.value.clientHeight || 420
+    const el = listViewport.value ? listViewport.value.wrapRef : null
+    if (el) viewportH.value = el.clientHeight || 420
   })
-  viewportRO.observe(el)
+  viewportRO.observe(wrap)
 }
 
-// 快照晚到（挂载后才识别）时清单容器才出现，经模板 ref 变化接入体高同步与观察
-watch(listViewport, (el) => {
-  if (!el) return
-  syncListBodyH()
-  bindViewportRO()
+// 快照晚到（挂载后才识别）时清单滚动体才出现，经模板 ref 变化接入观察
+watch(listViewport, (inst) => {
+  if (!inst) return
+  void nextTick(bindViewportRO)
 })
 
 onMounted(async () => {
   offResponse = Events.On(TOPIC_RESPONSE, onResponse)
   offEvent = Events.On(TOPIC_EVENT, onEvent)
-  // 体高同步三触发：窗口缩放、上游内容增减（body 尺寸变化改变清单顶部偏移）、清单容器出现
-  window.addEventListener('resize', syncListBodyH)
-  // 光标追踪（剧本步2′ chips 插入用）：事件流维护选区快照
+  // 光标追踪（集名输入框 chips 插入用）：事件流维护选区快照
   document.addEventListener('selectionchange', onNameSelChange)
   for (const t of ['click', 'keyup', 'select', 'input'] as const) {
     document.addEventListener(t, onNameSelDelegate, true)
   }
-  layoutRO = new ResizeObserver(syncListBodyH)
-  layoutRO.observe(document.body)
   const root = await restoreSession()
   if (root && session.value) {
     if (session.value.state === 'recognized') {
       await loadPanorama(root)
     }
     await nextTick()
-    syncListBodyH()
     bindViewportRO()
   }
 })
@@ -2150,8 +2162,6 @@ onUnmounted(() => {
   if (offEvent) offEvent()
   // 断开观察与监听，防卸载后回调触达已失效节点
   viewportRO?.disconnect()
-  layoutRO?.disconnect()
-  window.removeEventListener('resize', syncListBodyH)
   document.removeEventListener('selectionchange', onNameSelChange)
   for (const t of ['click', 'keyup', 'select', 'input'] as const) {
     document.removeEventListener(t, onNameSelDelegate, true)
@@ -2160,11 +2170,16 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* 工作台式骨架：宿主推荐边距惯例（10px），高度链自 BaseView 闭合——页级滚动归零，
+   各分区卡内部滚动 */
 .li-ws {
-  padding: 16px;
+  width: calc(100% - 20px);
+  height: calc(100% - 20px);
+  margin: 10px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 /* —— 头部 —— */
@@ -2178,7 +2193,8 @@ onUnmounted(() => {
 
 .li-ws-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 16px;
+  font-weight: 600;
   color: var(--app-text-primary);
 }
 
@@ -2200,10 +2216,7 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.li-ws-header-link {
-  font-size: 13px;
-  color: var(--app-color-primary);
-}
+
 
 /* 声明来源规则名直达编辑链接（待裁决候选/终选声明的来源小字内） */
 .li-ws-rule-link {
@@ -2220,14 +2233,17 @@ onUnmounted(() => {
   color: var(--app-color-primary);
 }
 
+/* 资源清单卡（唯一左卡）：flex 填满主体高度，卡内分区各自伸缩 */
 .li-ws-card {
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius);
   background: var(--app-bg-surface);
-  padding: 16px;
+  padding: 12px 14px;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .li-ws-card-title {
@@ -2239,6 +2255,9 @@ onUnmounted(() => {
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* 卡头右簇：创建任务/开始全量识别入口（已选计数在左、动作按钮在右） */
+
 
 /* H2：识别统计并入卡片标题行的小字串 */
 .li-ws-card-stats {
@@ -2260,7 +2279,21 @@ onUnmounted(() => {
   color: var(--app-text-secondary);
 }
 
-/* —— 识别中状态条 —— */
+/* 未识别会话（无快照）卡体：引导说明 + 空态占位 */
+.li-ws-nosnap {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* —— 识别中状态条（清单卡体内，无快照/增量重识别共用） —— */
+
+.li-ws-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 .li-ws-progress-head {
   display: flex;
@@ -2320,17 +2353,21 @@ onUnmounted(() => {
   color: var(--app-tag-danger-text);
 }
 
-/* —— 双栏主从主体：左栏自适应（保底 ~480px），右栏固定 ~400px —— */
+/* —— 双栏主从主体（视口锁定）：左卡 flex 自适应（min-width:0），右卡固定 400px；
+      stretch 令双卡等高填满，各自卡内滚动 —— */
 
 .li-ws-main {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
-  gap: 12px;
-  align-items: flex-start;
+  gap: 10px;
+  align-items: stretch;
 }
 
 .li-ws-left {
   flex: 1 1 auto;
-  min-width: 480px;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2370,30 +2407,24 @@ onUnmounted(() => {
   max-width: 240px;
 }
 
-/* —— 区5 资源清单（虚拟滚动） —— */
+/* —— 平铺虚拟清单（滚动承载=el-scrollbar 宿主样式条；高度由卡内 flex 链分配） —— */
 
-/* H4：高度由 listBodyH 内联注入（视口剩余空间实测），此处只兜底最小高度 */
 .li-ws-list {
-  position: relative;
-  min-height: 240px;
-  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius-sm);
 }
 
+/* 虚拟滚动画布：总高=行数×行高撑起滚动区，行绝对定位在画布内按序号平移 */
+/* 虚拟化占位条（头/尾各一）：高度内联由 visibleRange 派生，仅撑高度不承载内容 */
 .li-ws-list-spacer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  pointer-events: none;
+  width: 100%;
 }
 
 .li-ws-row {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
+  /* 常规流行（2026-10-27 滚轮缺陷修复：绝对定位行会切断 WebView2 合成器滚轮命中链，
+     改由头/尾静态占位条撑起虚拟化高度；行高固定 30px 与 ROW_H 对齐） */
   height: 30px;
   display: flex;
   align-items: center;
@@ -2516,13 +2547,7 @@ onUnmounted(() => {
   color: var(--app-tag-success-text);
 }
 
-/* —— 折叠区（默认收起，会话内记忆不持久化） —— */
-
-.li-ws-fold {
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius);
-  background: var(--app-bg-surface);
-}
+/* —— 收纳分组折叠头（候选卡墙已归集/已忽略分仓） —— */
 
 .li-ws-fold-head {
   width: 100%;
@@ -2553,20 +2578,7 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.li-ws-fold-note {
-  font-size: 12px;
-  font-weight: normal;
-  color: var(--app-text-secondary);
-}
-
-.li-ws-fold-body {
-  padding: 0 12px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-/* —— 区5 清单模式切换（剧本F：▦ 清单 ↔ ⛁ 目录树） —— */
+/* —— 清单模式切换（目录树 / 平铺清单 / 疑似作品集） —— */
 
 .li-ws-mode-toggle {
   display: inline-flex;
@@ -2575,12 +2587,15 @@ onUnmounted(() => {
 
 /* —— 区5 目录树模式（剧本F：全量渲染）；目录行复用旧目录结构区的含义覆盖标记样式 —— */
 
-/* H4：体高与平铺清单同享 listBodyH 内联注入，此处只兜底最小高度 */
+/* H4：体高与平铺清单同享卡内 flex 链 */
 .li-ws-tree {
-  min-height: 240px;
-  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius-sm);
+}
+
+.li-ws-tree :deep(.el-scrollbar__view) {
   padding: 4px 0;
 }
 
@@ -2687,17 +2702,18 @@ onUnmounted(() => {
 /* —— 剧本v2 疑似作品集候选卡墙（第三标签；区6 序列群折叠区能力并入） —— */
 
 .li-ws-sets {
-  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.li-ws-sets-inner {
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 8px 10px;
 }
 
-.li-ws-cand-filterbar {
-  display: flex;
-  justify-content: flex-end;
-}
+
 
 .li-ws-cand {
   border: 1px solid var(--app-border-color-light);
@@ -2957,7 +2973,7 @@ onUnmounted(() => {
   flex: none;
 }
 
-/* —— 区7 待裁决项 —— */
+/* —— 待裁决项卡（融合弹窗内；文件名点按定位清单行，候选含规则直达链接） —— */
 
 .li-ws-pending {
   border: 1px solid var(--app-border-color-light);
@@ -3013,50 +3029,36 @@ onUnmounted(() => {
   color: var(--app-text-secondary);
 }
 
-/* —— 区8 规则档案态 —— */
+/* —— 待裁决·决策态融合弹窗（决策计数 + 失效赋值 + 待裁决全量清单，弹窗内滚动） —— */
 
-.li-ws-rules {
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius-sm);
-  overflow: hidden;
+.li-ws-fusion {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.li-ws-rule-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 90px 60px 60px;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  padding: 4px 10px;
-}
-
-.li-ws-rule-row:nth-child(odd) {
-  background: var(--app-fill-color);
-}
-
-.li-ws-rule-head {
+.li-ws-fusion-title {
+  font-size: 15px;
   font-weight: 600;
-  color: var(--app-text-secondary);
-}
-
-.li-ws-rule-id {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--app-text-primary);
 }
 
-.li-ws-rule-src,
-.li-ws-rule-enabled,
-.li-ws-rule-hits {
-  color: var(--app-text-regular);
+.li-ws-fusion-sec {
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--app-border-color-light);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
 }
 
-.li-ws-rule-enabled.is-off {
+.li-ws-fusion-note {
+  margin: 0;
+  font-size: 12px;
   color: var(--app-text-secondary);
 }
 
-/* —— 区9 会话决策态 —— */
+/* —— 决策计数三格（融合弹窗内：已手动解析/已忽略/已选定为任务） —— */
 
 .li-ws-decisions {
   display: flex;
@@ -3106,14 +3108,7 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-/* —— 区2 选择创建栏 —— */
-
-.li-ws-createbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
+/* —— 已选计数（清单卡头，随选择集同步）与悬空选择提示（卡底反馈条） —— */
 
 .li-ws-create-count {
   font-size: 13px;
@@ -3125,11 +3120,6 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: normal;
   color: var(--app-text-secondary);
-}
-
-.li-ws-create-note {
-  font-size: 12px;
-  color: var(--app-text-regular);
 }
 
 .li-ws-stale-hint {
@@ -3146,20 +3136,23 @@ onUnmounted(() => {
   color: var(--app-text-secondary);
 }
 
-/* —— 右栏解析面板 —— */
+/* —— 右栏解析面板卡（高度由主体 stretch 链锁定，卡内滚动） —— */
 
 .li-ws-right {
   flex: 0 0 400px;
   width: 400px;
-  position: sticky;
-  top: 12px;
-  max-height: calc(100vh - 24px);
-  overflow-y: auto;
+  min-height: 0;
   border: 1px solid var(--app-border-color-light);
   border-radius: var(--app-radius);
   background: var(--app-bg-surface);
   display: flex;
   flex-direction: column;
+}
+
+/* 面板内容滚动体：宿主样式条内滚 */
+.li-ws-panel-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .li-ws-panel-head {

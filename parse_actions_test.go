@@ -76,23 +76,26 @@ func TestAdjudicatePickGeneratesAndRule(t *testing.T) {
 		t.Fatalf("生成规则 ID/来源不符: %+v", result.Rule)
 	}
 
-	// 生成物结构断言（档案内）：模式=And[conflictA, conflictB]，提取恰一条
+	// 生成物结构断言（档案内，经 LoadProfile 往返）：refs 门 + 空条件行 + 恒真合取缓存
 	profile, errs := LoadProfile(m.store)
 	if len(errs) > 0 || profile == nil {
 		t.Fatalf("载入档案失败: %v", profile)
 	}
 	rule := findRuleByID(t, profile, result.Rule.ID)
-	and, ok := rule.Pattern.(And)
-	if !ok {
-		t.Fatalf("生成规则模式应为 And 组合，实际 %T", rule.Pattern)
+	if len(rule.Refs) != 2 {
+		t.Fatalf("生成规则 refs 应恰含双方候选规则，实际 %v", rule.Refs)
 	}
-	if len(and) != 2 {
-		t.Fatalf("And 组合应恰含双方候选模式（最简充分形式），实际 %d 个子模式", len(and))
-	}
-	for _, sub := range and {
-		if _, isRegex := sub.(*RegexPattern); !isRegex {
-			t.Fatalf("And 子模式应为候选规则的正则模式，实际 %T", sub)
+	for _, want := range []string{"test-conflict-a", "test-conflict-b"} {
+		if !containsString(rule.Refs, want) {
+			t.Fatalf("生成规则 refs 应含候选 %q，实际 %v", want, rule.Refs)
 		}
+	}
+	if rule.Conditions == nil || len(rule.Conditions) != 0 {
+		t.Fatalf("生成规则条件行应为空表（命中前提由成员门段承担），实际 %+v", rule.Conditions)
+	}
+	and, ok := rule.Pattern.(And)
+	if !ok || len(and) != 0 {
+		t.Fatalf("生成规则模式应为恒真合取（And 零子式），实际 %T %+v", rule.Pattern, rule.Pattern)
 	}
 	if len(rule.Extractions) != 1 {
 		t.Fatalf("生成规则提取动作应恰一条（合成=裁决结果），实际 %d 条", len(rule.Extractions))
@@ -136,7 +139,7 @@ func TestAdjudicatePickGeneratesAndRule(t *testing.T) {
 }
 
 // TestAdjudicateSameRuleCandidatesCollapse 候选同出一规则（同规则双动作产值）时
-// 组合模式退化为该规则模式（A∧A≡A 的最简形式）。
+// refs 门收敛为单引用（A∧A≡A 的最简形式）。
 func TestAdjudicateSameRuleCandidatesCollapse(t *testing.T) {
 	root := t.TempDir()
 	store := newFakeSessionStore()
@@ -175,12 +178,92 @@ func TestAdjudicateSameRuleCandidatesCollapse(t *testing.T) {
 	}
 	profile, _ := LoadProfile(store)
 	rule := findRuleByID(t, profile, result.Rule.ID)
-	regex, ok := rule.Pattern.(*RegexPattern)
-	if !ok || regex.Expr != `^D.*\.jpg$` {
-		t.Fatalf("同规则候选的组合模式应退化为该规则模式，实际 %T %+v", rule.Pattern, rule.Pattern)
+	if len(rule.Refs) != 1 || rule.Refs[0] != "dual-title" {
+		t.Fatalf("同规则候选的 refs 门应收敛为该规则单引用，实际 %v", rule.Refs)
+	}
+	and, ok := rule.Pattern.(And)
+	if !ok || len(and) != 0 {
+		t.Fatalf("生成规则模式应为恒真合取（And 零子式），实际 %T %+v", rule.Pattern, rule.Pattern)
 	}
 	if len(rule.Extractions) != 1 || rule.Extractions[0].Constant != "乙" {
 		t.Fatalf("裁决动作应恰一条且取所选候选值: %+v", rule.Extractions)
+	}
+}
+
+// TestAdjudicateV4ConditionRulesRoundtrip 生产形态回归：v4 条件行候选（编译为
+// 行包装模式 RowSubjectPattern，不可按模式树序列化）冲突裁决后，档案写入与
+// 重载往返必须成功——2026-10-27 live-test 抓出的实机缺陷（裁决规则内嵌候选
+// 模式树 → 序列化失败「不支持序列化的模式类型: *main.RowSubjectPattern」），
+// 锚定改走 refs 门后由此测试锚定不再回退。
+func TestAdjudicateV4ConditionRulesRoundtrip(t *testing.T) {
+	root := t.TempDir()
+	store := newFakeSessionStore()
+	ctx := &workbenchTestCtx{store: store}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+
+	// v4 生产形态候选对：同一文件行模板，title 分别取标题段与作品号段（同层异值）
+	rowTpl := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetFile,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "[{集名}]_[{作品号}]_{标题}_[{序号}]"},
+	}}}
+	titlePat, err := CompileRuleConditions(rowTpl)
+	if err != nil {
+		t.Fatalf("构造 v4 候选规则失败: %v", err)
+	}
+	ruleX := RuleEntry{
+		ID: "v4-title", Description: "v4 标题段", Source: RuleSourceManual, Enabled: true,
+		Conditions: rowTpl, Pattern: titlePat,
+		Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1}},
+	}
+	ruleY := RuleEntry{
+		ID: "v4-workid", Description: "v4 作品号段", Source: RuleSourceManual, Enabled: true,
+		Conditions: rowTpl, Pattern: titlePat,
+		Extractions: []ExtractionAction{{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["作品号"], Row: 1}},
+	}
+	if err := SaveProfile(store, &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{ruleX, ruleY}}); err != nil {
+		t.Fatalf("写入档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	writeTestFile(t, root+"/[集]_[77]_题_[01].jpg", "d")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	snap := mustSessionSnapshot(t, m, root)
+	if len(snap.Pending) != 1 {
+		t.Fatalf("应产出同层冲突待裁决项: %+v", snap.Pending)
+	}
+
+	result, err := m.ApplyAdjudication(root, "[集]_[77]_题_[01].jpg", DimTitle, adjudicationInput{
+		Mode: adjudicateModePick, PickIndex: 0,
+	})
+	if err != nil {
+		t.Fatalf("v4 形态候选裁决失败: %v", err)
+	}
+	// 档案往返：写入即重载（缺陷形态在此步即报序列化失败）
+	profile, errs := LoadProfile(store)
+	if len(errs) > 0 || profile == nil {
+		t.Fatalf("裁决后档案重载失败: %v", errs)
+	}
+	rule := findRuleByID(t, profile, result.Rule.ID)
+	if len(rule.Refs) != 2 || rule.Conditions == nil || len(rule.Conditions) != 0 {
+		t.Fatalf("裁决规则应为 refs 门空条件形态，实际 refs=%v conditions=%+v", rule.Refs, rule.Conditions)
+	}
+	// 验证轮：冲突消解、终选为裁决值
+	sess := waitForVerificationRound(t, m, root)
+	file := snapshotFileOf(sess.Snapshot, "[集]_[77]_题_[01].jpg")
+	if file == nil || len(file.PendingDims) != 0 {
+		t.Fatalf("裁决后待裁决应消解: %+v", file)
+	}
+	found := false
+	for _, decl := range file.Final {
+		if decl.Dimension == "title" && decl.Source == string(SourceAdjudication) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("终选应含裁决源 title 声明，实际 %+v", file.Final)
 	}
 }
 

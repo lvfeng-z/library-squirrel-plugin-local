@@ -773,8 +773,11 @@ type adjudicationInput struct {
 
 // ApplyAdjudication 裁决动作：按当前识别快照的待裁决项（relPath+dimension 寻址）
 // 呈双方候选规则，用户裁决后生成组合规则（来源 adjudication）入档案并立即启动
-// 强制验证轮。双命中择一生成「模式=候选规则模式的 And 组合 + 合成=裁决结果常量」；
-// 单侧缺席改绑生成「同一组合模式 + 在场/缺席谓词条件双分支常量」的谓词条件策略。
+// 强制验证轮。锚定采用组合规则机制（2026-10-26 refs 门）：refs=候选规则集、空
+// 条件行（命中前提全部由成员门段承担，模式=恒真合取缓存）——不内嵌候选规则
+// 的模式树（v4 候选编译为行包装模式 RowSubjectPattern，不可序列化落档）。
+// 双命中择一生成「refs 门 + 合成=裁决结果常量」；单侧缺席改绑生成「同一 refs
+// 门 + 在场/缺席谓词条件双分支常量」的谓词条件策略。
 func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDimension, in adjudicationInput) (*GenerationResult, error) {
 	relPath = filepath.ToSlash(relPath)
 
@@ -829,16 +832,13 @@ func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDim
 	if len(candidateRuleIDs) < 1 {
 		return nil, fmt.Errorf("待裁决候选均无规则出处，无法组合（候选: %+v）", item.Candidates)
 	}
-	subs := make([]Pattern, 0, len(candidateRuleIDs))
+	// 候选规则在场性核验（refs 门求值须可解析；不取其模式树——见函数头注释）
 	for _, ruleID := range candidateRuleIDs {
 		pattern, ok := patternByID(ruleID)
 		if !ok || pattern == nil {
 			return nil, fmt.Errorf("候选规则 %q 在档案与内置表中均不存在（可能已被删除），无法组合", ruleID)
 		}
-		subs = append(subs, pattern)
 	}
-	// 最简充分形式：单一规则产出的冲突不叠加 And（A∧A≡A）
-	combined := combinePatterns(subs)
 
 	candValue := func(index int) (string, error) {
 		if index < 0 || index >= len(item.Candidates) {
@@ -890,7 +890,9 @@ func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDim
 		Description: adjudicationDescription(item, dim, in, extractions),
 		Source:      RuleSourceAdjudication,
 		Enabled:     true,
-		Pattern:     combined,
+		Refs:        candidateRuleIDs,
+		Conditions:  []CondxRow{},
+		Pattern:     And{},
 		Extractions: extractions,
 	}
 	if err := m.commitGeneratedRule(ArchiveWriteAdjudicate, &rule); err != nil {
@@ -938,15 +940,6 @@ func (m *SessionManager) scheduleRecognitionRefresh(root string) bool {
 
 // recognitionFollowupTimeout 在途识别等待补启动的上限。
 const recognitionFollowupTimeout = 30 * time.Second
-
-// combinePatterns 候选规则模式的最简组合：单一模式原样返回，多个模式 And 组合
-// （全部命中才命中——双命中冲突的锚定形态）。
-func combinePatterns(subs []Pattern) Pattern {
-	if len(subs) == 1 {
-		return subs[0]
-	}
-	return And(subs)
-}
 
 // adjudicationDescription 裁决生成规则的人话描述：从裁决内容派生。
 func adjudicationDescription(item *SnapPending, dim MetadataDimension, in adjudicationInput, extractions []ExtractionAction) string {

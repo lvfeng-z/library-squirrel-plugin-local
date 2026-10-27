@@ -1,15 +1,21 @@
 <template>
-  <div class="li-sub">
-    <header class="li-sub-header">
-      <h2 class="li-sub-title">解析观测</h2>
-      <span class="li-sub-state li-sub-state-wip">建设中</span>
-    </header>
-    <p class="li-sub-desc">
-      资源与元数据关联的可视化与利用率观测（解析观测面）规划中，本页为其保留的
-      挂载位——功能建设期间呈现「建设中」占位。
-    </p>
-    <a class="li-sub-back" href="#/com.lvfeng.localImport/workbench-parse">返回解析视图</a>
-  </div>
+  <BaseView>
+    <div class="li-sub">
+      <el-scrollbar class="li-sub-scroll">
+        <div class="li-sub-body">
+          <header class="li-sub-header">
+            <h2 class="li-sub-title">解析观测</h2>
+            <span class="li-sub-state li-sub-state-wip">建设中</span>
+          </header>
+          <p class="li-sub-desc">
+            资源与元数据关联的可视化与利用率观测（解析观测面）规划中，本页为其保留的
+            挂载位——功能建设期间呈现「建设中」占位。
+          </p>
+          <a class="li-sub-back" href="#/com.lvfeng.localImport/workbench-parse">返回解析视图</a>
+        </div>
+      </el-scrollbar>
+    </div>
+  </BaseView>
 </template>
 
 <script setup lang="ts">
@@ -18,13 +24,24 @@
 
 <style scoped>
 .li-sub {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 32px 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  width: calc(100% - 20px);
+  height: calc(100% - 20px);
+  margin: 10px;
+}
+
+.li-sub-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.li-sub-body {
+  display: flex;
+  flex-direction: column;
   align-items: flex-start;
+  gap: 10px;
+  padding-right: 10px;
 }
 
 .li-sub-header {
@@ -35,7 +52,8 @@
 
 .li-sub-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 16px;
+  font-weight: 600;
   color: var(--app-text-primary);
 }
 
