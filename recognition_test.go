@@ -582,6 +582,57 @@ func TestRunFullRecognitionIncremental(t *testing.T) {
 	}
 }
 
+// TestRunFullRecognitionIncrementalGroupRestore 全员已识别结构群的增量轮复原：
+// 结构群成员全部已识别时，文件行不落群组键（已识别成员的群组信息只在群卡），
+// 增量轮按目录整组复原群卡，群聚合计数与全量轮一致。
+func TestRunFullRecognitionIncrementalGroupRestore(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	// 三文件仅尾号数字互异：结构对齐成群；括号命名惯例规则全部识别 → 全员
+	// 已识别的结构群（群卡在场而成员文件行无群组键）
+	writeTestFile(t, root+"/成群已识别/【作者A】标题1.jpg", "a")
+	writeTestFile(t, root+"/成群已识别/【作者A】标题2.jpg", "b")
+	writeTestFile(t, root+"/成群已识别/【作者A】标题3.jpg", "c")
+
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮识别失败: %v", err)
+	}
+	first, _ := m.SessionOf(root)
+	groupOfDir := func(snap *RecognitionSnapshot) *SnapGroup {
+		for i := range snap.Groups {
+			if snap.Groups[i].DirRelKey == "成群已识别" {
+				return &snap.Groups[i]
+			}
+		}
+		return nil
+	}
+	g := groupOfDir(first.Snapshot)
+	if g == nil || g.RuleID != "" || len(g.Members) != 3 {
+		t.Fatalf("首轮应产出全员已识别的结构群: %+v", g)
+	}
+	for _, f := range first.Snapshot.Files {
+		if f.DirRelKey == "成群已识别" && (len(f.Final) == 0 || f.GroupKey != "") {
+			t.Fatalf("首轮成员应已识别且文件行不落群组键: %+v", f)
+		}
+	}
+
+	// 二轮：磁盘未变 → 全部目录按游标跳过；群卡应整组复原
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("增量识别失败: %v", err)
+	}
+	second, _ := m.SessionOf(root)
+	if second.Snapshot.Stats.SkippedDirs == 0 {
+		t.Fatal("增量识别应跳过未变目录，实际跳过 0 个")
+	}
+	if g2 := groupOfDir(second.Snapshot); g2 == nil || len(g2.Members) != 3 {
+		t.Fatalf("增量轮丢失全员已识别结构群: %+v", g2)
+	}
+	first.Snapshot.Stats.SkippedDirs, second.Snapshot.Stats.SkippedDirs = 0, 0
+	if !reflect.DeepEqual(first.Snapshot.Stats, second.Snapshot.Stats) {
+		t.Fatalf("增量轮统计漂移: 首轮 %+v，增量轮 %+v", first.Snapshot.Stats, second.Snapshot.Stats)
+	}
+}
+
 // TestScannerEnumerateMtimeIncrement 轻量枚举的目录级增量语义。
 func TestScannerEnumerateMtimeIncrement(t *testing.T) {
 	root := t.TempDir()

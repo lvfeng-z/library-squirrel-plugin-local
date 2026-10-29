@@ -797,6 +797,25 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		}
 	}
 
+	// 跳过复用目录的序列群按目录整组复原：目录级跳过=目录 mtime 未变、文件集
+	// 未变，该目录全部群卡（规则定群与结构群）从旧快照整组拷贝。文件行群组键
+	// 只覆盖规则定群成员与未识别结构群成员（已识别成员的群组信息只在群卡），
+	// 不足以充当复原索引。重求值目录的群由本轮结论装配，不经此通道。
+	if in.prev != nil {
+		for i := range in.prev.Groups {
+			g := in.prev.Groups[i]
+			if !in.prevSkipped[g.DirRelKey] {
+				continue
+			}
+			gkey := g.DirRelKey + "\x00" + g.Key + "\x00" + g.RuleID
+			if reusedGroups[gkey] {
+				continue
+			}
+			reusedGroups[gkey] = true
+			groups[gkey] = &g
+		}
+	}
+
 	for _, f := range in.enumRes.AllFiles {
 		if c, ok := conclusionByRel[f.RelPath]; ok {
 			appendConclusion(c)
@@ -810,28 +829,13 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		}
 		snap.Pending = append(snap.Pending, prevPendingByPath[prevFile.RelPath]...)
 		snap.Files = append(snap.Files, prevFile)
-		if prevFile.GroupKey != "" && in.prev != nil {
-			for i := range in.prev.Groups {
-				g := in.prev.Groups[i]
-				if g.DirRelKey == prevFile.DirRelKey && g.Key == prevFile.GroupKey {
-					// 复用键与结论侧同构（目录 + 分组键 + 定群规则 ID），命中即
-					// 整组拷贝一次
-					gkey := prevFile.DirRelKey + "\x00" + prevFile.GroupKey + "\x00" + g.RuleID
-					if !reusedGroups[gkey] {
-						reusedGroups[gkey] = true
-						groups[gkey] = &g
-					}
-					break
-				}
-			}
-		}
 	}
 
 	// —— 元素4 结构性兄弟群（规则无关）的对齐判定已前置到求值段（规则定群段
 	// 之后、提取段之前，结论携带成员信息），此处只做呈现标记：未识别成员记
 	// 文件行群组键与「群组前缀=集名候选」线索（元素3）并升格有线索态；已识别
-	// 成员仅入群呈现，不加线索不升格。跳过复用目录的群零操作（成员文件复用
-	// 旧记录时已带标记，重复标记为幂等空转）。——
+	// 成员仅入群呈现，不加线索不升格。跳过复用目录的复原群重复参与标记为幂等
+	// 空转（未识别成员旧记录已带标记）。——
 	structuralMarks := make([]SnapGroup, 0)
 	for _, group := range groups {
 		if group.RuleID == "" {
