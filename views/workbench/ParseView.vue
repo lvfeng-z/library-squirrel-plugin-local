@@ -18,7 +18,7 @@
           @click="openCreateDialog"
         >创建任务</el-button>
         <el-button
-          v-else-if="!recognizing"
+          v-else-if="!recognizing && !panoLoading && !panoLoadFailed"
           type="primary"
           size="small"
           :loading="starting"
@@ -434,10 +434,38 @@
                 </div>
                 </div>
               </el-scrollbar>
-              <!-- 创建反馈条落位区（卡底、常态不占行）：红=对账/创建失败、绿=创建成功、
-                   黄字=悬空选择提示（重识别后选择集引用了已不存在的作品） -->
+              <!-- 创建反馈条落位区（卡底、常态不占行）：两相进度横幅（异步创建期）、
+                   红=创建中断/对账失败、绿=创建成功、黄字=悬空选择提示（重识别后
+                   选择集引用了已不存在的作品） -->
+              <!-- 创建异步进度横幅（剧本2·帧2/3）：核对文件/创建子任务两相计数+百分比；
+                   创建在插件侧独立 goroutine 执行，期间清单/目录树可继续浏览（不阻塞） -->
+              <div
+                v-if="createPhase === 'verify' || createPhase === 'create'"
+                class="li-ws-create-progress"
+              >
+                <div class="li-ws-progress-head">
+                  <span class="li-ws-progress-phase">{{ createPhase === 'verify' ? '正在核对文件…' : '正在创建子任务…' }} {{ createProgressDone }} / {{ createProgressTotal }}</span>
+                  <span class="li-ws-progress-count">{{ createProgressPercent }}</span>
+                </div>
+                <div class="li-ws-progress-track">
+                  <div class="li-ws-progress-bar" :style="{ width: createProgressPercent }"></div>
+                </div>
+              </div>
+              <!-- 创建中断横幅（剧本2·帧5）：部分完成=结构化两行（中断计数+入库提示）；
+                   零产出失败=事件原文整行。选择集两种失败态均保留（重试走帧1） -->
               <el-alert
-                v-if="createError"
+                v-if="createFailMessage"
+                class="li-ws-banner"
+                type="error"
+                :closable="false"
+                show-icon
+                :title="createFailPartial ? `任务创建中断：已创建 ${createProgressDone} / ${createProgressTotal} 个子任务` : createFailMessage"
+              >
+                <p v-if="createFailPartial" class="li-ws-create-fail-sub">父任务已入库，可删除后重试；选择集已保留</p>
+                <p v-if="createFailReason" class="li-ws-create-fail-reason">{{ createFailReason }}</p>
+              </el-alert>
+              <el-alert
+                v-else-if="createError"
                 class="li-ws-banner"
                 type="error"
                 :closable="false"
@@ -456,6 +484,31 @@
                 选择集中 {{ danglingSelection }} 项已不在当前识别全景内（可能已重识别），创建前请刷新重选
               </p>
             </template>
+            <!-- 载入态（大载荷分页方案·剧本1·帧1/帧2）：分节分页拉取进行中/中断——
+                 专用载入态替换「尚未生成识别全景」误导空态（决策3=整体装载：全部
+                 分节就绪前不呈现任何清单数据，解析面板等其余区域空置） -->
+            <div v-else-if="panoLoading || panoLoadFailed" class="li-ws-pano-load">
+              <template v-if="panoLoading">
+                <p class="li-ws-pano-load-title">正在载入识别全景…</p>
+                <div class="li-ws-progress-track">
+                  <div class="li-ws-progress-bar" :style="{ width: panoProgressPercent }"></div>
+                </div>
+                <p class="li-ws-pano-load-count">
+                  <span>{{ panoProgressPercent }}</span>
+                  <span>已接收 {{ panoReceivedCount }}/{{ panoTotalCount }} 项</span>
+                </p>
+              </template>
+              <template v-else>
+                <p class="li-ws-pano-load-title is-failed">载入中断</p>
+                <p class="li-ws-pano-load-count">第 {{ panoFailedPage }}/{{ panoEstPages }} 页失败</p>
+                <el-button
+                  size="small"
+                  type="primary"
+                  :loading="panoResuming"
+                  @click="resumePanoLoad"
+                >从断点继续</el-button>
+              </template>
+            </div>
             <!-- 边界：未识别会话（无快照）→ 引导说明 + 空态占位（干跑 = 纯求值，零任务产出、零弹问） -->
             <div v-else-if="!recognizing" class="li-ws-nosnap">
               <p class="li-ws-desc">
@@ -831,6 +884,31 @@ interface SelectableWorkView {
 
 interface WorkDomainView {
   works: SelectableWorkView[]
+  // 选择域集视图（大载荷分页方案·设计 A：domain 分节分页随答；作品序列在前、
+  // 集序列在后共用一个下标空间，前端逐页拼接）
+  sets?: WorkSetRowView[]
+}
+
+// 选择域集（序列群）的呈现视图（后端 WorkSetView：成员作品键按集内序）
+interface WorkSetRowView {
+  setKey: string
+  dirRelKey: string
+  key: string
+  members: string[]
+}
+
+// getPanorama 分节分页回执（后端 workbenchPageReceipt，json 驼峰逐字对齐）：
+// section=本页分节（overview/files/domain）、offset/count=分节序列起点与条数、
+// total=序列总条数（overview 无条目语义恒 0）、nextCursor=续拉游标（末页空）、
+// done=本页即末页、generation=快照世代（GeneratedAtMs）
+interface PageReceipt {
+  section: string
+  offset: number
+  count: number
+  total: number
+  nextCursor?: string
+  done: boolean
+  generation: number
 }
 
 // 重识别差异集（生成规则后的强制验证轮高亮载荷）
@@ -859,8 +937,11 @@ interface WorkbenchResponse {
   decisions?: DecisionsView
   diff?: SnapDiff
   domain?: WorkDomainView
-  created?: number
-  createMsg?: string
+  // getPanorama 分节分页回执（与 panorama/domain 分节数据同答）
+  page?: PageReceipt
+  // createTasks 立即应答「已开始创建」（大载荷分页方案·设计 C：进度与终态经
+  // createProgress/createDone 事件推送，应答不再携带 created/createMsg）
+  started?: boolean
 }
 
 interface WorkbenchEvent {
@@ -1183,6 +1264,23 @@ const selectedWorks = ref<Set<string>>(new Set())
 const creating = ref(false)
 const createError = ref('')
 const createSummary = ref('')
+// —— 创建异步呈现态（大载荷分页方案·设计 C/剧本2）——
+// 两相进度横幅：phase=verify 核对文件 / create 创建子任务（createProgress 事件
+// 驱动；idle=不在途）；创建在插件侧 goroutine 执行，creating 保持到 createDone
+const createPhase = ref<'idle' | 'verify' | 'create'>('idle')
+const createProgressDone = ref(0)
+const createProgressTotal = ref(0)
+// 终态失败横幅：message=事件原文（零产出失败整行直出）、partial=部分完成态
+//（结构化两行：中断计数+入库提示）、reason=文案尾段原因
+const createFailMessage = ref('')
+const createFailPartial = ref(false)
+const createFailReason = ref('')
+// 本次创建的任务名（成功通知兜底名；事件文案携带名为准）
+const createTaskLabel = ref('')
+const createProgressPercent = computed(() => {
+  if (createProgressTotal.value <= 0) return '0%'
+  return `${Math.min(100, Math.round((createProgressDone.value / createProgressTotal.value) * 100))}%`
+})
 // 剧本K 名称确认对话框：开窗态 + 任务名输入（每次打开预填默认名，清空=用默认）
 const createDialogVisible = ref(false)
 const createTaskName = ref('')
@@ -1285,39 +1383,242 @@ async function restoreSession(attempt = 0): Promise<string> {
   return ''
 }
 
-// 装载全景（两段拉取：概览先渲染，文件级清单大库单独分节拉取）；
-// 重装载后选中键不重置——selectedRelPath 凭相对路径跨快照保持
-async function loadPanorama(root: string): Promise<void> {
-  const summary = await request('getPanorama', { root: root })
-  if (!summary.ok || !summary.panorama) {
-    // 未识别（created）：保留空态呈现识别入口
-    if (summary.error && summary.error.indexOf('尚未完成') < 0) {
-      loadError.value = summary.error
+// —— 全景分节分页装载（大载荷分页方案·设计 A/剧本1）—— //
+// 拉取链：overview 首拉（单页整答，Decisions/Diff 仅该分节随答）→ files 逐页
+// （cursor 串行续拉）→ domain 逐页 → 全部就绪一次性进入现有呈现（决策3=整体
+// 装载，就绪前清单区只显示专用载入态）；每页一请求，30s 超时按页适用。进度
+// 计数=各分节 Page 回执 total/累计 count 汇总。页失败（含超时）→ 暂停出
+// 「载入中断」+「第 X/Y 页失败」断点重试（已收页不重拉）；「世代变更/游标
+// 无效」→ 整轮重拉（回到载入态从头，连续自动重拉至多 2 次后转中断态人工重启）。
+
+// 载入态呈现面（响应式小量；累积的大数组归 PanoLoadRun 普通对象承载，避免
+// 数十万条的深层响应式开销）
+const panoLoading = ref(false)
+const panoLoadFailed = ref(false)
+const panoResuming = ref(false)
+const panoReceivedCount = ref(0)
+const panoTotalCount = ref(0)
+const panoFailedPage = ref(0)
+const panoEstPages = ref(0)
+
+// 一轮装载的累积数据与簿记（非响应式；跨断点暂停保留，供「从断点继续」续拉）
+interface PanoLoadRun {
+  overview: PanoramaSnapshot | null
+  decisions: DecisionsView | null
+  diff: SnapDiff | null
+  files: SnapFile[]
+  filesTotal: number
+  filesFirstCount: number
+  domainWorks: SelectableWorkView[]
+  domainSets: WorkSetRowView[]
+  domainTotal: number
+  domainFirstCount: number
+  // 全局页序计数（overview 计第 1 页）：失败页号 = pagesDone + 1
+  pagesDone: number
+}
+let panoRun: PanoLoadRun | null = null
+// 断点续拉位（失败页的 section+cursor）；null=须整轮重拉（世代变更耗尽自动重拉额度）
+const panoResumeFrom = ref<{ section: string; cursor: string } | null>(null)
+
+// 世代失效/游标无效的整轮重拉错误锚（后端错误应答文案前缀，逐字对齐 session.go）
+const PANO_RESTART_ERROR = '整轮重拉'
+
+function freshPanoRun(): PanoLoadRun {
+  return {
+    overview: null,
+    decisions: null,
+    diff: null,
+    files: [],
+    filesTotal: 0,
+    filesFirstCount: 0,
+    domainWorks: [],
+    domainSets: [],
+    domainTotal: 0,
+    domainFirstCount: 0,
+    pagesDone: 0
+  }
+}
+
+function resetPanoRun(run: PanoLoadRun): void {
+  const fresh = freshPanoRun()
+  Object.assign(run, fresh)
+}
+
+// 载入进度同步：已接收=各分节累计条目数；总量=已知分节 total 之和；估算总页数
+// =各分节 ceil(total/首页条数) 之和 + overview 1 页（未知分节不计），且不低于
+// 失败页号（首页即败时保证「第 X/Y 页」分母可读）
+function syncPanoProgress(run: PanoLoadRun): void {
+  panoReceivedCount.value = run.files.length + run.domainWorks.length + run.domainSets.length
+  panoTotalCount.value = run.filesTotal + run.domainTotal
+  const filesEst = run.filesTotal > 0 && run.filesFirstCount > 0 ? Math.ceil(run.filesTotal / run.filesFirstCount) : 0
+  const domainEst = run.domainTotal > 0 && run.domainFirstCount > 0 ? Math.ceil(run.domainTotal / run.domainFirstCount) : 0
+  panoEstPages.value = Math.max(1 + filesEst + domainEst, run.pagesDone + 1)
+}
+
+const panoProgressPercent = computed(() => {
+  if (panoTotalCount.value <= 0) return '0%'
+  return `${Math.min(100, Math.round((panoReceivedCount.value / panoTotalCount.value) * 100))}%`
+})
+
+// 单页拉取结果：done=全部分节就绪；nosnap=会话未识别（保留空态呈现识别入口）；
+// restart=世代失效/游标无效（整轮重拉）；failed=页失败（resume=失败页续拉位）
+type PanoPagesOutcome =
+  | { outcome: 'done' }
+  | { outcome: 'nosnap' }
+  | { outcome: 'restart' }
+  | { outcome: 'failed'; resume: { section: string; cursor: string } }
+
+// 分节序列游走：overview → files → domain；页成功则累积数据并按回执续拉/换节
+async function runPanoPages(
+  root: string,
+  run: PanoLoadRun,
+  from: { section: string; cursor: string }
+): Promise<PanoPagesOutcome> {
+  let section = from.section
+  let cursor = from.cursor
+  while (section) {
+    const resp = await request('getPanorama', {
+      root: root,
+      section: section,
+      cursor: cursor || undefined
+    })
+    if (!resp.ok || !resp.page) {
+      const errorText = resp.error || ''
+      // 未识别会话：非载入失败，退出呈现空态（识别入口）
+      if (section === 'overview' && errorText.indexOf('尚未完成') >= 0) {
+        return { outcome: 'nosnap' }
+      }
+      // 世代变更/游标无效：旧游标作废，整轮重拉
+      if (errorText.indexOf(PANO_RESTART_ERROR) >= 0) {
+        return { outcome: 'restart' }
+      }
+      return { outcome: 'failed', resume: { section: section, cursor: cursor } }
     }
+    const page = resp.page
+    if (section === 'overview') {
+      run.overview = resp.panorama || null
+      run.decisions = resp.decisions || null
+      run.diff = resp.diff || null
+    } else if (section === 'files') {
+      const pageFiles = (resp.panorama && resp.panorama.files) || []
+      for (const f of pageFiles) run.files.push(f)
+      run.filesTotal = page.total
+      if (run.filesFirstCount === 0) run.filesFirstCount = page.count
+    } else {
+      const works = (resp.domain && resp.domain.works) || []
+      const sets = (resp.domain && resp.domain.sets) || []
+      for (const w of works) run.domainWorks.push(w)
+      for (const s of sets) run.domainSets.push(s)
+      run.domainTotal = page.total
+      if (run.domainFirstCount === 0) run.domainFirstCount = page.count
+    }
+    run.pagesDone += 1
+    syncPanoProgress(run)
+    if (page.done) {
+      section = section === 'overview' ? 'files' : section === 'files' ? 'domain' : ''
+      cursor = ''
+    } else {
+      cursor = page.nextCursor || ''
+    }
+  }
+  return { outcome: 'done' }
+}
+
+// 一轮装载的编排：驱动分页游走并收束三种终局（就绪呈现 / 整轮重拉循环 / 中断
+// 暂停）。from=null 时重置累积数据从头拉（含世代变更的整轮重拉）。
+async function drivePanoLoad(
+  root: string,
+  run: PanoLoadRun,
+  from: { section: string; cursor: string } | null,
+  restartsLeft: number
+): Promise<void> {
+  if (!from) {
+    resetPanoRun(run)
+    syncPanoProgress(run)
+  }
+  panoLoading.value = true
+  panoLoadFailed.value = false
+  let next = from
+  for (;;) {
+    const result = await runPanoPages(root, run, next || { section: 'overview', cursor: '' })
+    // 并发守卫：期间新一轮 loadPanorama 已接管时，本轮静默废弃
+    if (panoRun !== run) return
+    if (result.outcome === 'done') {
+      finishPanoLoad(run)
+      await nextTick()
+      scrollSelectedIntoView()
+      return
+    }
+    if (result.outcome === 'nosnap') {
+      // 未识别会话：清载入态走空态引导（与旧两段拉取的「保留空态」语义一致）
+      panoLoading.value = false
+      panoLoadFailed.value = false
+      panoRun = null
+      panoResumeFrom.value = null
+      return
+    }
+    if (result.outcome === 'restart') {
+      if (restartsLeft > 0) {
+        // 世代变更：整轮重拉（回到载入态从头）
+        restartsLeft -= 1
+        next = null
+        resetPanoRun(run)
+        syncPanoProgress(run)
+        continue
+      }
+      panoResumeFrom.value = null
+    } else {
+      panoResumeFrom.value = result.resume
+    }
+    panoFailedPage.value = run.pagesDone + 1
+    syncPanoProgress(run)
+    panoLoading.value = false
+    panoLoadFailed.value = true
     return
   }
-  snapshot.value = summary.panorama
-  decisions.value = summary.decisions || null
-  diff.value = summary.diff || null
-  // 选择域（唯一结构源）与会话选择集（作品键）随全景回读
-  domain.value = summary.domain || null
-  selectedWorks.value = new Set((summary.decisions && summary.decisions.selection) || [])
-  const files = await request('getPanorama', { root: root, section: 'files' })
-  if (files.ok && files.panorama) {
-    const base = snapshot.value
-    if (base) {
-      snapshot.value = {
-        ...base,
-        files: files.panorama.files,
-        groups: files.panorama.groups,
-        pending: files.panorama.pending
-      }
-    }
-    if (files.diff) diff.value = files.diff
+}
+
+// 全部就绪：一次性进入现有呈现（快照合体 overview+files、选择域合体两分页、
+// 选择集随决策态回读；选中键凭相对路径跨快照保持）
+function finishPanoLoad(run: PanoLoadRun): void {
+  if (run.overview) {
+    snapshot.value = { ...run.overview, files: run.files }
   }
-  // 自动刷新后选中行滚回可视区（文件仍在当前全景时）
-  await nextTick()
-  scrollSelectedIntoView()
+  decisions.value = run.decisions
+  diff.value = run.diff
+  domain.value = { works: run.domainWorks, sets: run.domainSets }
+  selectedWorks.value = new Set((run.decisions && run.decisions.selection) || [])
+  panoLoading.value = false
+  panoLoadFailed.value = false
+  panoRun = null
+  panoResumeFrom.value = null
+}
+
+// 装载全景（分节分页整轮：overview → files 逐页 → domain 逐页 → 一次性呈现）；
+// 重装载后选中键不重置——selectedRelPath 凭相对路径跨快照保持
+async function loadPanorama(root: string): Promise<void> {
+  const run = freshPanoRun()
+  panoRun = run
+  // 载入态先行：清旧呈现（决策3——就绪前不呈现部分数据，清单区转专用载入态）
+  snapshot.value = null
+  decisions.value = null
+  diff.value = null
+  domain.value = null
+  await drivePanoLoad(root, run, null, 2)
+}
+
+// 断点继续：从失败页续拉（已收页不重拉）；世代变更耗尽自动重拉额度后的中断态
+// 无有效游标（panoResumeFrom=null），按钮走整轮重拉
+async function resumePanoLoad(): Promise<void> {
+  const root = session.value ? session.value.rootPath : ''
+  const run = panoRun
+  if (!root || !run || panoResuming.value) return
+  panoResuming.value = true
+  try {
+    await drivePanoLoad(root, run, panoResumeFrom.value, 2)
+  } finally {
+    panoResuming.value = false
+  }
 }
 
 async function startRecognition(): Promise<void> {
@@ -1335,7 +1636,9 @@ async function startRecognition(): Promise<void> {
 }
 
 // 进度与终态事件（识别事件外的其他工作台事件忽略）：
-// recognitionDone → 重取全景与决策态（赋值变更后的自动增量重识别也经此通路刷新）
+// recognitionDone → 重取全景与决策态（赋值变更后的自动增量重识别也经此通路刷新）；
+// createProgress/createDone → 创建异步进度两相与终态（大载荷分页方案·设计 C，
+// createTasks 立即应答 started 后全程经事件感知）
 function onEvent(event: { data?: unknown }) {
   const evt = decodePayload<WorkbenchEvent>(event && event.data)
   if (!evt) return
@@ -1356,7 +1659,47 @@ function onEvent(event: { data?: unknown }) {
     } else {
       recognError.value = evt.message || '全量识别失败'
     }
+  } else if (evt.kind === 'createProgress') {
+    // 两相进度（phase 词汇对齐 selection.go：verify=核对文件、create=创建子任务）
+    if (evt.phase === 'verify' || evt.phase === 'create') {
+      creating.value = true
+      createPhase.value = evt.phase
+      createProgressDone.value = evt.done || 0
+      createProgressTotal.value = evt.total || 0
+    }
+  } else if (evt.kind === 'createDone') {
+    creating.value = false
+    createPhase.value = 'idle'
+    createProgressDone.value = evt.done || 0
+    createProgressTotal.value = evt.total || 0
+    if (evt.success) {
+      // 成功通知（剧本2·帧4）：任务名取事件摘要文案携带名，子任务数=done 镜像；
+      // 选择集已被插件侧清空，本地同步镜像（已选计数归零）
+      const name = taskNameOfMessage(evt.message) || createTaskLabel.value
+      createSummary.value = `已创建任务「${name}」：${createProgressDone.value} 个子任务（Created 待手动开始）`
+      selectedWorks.value = new Set()
+    } else {
+      // 失败（剧本2·帧5）：部分完成（total>0）=结构化中断横幅+选择集保留；
+      // 零产出失败=事件原文整行，选择集同样保留可重试
+      createFailPartial.value = createProgressTotal.value > 0
+      createFailMessage.value = evt.message || '任务创建失败（选择集已保留，可重试）'
+      createFailReason.value = createFailPartial.value ? failReasonOfMessage(evt.message) : ''
+    }
   }
+}
+
+// 事件摘要文案中的任务名（「已创建任务「名」：…」首对引号内；缺省回退提交名）
+function taskNameOfMessage(message?: string): string {
+  if (!message) return ''
+  const m = message.match(/「([^」]+)」/)
+  return m ? m[1] : ''
+}
+
+// 失败文案尾段原因（「…（…）：<原因>」末个括号冒号之后的段；兼容半角冒号）
+function failReasonOfMessage(message?: string): string {
+  if (!message) return ''
+  const idx = Math.max(message.lastIndexOf('）：'), message.lastIndexOf('）:'))
+  return idx >= 0 ? message.slice(idx + 2) : ''
 }
 
 const phaseLabel = (phase: string): string => {
@@ -1980,11 +2323,13 @@ function openCreateDialog(): void {
   createDialogVisible.value = true
 }
 
-// —— 创建任务：选择集整集落库 → 创建编排（对账→CreateTask→清理） —— //
+// —— 创建任务：选择集整集落库 → 创建编排（立即应答→插件侧 goroutine 创建→事件终态） —— //
 
-// 剧本K2：确认「创建」→ 弹窗关闭、创建按钮转 loading、走既有链路；taskName 随输入
-// 原样上送（清空/全空白由后端默认名兜底）；失败态（K2b）弹窗已关、红横幅语义与
-// 现状一致、选择集保留可重试
+// 剧本K2/剧本2·帧1（大载荷分页方案·设计 C）：确认「创建」→ 弹窗立即关闭（不等
+// 创建完成）；taskName 随输入原样上送（清空/全空白由后端默认名兜底）。createTasks
+// 立即应答 started（守卫链失败=红横幅+选择集保留，语义与现状一致）；已开始则两相
+// 进度横幅亮起，进度与终态经 createProgress/createDone 事件推送（卡底横幅呈现，
+// 清单/目录树浏览不阻塞），成功转绿色通知、失败转中断横幅（选择集保留可重试）
 async function createTasks(): Promise<void> {
   createDialogVisible.value = false
   if (!session.value) return
@@ -1995,6 +2340,16 @@ async function createTasks(): Promise<void> {
   creating.value = true
   createError.value = ''
   createSummary.value = ''
+  createFailMessage.value = ''
+  createFailPartial.value = false
+  createFailReason.value = ''
+  // 通知名预备：成功事件文案携带名为准，空输入回退前端同规则默认名
+  createTaskLabel.value = createTaskName.value.trim() || defaultTaskName.value
+  // 两相横幅先行亮起（立即应答与首条 createProgress 之间的空窗也有呈现）
+  createPhase.value = 'verify'
+  createProgressDone.value = 0
+  createProgressTotal.value = 0
+  let started = false
   try {
     const sel = await request('setSelection', { root: session.value.rootPath, works: [...selectedWorks.value] })
     if (!sel.ok) {
@@ -2007,11 +2362,21 @@ async function createTasks(): Promise<void> {
       createError.value = resp.error || '任务创建失败'
       return
     }
-    createSummary.value = resp.createMsg || `已提交 ${resp.created || 0} 件作品的导入任务`
+    started = resp.started === true
+    if (!started) {
+      createError.value = resp.error || '任务创建未能开始'
+      return
+    }
+    // 已开始创建：立即应答随答的决策态回读选择集（此刻选择集尚未被清空）
     if (resp.decisions) decisions.value = resp.decisions
     selectedWorks.value = new Set((resp.decisions && resp.decisions.selection) || [])
   } finally {
-    creating.value = false
+    if (!started) {
+      // 未进入异步创建（守卫失败/超时）：横幅即刻收起
+      creating.value = false
+      createPhase.value = 'idle'
+    }
+    // started=true 保持两相横幅，收尾归 createDone 事件
   }
 }
 
@@ -2285,6 +2650,60 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* —— 分页载入态（剧本1·帧1/帧2）：清单卡体专用载入/中断占位 —— */
+
+.li-ws-pano-load {
+  flex: 1 1 auto;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 10px;
+}
+
+.li-ws-pano-load-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.li-ws-pano-load-title.is-failed {
+  color: var(--app-color-danger, #f56c6c);
+}
+
+.li-ws-pano-load-count {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+/* —— 创建异步横幅（剧本2·帧2/3/5）：卡底两相进度与中断两行 —— */
+
+.li-ws-create-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.li-ws-create-fail-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.li-ws-create-fail-reason {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  word-break: break-all;
 }
 
 /* —— 识别中状态条（清单卡体内，无快照/增量重识别共用） —— */
