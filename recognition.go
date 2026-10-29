@@ -641,8 +641,8 @@ type SnapRuleStat struct {
 	Description string `json:"description"`
 	Source      string `json:"source"`
 	Enabled     bool   `json:"enabled"`
-	// HitCount 命中数：提取段按文件计（记入 MatchedRuleIDs 的文件数），分组段
-	// 按定群成员文件数计。
+	// HitCount 命中数：提取段按文件计（记入 MatchedRuleIDs 的文件数），定群
+	// 规则不进提取段，按定群成员文件数计（规则群卡成员数汇总，复用组含）。
 	HitCount int `json:"hitCount"`
 }
 
@@ -868,7 +868,16 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	buildSnapshotCandidates(snap, in.lib, in)
 
 	// —— 元素6：规则命中统计（含禁用规则；复用文件的命中从旧记录累计）——
+	// 定群规则不进提取段/MatchedRuleIDs，命中按定群成员文件数计：规则群卡
+	// （RuleID 非空——复用组随组拷贝、规则组逐成员追加）单点汇总；结构群
+	// （RuleID 空）非规则产物不计。定群（分组段独占）与提取（提取段独占）
+	// 两类通道按规则构造互斥，同一规则不会两面计数。
 	hitByID := make(map[string]int)
+	for _, g := range snap.Groups {
+		if g.RuleID != "" {
+			hitByID[g.RuleID] += len(g.Members)
+		}
+	}
 	for _, f := range snap.Files {
 		for _, ruleID := range f.MatchedRuleIDs {
 			hitByID[ruleID]++
