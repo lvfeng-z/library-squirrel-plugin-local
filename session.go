@@ -1283,8 +1283,8 @@ type workbenchFrontendResponse struct {
 	// Domain getPanorama 选择域分节随答的资源选择域（阶段4：作品原子结构+
 	// 集视图，前端选择交互与选择集键的单一推导源），按游标分页。
 	Domain *WorkDomain `json:"domain,omitempty"`
-	// Page getPanorama 分节分页回执（overview 单页整答：count/total 恒 0、
-	// done 恒真）。
+	// Page getPanorama 分节分页回执（三分节统一按共用下标空间分页：overview
+	// 重载荷清单六段共用空间，files/domain 各自条目序列）。
 	Page *workbenchPageReceipt `json:"page,omitempty"`
 	// RulesView getRules 与规则管理族动作随答返回的规则管理视图（档案条目+
 	// 内置表+禁用清单+备份态），前端每次动作后整份刷新。
@@ -1302,7 +1302,7 @@ type workbenchPageReceipt struct {
 	// Section 本页所属分节（overview / files / domain）。
 	Section string `json:"section"`
 	// Offset / Count 本页在分节条目序列中的起点与条数；Total 序列总条数
-	//（overview 无条目序列语义，三者恒 0）。
+	//（overview 为六段共用下标空间合计）。
 	Offset int `json:"offset"`
 	Count  int `json:"count"`
 	Total  int `json:"total"`
@@ -1397,16 +1397,23 @@ func (m *SessionManager) publishResponse(resp *workbenchFrontendResponse) {
 		return
 	}
 	if err := m.ctx.PublishToFrontend(workbenchTopicResponse, data); err != nil {
-		m.warnf("工作台应答回发失败(seq=%d): %v", resp.Seq, err)
+		// 日志参数经 SDK 通道先字符串化、再由宿主按模板格式化：数字值须用 %s
+		// 动词，%d 收到字符串形态会印出 %!d(string=N)
+		m.warnf("工作台应答回发失败(seq=%s): %v", resp.Seq, err)
 	}
 }
 
 // —— getPanorama 分节分页（大载荷分页方案·设计 A）——
 
 const (
-	// panoramaPageTargetBytes 单页序列化字节目标（页界区间 6-16MB 取 8MB：
-	// 远低于 64MB 断路器且单页往返在 30s 前端超时窗内余量充足）。
+	// panoramaPageTargetBytes 单页序列化字节目标（首遍打包提示：估算函数按此
+	// 切页；远低于软界与 64MB 断路器，单页往返在 30s 前端超时窗内余量充足）。
 	panoramaPageTargetBytes = 8 << 20
+	// panoramaPageSoftBytes 单页序列化软界：页组装后对完整应答 json.Marshal
+	// 实测，超界即从尾部卸条目直至达标。估算函数只作首遍打包提示，实测硬门
+	// 兜底其漂移（条目新增未计数字段或转义放大不再引发撞断路器的超界应答）；
+	// 12MB 为组装目标与断路器之间的安全带。
+	panoramaPageSoftBytes = 12 << 20
 	// panoramaPageMaxEntries 单页条数硬上限（字节估算之外的双保险，防小条目
 	// 海量场景单页条数失控）；请求的 PageSizeHint 只能收窄本上限。
 	panoramaPageMaxEntries = 50000
@@ -1486,81 +1493,177 @@ func workSetViewWireBytes(s *WorkSetView) int {
 	return n
 }
 
-// panoramaFilesPage 文件分节切页：从 offset 起按页字节目标与条数上限装页，
-// 首条必装保证推进；返回页切片与下一偏移；offset 合法性由调用方前置校验。
-func panoramaFilesPage(files []SnapFile, offset, maxEntries int) ([]SnapFile, int) {
-	end := offset
-	for budget := panoramaPageTargetBytes; end < len(files) && end-offset < maxEntries; end++ {
-		cost := snapFileWireBytes(files[end])
-		if end > offset && budget < cost {
-			break
-		}
-		budget -= cost
-	}
-	return files[offset:end], end
+// snapElWireBytes 文件名元素条目的序列化字节估算（口径同上）。
+func snapElWireBytes(el SnapEl) int {
+	return 36 + len(el.Text) + len(el.Kind) + len(el.Inner)
 }
 
-// panoramaDomainPage 选择域分节切页：作品序列在前、集序列在后共用一个下标
-// 空间（两段共用同一字节预算），页可跨界（作品尾+集头同页）；返回页内作品/
-// 集切片与下一偏移。
-func panoramaDomainPage(domain *WorkDomain, offset, maxEntries int) ([]*SelectableWork, []*WorkSetView, int) {
-	nWorks := len(domain.Works)
-	total := nWorks + len(domain.Sets)
-	budget := panoramaPageTargetBytes
+// snapDirWireBytes 目录树条目的序列化字节估算（口径同上；含投影展开的目录级
+// 结构线索集）。
+func snapDirWireBytes(d SnapDir) int {
+	n := 92 + len(d.RelKey) + len(d.Name) + len(d.MeaningRuleID)
+	for _, m := range d.Meanings {
+		n += 44 + len(m.Type) + len(m.ID) + len(m.Name)
+	}
+	for _, c := range d.StructClues {
+		n += 44 + len(c.Ref) + len(c.Kind) + len(c.Label) + len(c.Value)
+	}
+	return n
+}
+
+// snapGroupWireBytes 序列群条目的序列化字节估算（口径同上；成员携带文件名
+// 元素数组）。
+func snapGroupWireBytes(g SnapGroup) int {
+	n := 118 + len(g.DirRelKey) + len(g.Key) + len(g.RuleID) +
+		len(g.FormName) + len(g.FormKeyExpr) + len(g.FormSeqExpr)
+	for _, m := range g.Members {
+		n += 38 + len(m.RelPath) + len(m.SeqText)
+		for _, el := range m.Elements {
+			n += snapElWireBytes(el)
+		}
+	}
+	return n
+}
+
+// snapCandidateWireBytes 集名候选条目的序列化字节估算（口径同上；成员携带
+// 文件名元素数组）。
+func snapCandidateWireBytes(c SnapCandidate) int {
+	n := 108 + len(c.Key) + len(c.Dir) + len(c.Source) + len(c.FormName) +
+		len(c.Reason) + len(c.ExistingSetName) + len(c.ConfirmedSetName)
+	for _, m := range c.Members {
+		n += 32 + len(m.RelPath) + len(m.SeqText)
+		for _, el := range m.Elements {
+			n += snapElWireBytes(el)
+		}
+	}
+	for _, el := range c.KeyElements {
+		n += snapElWireBytes(el)
+	}
+	return n
+}
+
+// snapPendingWireBytes 待裁决明细条目的序列化字节估算（口径同上）。
+func snapPendingWireBytes(p SnapPending) int {
+	n := 74 + len(p.RelPath) + len(p.FileName) + len(p.Dimension) + len(p.Reason)
+	for _, d := range p.Candidates {
+		n += 72 + len(d.Dimension) + len(d.Value) + len(d.Source) + len(d.RoleName) + len(d.RuleID)
+	}
+	return n
+}
+
+// panoramaPackEnd 估算首遍打包：从 offset 起按页字节目标与条数上限装页
+//（首条必装保证推进），返回页终点下标；cost 为共用下标空间内单条目的估算
+// 字节。估算只作首遍提示，实测硬门兜底其漂移。
+func panoramaPackEnd(cost func(i int) int, offset, total, maxEntries int) int {
 	end := offset
-	for end < nWorks && end-offset < maxEntries {
-		cost := selectableWorkWireBytes(domain.Works[end])
-		if end > offset && budget < cost {
+	for budget := panoramaPageTargetBytes; end < total && end-offset < maxEntries; end++ {
+		c := cost(end)
+		if end > offset && budget < c {
 			break
 		}
-		budget -= cost
-		end++
+		budget -= c
 	}
-	for end < total && end-offset < maxEntries {
-		cost := workSetViewWireBytes(domain.Sets[end-nWorks])
-		if end > offset && budget < cost {
-			break
+	return end
+}
+
+// panoramaOverviewSpans overview 重载荷清单的共用下标空间：六段按固定顺序
+// 线性拼接（目录树→序列群→候选三仓→待裁决明细），段边界由各段条数确定；
+// 与 domain 分节作品/集共用下标空间同构。
+type panoramaOverviewSpans struct {
+	dirs, groups, candidates, ignored, confirmed, pending int
+}
+
+func (s panoramaOverviewSpans) total() int {
+	return s.dirs + s.groups + s.candidates + s.ignored + s.confirmed + s.pending
+}
+
+// cost 共用空间第 i 条的估算字节（按段分派到对应清单条目）。
+func (s panoramaOverviewSpans) cost(view *RecognitionSnapshot, i int) int {
+	switch {
+	case i < s.dirs:
+		return snapDirWireBytes(view.Dirs[i])
+	case i < s.dirs+s.groups:
+		return snapGroupWireBytes(view.Groups[i-s.dirs])
+	case i < s.dirs+s.groups+s.candidates:
+		return snapCandidateWireBytes(view.Candidates[i-s.dirs-s.groups])
+	case i < s.dirs+s.groups+s.candidates+s.ignored:
+		return snapCandidateWireBytes(view.IgnoredCandidates[i-s.dirs-s.groups-s.candidates])
+	case i < s.dirs+s.groups+s.candidates+s.ignored+s.confirmed:
+		return snapCandidateWireBytes(view.ConfirmedCandidates[i-s.dirs-s.groups-s.candidates-s.ignored])
+	default:
+		return snapPendingWireBytes(view.Pending[i-s.dirs-s.groups-s.candidates-s.ignored-s.confirmed])
+	}
+}
+
+// slice 共用空间 [offset,end) 区间拆回各段切片：未涉及的段为 nil，部分涉及
+// 的段按区间截取。
+func (s panoramaOverviewSpans) slice(view *RecognitionSnapshot, offset, end int) (
+	dirs []SnapDir, groups []SnapGroup, candidates, ignored, confirmed []SnapCandidate, pending []SnapPending,
+) {
+	seg := func(lo, hi int) (int, int, bool) {
+		if end <= lo || offset >= hi {
+			return 0, 0, false
 		}
-		budget -= cost
-		end++
+		return max(offset, lo), min(end, hi), true
 	}
-	var works []*SelectableWork
-	var sets []*WorkSetView
-	if offset < nWorks {
-		worksEnd := min(end, nWorks)
-		works = domain.Works[offset:worksEnd]
-		if end > nWorks {
-			sets = domain.Sets[:end-nWorks]
-		}
-		return works, sets, end
+	if lo, hi, ok := seg(0, s.dirs); ok {
+		dirs = view.Dirs[lo:hi]
 	}
-	return works, domain.Sets[offset-nWorks : end-nWorks], end
+	base := s.dirs
+	if lo, hi, ok := seg(base, base+s.groups); ok {
+		groups = view.Groups[lo-base : hi-base]
+	}
+	base += s.groups
+	if lo, hi, ok := seg(base, base+s.candidates); ok {
+		candidates = view.Candidates[lo-base : hi-base]
+	}
+	base += s.candidates
+	if lo, hi, ok := seg(base, base+s.ignored); ok {
+		ignored = view.IgnoredCandidates[lo-base : hi-base]
+	}
+	base += s.ignored
+	if lo, hi, ok := seg(base, base+s.confirmed); ok {
+		confirmed = view.ConfirmedCandidates[lo-base : hi-base]
+	}
+	base += s.confirmed
+	if lo, hi, ok := seg(base, base+s.pending); ok {
+		pending = view.Pending[lo-base : hi-base]
+	}
+	return
+}
+
+// panoramaReceipt 分页回执构造：终点越过 total 即末页，非末页携带续拉游标。
+func panoramaReceipt(section string, generation int64, offset, end, total int) *workbenchPageReceipt {
+	receipt := &workbenchPageReceipt{
+		Section: section, Offset: offset, Count: end - offset, Total: total,
+		Done: end >= total, Generation: generation,
+	}
+	if !receipt.Done {
+		receipt.NextCursor = encodePanoramaCursor(generation, end)
+	}
+	return receipt
 }
 
 // panoramaSectionPage getPanorama 分节应答的装配件：分页回执 + 分节数据，
-// 未请求的分节恒空。
+// 未请求的分节恒空。shrink 为测量硬门的卸条目通道——按卸后条目数重建页载荷
+// 与回执（n ∈ [1, 回执 Count]；分节恒有条目空间，恒非 nil）。
 type panoramaSectionPage struct {
 	receipt  *workbenchPageReceipt
 	panorama *RecognitionSnapshot
 	domain   *WorkDomain
-	overview bool // overview 分节（Decisions/Diff 仅该分节随答）
+	overview bool // overview 分节（Decisions/Diff 仅该分节首页随答）
+	shrink   func(n int)
 }
 
 // panoramaPageOf getPanorama 分节分页求值：按 section 词汇裁剪投影、按游标
-// （先过世代校验）切页并落 Page 回执。overview 单页整答；files/domain 按游标
-// 分页。
+// （先过世代校验）切页并落 Page 回执。三分节统一按共用下标空间切页——
+// overview 的重载荷清单（目录树/序列群/候选三仓/待裁决明细）六段共用一个
+// 下标空间逐页（统计/规则档案态等小字段每页随答）；files/domain 语义不变
+//（domain 作品序列在前集在后，页可跨界）。
 func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFrontendRequest) (*panoramaSectionPage, error) {
 	generation := sess.Snapshot.GeneratedAtMs
 	switch req.Section {
-	case "", panoramaSectionOverview:
-		view := panoramaViewOf(sess.Snapshot)
-		view.Files = nil
-		return &panoramaSectionPage{
-			receipt:  &workbenchPageReceipt{Section: panoramaSectionOverview, Done: true, Generation: generation},
-			panorama: &view,
-			overview: true,
-		}, nil
-	case panoramaSectionFiles, panoramaSectionDomain:
+	case "", panoramaSectionOverview, panoramaSectionFiles, panoramaSectionDomain:
 	default:
 		return nil, fmt.Errorf("未知的 getPanorama 分节 %q", req.Section)
 	}
@@ -1575,39 +1678,113 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 	if req.PageSizeHint > 0 && req.PageSizeHint < maxEntries {
 		maxEntries = req.PageSizeHint
 	}
-	if req.Section == panoramaSectionFiles {
+	switch req.Section {
+	case "", panoramaSectionOverview:
+		view := panoramaOverviewViewOf(sess.Snapshot)
+		spans := panoramaOverviewSpans{
+			dirs: len(view.Dirs), groups: len(view.Groups), candidates: len(view.Candidates),
+			ignored: len(view.IgnoredCandidates), confirmed: len(view.ConfirmedCandidates),
+			pending: len(view.Pending),
+		}
+		total := spans.total()
+		if offset > total {
+			return nil, errPanoramaCursorInvalid
+		}
+		end := panoramaPackEnd(func(i int) int { return spans.cost(&view, i) }, offset, total, maxEntries)
+		page := &panoramaSectionPage{overview: true}
+		apply := func(e int) {
+			pan := view
+			pan.Dirs, pan.Groups, pan.Candidates, pan.IgnoredCandidates, pan.ConfirmedCandidates, pan.Pending =
+				spans.slice(&view, offset, e)
+			page.panorama = &pan
+			page.receipt = panoramaReceipt(panoramaSectionOverview, generation, offset, e, total)
+		}
+		apply(end)
+		page.shrink = apply
+		return page, nil
+	case panoramaSectionFiles:
 		view := panoramaViewOf(sess.Snapshot)
 		if offset > len(view.Files) {
 			return nil, errPanoramaCursorInvalid
 		}
-		page, next := panoramaFilesPage(view.Files, offset, maxEntries)
-		receipt := &workbenchPageReceipt{
-			Section: panoramaSectionFiles, Offset: offset, Count: len(page),
-			Total: len(view.Files), Done: next >= len(view.Files), Generation: generation,
+		files := view.Files
+		end := panoramaPackEnd(func(i int) int { return snapFileWireBytes(files[i]) }, offset, len(files), maxEntries)
+		page := &panoramaSectionPage{}
+		apply := func(e int) {
+			page.panorama = &RecognitionSnapshot{
+				SchemaVersion: view.SchemaVersion, GeneratedAtMs: view.GeneratedAtMs,
+				Files: files[offset:e],
+			}
+			page.receipt = panoramaReceipt(panoramaSectionFiles, generation, offset, e, len(files))
 		}
-		if !receipt.Done {
-			receipt.NextCursor = encodePanoramaCursor(generation, next)
+		apply(end)
+		page.shrink = apply
+		return page, nil
+	default:
+		domain := domainViewOf(DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess)))
+		nWorks := len(domain.Works)
+		total := nWorks + len(domain.Sets)
+		if offset > total {
+			return nil, errPanoramaCursorInvalid
 		}
-		return &panoramaSectionPage{receipt: receipt, panorama: &RecognitionSnapshot{
-			SchemaVersion: view.SchemaVersion, GeneratedAtMs: view.GeneratedAtMs, Files: page,
-		}}, nil
+		end := panoramaPackEnd(func(i int) int {
+			if i < nWorks {
+				return selectableWorkWireBytes(domain.Works[i])
+			}
+			return workSetViewWireBytes(domain.Sets[i-nWorks])
+		}, offset, total, maxEntries)
+		page := &panoramaSectionPage{}
+		apply := func(e int) {
+			var works []*SelectableWork
+			var sets []*WorkSetView
+			if offset < nWorks {
+				worksEnd := min(e, nWorks)
+				works = domain.Works[offset:worksEnd]
+				if e > nWorks {
+					sets = domain.Sets[:e-nWorks]
+				}
+			} else {
+				sets = domain.Sets[offset-nWorks : e-nWorks]
+			}
+			// 页域投影：两序列恒为非 nil 空切片形态（序列化出 []，与全量域视图一致）
+			page.domain = &WorkDomain{
+				Works: append([]*SelectableWork{}, works...),
+				Sets:  append([]*WorkSetView{}, sets...),
+			}
+			page.receipt = panoramaReceipt(panoramaSectionDomain, generation, offset, e, total)
+		}
+		apply(end)
+		page.shrink = apply
+		return page, nil
 	}
-	domain := domainViewOf(DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess)))
-	total := len(domain.Works) + len(domain.Sets)
-	if offset > total {
-		return nil, errPanoramaCursorInvalid
+}
+
+// boundPanoramaPage 测量硬门：页组装后对完整应答 json.Marshal 实测，超软界
+// 即从尾部按超界比例卸条目直至达标（比例步长几何收敛，免逐条卸的重复序列
+// 化）；游标随卸后终点回写。首条必装——单条超界仍独立成页并记日志可见。
+// 估算函数仅作首遍打包提示，实测兜底其漂移。
+func (m *SessionManager) boundPanoramaPage(resp *workbenchFrontendResponse, page *panoramaSectionPage) {
+	data, err := json.Marshal(resp)
+	if err != nil || len(data) <= panoramaPageSoftBytes || page.shrink == nil || page.receipt.Count <= 1 {
+		return
 	}
-	works, sets, next := panoramaDomainPage(domain, offset, maxEntries)
-	receipt := &workbenchPageReceipt{
-		Section: panoramaSectionDomain, Offset: offset, Count: len(works) + len(sets),
-		Total: total, Done: next >= total, Generation: generation,
+	n := page.receipt.Count
+	for len(data) > panoramaPageSoftBytes && n > 1 {
+		drop := (n - 1) * (len(data) - panoramaPageSoftBytes) / len(data)
+		if drop < 1 {
+			drop = 1
+		}
+		n -= drop
+		page.shrink(n)
+		resp.Page, resp.Panorama, resp.Domain = page.receipt, page.panorama, page.domain
+		if data, err = json.Marshal(resp); err != nil {
+			return
+		}
 	}
-	if !receipt.Done {
-		receipt.NextCursor = encodePanoramaCursor(generation, next)
+	if len(data) > panoramaPageSoftBytes {
+		m.warnf("getPanorama 单条目页实测 %s 字节超软界 %s（section=%s offset=%s）",
+			len(data), panoramaPageSoftBytes, page.receipt.Section, page.receipt.Offset)
 	}
-	// 页域投影：两序列恒为非 nil 空切片形态（序列化出 []，与全量域视图一致）
-	pageDomain := &WorkDomain{Works: append([]*SelectableWork{}, works...), Sets: append([]*WorkSetView{}, sets...)}
-	return &panoramaSectionPage{receipt: receipt, domain: pageDomain}, nil
 }
 
 // HandleFrontendRequest 处理一条前端请求并回发应答（激活期订阅循环逐条调用）。
@@ -1696,12 +1873,14 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.Page = page.receipt
 		resp.Panorama = page.panorama
 		resp.Domain = page.domain
-		if page.overview {
-			// Decisions/Diff 仅 overview 分节随答（会话决策态与差异高亮随概览
-			// 一次到达，明细分节不重复携带）
+		if page.overview && page.receipt.Offset == 0 {
+			// Decisions/Diff 仅 overview 分节首页随答（会话决策态与差异高亮随概览
+			// 首屏一次到达，后续页与明细分节不重复携带）
 			resp.Decisions = decisionsViewOf(sess)
 			resp.Diff = sess.LastDiff
 		}
+		// 测量硬门：估算首遍打包后实测完整应答字节，超软界从尾部卸条目
+		m.boundPanoramaPage(resp, page)
 	case workbenchActionAssign:
 		sess, view, err := m.ApplyAssignment(req.Root, req.RelPath, SessionAssignment{
 			Author: req.Author, AuthorRole: req.AuthorRole, Title: req.Title,

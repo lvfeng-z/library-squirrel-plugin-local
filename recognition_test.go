@@ -1078,16 +1078,22 @@ func TestGetPanoramaGenerationStale(t *testing.T) {
 	}
 }
 
-// TestGetPanoramaPageByteBound 页字节界：构造超界规模快照（60 条 × ~300KB
-// 序列化估算 + 1 条单条超界的 ~9MB 巨条目）断言按字节界分多页、每页序列化
-// 字节 ≤ 页界上限（16MB）；单条超界条目独立成页（首条必装的推进保证）。
+// TestGetPanoramaPageByteBound 页实测硬门：每页断言以 json.Marshal 实测完整
+// 应答字节为准（≤ 软界 panoramaPageSoftBytes，非估算值）——估算函数仅作首遍
+// 打包提示，实测兜底漂移。夹具三形态：
+//   - 估算放大型：RelPath/DirRelKey 含大量 `<&>`（json 序列化为 \u003c 等
+//     六字节转义，估算按单字节计数低估约 6 倍）——估算首遍装出的页实测超
+//     软界，硬门须从尾部卸条目直至达标（首页回执条数 < 估算首遍装页条数
+//     即卸载实证）；
+//   - 真实嵌套形态：每条含多条结构分段线索（投影展开）+ 终选声明 + 疑似
+//     线索 + 命中规则；
+//   - 单条巨条目：独立成页（首条必装的推进保证）。
 func TestGetPanoramaPageByteBound(t *testing.T) {
 	root := t.TempDir()
 	m, ctx := newRecognitionFixture(t, root, nil)
 
-	const pageCeiling = 16 << 20
-	big := strings.Repeat("x", 100*1024) // 100KB 目录名：条目估算 ≈ 300KB/条
-	huge := strings.Repeat("y", 3<<20)   // 3MB 目录名：单条估算 ≈ 9MB > 页目标
+	escapeHeavy := strings.Repeat("<&>", 5667) // ~17KB：实测转义后 ~102KB/字段（×2 字段 ≈ 6 倍低估）
+	huge := strings.Repeat("y", 3<<20)        // 3MB 目录名：单条估算 ≈ 9MB > 页目标
 	snap := &RecognitionSnapshot{
 		SchemaVersion: recognitionSnapshotSchemaVersion,
 		GeneratedAtMs: 1700000000002,
@@ -1095,14 +1101,33 @@ func TestGetPanoramaPageByteBound(t *testing.T) {
 	}
 	hugeRel := huge + "/单条超界.jpg"
 	for i := 0; i < 60; i++ {
-		rel := fmt.Sprintf("%s/f%02d.jpg", big, i)
-		snap.Files = append(snap.Files, SnapFile{RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: big, State: snapStatePlain})
+		rel := fmt.Sprintf("%s/f%02d.jpg", escapeHeavy, i)
+		snap.Files = append(snap.Files, SnapFile{RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: escapeHeavy, State: snapStatePlain})
+	}
+	for i := 0; i < 80; i++ {
+		rel := fmt.Sprintf("作者%02d/画集%02d/【作者名】タイトル文段_汉_%05d(%d).jpg", i%7, i%11, i, i%40)
+		f := SnapFile{
+			RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: fmt.Sprintf("作者%02d/画集%02d", i%7, i%11),
+			State: snapStateClueful, GroupKey: fmt.Sprintf("タイトル文段_%05d", i), GroupSeq: i%40 + 1,
+			Final: []SnapDecl{{
+				Dimension: "作者", Value: fmt.Sprintf("作者名%02d", i%7), Source: "rule",
+				RoleName: "画师", RuleID: "test-bracket-author-title",
+			}},
+			MatchedRuleIDs: []string{"test-bracket-author-title"},
+			Clues:          []SnapClue{{Kind: "库内作者", Detail: fmt.Sprintf("命中库内作者 作者名%02d", i%7)}},
+		}
+		snap.Files = append(snap.Files, f)
 	}
 	snap.Files = append(snap.Files, SnapFile{RelPath: hugeRel, FileName: fileNameOfRel(hugeRel), DirRelKey: huge, State: snapStatePlain})
 	injectSessionSnapshot(t, m, root, snap)
+	view := panoramaViewOf(snap)
 
-	var got int
+	// 估算首遍装页条数（首页）：硬门卸载的对照基线
+	firstPassEnd := panoramaPackEnd(func(i int) int { return snapFileWireBytes(view.Files[i]) }, 0, len(view.Files), panoramaPageMaxEntries)
+
+	var got []SnapFile
 	hugeAlone := false
+	trimmedFirstPage := false
 	cursor := ""
 	for page := 0; ; page++ {
 		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
@@ -1113,17 +1138,20 @@ func TestGetPanoramaPageByteBound(t *testing.T) {
 		if !resp.OK || resp.Panorama == nil || resp.Page == nil {
 			t.Fatalf("字节界分页拉取失败（第 %d 页）: %+v", page+1, resp)
 		}
-		data, err := json.Marshal(resp.Panorama)
+		data, err := json.Marshal(resp)
 		if err != nil {
-			t.Fatalf("页序列化失败: %v", err)
+			t.Fatalf("页应答序列化失败: %v", err)
 		}
-		if len(data) > pageCeiling {
-			t.Fatalf("第 %d 页序列化 %d 字节超页界上限 %d", page+1, len(data), pageCeiling)
+		if len(data) > panoramaPageSoftBytes {
+			t.Fatalf("第 %d 页实测 %d 字节超软界 %d", page+1, len(data), panoramaPageSoftBytes)
+		}
+		if page == 0 && resp.Page.Count < firstPassEnd {
+			trimmedFirstPage = true // 估算放大型条目超软界 → 硬门已卸载
 		}
 		if len(resp.Panorama.Files) == 1 && resp.Panorama.Files[0].RelPath == hugeRel {
 			hugeAlone = true
 		}
-		got += len(resp.Panorama.Files)
+		got = append(got, resp.Panorama.Files...)
 		if resp.Page.Done {
 			if page+1 < 2 {
 				t.Fatalf("超界规模快照应分多页，实际 %d 页", page+1)
@@ -1132,12 +1160,134 @@ func TestGetPanoramaPageByteBound(t *testing.T) {
 		}
 		cursor = resp.Page.NextCursor
 	}
-	if got != 61 {
-		t.Fatalf("逐页合计条数 = %d，期望 61", got)
+	if len(got) != 141 {
+		t.Fatalf("逐页合计条数 = %d，期望 141", len(got))
 	}
 	if !hugeAlone {
 		t.Fatal("单条超界条目应独立成页")
 	}
+	if !trimmedFirstPage {
+		t.Fatalf("估算放大型条目应触发硬门卸载（首页回执 %d 条 ≥ 估算首遍 %d 条）", 0, firstPassEnd)
+	}
+	if !reflect.DeepEqual(got, view.Files) {
+		t.Fatal("逐页拼接与全量投影逐条不全等")
+	}
+}
+
+// TestGetPanoramaOverviewPaging overview 分节分页：重载荷清单（目录树/序列群/
+// 候选三仓/待裁决明细）六段共用一个下标空间逐页，逐页拼接与全量投影逐条
+// 全等（含跨界页：一页同时携带相邻两段条目）；统计/规则档案态小字段每页
+// 随答、文件明细恒不随答；Decisions/Diff 仅首页随答；每页实测 ≤ 软界。
+func TestGetPanoramaOverviewPaging(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1700000000003,
+		RootPath:      root,
+		Dirs: []SnapDir{
+			{RelKey: "甲", Name: "甲", Depth: 1, FileCount: 2},
+			{RelKey: "乙", Name: "乙", Depth: 1, FileCount: 2},
+		},
+		Groups: []SnapGroup{{DirRelKey: "甲", Key: "群A", Size: 2, RuleID: "test-sibling-set",
+			Members: []SnapGroupMember{{RelPath: "甲/a_1.jpg", Seq: 1, SeqText: "1"}}}},
+		Candidates:         []SnapCandidate{{Key: "候选甲", Dir: "甲", Source: candSourceDir, Size: 2, Reason: "目录信号", Members: []SnapCandMember{{RelPath: "甲/a_1.jpg"}}}},
+		IgnoredCandidates:  []SnapCandidate{{Key: "忽略乙", Dir: "乙", Source: candSourceGroup, Size: 1, Members: []SnapCandMember{{RelPath: "乙/b_1.jpg"}}}},
+		ConfirmedCandidates: []SnapCandidate{{Key: "确认丙", Dir: "乙", Source: candSourceDir, Size: 1, ConfirmedSetName: "确认丙", Members: []SnapCandMember{{RelPath: "乙/c_1.jpg"}}}},
+		Pending: []SnapPending{{RelPath: "甲/a_1.jpg", FileName: "a_1.jpg", Dimension: "标题",
+			Reason: "同层冲突", Candidates: []SnapDecl{{Dimension: "标题", Value: "甲", Source: "rule"}}}},
+		RuleStats: []SnapRuleStat{{ID: "test-sibling-set", Description: "测试：下划线前缀+序号成群", Source: string(RuleSourceManual), Enabled: true, HitCount: 2}},
+		Stats:    SnapStats{TotalFiles: 4, GroupCount: 1, PendingFiles: 1},
+	}
+	diff := &SnapDiff{
+		Changed: []SnapDiffEntry{}, Removed: []SnapDiffEntry{},
+		Added: []SnapDiffEntry{{RelPath: "甲/a_1.jpg", After: &SnapConclusion{State: snapStatePlain}}},
+	}
+	if _, err := m.CompleteRecognitionWithDiff(root, snap, diff); err != nil {
+		t.Fatalf("注入快照与差异集失败: %v", err)
+	}
+	want := panoramaOverviewViewOf(snap)
+	total := len(snap.Dirs) + len(snap.Groups) + len(snap.Candidates) +
+		len(snap.IgnoredCandidates) + len(snap.ConfirmedCandidates) + len(snap.Pending)
+
+	var gotDirs []SnapDir
+	var gotGroups []SnapGroup
+	var gotCands, gotIgnored, gotConfirmed []SnapCandidate
+	var gotPending []SnapPending
+	straddled := false
+	cursor := ""
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(600 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionOverview, Cursor: cursor, PageSizeHint: 2,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Panorama == nil || resp.Page == nil {
+			t.Fatalf("overview 分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("页应答序列化失败: %v", err)
+		}
+		if len(data) > panoramaPageSoftBytes {
+			t.Fatalf("第 %d 页实测 %d 字节超软界 %d", page+1, len(data), panoramaPageSoftBytes)
+		}
+		p := resp.Page
+		received := len(gotDirs) + len(gotGroups) + len(gotCands) + len(gotIgnored) + len(gotConfirmed) + len(gotPending)
+		if p.Section != panoramaSectionOverview || p.Generation != snap.GeneratedAtMs ||
+			p.Total != total || p.Offset != received || p.Count != countOverviewPage(resp.Panorama) {
+			t.Fatalf("overview 页回执不符（第 %d 页）: %+v（已收 %d 条）", page+1, p, received)
+		}
+		// 小字段每页随答；文件明细恒不随答
+		if len(resp.Panorama.RuleStats) == 0 || resp.Panorama.Stats.TotalFiles != 4 || len(resp.Panorama.Files) != 0 {
+			t.Fatalf("overview 页应每页随答小字段且不携带文件明细（第 %d 页）", page+1)
+		}
+		// Decisions/Diff 仅首页随答
+		if page == 0 {
+			if resp.Decisions == nil || !reflect.DeepEqual(resp.Diff, diff) {
+				t.Fatalf("overview 首页应随答决策态与差异集: decisions=%v diff=%v", resp.Decisions, resp.Diff)
+			}
+		} else if resp.Decisions != nil || resp.Diff != nil {
+			t.Fatalf("overview 非首页不应随答决策态/差异集（第 %d 页）", page+1)
+		}
+		pan := resp.Panorama
+		if len(pan.Dirs) > 0 && len(pan.Groups) > 0 || len(pan.Groups) > 0 && len(pan.Candidates) > 0 ||
+			len(pan.Candidates) > 0 && len(pan.IgnoredCandidates) > 0 || len(pan.IgnoredCandidates) > 0 && len(pan.ConfirmedCandidates) > 0 ||
+			len(pan.ConfirmedCandidates) > 0 && len(pan.Pending) > 0 {
+			straddled = true
+		}
+		gotDirs = append(gotDirs, pan.Dirs...)
+		gotGroups = append(gotGroups, pan.Groups...)
+		gotCands = append(gotCands, pan.Candidates...)
+		gotIgnored = append(gotIgnored, pan.IgnoredCandidates...)
+		gotConfirmed = append(gotConfirmed, pan.ConfirmedCandidates...)
+		gotPending = append(gotPending, pan.Pending...)
+		if p.Done {
+			if p.NextCursor != "" {
+				t.Fatal("末页不应携带续拉游标")
+			}
+			break
+		}
+		if p.NextCursor == "" {
+			t.Fatal("非末页缺续拉游标")
+		}
+		cursor = p.NextCursor
+	}
+	if !straddled {
+		t.Fatal("提示 2 条/页的六段序列应出现跨段页")
+	}
+	if !reflect.DeepEqual(gotDirs, want.Dirs) || !reflect.DeepEqual(gotGroups, want.Groups) ||
+		!reflect.DeepEqual(gotCands, want.Candidates) || !reflect.DeepEqual(gotIgnored, want.IgnoredCandidates) ||
+		!reflect.DeepEqual(gotConfirmed, want.ConfirmedCandidates) || !reflect.DeepEqual(gotPending, want.Pending) {
+		t.Fatal("overview 逐页拼接与全量投影逐条不全等")
+	}
+}
+
+// countOverviewPage overview 页回执条数复核：页内六段条目合计。
+func countOverviewPage(pan *RecognitionSnapshot) int {
+	return len(pan.Dirs) + len(pan.Groups) + len(pan.Candidates) +
+		len(pan.IgnoredCandidates) + len(pan.ConfirmedCandidates) + len(pan.Pending)
 }
 
 // TestDetectStructuralGroups 验证规则无关的兄弟群结构探测（元素4 结构面与

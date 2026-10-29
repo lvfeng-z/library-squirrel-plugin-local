@@ -899,8 +899,8 @@ interface WorkSetRowView {
 
 // getPanorama 分节分页回执（后端 workbenchPageReceipt，json 驼峰逐字对齐）：
 // section=本页分节（overview/files/domain）、offset/count=分节序列起点与条数、
-// total=序列总条数（overview 无条目语义恒 0）、nextCursor=续拉游标（末页空）、
-// done=本页即末页、generation=快照世代（GeneratedAtMs）
+// total=序列总条数（overview=重载荷清单六段共用下标空间合计）、nextCursor=
+// 续拉游标（末页空）、done=本页即末页、generation=快照世代（GeneratedAtMs）
 interface PageReceipt {
   section: string
   offset: number
@@ -1384,12 +1384,14 @@ async function restoreSession(attempt = 0): Promise<string> {
 }
 
 // —— 全景分节分页装载（大载荷分页方案·设计 A/剧本1）—— //
-// 拉取链：overview 首拉（单页整答，Decisions/Diff 仅该分节随答）→ files 逐页
-// （cursor 串行续拉）→ domain 逐页 → 全部就绪一次性进入现有呈现（决策3=整体
-// 装载，就绪前清单区只显示专用载入态）；每页一请求，30s 超时按页适用。进度
-// 计数=各分节 Page 回执 total/累计 count 汇总。页失败（含超时）→ 暂停出
-// 「载入中断」+「第 X/Y 页失败」断点重试（已收页不重拉）；「世代变更/游标
-// 无效」→ 整轮重拉（回到载入态从头，连续自动重拉至多 2 次后转中断态人工重启）。
+// 拉取链：overview 逐页（重载荷清单六段共用下标空间——目录树/序列群/候选三仓/
+// 待裁决明细逐页拼接，统计与规则档案态等小字段每页随答，Decisions/Diff 仅首页
+// 随答）→ files 逐页（cursor 串行续拉）→ domain 逐页 → 全部就绪一次性进入现有
+// 呈现（决策3=整体装载，就绪前清单区只显示专用载入态）；每页一请求，30s 超时
+// 按页适用。进度计数=各分节 Page 回执 total/累计 count 汇总（overview 清单条目
+// 计入）。页失败（含超时）→ 暂停出「载入中断」+「第 X/Y 页失败」断点重试
+// （已收页不重拉）；「世代变更/游标无效」→ 整轮重拉（回到载入态从头，连续
+// 自动重拉至多 2 次后转中断态人工重启）。
 
 // 载入态呈现面（响应式小量；累积的大数组归 PanoLoadRun 普通对象承载，避免
 // 数十万条的深层响应式开销）
@@ -1403,6 +1405,7 @@ const panoEstPages = ref(0)
 
 // 一轮装载的累积数据与簿记（非响应式；跨断点暂停保留，供「从断点继续」续拉）
 interface PanoLoadRun {
+  // overview 各页拼接的重载荷清单（首页另携小字段；files 明细恒不在场）
   overview: PanoramaSnapshot | null
   decisions: DecisionsView | null
   diff: SnapDiff | null
@@ -1413,7 +1416,9 @@ interface PanoLoadRun {
   domainSets: WorkSetRowView[]
   domainTotal: number
   domainFirstCount: number
-  // 全局页序计数（overview 计第 1 页）：失败页号 = pagesDone + 1
+  overviewTotal: number
+  overviewFirstCount: number
+  // 全局页序计数（三分节统一逐页）：失败页号 = pagesDone + 1
   pagesDone: number
 }
 let panoRun: PanoLoadRun | null = null
@@ -1435,6 +1440,8 @@ function freshPanoRun(): PanoLoadRun {
     domainSets: [],
     domainTotal: 0,
     domainFirstCount: 0,
+    overviewTotal: 0,
+    overviewFirstCount: 0,
     pagesDone: 0
   }
 }
@@ -1444,15 +1451,32 @@ function resetPanoRun(run: PanoLoadRun): void {
   Object.assign(run, fresh)
 }
 
-// 载入进度同步：已接收=各分节累计条目数；总量=已知分节 total 之和；估算总页数
-// =各分节 ceil(total/首页条数) 之和 + overview 1 页（未知分节不计），且不低于
-// 失败页号（首页即败时保证「第 X/Y 页」分母可读）
+// overview 已收清单条目数（六段合计；进度计数用）
+function overviewListCount(o: PanoramaSnapshot | null): number {
+  if (!o) return 0
+  return (
+    (o.dirs || []).length +
+    (o.groups || []).length +
+    (o.candidates || []).length +
+    (o.ignoredCandidates || []).length +
+    (o.confirmedCandidates || []).length +
+    (o.pending || []).length
+  )
+}
+
+// 载入进度同步：已接收=各分节累计条目数（overview 清单条目计入）；总量=已知
+// 分节 total 之和；估算总页数=各分节 ceil(total/首页条数) 之和（overview 至少
+// 1 页；未知分节不计），且不低于失败页号（首页即败时保证「第 X/Y 页」分母可读）
 function syncPanoProgress(run: PanoLoadRun): void {
-  panoReceivedCount.value = run.files.length + run.domainWorks.length + run.domainSets.length
-  panoTotalCount.value = run.filesTotal + run.domainTotal
+  panoReceivedCount.value = overviewListCount(run.overview) + run.files.length + run.domainWorks.length + run.domainSets.length
+  panoTotalCount.value = run.overviewTotal + run.filesTotal + run.domainTotal
+  const overviewEst =
+    run.overviewTotal > 0 && run.overviewFirstCount > 0
+      ? Math.max(1, Math.ceil(run.overviewTotal / run.overviewFirstCount))
+      : 1
   const filesEst = run.filesTotal > 0 && run.filesFirstCount > 0 ? Math.ceil(run.filesTotal / run.filesFirstCount) : 0
   const domainEst = run.domainTotal > 0 && run.domainFirstCount > 0 ? Math.ceil(run.domainTotal / run.domainFirstCount) : 0
-  panoEstPages.value = Math.max(1 + filesEst + domainEst, run.pagesDone + 1)
+  panoEstPages.value = Math.max(overviewEst + filesEst + domainEst, run.pagesDone + 1)
 }
 
 const panoProgressPercent = computed(() => {
@@ -1496,9 +1520,26 @@ async function runPanoPages(
     }
     const page = resp.page
     if (section === 'overview') {
-      run.overview = resp.panorama || null
-      run.decisions = resp.decisions || null
-      run.diff = resp.diff || null
+      // overview 逐页拼接：首页整体入账（含小字段），后续页只追加六段清单；
+      // Decisions/Diff 仅首页随答（在场才入账，后续页空载不覆盖）
+      const pan = resp.panorama || null
+      if (pan) {
+        if (!run.overview) {
+          run.overview = pan
+        } else {
+          const o = run.overview
+          o.dirs = (o.dirs || []).concat(pan.dirs || [])
+          o.groups = (o.groups || []).concat(pan.groups || [])
+          o.candidates = (o.candidates || []).concat(pan.candidates || [])
+          o.ignoredCandidates = (o.ignoredCandidates || []).concat(pan.ignoredCandidates || [])
+          o.confirmedCandidates = (o.confirmedCandidates || []).concat(pan.confirmedCandidates || [])
+          o.pending = (o.pending || []).concat(pan.pending || [])
+        }
+        run.overviewTotal = page.total
+        if (run.overviewFirstCount === 0) run.overviewFirstCount = page.count
+      }
+      if (resp.decisions) run.decisions = resp.decisions
+      if (resp.diff) run.diff = resp.diff
     } else if (section === 'files') {
       const pageFiles = (resp.panorama && resp.panorama.files) || []
       for (const f of pageFiles) run.files.push(f)

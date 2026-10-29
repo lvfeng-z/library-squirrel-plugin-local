@@ -1922,6 +1922,24 @@ func matchExistingWorkSet(key string, lib *LibraryIndex) (crossMatch bool, setID
 	return crossMatch, 0, ""
 }
 
+// panoramaOverviewViewOf 快照的 overview 分节投影：文件明细不随答（files 分节
+// 逐页拉取），仅展开目录级结构线索集；候选三仓/序列群/待裁决明细等重载荷
+// 清单由分节切页逐段携带，小字段（统计/规则档案态等）每页随答。
+func panoramaOverviewViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
+	view := *snap
+	view.DirMtimes = nil
+	view.Files = nil
+	if len(snap.Dirs) > 0 {
+		dirs := make([]SnapDir, len(snap.Dirs))
+		for i, d := range snap.Dirs {
+			d.StructClues = DirStructCluesOf(snap.RootPath, d.RelKey)
+			dirs[i] = d
+		}
+		view.Dirs = dirs
+	}
+	return view
+}
+
 // panoramaViewOf 快照的前端投影：游标表为后端增量态，不出前端载荷；文件级与
 // 目录级记录分别附加结构分段线索集（纯路径推导的呈现态数据，不入持久快照）。
 func panoramaViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
