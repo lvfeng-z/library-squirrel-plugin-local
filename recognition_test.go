@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -791,7 +792,8 @@ func TestBuildLibraryIndexPagingAndFallback(t *testing.T) {
 }
 
 // TestHandleFrontendRequestRecognitionActions 前端协议：getPanorama 未识别错误
-// 应答、识别后全量/分节拉取与决策态附带、startRecognition 启动应答与无会话错误。
+// 应答、识别后三分节（overview/files/domain）分节裁剪与决策态附带、startRecognition
+// 启动应答与无会话错误。
 func TestHandleFrontendRequestRecognitionActions(t *testing.T) {
 	root := t.TempDir()
 	m, ctx := newRecognitionFixture(t, root, nil)
@@ -807,7 +809,13 @@ func TestHandleFrontendRequestRecognitionActions(t *testing.T) {
 	if err := m.runFullRecognition(root); err != nil {
 		t.Fatalf("全量识别失败: %v", err)
 	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
 
+	// 缺省请求=overview 概览分节：目录树/群/规则统计在场，文件明细与选择域
+	// 不出现在本载荷；随答会话决策态；单页整答回执
 	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 102, Action: workbenchActionGetPanorama, Root: root}))
 	resp := ctx.lastResponse(t)
 	if !resp.OK || resp.Seq != 102 || resp.Panorama == nil {
@@ -816,24 +824,65 @@ func TestHandleFrontendRequestRecognitionActions(t *testing.T) {
 	if resp.Panorama.DirMtimes != nil {
 		t.Fatal("前端投影不应携带增量游标表")
 	}
-	if len(resp.Panorama.Dirs) == 0 || len(resp.Panorama.Files) == 0 || len(resp.Panorama.RuleStats) == 0 {
-		t.Fatalf("全量投影缺节: dirs=%d files=%d rules=%d",
-			len(resp.Panorama.Dirs), len(resp.Panorama.Files), len(resp.Panorama.RuleStats))
+	if len(resp.Panorama.Dirs) == 0 || len(resp.Panorama.Groups) != 1 || len(resp.Panorama.RuleStats) == 0 {
+		t.Fatalf("概览分节缺节: dirs=%d groups=%d rules=%d",
+			len(resp.Panorama.Dirs), len(resp.Panorama.Groups), len(resp.Panorama.RuleStats))
+	}
+	if len(resp.Panorama.Files) != 0 || resp.Domain != nil {
+		t.Fatal("概览分节不应携带文件明细与选择域")
 	}
 	if resp.Decisions == nil {
-		t.Fatal("getPanorama 应附带会话决策态（元素7 骨架）")
+		t.Fatal("概览分节应附带会话决策态（元素7 骨架）")
+	}
+	if resp.Page == nil || resp.Page.Section != panoramaSectionOverview || !resp.Page.Done ||
+		resp.Page.NextCursor != "" || resp.Page.Generation != sess.Snapshot.GeneratedAtMs {
+		t.Fatalf("概览分节分页回执不符: %+v", resp.Page)
 	}
 
+	// files 分节：仅文件明细（整树单页承载），不携带目录树/群/规则态/决策态/
+	// 差异集/选择域；回执按全量条数落 total/done
 	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 103, Action: workbenchActionGetPanorama, Root: root, Section: panoramaSectionFiles}))
 	resp = ctx.lastResponse(t)
 	if !resp.OK || resp.Seq != 103 || resp.Panorama == nil {
 		t.Fatalf("分节 getPanorama 失败: %+v", resp)
 	}
-	if len(resp.Panorama.Files) != len(recognitionSampleRelPaths) || len(resp.Panorama.Groups) != 1 {
-		t.Fatalf("文件级分节形态不符: files=%d groups=%d", len(resp.Panorama.Files), len(resp.Panorama.Groups))
+	if len(resp.Panorama.Files) != len(recognitionSampleRelPaths) {
+		t.Fatalf("文件分节形态不符: files=%d", len(resp.Panorama.Files))
 	}
-	if len(resp.Panorama.Dirs) != 0 || len(resp.Panorama.RuleStats) != 0 {
-		t.Fatal("文件级分节不应携带目录树与规则态")
+	if len(resp.Panorama.Dirs) != 0 || len(resp.Panorama.Groups) != 0 || len(resp.Panorama.RuleStats) != 0 {
+		t.Fatal("文件分节不应携带目录树/群/规则态")
+	}
+	if resp.Decisions != nil || resp.Diff != nil || resp.Domain != nil {
+		t.Fatal("文件分节不应随答决策态/差异集/选择域")
+	}
+	if resp.Page == nil || resp.Page.Section != panoramaSectionFiles || resp.Page.Offset != 0 ||
+		resp.Page.Count != len(recognitionSampleRelPaths) || resp.Page.Total != len(recognitionSampleRelPaths) ||
+		!resp.Page.Done || resp.Page.NextCursor != "" {
+		t.Fatalf("文件分节分页回执不符: %+v", resp.Page)
+	}
+
+	// domain 分节：仅选择域（样例树=8 作品+1 集，合计 9 条目单页承载），
+	// 不携带全景（无 Files/Dirs）与决策态/差异集
+	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 106, Action: workbenchActionGetPanorama, Root: root, Section: panoramaSectionDomain}))
+	resp = ctx.lastResponse(t)
+	if !resp.OK || resp.Seq != 106 || resp.Panorama != nil || resp.Domain == nil {
+		t.Fatalf("选择域分节 getPanorama 失败: %+v", resp)
+	}
+	if len(resp.Domain.Works) != 8 || len(resp.Domain.Sets) != 1 {
+		t.Fatalf("选择域分节形态不符: works=%d sets=%d", len(resp.Domain.Works), len(resp.Domain.Sets))
+	}
+	if resp.Decisions != nil || resp.Diff != nil {
+		t.Fatal("选择域分节不应随答决策态/差异集")
+	}
+	if resp.Page == nil || resp.Page.Section != panoramaSectionDomain || resp.Page.Offset != 0 ||
+		resp.Page.Count != 9 || resp.Page.Total != 9 || !resp.Page.Done || resp.Page.NextCursor != "" {
+		t.Fatalf("选择域分节分页回执不符: %+v", resp.Page)
+	}
+
+	// 未知分节词汇：错误应答
+	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 107, Action: workbenchActionGetPanorama, Root: root, Section: "不存在的分节"}))
+	if resp := ctx.lastResponse(t); resp.OK || !strings.Contains(resp.Error, "未知的 getPanorama 分节") {
+		t.Fatalf("未知分节应错误应答: %+v", resp)
 	}
 
 	// startRecognition：完成态再启动=合法重识别请求（started=true，异步执行）
@@ -846,6 +895,248 @@ func TestHandleFrontendRequestRecognitionActions(t *testing.T) {
 	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{Seq: 105, Action: workbenchActionStartRecognition, Root: root + "/不存在"}))
 	if resp := ctx.lastResponse(t); resp.OK {
 		t.Fatal("无会话库根的 startRecognition 不应成功")
+	}
+}
+
+// injectSessionSnapshot 测试直注：经识别完成落库入口写入指定快照（绕过识别
+// 干跑，构造分页/世代/页界测试所需的大规模或特定世代快照；重复调用=模拟
+// 重识别覆写，世代随新快照前移）。
+func injectSessionSnapshot(t *testing.T, m *SessionManager, root string, snap *RecognitionSnapshot) {
+	t.Helper()
+	if _, err := m.CompleteRecognition(root, snap); err != nil {
+		t.Fatalf("注入快照失败: %v", err)
+	}
+}
+
+// TestGetPanoramaCursorPaging 游标分页：5 万条文件快照按页大小提示逐页拉取，
+// 拼接与全量投影逐条全等、Page 回执 offset/count/total/nextCursor/done 逐页
+// 正确；选择域分节同口径（作品序列在前集在后，含跨界页）。
+func TestGetPanoramaCursorPaging(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+
+	const fileTotal = 50000
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1700000000000,
+		RootPath:      root,
+		Files:         make([]SnapFile, fileTotal),
+	}
+	for i := range snap.Files {
+		rel := fmt.Sprintf("目录甲/文件%06d.jpg", i)
+		snap.Files[i] = SnapFile{RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: "目录甲", State: snapStatePlain}
+	}
+	injectSessionSnapshot(t, m, root, snap)
+
+	// files 分节：提示 1 万条/页 → 5 页拉完
+	var got []SnapFile
+	cursor := ""
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(200 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionFiles, Cursor: cursor, PageSizeHint: 10000,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Panorama == nil || resp.Page == nil {
+			t.Fatalf("files 分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		p := resp.Page
+		if p.Section != panoramaSectionFiles || p.Generation != snap.GeneratedAtMs ||
+			p.Total != fileTotal || p.Offset != len(got) || p.Count != len(resp.Panorama.Files) {
+			t.Fatalf("files 页回执不符（第 %d 页）: %+v（已收 %d 条）", page+1, p, len(got))
+		}
+		got = append(got, resp.Panorama.Files...)
+		if p.Done {
+			if p.NextCursor != "" {
+				t.Fatal("末页不应携带续拉游标")
+			}
+			if page+1 != 5 {
+				t.Fatalf("提示 1 万条/页应 5 页拉完，实际 %d 页", page+1)
+			}
+			break
+		}
+		if p.NextCursor == "" {
+			t.Fatal("非末页缺续拉游标")
+		}
+		cursor = p.NextCursor
+	}
+	if !reflect.DeepEqual(got, panoramaViewOf(snap).Files) {
+		t.Fatal("逐页拼接与全量投影逐条不全等")
+	}
+
+	// domain 分节：6 集成员（1 集）+ 6 落单（同目录聚合 1 作品）→ 作品 7 + 集 1
+	// = 8 条目共用一个下标空间；提示 3 条/页 → 第 3 页跨界（作品尾+集头同页）
+	domSnap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1700000000001,
+		RootPath:      root,
+	}
+	for i := 1; i <= 6; i++ {
+		rel := fmt.Sprintf("甲/画集_%02d.jpg", i)
+		domSnap.Files = append(domSnap.Files, SnapFile{
+			RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: "甲",
+			State: snapStatePlain, GroupKey: "画集", GroupSeq: i,
+		})
+	}
+	for i := 1; i <= 6; i++ {
+		rel := fmt.Sprintf("乙/落单_%02d.jpg", i)
+		domSnap.Files = append(domSnap.Files, SnapFile{
+			RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: "乙", State: snapStatePlain,
+		})
+	}
+	injectSessionSnapshot(t, m, root, domSnap)
+	wantDomain := domainViewOf(DeriveWorkDomain(domSnap, nil))
+	if len(wantDomain.Works) != 7 || len(wantDomain.Sets) != 1 {
+		t.Fatalf("选择域测试桩形态不符: works=%d sets=%d", len(wantDomain.Works), len(wantDomain.Sets))
+	}
+
+	var gotWorks []*SelectableWork
+	var gotSets []*WorkSetView
+	cursor = ""
+	straddled := false
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(300 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionDomain, Cursor: cursor, PageSizeHint: 3,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Domain == nil || resp.Page == nil || resp.Panorama != nil {
+			t.Fatalf("domain 分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		p := resp.Page
+		if p.Section != panoramaSectionDomain || p.Generation != domSnap.GeneratedAtMs ||
+			p.Total != 8 || p.Offset != len(gotWorks)+len(gotSets) ||
+			p.Count != len(resp.Domain.Works)+len(resp.Domain.Sets) {
+			t.Fatalf("domain 页回执不符（第 %d 页）: %+v", page+1, p)
+		}
+		if len(resp.Domain.Works) > 0 && len(resp.Domain.Sets) > 0 {
+			straddled = true // 作品尾+集头同页
+		}
+		gotWorks = append(gotWorks, resp.Domain.Works...)
+		gotSets = append(gotSets, resp.Domain.Sets...)
+		if p.Done {
+			if p.NextCursor != "" {
+				t.Fatal("末页不应携带续拉游标")
+			}
+			break
+		}
+		cursor = p.NextCursor
+	}
+	if !straddled {
+		t.Fatal("提示 3 条/页的 8 条目序列应出现作品→集跨界页")
+	}
+	if !reflect.DeepEqual(gotWorks, wantDomain.Works) || !reflect.DeepEqual(gotSets, wantDomain.Sets) {
+		t.Fatal("选择域逐页拼接与全量推导不全等")
+	}
+}
+
+// TestGetPanoramaGenerationStale 世代失效：拉取中途快照世代前移 → 旧游标请求
+// 报「世代变更，请整轮重拉」错误应答（复用既有错误应答通路）。
+func TestGetPanoramaGenerationStale(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1000,
+		RootPath:      root,
+	}
+	for i := 0; i < 10; i++ {
+		rel := fmt.Sprintf("d/f%d.jpg", i)
+		snap.Files = append(snap.Files, SnapFile{RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: "d", State: snapStatePlain})
+	}
+	injectSessionSnapshot(t, m, root, snap)
+
+	// 首页（提示 3 条/页 → 非末页，携带续拉游标）
+	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+		Seq: 400, Action: workbenchActionGetPanorama, Root: root,
+		Section: panoramaSectionFiles, PageSizeHint: 3,
+	}))
+	resp := ctx.lastResponse(t)
+	if !resp.OK || resp.Page == nil || resp.Page.Done || resp.Page.NextCursor == "" {
+		t.Fatalf("files 首页应答不符: %+v", resp)
+	}
+
+	// 拉取中途换世代（模拟重识别产出新快照）→ 旧游标请求报世代变更
+	newer := *snap
+	newer.GeneratedAtMs = 2000
+	injectSessionSnapshot(t, m, root, &newer)
+	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+		Seq: 401, Action: workbenchActionGetPanorama, Root: root,
+		Section: panoramaSectionFiles, Cursor: resp.Page.NextCursor, PageSizeHint: 3,
+	}))
+	if stale := ctx.lastResponse(t); stale.OK || !strings.Contains(stale.Error, "世代变更") {
+		t.Fatalf("旧游标应报世代变更: %+v", stale)
+	}
+
+	// 游标解析的世代校验单锚（sentinel 语义）
+	if _, err := decodePanoramaCursor("1000:3", 2000); !errors.Is(err, errPanoramaGenerationStale) {
+		t.Fatalf("世代不一致应回 errPanoramaGenerationStale: %v", err)
+	}
+	if _, err := decodePanoramaCursor("残缺游标", 2000); !errors.Is(err, errPanoramaCursorInvalid) {
+		t.Fatalf("无法解析的游标应回 errPanoramaCursorInvalid: %v", err)
+	}
+}
+
+// TestGetPanoramaPageByteBound 页字节界：构造超界规模快照（60 条 × ~300KB
+// 序列化估算 + 1 条单条超界的 ~9MB 巨条目）断言按字节界分多页、每页序列化
+// 字节 ≤ 页界上限（16MB）；单条超界条目独立成页（首条必装的推进保证）。
+func TestGetPanoramaPageByteBound(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+
+	const pageCeiling = 16 << 20
+	big := strings.Repeat("x", 100*1024) // 100KB 目录名：条目估算 ≈ 300KB/条
+	huge := strings.Repeat("y", 3<<20)   // 3MB 目录名：单条估算 ≈ 9MB > 页目标
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1700000000002,
+		RootPath:      root,
+	}
+	hugeRel := huge + "/单条超界.jpg"
+	for i := 0; i < 60; i++ {
+		rel := fmt.Sprintf("%s/f%02d.jpg", big, i)
+		snap.Files = append(snap.Files, SnapFile{RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: big, State: snapStatePlain})
+	}
+	snap.Files = append(snap.Files, SnapFile{RelPath: hugeRel, FileName: fileNameOfRel(hugeRel), DirRelKey: huge, State: snapStatePlain})
+	injectSessionSnapshot(t, m, root, snap)
+
+	var got int
+	hugeAlone := false
+	cursor := ""
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(500 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionFiles, Cursor: cursor,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Panorama == nil || resp.Page == nil {
+			t.Fatalf("字节界分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		data, err := json.Marshal(resp.Panorama)
+		if err != nil {
+			t.Fatalf("页序列化失败: %v", err)
+		}
+		if len(data) > pageCeiling {
+			t.Fatalf("第 %d 页序列化 %d 字节超页界上限 %d", page+1, len(data), pageCeiling)
+		}
+		if len(resp.Panorama.Files) == 1 && resp.Panorama.Files[0].RelPath == hugeRel {
+			hugeAlone = true
+		}
+		got += len(resp.Panorama.Files)
+		if resp.Page.Done {
+			if page+1 < 2 {
+				t.Fatalf("超界规模快照应分多页，实际 %d 页", page+1)
+			}
+			break
+		}
+		cursor = resp.Page.NextCursor
+	}
+	if got != 61 {
+		t.Fatalf("逐页合计条数 = %d，期望 61", got)
+	}
+	if !hugeAlone {
+		t.Fatal("单条超界条目应独立成页")
 	}
 }
 

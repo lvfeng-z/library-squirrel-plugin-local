@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1100,11 +1101,19 @@ const (
 	workbenchActionRollbackProfile    = "rollbackProfile"    // 档案回退一代（写前备份）
 )
 
-// getPanorama 的分节拉取词汇。
+// getPanorama 的分节分页拉取词汇（大载荷分页方案·设计 A）。无 section 的
+// 缺省请求按 overview 应答；旧值 "files" 在新词汇下语义=文件分节（cursor 空
+// =首页）。
 const (
-	// panoramaSectionFiles 只取文件级清单（元素2/3 载体 + 序列群 + 待裁决明细 +
-	// 集名候选墙三清单 + 统计）——大库清单单独拉取，先渲染概览骨架再拉清单。
+	// panoramaSectionOverview 概览分节（单页整答，当前量级小）：统计+目录树+
+	// 群+规则统计+三清单+待裁决+过期赋值，并随答会话决策态与最近差异
+	//（Decisions/Diff 仅本分节随答）。
+	panoramaSectionOverview = "overview"
+	// panoramaSectionFiles 文件明细分节：按游标（投影数组下标）分页拉取。
 	panoramaSectionFiles = "files"
+	// panoramaSectionDomain 选择域分节（作品+集）：作品序列在前、集序列在后
+	// 共用一个下标空间，按游标分页拉取。
+	panoramaSectionDomain = "domain"
 )
 
 // workbenchFrontendRequest 前端→插件请求载荷（序号配对）。
@@ -1116,8 +1125,13 @@ type workbenchFrontendRequest struct {
 	// ConfirmSeq / Accepted 入口确认答复的配对序号与采纳结果。
 	ConfirmSeq int64 `json:"confirmSeq,omitempty"`
 	Accepted   bool  `json:"accepted,omitempty"`
-	// Section getPanorama 的分节拉取（缺省=全量投影）。
+	// Section getPanorama 的分节拉取（缺省=overview 概览分节）。
 	Section string `json:"section,omitempty"`
+	// Cursor getPanorama 分节续拉游标（不透明令牌「世代:下标」，空=首页）；
+	// PageSizeHint 单页条数上限提示（可选，仅收窄默认条数上限，页字节界不因
+	// 提示放宽）。
+	Cursor       string `json:"cursor,omitempty"`
+	PageSizeHint int    `json:"pageSizeHint,omitempty"`
 
 	// —— 手动解析族载荷（relPath 为相对库根的 '/' 路径）——
 	// RelPath 赋值/泛化/裁决/忽略的目标文件相对路径。
@@ -1238,12 +1252,14 @@ type workbenchFrontendResponse struct {
 	// running=同库根干跑已在途（本次未重复启动）。
 	Started bool `json:"started,omitempty"`
 	Running bool `json:"running,omitempty"`
-	// Panorama getPanorama 的识别全景投影（section=files 时仅含文件级清单）。
+	// Panorama getPanorama 的识别全景投影（overview 分节=概览裁剪、files 分节
+	//=文件明细分页页片；其余分节不携带）。
 	Panorama *RecognitionSnapshot `json:"panorama,omitempty"`
-	// Decisions getPanorama 附带的会话决策态（元素7：赋值/忽略/选择集的活数据）。
+	// Decisions getPanorama overview 分节随答的会话决策态（元素7：赋值/忽略/
+	// 选择集的活数据）。
 	Decisions *workbenchSessionDecisionsView `json:"decisions,omitempty"`
-	// Diff getPanorama/getDiff 附带的最近一次重识别差异集（生成规则后强制
-	// 验证轮的高亮载荷）。
+	// Diff getPanorama overview 分节随答的最近一次重识别差异集（getDiff 同源；
+	// 生成规则后强制验证轮的高亮载荷）。
 	Diff *SnapDiff `json:"diff,omitempty"`
 	// Assignment assign/clearAssignment 后该文件的赋值呈现（清除后为空）。
 	Assignment *workbenchAssignmentView `json:"assignment,omitempty"`
@@ -1262,9 +1278,12 @@ type workbenchFrontendResponse struct {
 	// 成员+共同形态+规则草稿+命中预览+调整面线索清单与默认指派；Failed=true
 	// 为剧本步5a 失败态——泛化置灰、调整可用）。
 	SetRuleSuggestion *SetRuleSuggestion `json:"setRuleSuggestion,omitempty"`
-	// Domain getPanorama 附带的资源选择域（阶段4：作品原子结构+集视图，前端
-	// 选择交互与选择集键的单一推导源）。
+	// Domain getPanorama 选择域分节随答的资源选择域（阶段4：作品原子结构+
+	// 集视图，前端选择交互与选择集键的单一推导源），按游标分页。
 	Domain *WorkDomain `json:"domain,omitempty"`
+	// Page getPanorama 分节分页回执（overview 单页整答：count/total 恒 0、
+	// done 恒真）。
+	Page *workbenchPageReceipt `json:"page,omitempty"`
 	// Created / CreateMsg createTasks 的创建结论：已提交作品数与用户可读摘要。
 	Created   int    `json:"created,omitempty"`
 	CreateMsg string `json:"createMsg,omitempty"`
@@ -1275,6 +1294,24 @@ type workbenchFrontendResponse struct {
 	RulePreview *rulesPreviewResult `json:"rulePreview,omitempty"`
 	// RolledBack rollbackProfile 的回退结论（真=已回退一代）。
 	RolledBack bool `json:"rolledBack,omitempty"`
+}
+
+// workbenchPageReceipt getPanorama 分节分页回执。generation=快照世代
+// （GeneratedAtMs）：识别轮次变更后世代前移，拉取中携带的旧游标失效——应答
+// 明确报「世代变更，请整轮重拉」由前端整轮重来。
+type workbenchPageReceipt struct {
+	// Section 本页所属分节（overview / files / domain）。
+	Section string `json:"section"`
+	// Offset / Count 本页在分节条目序列中的起点与条数；Total 序列总条数
+	//（overview 无条目序列语义，三者恒 0）。
+	Offset int `json:"offset"`
+	Count  int `json:"count"`
+	Total  int `json:"total"`
+	// NextCursor 续拉游标（末页为空）；Done 本页即末页。
+	NextCursor string `json:"nextCursor,omitempty"`
+	Done       bool   `json:"done"`
+	// Generation 快照世代（GeneratedAtMs）。
+	Generation int64 `json:"generation"`
 }
 
 // workbenchSessionDecisionsView 会话决策态投影（元素7 的活数据——赋值/忽略/
@@ -1365,6 +1402,215 @@ func (m *SessionManager) publishResponse(resp *workbenchFrontendResponse) {
 	}
 }
 
+// —— getPanorama 分节分页（大载荷分页方案·设计 A）——
+
+const (
+	// panoramaPageTargetBytes 单页序列化字节目标（页界区间 6-16MB 取 8MB：
+	// 远低于 64MB 断路器且单页往返在 30s 前端超时窗内余量充足）。
+	panoramaPageTargetBytes = 8 << 20
+	// panoramaPageMaxEntries 单页条数硬上限（字节估算之外的双保险，防小条目
+	// 海量场景单页条数失控）；请求的 PageSizeHint 只能收窄本上限。
+	panoramaPageMaxEntries = 50000
+)
+
+// errPanoramaGenerationStale 世代失效：识别轮次更新（快照 GeneratedAtMs 前移），
+// 拉取中携带的旧游标作废，前端须整轮重拉。
+var errPanoramaGenerationStale = errors.New("世代变更，请整轮重拉")
+
+// errPanoramaCursorInvalid 游标无法解析或下标越界（同世代内不应出现），按整轮
+// 重拉语义报错。
+var errPanoramaCursorInvalid = errors.New("游标无效，请整轮重拉")
+
+// encodePanoramaCursor 游标编码：世代:下标（前端不透明令牌，原样回传）。
+func encodePanoramaCursor(generation int64, offset int) string {
+	return fmt.Sprintf("%d:%d", generation, offset)
+}
+
+// decodePanoramaCursor 游标解析并校验世代（与当前快照世代不一致 → 世代失效）。
+func decodePanoramaCursor(cursor string, generation int64) (int, error) {
+	genText, offText, ok := strings.Cut(cursor, ":")
+	if !ok {
+		return 0, errPanoramaCursorInvalid
+	}
+	gen, genErr := strconv.ParseInt(genText, 10, 64)
+	offset, offErr := strconv.Atoi(offText)
+	if genErr != nil || offErr != nil || offset < 0 {
+		return 0, errPanoramaCursorInvalid
+	}
+	if gen != generation {
+		return 0, errPanoramaGenerationStale
+	}
+	return offset, nil
+}
+
+// snapFileWireBytes SnapFile 条目的序列化字节估算（确定性近似，不做真序列化：
+// 键名/标点骨架按定长、字符串按 UTF-8 字节数；JSON 转义增量与骨架余量互抵，
+// 在 6-16MB 页界目标下足够安全——简单确定性优先，不追求精确）。
+func snapFileWireBytes(f SnapFile) int {
+	n := 144 // 骨架：键名/标点/state/数值与布尔字段
+	n += len(f.RelPath) + len(f.FileName) + len(f.DirRelKey) + len(f.State) + len(f.GroupKey)
+	for _, d := range f.Final {
+		n += 72 + len(d.Dimension) + len(d.Value) + len(d.Source) + len(d.RoleName) + len(d.RuleID)
+	}
+	for _, dim := range f.PendingDims {
+		n += 16 + len(dim)
+	}
+	for _, id := range f.MatchedRuleIDs {
+		n += 18 + len(id)
+	}
+	for _, c := range f.Clues {
+		n += 28 + len(c.Kind) + len(c.Detail)
+	}
+	for _, sc := range f.StructClues {
+		n += 44 + len(sc.Ref) + len(sc.Kind) + len(sc.Label) + len(sc.Value)
+	}
+	return n
+}
+
+// selectableWorkWireBytes 选择域作品条目的序列化字节估算（口径同上）。
+func selectableWorkWireBytes(w *SelectableWork) int {
+	n := 104
+	n += len(w.WorkID) + len(w.Kind) + len(w.DirRelKey) + len(w.SetKey) + len(w.State)
+	for _, rel := range w.Files {
+		n += 14 + len(rel)
+	}
+	return n
+}
+
+// workSetViewWireBytes 选择域集条目的序列化字节估算（口径同上）。
+func workSetViewWireBytes(s *WorkSetView) int {
+	n := 68
+	n += len(s.SetKey) + len(s.DirRelKey) + len(s.Key)
+	for _, m := range s.Members {
+		n += 12 + len(m)
+	}
+	return n
+}
+
+// panoramaFilesPage 文件分节切页：从 offset 起按页字节目标与条数上限装页，
+// 首条必装保证推进；返回页切片与下一偏移；offset 合法性由调用方前置校验。
+func panoramaFilesPage(files []SnapFile, offset, maxEntries int) ([]SnapFile, int) {
+	end := offset
+	for budget := panoramaPageTargetBytes; end < len(files) && end-offset < maxEntries; end++ {
+		cost := snapFileWireBytes(files[end])
+		if end > offset && budget < cost {
+			break
+		}
+		budget -= cost
+	}
+	return files[offset:end], end
+}
+
+// panoramaDomainPage 选择域分节切页：作品序列在前、集序列在后共用一个下标
+// 空间（两段共用同一字节预算），页可跨界（作品尾+集头同页）；返回页内作品/
+// 集切片与下一偏移。
+func panoramaDomainPage(domain *WorkDomain, offset, maxEntries int) ([]*SelectableWork, []*WorkSetView, int) {
+	nWorks := len(domain.Works)
+	total := nWorks + len(domain.Sets)
+	budget := panoramaPageTargetBytes
+	end := offset
+	for end < nWorks && end-offset < maxEntries {
+		cost := selectableWorkWireBytes(domain.Works[end])
+		if end > offset && budget < cost {
+			break
+		}
+		budget -= cost
+		end++
+	}
+	for end < total && end-offset < maxEntries {
+		cost := workSetViewWireBytes(domain.Sets[end-nWorks])
+		if end > offset && budget < cost {
+			break
+		}
+		budget -= cost
+		end++
+	}
+	var works []*SelectableWork
+	var sets []*WorkSetView
+	if offset < nWorks {
+		worksEnd := min(end, nWorks)
+		works = domain.Works[offset:worksEnd]
+		if end > nWorks {
+			sets = domain.Sets[:end-nWorks]
+		}
+		return works, sets, end
+	}
+	return works, domain.Sets[offset-nWorks : end-nWorks], end
+}
+
+// panoramaSectionPage getPanorama 分节应答的装配件：分页回执 + 分节数据，
+// 未请求的分节恒空。
+type panoramaSectionPage struct {
+	receipt  *workbenchPageReceipt
+	panorama *RecognitionSnapshot
+	domain   *WorkDomain
+	overview bool // overview 分节（Decisions/Diff 仅该分节随答）
+}
+
+// panoramaPageOf getPanorama 分节分页求值：按 section 词汇裁剪投影、按游标
+// （先过世代校验）切页并落 Page 回执。overview 单页整答；files/domain 按游标
+// 分页。
+func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFrontendRequest) (*panoramaSectionPage, error) {
+	generation := sess.Snapshot.GeneratedAtMs
+	switch req.Section {
+	case "", panoramaSectionOverview:
+		view := panoramaViewOf(sess.Snapshot)
+		view.Files = nil
+		return &panoramaSectionPage{
+			receipt:  &workbenchPageReceipt{Section: panoramaSectionOverview, Done: true, Generation: generation},
+			panorama: &view,
+			overview: true,
+		}, nil
+	case panoramaSectionFiles, panoramaSectionDomain:
+	default:
+		return nil, fmt.Errorf("未知的 getPanorama 分节 %q", req.Section)
+	}
+	offset := 0
+	if req.Cursor != "" {
+		var err error
+		if offset, err = decodePanoramaCursor(req.Cursor, generation); err != nil {
+			return nil, err
+		}
+	}
+	maxEntries := panoramaPageMaxEntries
+	if req.PageSizeHint > 0 && req.PageSizeHint < maxEntries {
+		maxEntries = req.PageSizeHint
+	}
+	if req.Section == panoramaSectionFiles {
+		view := panoramaViewOf(sess.Snapshot)
+		if offset > len(view.Files) {
+			return nil, errPanoramaCursorInvalid
+		}
+		page, next := panoramaFilesPage(view.Files, offset, maxEntries)
+		receipt := &workbenchPageReceipt{
+			Section: panoramaSectionFiles, Offset: offset, Count: len(page),
+			Total: len(view.Files), Done: next >= len(view.Files), Generation: generation,
+		}
+		if !receipt.Done {
+			receipt.NextCursor = encodePanoramaCursor(generation, next)
+		}
+		return &panoramaSectionPage{receipt: receipt, panorama: &RecognitionSnapshot{
+			SchemaVersion: view.SchemaVersion, GeneratedAtMs: view.GeneratedAtMs, Files: page,
+		}}, nil
+	}
+	domain := domainViewOf(DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess)))
+	total := len(domain.Works) + len(domain.Sets)
+	if offset > total {
+		return nil, errPanoramaCursorInvalid
+	}
+	works, sets, next := panoramaDomainPage(domain, offset, maxEntries)
+	receipt := &workbenchPageReceipt{
+		Section: panoramaSectionDomain, Offset: offset, Count: len(works) + len(sets),
+		Total: total, Done: next >= total, Generation: generation,
+	}
+	if !receipt.Done {
+		receipt.NextCursor = encodePanoramaCursor(generation, next)
+	}
+	// 页域投影：两序列恒为非 nil 空切片形态（序列化出 []，与全量域视图一致）
+	pageDomain := &WorkDomain{Works: append([]*SelectableWork{}, works...), Sets: append([]*WorkSetView{}, sets...)}
+	return &panoramaSectionPage{receipt: receipt, domain: pageDomain}, nil
+}
+
 // HandleFrontendRequest 处理一条前端请求并回发应答（激活期订阅循环逐条调用）。
 // 未知动作/非法载荷回告错误应答，不中断订阅循环。
 func (m *SessionManager) HandleFrontendRequest(data []byte) {
@@ -1443,20 +1689,20 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, "该会话尚未完成全量识别，无识别全景可读"
 			break
 		}
-		view := panoramaViewOf(sess.Snapshot)
-		if req.Section == panoramaSectionFiles {
-			// 文件级清单分节：概览小节（目录树/规则态/死路径）不出现在本载荷
-			view = RecognitionSnapshot{
-				SchemaVersion: view.SchemaVersion, GeneratedAtMs: view.GeneratedAtMs,
-				Files: view.Files, Groups: view.Groups, Pending: view.Pending, Stats: view.Stats,
-				Candidates: view.Candidates, IgnoredCandidates: view.IgnoredCandidates,
-				ConfirmedCandidates: view.ConfirmedCandidates,
-			}
+		page, err := m.panoramaPageOf(sess, req)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
 		}
-		resp.Panorama = &view
-		resp.Decisions = decisionsViewOf(sess)
-		resp.Diff = sess.LastDiff
-		resp.Domain = domainViewOf(DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess)))
+		resp.Page = page.receipt
+		resp.Panorama = page.panorama
+		resp.Domain = page.domain
+		if page.overview {
+			// Decisions/Diff 仅 overview 分节随答（会话决策态与差异高亮随概览
+			// 一次到达，明细分节不重复携带）
+			resp.Decisions = decisionsViewOf(sess)
+			resp.Diff = sess.LastDiff
+		}
 	case workbenchActionAssign:
 		sess, view, err := m.ApplyAssignment(req.Root, req.RelPath, SessionAssignment{
 			Author: req.Author, AuthorRole: req.AuthorRole, Title: req.Title,
