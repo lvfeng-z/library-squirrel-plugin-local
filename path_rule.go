@@ -168,8 +168,10 @@ func (c *PathClassifier) ClassifyDir(level int, dirName string) ([]PathMeaning, 
 	}
 }
 
-// meaningsFromRules 依规则档案回放该层目录含义：以启用规则序列调 dirMeaningsFromRules
-// 求值（档案载入在方法内完成）。
+// meaningsFromRules 依规则档案回放该层目录含义：以启用规则序列调
+// dirMeaningReplay 求值（档案载入在方法内完成）。问答通道只知层深与目录名，
+// 祖先链以空占位构造（占位层不命中目录格式，组合规则的祖先依赖成员在门段
+// 保守不命中——与文件级求值相比覆盖面收窄，仅影响本已退役的问答回放路径）。
 func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMeaning {
 	rules := EffectiveRules(nil)
 	if c.ctx != nil {
@@ -181,27 +183,39 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 			rules = EffectiveRules(profile)
 		}
 	}
-	return dirMeaningsFromRules(rules, level, dirName)
-}
-
-// dirMeaningsFromRules 依给定规则序列回放单个目录层的含义（纯求值，无 IO、不弹问）：
-// 层深先经 qnaDirDepth 换算为规则的 DirNames 索引（问答层深与规则层深两套编号恰差
-// 1），再构造仅该层目录名有效的合成匹配输入（其余层名空占位、文件名留空使文件名
-// 规则不参与），逐条求值可表达目录层含义的启用规则；命中落点须恰为该层该名
-// （占位层命中不算覆盖），再执行提取动作把声明转回路径含义并按（类型,名字）去重。
-// 层深 0（扫描根本身）无对应索引、或无含义产出时返回 nil，视为规则未覆盖。
-// 识别干跑的目录层含义状态求值与本方法同源（干跑零弹问，只取回放结论）。
-func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMeaning {
 	depth := qnaDirDepth(level)
 	if depth < 0 {
 		return nil
 	}
 	dirNames := make([]string, depth+1)
 	dirNames[depth] = dirName
+	meanings, _ := dirMeaningReplay(rules, dirNames, nil)
+	return meanings
+}
+
+// dirMeaningReplay 目录层含义回放（纯求值，无 IO、不弹问）：识别全景元素1 的
+// Meanings 与 MeaningRuleID 同源同序出自本实现。对给定目录链（dirNames = 库根
+// 下各层目录名，目标层为末元素，须为真实目录名——祖先层供组合规则门段判定）
+// 构造合成匹配输入（文件名留空使文件名规则不参与），逐条求值可表达目录层
+// 含义的启用规则；组合规则（refs 非空）与提取段同语义地先过门段——被引成员
+// 全体在同一合成输入上命中才参与（runRefGateStage，与 runExtractionStage 同一
+// 实现），门过把成员捕获快照注入本规则作用域（refCapture 提取与 when 限定名
+// 可用）；命中落点须恰为目标层目标名（祖先层命中不算覆盖），再执行提取动作
+// 把声明转回路径含义并按（类型,名字）去重。返回（含义序列, 首个命中规则 ID
+// ——不论该规则是否产出含义，与元素1「被哪条规则覆盖」口径一致）；空链返回
+// 零值。
+func dirMeaningReplay(rules []RuleEntry, dirNames []string, lib *LibraryIndex) ([]PathMeaning, string) {
+	if len(dirNames) == 0 {
+		return nil, ""
+	}
+	depth := len(dirNames) - 1
+	dirName := dirNames[depth]
 	in := &MatchInput{DirNames: dirNames}
+	gate := runRefGateStage(rules, in, lib, &ParseContext{DirNames: dirNames, Depth: len(dirNames)})
 	var meanings []PathMeaning
 	var decls []MetadataDeclaration
 	seen := make(map[PathMeaning]bool)
+	firstHitRuleID := ""
 	for _, rule := range rules {
 		if !rule.Enabled || rule.Pattern == nil {
 			continue
@@ -210,13 +224,24 @@ func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMe
 			// 兄弟群组规则定群文件归属，不表达目录层含义
 			continue
 		}
-		ctx := &ParseContext{DirNames: dirNames, Depth: depth + 1}
-		if !rule.Pattern.Evaluate(in, nil, ctx) {
+		ctx := &ParseContext{DirNames: dirNames, Depth: len(dirNames)}
+		if len(rule.Refs) > 0 {
+			// 组合规则门段（与提取段同语义）：refs 全体成员在本回放输入上命中
+			// 才参与；门过注入成员捕获快照（限定键通道）。
+			if !gate.allHit(rule.Refs) {
+				continue
+			}
+			injectRefSnapshots(ctx, gate, rule.Refs)
+		}
+		if !rule.Pattern.Evaluate(in, lib, ctx) {
 			continue
 		}
 		if hit, ok := ctx.LastDirHit(); !ok || hit.Depth != depth || hit.Name != dirName {
-			// 命中未落在本层目录名上（占位层假命中），不算覆盖
+			// 命中未落在本层目录名上（祖先层命中），不算覆盖
 			continue
+		}
+		if firstHitRuleID == "" {
+			firstHitRuleID = rule.ID
 		}
 		for _, action := range rule.Extractions {
 			// 条件动作对该回放语境下的解析上下文与已产出声明集求值（与提取段
@@ -240,7 +265,7 @@ func dirMeaningsFromRules(rules []RuleEntry, level int, dirName string) []PathMe
 			}
 		}
 	}
-	return meanings
+	return meanings, firstHitRuleID
 }
 
 // absorbResponse 把问答响应吸收为一条 qna 规则并持久化入档：答案词汇映射新体系

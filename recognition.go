@@ -727,8 +727,10 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	for _, dir := range in.enumRes.Dirs {
 		node := SnapDir{RelKey: dir.RelKey, Name: dir.Name, Depth: dir.Depth, FileCount: dir.FileCount}
 		if dir.Depth > 0 {
-			node.Meanings = dirMeaningsFromRules(in.enabledRules, dir.Depth, dir.Name)
-			node.MeaningRuleID = firstMeaningRuleID(in.enabledRules, dir.Depth, dir.Name)
+			// 目录链取真实祖先名（RelKey 按 '/' 拆层——目录名不含分隔符）：
+			// 组合规则的门段依赖祖先层求值（如「Artist 壳目录之下」），占位
+			// 空串祖先会令门段保守失败、含义面收窄。
+			node.Meanings, node.MeaningRuleID = dirMeaningReplay(in.enabledRules, strings.Split(dir.RelKey, "/"), in.lib)
 		}
 		snap.Dirs = append(snap.Dirs, node)
 	}
@@ -1805,34 +1807,6 @@ func matchExistingWorkSet(key string, lib *LibraryIndex) (crossMatch bool, setID
 		return crossMatch, setID, setName
 	}
 	return crossMatch, 0, ""
-}
-
-// firstMeaningRuleID 目录层含义回放中首个命中规则的 ID（元素1 的「被哪条规则
-// 覆盖」呈现；与 dirMeaningsFromRules 同输入同序求值，仅取规则侧结论）。
-func firstMeaningRuleID(rules []RuleEntry, level int, dirName string) string {
-	depth := qnaDirDepth(level)
-	if depth < 0 {
-		return ""
-	}
-	dirNames := make([]string, depth+1)
-	dirNames[depth] = dirName
-	in := &MatchInput{DirNames: dirNames}
-	for _, rule := range rules {
-		if !rule.Enabled || rule.Pattern == nil {
-			continue
-		}
-		if isGroupingRule(&rule) {
-			continue
-		}
-		ctx := &ParseContext{DirNames: dirNames, Depth: depth + 1}
-		if !rule.Pattern.Evaluate(in, nil, ctx) {
-			continue
-		}
-		if hit, ok := ctx.LastDirHit(); ok && hit.Depth == depth && hit.Name == dirName {
-			return rule.ID
-		}
-	}
-	return ""
 }
 
 // panoramaViewOf 快照的前端投影：游标表为后端增量态，不出前端载荷；文件级与
