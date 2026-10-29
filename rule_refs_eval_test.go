@@ -408,6 +408,72 @@ func TestRefGateThreeChannelConsistency(t *testing.T) {
 	assertRefMatchedIDs(t, batch[0].MatchedRuleIDs, "member-a", "member-b", "combo-1")
 }
 
+// —— 「之下不含其身」（2026-10-29 用户拍板收紧）——
+
+// TestRefGateAnchorStrictBelow 组合自身目录行锚定层与被引目录成员命中层重合
+// 时整体不中：集名等锚定不得落在被引规则命中的目录身上（同链同层即同目录）；
+// 纯门组合（无自身目录行，无锚定）与文件行成员（无目录命中层）不受该约束。
+func TestRefGateAnchorStrictBelow(t *testing.T) {
+	setCombo := refComboRule(t, "combo-set", []string{"member-b"},
+		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}}},
+		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
+	memberA, memberB := refEvalMembers(t) // memberA=文件行，memberB=目录行 Artist[{作者}]
+	rules := []RuleEntry{memberB, setCombo}
+
+	// 壳下子目录文件：锚定层（SetA=1）严格深于成员命中层（Artist[甲]=0）→命中。
+	in := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"Artist[甲]", "SetA"},
+		RelPath: "Artist[甲]/SetA/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	decision := runRefEval(t, rules, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "combo-set")
+	if v, ok := declOf(decision, "combo-set", DimCollection); !ok || v != "SetA" {
+		t.Fatalf("壳下子目录集名应为 SetA: %q %v", v, ok)
+	}
+
+	// 壳直属文件：{集名} 最深命中层=壳目录自身（0）与成员命中层重合→组合零产出。
+	in = &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"Artist[甲]"},
+		RelPath: "Artist[甲]/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	decision = runRefEval(t, rules, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b")
+
+	// 纯门组合（无自身行）：壳直属文件仍命中（无目录锚定，约束不适用）。
+	pureGate := refComboRule(t, "combo-gate", []string{"member-b"}, nil, nil)
+	decision = runRefEval(t, []RuleEntry{memberB, pureGate}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "combo-gate")
+
+	// 文件行成员（无目录命中层）：组合自身目录行锚定不受约束，直接父目录即集名。
+	fileCombo := refComboRule(t, "combo-file", []string{"member-a"},
+		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}}},
+		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
+	in = &MatchInput{
+		FileName: "甲_乙.jpg", DirNames: []string{"Plain"},
+		RelPath: "Plain/甲_乙.jpg", Siblings: []string{"甲_乙.jpg"},
+	}
+	decision = runRefEval(t, []RuleEntry{memberA, fileCombo}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a", "combo-file")
+	if v, ok := declOf(decision, "combo-file", DimCollection); !ok || v != "Plain" {
+		t.Fatalf("文件行成员的组合集名应为直接父目录名 Plain: %q %v", v, ok)
+	}
+
+	// 锚定层在被引成员命中层之上（不重合）：不受约束——既有「Vol 标签目录在
+	// 作者目录之上」形态保持命中（同 TestRefGateNonComboZeroChange 自身行锚）。
+	aboveCombo := refComboRule(t, "combo-above", []string{"member-b"},
+		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("Vol[{标签}]")}}},
+		[]ExtractionAction{{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1}})
+	in = &MatchInput{
+		FileName: "甲_乙.jpg", DirNames: []string{"Vol[科幻]", "Artist[甲]"},
+		RelPath:  "Vol[科幻]/Artist[甲]/甲_乙.jpg", Siblings: []string{"甲_乙.jpg"},
+	}
+	decision = runRefEval(t, []RuleEntry{memberB, aboveCombo}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "combo-above")
+	if v, ok := declOf(decision, "combo-above", DimTag); !ok || v != "科幻" {
+		t.Fatalf("锚定层在成员命中层之上时应保持命中: %q %v", v, ok)
+	}
+}
+
 // refIDsContain 判断命中 ID 序列是否含目标值。
 func refIDsContain(values []string, target string) bool {
 	for _, v := range values {

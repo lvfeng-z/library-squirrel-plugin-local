@@ -17,8 +17,9 @@ const realComboProfile = `{"schemaVersion":4,"rules":[
 {"id":"manual-作品集-作者-目录-结构的-1793237671031","description":"【作品集】作者/目录 结构的","source":"manual","enabled":true,"refs":["manual-作者-artist-作者结构-1793237147531"],"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"{集名}"}}}],"extractions":[{"dimension":"collection","from":"capture","captureName":"setname","constant":"","roleName":""}],"synthesis":{"dimPolicies":[],"roles":[]}}]}`
 
 // TestRealProfileComboGatePipeline 真实档案的文件级流水线门控基线：Artist 壳
-// 下子目录识别为作品集、无 Artist 壳祖先的目录零作品集（该通道修复前后均
-// 正常，作为回放通道对照面锚定）。
+// 下子目录识别为作品集、无 Artist 壳祖先的目录零作品集、Artist 壳直属文件零
+// 作品集（之下不含其身：集名锚定不得落在被引规则命中的目录身上——2026-10-29
+// 用户拍板收紧）。
 func TestRealProfileComboGatePipeline(t *testing.T) {
 	profile, errs := ParseProfile([]byte(realComboProfile))
 	if profile == nil {
@@ -41,9 +42,13 @@ func TestRealProfileComboGatePipeline(t *testing.T) {
 	if got := matchedCollectionOf(decisions[1]); got != "" {
 		t.Errorf("OtherDir 不应识别作品集，实际 %q", got)
 	}
-	// Artist 壳直属文件：{集名} 取最深命中层=壳目录自身（与组合规则语义一致）。
-	if got := matchedCollectionOf(decisions[2]); got != "Artist[foo]" {
-		t.Errorf("Artist[foo] 直属文件的集名应为壳目录名，实际 %q", got)
+	// Artist 壳直属文件：自身行 {集名} 的最深命中层=壳目录自身，与成员命中层
+	// 重合 → 之下不含其身 → 零作品集。
+	if got := matchedCollectionOf(decisions[2]); got != "" {
+		t.Errorf("Artist[foo] 直属文件不应识别作品集（之下不含其身），实际 %q", got)
+	}
+	if len(decisions[2].MatchedRuleIDs) != 1 || decisions[2].MatchedRuleIDs[0] != "manual-作者-artist-作者结构-1793237147531" {
+		t.Errorf("Artist[foo] 直属文件命中应仅成员规则，实际 %v", decisions[2].MatchedRuleIDs)
 	}
 }
 
@@ -59,8 +64,8 @@ func matchedCollectionOf(d FileDecision) string {
 
 // TestDirMeaningReplayRefGateMatrix 目录层含义回放（识别全景元素1 消费）的
 // 门控矩阵：Artist 壳下子目录得作品集含义、无 Artist 壳祖先的目录零作品集
-// 含义、Artist 壳目录自身亦覆盖（与文件级求值一致：壳内直属文件的 {集名}
-// 捕获即壳目录名）、首个覆盖规则随门分叉、门过链上更深层取最深 {集名} 层。
+// 含义、Artist 壳目录自身零作品集含义（之下不含其身——作者含义仍由成员规则
+// 覆盖）、首个覆盖规则随门分叉、门过链上更深层取最深 {集名} 层。
 func TestDirMeaningReplayRefGateMatrix(t *testing.T) {
 	profile, errs := ParseProfile([]byte(realComboProfile))
 	if profile == nil {
@@ -90,14 +95,16 @@ func TestDirMeaningReplayRefGateMatrix(t *testing.T) {
 		t.Fatalf("无规则覆盖的目录首个覆盖规则应为空，实际 %q", firstID)
 	}
 
-	// Artist 壳目录自身：成员在本层命中 + 组合 {集名} 亦匹配本层 → 作者与
-	// 作品集双含义（与文件级一致：壳内直属文件的集名捕获=壳目录名）。
+	// Artist 壳目录自身：成员在本层命中 → 作者含义仍在；组合 {集名} 锚定层与
+	// 成员命中层重合（之下不含其身）→ 零作品集含义。
 	meanings, firstID = dirMeaningReplay(profile.Rules, []string{"Artist[foo]"}, nil)
 	if !meaningContains(meanings, string(PathTypeLocalAuthor), "foo") {
 		t.Fatalf("Artist 壳目录自身应回放作者含义 foo: %+v", meanings)
 	}
-	if !meaningContains(meanings, string(PathTypeWorkSet), "Artist[foo]") {
-		t.Fatalf("Artist 壳目录自身应回放作品集含义（与文件级一致）: %+v", meanings)
+	for _, m := range meanings {
+		if m.Type == string(PathTypeWorkSet) {
+			t.Fatalf("Artist 壳目录自身不应回放任何作品集含义（之下不含其身）: %+v", meanings)
+		}
 	}
 	if firstID != memberID {
 		t.Fatalf("首个覆盖规则应为成员规则，实际 %q", firstID)

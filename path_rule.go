@@ -200,10 +200,11 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 // 含义的启用规则；组合规则（refs 非空）与提取段同语义地先过门段——被引成员
 // 全体在同一合成输入上命中才参与（runRefGateStage，与 runExtractionStage 同一
 // 实现），门过把成员捕获快照注入本规则作用域（refCapture 提取与 when 限定名
-// 可用）；命中落点须恰为目标层目标名（祖先层命中不算覆盖），再执行提取动作
-// 把声明转回路径含义并按（类型,名字）去重。返回（含义序列, 首个命中规则 ID
-// ——不论该规则是否产出含义，与元素1「被哪条规则覆盖」口径一致）；空链返回
-// 零值。
+// 可用），且同受「之下不含其身」约束（自身目录行锚定层与被引目录成员命中层
+// 重合时整体不中）；命中落点须恰为目标层目标名（祖先层命中不算覆盖），再执行
+// 提取动作把声明转回路径含义并按（类型,名字）去重。返回（含义序列, 首个命中
+// 规则 ID——不论该规则是否产出含义，与元素1「被哪条规则覆盖」口径一致）；
+// 空链返回零值。
 func dirMeaningReplay(rules []RuleEntry, dirNames []string, lib *LibraryIndex) ([]PathMeaning, string) {
 	if len(dirNames) == 0 {
 		return nil, ""
@@ -238,6 +239,11 @@ func dirMeaningReplay(rules []RuleEntry, dirNames []string, lib *LibraryIndex) (
 		}
 		if hit, ok := ctx.LastDirHit(); !ok || hit.Depth != depth || hit.Name != dirName {
 			// 命中未落在本层目录名上（祖先层命中），不算覆盖
+			continue
+		}
+		if len(rule.Refs) > 0 && gate.anchorCoincides(rule.Refs, depth) {
+			// 之下不含其身（与提取段同判据）：目标目录即被引目录成员命中的
+			// 目录 → 组合不覆盖本层。
 			continue
 		}
 		if firstHitRuleID == "" {

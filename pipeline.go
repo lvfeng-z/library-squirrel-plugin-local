@@ -241,7 +241,10 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // 追加序保持既有规则序面。门过后成员捕获快照以限定键挂入组合规则私有作用域
 // 的注入区（ParseContext.RefCaptures，仅组合规则可见；refCapture 提取取值见
 // Apply 的 FromRefCapture 分支，when 限定名解析见 conditionOperandValue）。
-// 非组合规则与非组合路径零变化。
+// 组合自身条件含目录行时另有「之下不含其身」约束（2026-10-29 用户拍板）：
+// 自身目录行锚定的层与被引目录成员的命中层重合（锚定目录即被引规则命中的
+// 目录）时整体不中——「位于被引规则命中的目录之下」不含其身；纯门组合与
+// 自身行非目录形态（无目录锚定）不受影响。非组合规则与非组合路径零变化。
 func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) {
 	type ruleMatch struct {
 		rule    *RuleEntry
@@ -271,6 +274,13 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 		hit := rule.Pattern.Evaluate(in, lib, ruleCtx)
 		ctx.absorbScoped(ruleCtx)
 		if !hit {
+			continue
+		}
+		if anchor, ok := ruleCtx.LastDirHit(); ok && gate.anchorCoincides(rule.Refs, anchor.Depth) {
+			// 之下不含其身（2026-10-29 用户拍板）：组合自身目录行锚定的目录
+			// 同时是被引目录成员命中的目录（同链同层即同目录）→整体不中、
+			// 不进 MatchedRuleIDs。纯门组合与自身行非目录形态（文件/序列行，
+			// 无目录锚定）不受影响。
 			continue
 		}
 		decision.MatchedRuleIDs = append(decision.MatchedRuleIDs, rule.ID)
@@ -337,6 +347,10 @@ type refGateState struct {
 	// snapshots 为成员 ID → 限定键捕获快照（命中成员私有作用域捕获的副本，
 	// 键形态「成员ID.rN.组名」，#canon 规范名变体一并快照）。
 	snapshots map[string][]CaptureBinding
+	// dirHitDepths 为成员 ID → 该成员目录行实际命中的层深集合（同链同层即
+	// 同目录；Or 行短路只记实际发生命中的行）——「之下不含其身」判据的消费
+	// 数据。无目录行的成员（文件/序列行形态）缺席或空集，不构成约束。
+	dirHitDepths map[string]map[int]bool
 }
 
 // allHit 门判据：refs 全体成员门段命中（严格语义，不降级——决策2）：任一
@@ -348,6 +362,19 @@ func (g *refGateState) allHit(refs []string) bool {
 		}
 	}
 	return true
+}
+
+// anchorCoincides 判定组合自身目录行的锚定层（anchorDepth）是否与某被引目录
+// 成员的命中层重合——重合即锚定目录同时是该成员命中的目录（「之下不含其身」
+// 的排除判据，2026-10-29 用户拍板）：组合以目录行为自身条件时，集名等锚定
+// 不得落在被引规则命中的目录身上。无目录行的成员不参与判定。
+func (g *refGateState) anchorCoincides(refs []string, anchorDepth int) bool {
+	for _, ref := range refs {
+		if g.dirHitDepths[ref][anchorDepth] {
+			return true
+		}
+	}
+	return false
 }
 
 // snapshot 取某成员的限定键捕获快照（成员未命中时为空）。
@@ -369,7 +396,7 @@ func (g *refGateState) snapshot(memberID string) []CaptureBinding {
 // 本批无会被求值的组合规则时零工作（空门，主循环行为与既有完全一致）。
 // 成员求值彼此独立纯函数，needed 集合的遍历序不影响结论。
 func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) *refGateState {
-	gate := &refGateState{hits: map[string]bool{}, snapshots: map[string][]CaptureBinding{}}
+	gate := &refGateState{hits: map[string]bool{}, snapshots: map[string][]CaptureBinding{}, dirHitDepths: map[string]map[int]bool{}}
 	needed := map[string]bool{}
 	for i := range rules {
 		rule := &rules[i]
@@ -399,6 +426,13 @@ func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *
 		gate.hits[memberID] = hit
 		if hit {
 			gate.snapshots[memberID] = refCaptureSnapshot(memberID, memberCtx)
+			// 目录行命中层集合留档（「之下不含其身」判据；空集=成员无目录行）。
+			for _, dh := range memberCtx.DirHits {
+				if gate.dirHitDepths[memberID] == nil {
+					gate.dirHitDepths[memberID] = map[int]bool{}
+				}
+				gate.dirHitDepths[memberID][dh.Depth] = true
+			}
 		}
 	}
 	return gate
