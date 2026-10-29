@@ -6,6 +6,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -70,8 +71,10 @@ func legalSessionTransition(from, to WorkbenchSessionState) bool {
 	return from == WorkbenchSessionCreated && to == WorkbenchSessionRecognized
 }
 
-// WorkbenchSession 会话持久化工件（KV 单键 JSON）。特异性知识（单次赋值、选择集、
-// 识别快照与重识别游标）属会话态；普适规律入规则档案，不在会话内。
+// WorkbenchSession 会话持久化工件：轻字段存于 meta 信封（workbench-session:{root}，
+// 见 session_payload.go），重载荷（Snapshot/LastDiff）gzip 压缩分片存于独立分片键组。
+// 特异性知识（单次赋值、选择集、识别快照与重识别游标）属会话态；普适规律入规则
+// 档案，不在会话内。
 type WorkbenchSession struct {
 	// SchemaVersion 工件结构版本（自管）。
 	SchemaVersion int `json:"schemaVersion"`
@@ -303,39 +306,182 @@ func (m *SessionManager) currentProfileDigest() string {
 	return digest
 }
 
-// saveSession 锁内序列化落库（调用方须持 mu）。
+// saveSession 轻保存（调用方须持 mu）：只写 meta 信封 + 索引——载荷簿记字段
+// （shardSet/shards/codec/digest）沿用当前 meta，重载荷留在旧批次分片键组中，
+// 赋值/确认/选择集等会话级变更不再重写整个快照载荷。
+//
+// ⚠ 轻/全保存划分纪律（方案自曝风险4）：本入口绝不可承载快照/差异更新——轻保存
+// 不触碰分片，shards>0 时内存中对 Snapshot/LastDiff 的改动会静默丢失（无法在不
+// 重编码载荷的前提下检出内存改动）。触碰 Snapshot/LastDiff 的唯一全保存入口=
+// CompleteRecognitionWithDiff（经 mutateSessionFull/saveSessionFull）；ReplaceSession
+// 是重建语义（删除旧工件后轻保存新会话），不属更新。新增入口若需改快照，必须走
+// mutateSessionFull——误走轻保存由「测试锚定：轻保存不触分片」的单测护栏暴露。
+//
+// 升级规则：内存载荷在场（Snapshot/LastDiff 非 nil）而当前 meta 无可用载荷簿记
+// （旧格式整值、meta 缺席或信封 shards=0）时，升级为 saveSessionFull——旧格式
+// 会话「读到即转新格式」在此落笔（首次保存即写分片），并对 shards=0 场景兜住
+// 误走轻保存的快照更新（升级后仍写入载荷而非丢弃）。
 func (m *SessionManager) saveSession(sess *WorkbenchSession) error {
 	sess.SchemaVersion = workbenchSessionSchemaVersion
-	data, err := json.Marshal(sess)
+	env, _, err := m.readSessionEnvelope(sess.RootPath)
 	if err != nil {
-		return fmt.Errorf("会话序列化失败: %w", err)
+		return fmt.Errorf("读取旧会话（键 %q）失败: %w", workbenchSessionKey(sess.RootPath), err)
+	}
+	if (sess.Snapshot != nil || sess.LastDiff != nil) && (env == nil || env.Shards <= 0) {
+		return m.saveSessionFull(sess)
+	}
+	saving := &sessionEnvelope{V: sessionEnvelopeVersion, Session: sessionLightCopy(sess)}
+	if env != nil {
+		saving.ShardSet, saving.Shards = env.ShardSet, env.Shards
+		saving.Codec, saving.Digest = env.Codec, env.Digest
+	}
+	data, err := json.Marshal(saving)
+	if err != nil {
+		return fmt.Errorf("会话信封序列化失败: %w", err)
 	}
 	if err := m.store.SetValue(workbenchSessionKey(sess.RootPath), string(data)); err != nil {
 		return fmt.Errorf("写入会话（键 %q）失败: %w", workbenchSessionKey(sess.RootPath), err)
 	}
+	if err := m.ensureSessionIndexed(normalizeLibraryRoot(sess.RootPath)); err != nil {
+		m.warnf("会话索引登记失败（root=%s）: %v", normalizeLibraryRoot(sess.RootPath), err)
+	}
 	return nil
 }
 
-// loadSessionLocked 读单键会话（锁外读亦安全：只读单键）；未写入返回
-// ErrWorkbenchSessionNotFound，载荷损坏或版本不符按未命中处理并告警。
-func (m *SessionManager) loadSession(root string) (*WorkbenchSession, error) {
-	stored, err := m.store.GetValue(workbenchSessionKey(root))
+// saveSessionFull 全保存（调用方须持 mu；快照/差异变化时）：载荷 {snapshot,
+// lastDiff} → gzip → 3MB 边界切片 → 逐片写全新批次键组（不覆写旧片）→ 全部
+// 成功后写 meta 信封（原子切换点）→ 删除旧批次全部分片键（旧批次取自替换前的
+// 旧 meta）→ 索引补登。任一分片写失败即中止返回错误——旧 meta 未动，会话维持
+// 旧快照可读；已写成的分片成为残留垃圾键，不影响正确性（方案自曝风险3）。
+func (m *SessionManager) saveSessionFull(sess *WorkbenchSession) error {
+	sess.SchemaVersion = workbenchSessionSchemaVersion
+	compressed, digest, err := marshalSessionPayload(sess.Snapshot, sess.LastDiff)
 	if err != nil {
-		return nil, fmt.Errorf("读取会话（键 %q）失败: %w", workbenchSessionKey(root), err)
+		return fmt.Errorf("会话载荷序列化失败: %w", err)
+	}
+	oldEnv, _, err := m.readSessionEnvelope(sess.RootPath)
+	if err != nil {
+		return fmt.Errorf("读取旧会话（键 %q）失败: %w", workbenchSessionKey(sess.RootPath), err)
+	}
+	norm := normalizeLibraryRoot(sess.RootPath)
+	oldBatch := int64(0)
+	if oldEnv != nil {
+		oldBatch = parseSessionShardBatch(oldEnv.ShardSet)
+	}
+	batch := nextSessionShardBatch(oldBatch)
+	shards := splitSessionShards(compressed)
+	for i, chunk := range shards {
+		key := sessionShardKey(norm, batch, i)
+		if err := m.store.SetValue(key, base64.StdEncoding.EncodeToString(chunk)); err != nil {
+			return fmt.Errorf("写入会话分片（键 %q）失败: %w", key, err)
+		}
+	}
+	env := &sessionEnvelope{
+		V: sessionEnvelopeVersion, Session: sessionLightCopy(sess),
+		ShardSet: batch, Shards: len(shards),
+		Codec: sessionPayloadCodecGzip, Digest: digest,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("会话信封序列化失败: %w", err)
+	}
+	if err := m.store.SetValue(workbenchSessionKey(sess.RootPath), string(data)); err != nil {
+		return fmt.Errorf("写入会话（键 %q）失败: %w", workbenchSessionKey(sess.RootPath), err)
+	}
+	m.deleteStaleShards(norm, oldEnv, batch)
+	if err := m.ensureSessionIndexed(norm); err != nil {
+		m.warnf("会话索引登记失败（root=%s）: %v", norm, err)
+	}
+	return nil
+}
+
+// loadSession 读单键会话（锁外读亦安全：只读本会话的键组）；未写入返回
+// ErrWorkbenchSessionNotFound，载荷损坏或版本不符按未命中处理并告警——含分片
+// digest 校验不符（全保存半写窗口的兜底语义：按未命中处理重新识别，同方案自曝
+// 风险3）。旧格式「单键单 JSON」整值兼容可读（读到即转：下次保存升级为信封+
+// 分片形态）。
+func (m *SessionManager) loadSession(root string) (*WorkbenchSession, error) {
+	key := workbenchSessionKey(root)
+	stored, err := m.store.GetValue(key)
+	if err != nil {
+		return nil, fmt.Errorf("读取会话（键 %q）失败: %w", key, err)
 	}
 	if stored == nil || stored.Value == "" {
 		return nil, ErrWorkbenchSessionNotFound
 	}
+	if probeSessionEnvelope(stored.Value) {
+		return m.loadSessionFromEnvelope(root, key, stored.Value)
+	}
 	var sess WorkbenchSession
 	if err := json.Unmarshal([]byte(stored.Value), &sess); err != nil {
-		m.warnf("会话载荷无法解析，按未命中处理（键 %q）: %v", workbenchSessionKey(root), err)
+		m.warnf("会话载荷无法解析，按未命中处理（键 %q）: %v", key, err)
 		return nil, ErrWorkbenchSessionNotFound
 	}
 	if sess.SchemaVersion != workbenchSessionSchemaVersion {
 		m.warnf("会话结构版本 %d 与当前支持版本 %d 不符，按未命中处理（键 %q）",
-			sess.SchemaVersion, workbenchSessionSchemaVersion, workbenchSessionKey(root))
+			sess.SchemaVersion, workbenchSessionSchemaVersion, key)
 		return nil, ErrWorkbenchSessionNotFound
 	}
+	return &sess, nil
+}
+
+// loadSessionFromEnvelope 从信封读会话：无快照会话（shards=0）直接取轻字段；
+// 否则逐片读 → 拼接 → digest 比对（不符=告警+未命中）→ 解压反序列化合入。
+func (m *SessionManager) loadSessionFromEnvelope(root, key, raw string) (*WorkbenchSession, error) {
+	env, err := parseSessionEnvelope(raw)
+	if err != nil || env.Session == nil {
+		m.warnf("会话信封无法解析，按未命中处理（键 %q）: %v", key, err)
+		return nil, ErrWorkbenchSessionNotFound
+	}
+	if env.V != sessionEnvelopeVersion {
+		m.warnf("会话信封版本 %d 与当前支持版本 %d 不符，按未命中处理（键 %q）",
+			env.V, sessionEnvelopeVersion, key)
+		return nil, ErrWorkbenchSessionNotFound
+	}
+	sess := *env.Session
+	if sess.SchemaVersion != workbenchSessionSchemaVersion {
+		m.warnf("会话结构版本 %d 与当前支持版本 %d 不符，按未命中处理（键 %q）",
+			sess.SchemaVersion, workbenchSessionSchemaVersion, key)
+		return nil, ErrWorkbenchSessionNotFound
+	}
+	if env.Shards <= 0 {
+		return &sess, nil
+	}
+	if env.ShardSet == "" || env.Digest == "" || env.Codec != sessionPayloadCodecGzip {
+		m.warnf("会话信封载荷簿记不完整（shards=%d, codec=%q），按未命中处理（键 %q）",
+			env.Shards, env.Codec, key)
+		return nil, ErrWorkbenchSessionNotFound
+	}
+	norm := normalizeLibraryRoot(root)
+	compressed := make([]byte, 0, env.Shards*sessionShardRawUnit)
+	for i := 0; i < env.Shards; i++ {
+		shardKey := sessionShardKey(norm, env.ShardSet, i)
+		shardStored, serr := m.store.GetValue(shardKey)
+		if serr != nil {
+			return nil, fmt.Errorf("读取会话分片（键 %q）失败: %w", shardKey, serr)
+		}
+		if shardStored == nil || shardStored.Value == "" {
+			m.warnf("会话分片缺失（键 %q），按未命中处理（可能为半写残留）", shardKey)
+			return nil, ErrWorkbenchSessionNotFound
+		}
+		chunk, derr := base64.StdEncoding.DecodeString(shardStored.Value)
+		if derr != nil {
+			m.warnf("会话分片无法解码（键 %q），按未命中处理: %v", shardKey, derr)
+			return nil, ErrWorkbenchSessionNotFound
+		}
+		compressed = append(compressed, chunk...)
+	}
+	sum := sha256.Sum256(compressed)
+	if hex.EncodeToString(sum[:]) != env.Digest {
+		m.warnf("会话载荷 digest 校验不符，按未命中处理（键 %q）", key)
+		return nil, ErrWorkbenchSessionNotFound
+	}
+	payload, perr := unmarshalSessionPayload(compressed)
+	if perr != nil {
+		m.warnf("会话载荷无法解压反序列化，按未命中处理（键 %q）: %v", key, perr)
+		return nil, ErrWorkbenchSessionNotFound
+	}
+	sess.Snapshot, sess.LastDiff = payload.Snapshot, payload.LastDiff
 	return &sess, nil
 }
 
@@ -376,53 +522,89 @@ func (m *SessionManager) CreateSession(root string) (*WorkbenchSession, error) {
 	return sess, nil
 }
 
-// ReplaceSession 确认覆盖重建：删除既有会话后原库根重建（既有会话态不保留）。
+// ReplaceSession 确认覆盖重建：删除既有会话全部工件（meta+全部分片+索引登记）
+// 后原库根重建（既有会话态不保留）。重建不属快照更新——新会话无快照，走轻保存；
+// 旧分片随工件删除清理（轻/全保存划分见 saveSession 纪律注释）。
 func (m *SessionManager) ReplaceSession(root string) (*WorkbenchSession, error) {
 	m.mu.Lock()
-	if err := m.store.DeleteValue(workbenchSessionKey(root)); err != nil {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("删除既有会话（键 %q）失败: %w", workbenchSessionKey(root), err)
-	}
+	err := m.deleteSessionArtifactsLocked(root)
 	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	return m.CreateSession(root)
 }
 
-// DeleteSession 删除会话（幂等：会话不存在视为成功）。
+// DeleteSession 删除会话（幂等：会话不存在视为成功）：读 meta 取旧批次清单 →
+// 删全部分片 → 删 meta → 索引移除。分片删除失败仅告警（残留垃圾键不影响正确性，
+// 方案自曝风险3）；meta 删除失败返回错误（会话仍可读，删除未完成）。
 func (m *SessionManager) DeleteSession(root string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.store.DeleteValue(workbenchSessionKey(root)); err != nil {
-		return fmt.Errorf("删除会话（键 %q）失败: %w", workbenchSessionKey(root), err)
+	if err := m.deleteSessionArtifactsLocked(root); err != nil {
+		return err
 	}
 	m.logf("已删除解析会话: root=%s", root)
 	return nil
 }
 
-// ListSessions 枚举全部会话（键前缀扫描），按最近更新时间倒序；单键载荷损坏或
-// 版本不符的条目跳过并告警，不阻塞整体。
-func (m *SessionManager) ListSessions() ([]WorkbenchSession, error) {
-	all, err := m.store.GetAllValues()
+// deleteSessionArtifactsLocked 删除会话全部工件（调用方须持 mu）。
+func (m *SessionManager) deleteSessionArtifactsLocked(root string) error {
+	norm := normalizeLibraryRoot(root)
+	env, _, err := m.readSessionEnvelope(root)
 	if err != nil {
-		return nil, fmt.Errorf("枚举插件 KV 失败: %w", err)
+		return fmt.Errorf("读取旧会话（键 %q）失败: %w", workbenchSessionKey(root), err)
 	}
-	sessions := make([]WorkbenchSession, 0, len(all))
-	for key, stored := range all {
-		if !strings.HasPrefix(key, workbenchSessionKeyPrefix) {
+	if env != nil {
+		for i := 0; i < env.Shards; i++ {
+			shardKey := sessionShardKey(norm, env.ShardSet, i)
+			if derr := m.store.DeleteValue(shardKey); derr != nil {
+				m.warnf("删除会话分片失败（键 %q，残留垃圾不影响正确性）: %v", shardKey, derr)
+			}
+		}
+	}
+	if err := m.store.DeleteValue(workbenchSessionKey(root)); err != nil {
+		return fmt.Errorf("删除会话（键 %q）失败: %w", workbenchSessionKey(root), err)
+	}
+	m.unregisterSessionIndexed(norm)
+	return nil
+}
+
+// ListSessions 枚举全部会话，按最近更新时间倒序。优先走会话索引：索引命中 →
+// 逐根读 meta 仅取轻字段（列表呈现只用 RootPath/State/CreatedAtMs/UpdatedAtMs，
+// 分片载荷不加载）；某根 meta 缺失/损坏=跳过+告警+索引修剪重写。索引缺失/损坏 →
+// GetAllValues 回退扫描（排除分片前缀）→ 成功后重建索引写回。
+func (m *SessionManager) ListSessions() ([]WorkbenchSession, error) {
+	roots, indexed := readSessionIndexRoots(m.store)
+	if !indexed {
+		all, err := m.store.GetAllValues()
+		if err != nil {
+			return nil, fmt.Errorf("枚举插件 KV 失败: %w", err)
+		}
+		roots = scanSessionRootsFromValues(all)
+		if err := writeSessionIndex(m.store, roots); err != nil {
+			m.warnf("会话索引重建写回失败: %v", err)
+		}
+	}
+	sessions := make([]WorkbenchSession, 0, len(roots))
+	kept := make([]string, 0, len(roots))
+	pruned := false
+	for _, normRoot := range roots {
+		sess, err := m.listSessionOfRoot(normRoot)
+		if err != nil {
+			return nil, err
+		}
+		if sess == nil {
+			pruned = true
 			continue
 		}
-		if stored == nil || stored.Value == "" {
-			continue
+		kept = append(kept, normRoot)
+		sessions = append(sessions, *sess)
+	}
+	if indexed && pruned {
+		if err := writeSessionIndex(m.store, kept); err != nil {
+			m.warnf("会话索引修剪重写失败: %v", err)
 		}
-		var sess WorkbenchSession
-		if err := json.Unmarshal([]byte(stored.Value), &sess); err != nil {
-			m.warnf("会话载荷无法解析，跳过（键 %q）: %v", key, err)
-			continue
-		}
-		if sess.SchemaVersion != workbenchSessionSchemaVersion {
-			m.warnf("会话结构版本 %d 不符，跳过（键 %q）", sess.SchemaVersion, key)
-			continue
-		}
-		sessions = append(sessions, sess)
 	}
 	sort.Slice(sessions, func(i, j int) bool {
 		if sessions[i].UpdatedAtMs != sessions[j].UpdatedAtMs {
@@ -431,6 +613,41 @@ func (m *SessionManager) ListSessions() ([]WorkbenchSession, error) {
 		return sessions[i].RootPath < sessions[j].RootPath
 	})
 	return sessions, nil
+}
+
+// listSessionOfRoot 读单根 meta 仅取轻字段（列表投影，不读分片载荷）。meta 缺失/
+// 损坏/版本不符返回 nil（调用方跳过+修剪索引）；读取传输层失败返回错误（整体
+// 枚举不可靠，不静默修剪）。
+func (m *SessionManager) listSessionOfRoot(normRoot string) (*WorkbenchSession, error) {
+	key := workbenchSessionKeyPrefix + normRoot
+	stored, err := m.store.GetValue(key)
+	if err != nil {
+		return nil, fmt.Errorf("读取会话（键 %q）失败: %w", key, err)
+	}
+	if stored == nil || stored.Value == "" {
+		m.warnf("会话 meta 缺失，跳过并自索引修剪（键 %q）", key)
+		return nil, nil
+	}
+	if probeSessionEnvelope(stored.Value) {
+		env, perr := parseSessionEnvelope(stored.Value)
+		if perr != nil || env.Session == nil || env.V != sessionEnvelopeVersion ||
+			env.Session.SchemaVersion != workbenchSessionSchemaVersion {
+			m.warnf("会话信封损坏或版本不符，跳过并自索引修剪（键 %q）", key)
+			return nil, nil
+		}
+		return env.Session, nil
+	}
+	// 旧格式整值：整值反序列化（快照内联其中，列表只消费轻字段）。
+	var sess WorkbenchSession
+	if uerr := json.Unmarshal([]byte(stored.Value), &sess); uerr != nil {
+		m.warnf("会话载荷无法解析，跳过并自索引修剪（键 %q）: %v", key, uerr)
+		return nil, nil
+	}
+	if sess.SchemaVersion != workbenchSessionSchemaVersion {
+		m.warnf("会话结构版本 %d 不符，跳过并自索引修剪（键 %q）", sess.SchemaVersion, key)
+		return nil, nil
+	}
+	return &sess, nil
 }
 
 // ProfileReconcile 恢复会话时的档案对账结论。
@@ -458,7 +675,24 @@ func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, Profil
 	return sess, reconcile, nil
 }
 
-// mutateSession 锁内会话读改写（单点串行）；mutate 返回错误即中止不落库。
+// mutateSession 轻保存入口：锁内会话读改写（单点串行）；mutate 返回错误即中止
+// 不落库。落库只写 meta 信封+索引（载荷簿记沿用旧 meta，见 saveSession）。
+//
+// ⚠ 轻/全保存划分纪律（方案自曝风险4，护栏=「轻保存不触分片」单测）：本入口的
+// mutate 闭包**禁止修改 sess.Snapshot 与 sess.LastDiff**——轻保存不重写载荷分片，
+// 快照改动会被静默丢弃。既有轻入口清单（全部不触快照/差异）：
+//   - session.go：MarkRecognized（状态迁移）、BeginWorkbenchCreate /
+//     ConsumeWorkbenchCreateMarker（创建标记）、CreateSession（新建）、
+//     SetAssignment / SetIgnored（赋值与忽略）、SetCandidateIgnored /
+//     ConfirmWorkSetCandidate / UnconfirmWorkSetCandidate（集名候选族）；
+//   - parse_actions.go：ApplyDirAssignment / ClearDirAssignments（目录赋值族）、
+//     markScopedAssignments（泛化标记）；
+//   - selection.go：SetSelection（选择集）、ApplyCreateTasks 的选择集清理；
+//   - workset_rule.go：集规则谱系簿记。
+//
+// 触碰快照/差异的入口唯有 CompleteRecognitionWithDiff（走 mutateSessionFull）；
+// ReplaceSession 为重建语义（删除旧工件+轻保存新会话）。新增改快照的入口必须走
+// mutateSessionFull，否则请更新本清单并补对应单测。
 func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -471,6 +705,27 @@ func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSessio
 	}
 	sess.UpdatedAtMs = time.Now().UnixMilli()
 	if err := m.saveSession(sess); err != nil {
+		return nil, err
+	}
+	return sess, nil
+}
+
+// mutateSessionFull 全保存入口：锁内会话读改写后按重载荷全量落库（gzip 分片+
+// 批次原子切换，见 saveSessionFull）。生产调用方唯一=CompleteRecognitionWithDiff
+// （识别完成/重识别覆写快照与差异）；其余入口禁止经此写会话级轻字段（徒增整个
+// 载荷的重写成本）。
+func (m *SessionManager) mutateSessionFull(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, err := m.loadSession(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := mutate(sess); err != nil {
+		return nil, err
+	}
+	sess.UpdatedAtMs = time.Now().UnixMilli()
+	if err := m.saveSessionFull(sess); err != nil {
 		return nil, err
 	}
 	return sess, nil
@@ -500,11 +755,13 @@ func (m *SessionManager) CompleteRecognition(root string, snapshot *RecognitionS
 
 // CompleteRecognitionWithDiff 全量识别完成落库：快照、状态迁移与重识别差异集
 // 在锁内单次写完成（差异集随每次重识别覆写——首轮识别无前序快照，差异置空）。
+// 触碰 Snapshot/LastDiff 的唯一全保存入口（经 mutateSessionFull，轻/全划分纪律
+// 见 mutateSession 注释）。
 func (m *SessionManager) CompleteRecognitionWithDiff(root string, snapshot *RecognitionSnapshot, diff *SnapDiff) (*WorkbenchSession, error) {
 	if snapshot == nil {
 		return nil, errors.New("识别快照为空，无法落库")
 	}
-	return m.mutateSession(root, func(sess *WorkbenchSession) error {
+	return m.mutateSessionFull(root, func(sess *WorkbenchSession) error {
 		if sess.State == WorkbenchSessionCreated {
 			if !legalSessionTransition(sess.State, WorkbenchSessionRecognized) {
 				return fmt.Errorf("会话状态 %s 不允许迁移到 %s", sess.State, WorkbenchSessionRecognized)
