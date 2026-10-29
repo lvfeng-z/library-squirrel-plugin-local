@@ -129,17 +129,28 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 }
 
 // isGroupingRule 该规则是否为兄弟群定群规则：v3 = 顶层 SiblingPattern；v4 =
-// 无提取动作且单一序列条件行的规则（定群语义由序列主体承载：同键≥N 记
+// 无提取动作且全部条件行均为序列目标行（非行级非；单行与多行〔如同一序列
+// 家族的两种分隔形态 or 并列〕同权——定群语义由序列主体承载：同键≥N 记
 // GroupAnalysis，群组行包装求值与 SiblingPattern 同写入群组上下文；带提取
-// 动作的单 seq 行规则=序列前缀提取条目〔FromGroupPrefix〕，非定群）。
+// 动作的 seq 行规则=序列前缀提取条目〔FromGroupPrefix〕，非定群；混入非
+// seq 行或行级非的规则不定群——多形态合取属规则编辑的高级形态，不在定群
+// 语义内）。多行形态曾因「恰一行」判据被漏出定群段（2026-10-29 开发环境
+// 实测：两行 or 序列规则命中可见而群卡/序列身份缺席，退化为结构群补位）。
 func isGroupingRule(rule *RuleEntry) bool {
 	if rule == nil {
 		return false
 	}
 	if rule.Conditions != nil {
-		return len(rule.Extractions) == 0 && len(rule.Conditions) == 1 &&
-			rule.Conditions[0].Condition != nil &&
-			rule.Conditions[0].Condition.Target == CondxTargetSeq
+		if len(rule.Extractions) != 0 || len(rule.Conditions) == 0 {
+			return false
+		}
+		for i := range rule.Conditions {
+			row := &rule.Conditions[i]
+			if row.Negated || row.Condition == nil || row.Condition.Target != CondxTargetSeq {
+				return false
+			}
+		}
+		return true
 	}
 	_, ok := rule.Pattern.(*SiblingPattern)
 	return ok
@@ -147,7 +158,7 @@ func isGroupingRule(rule *RuleEntry) bool {
 
 // groupSeqTextOf 取定群规则对某成员文件名的序号原文（识别全景的群序号文本
 // 消费）：v3 = SiblingPattern 提取式；v4 = 序列主体对去扩展名基名重演成员模板
-// 取 {序号} 段。
+// 取 {序号} 段（多行 or 并列时逐主体试配，首个能匹配成员名的主体出序号）。
 func groupSeqTextOf(rule *RuleEntry, fileName string) (string, bool) {
 	if rule == nil {
 		return "", false
@@ -155,47 +166,51 @@ func groupSeqTextOf(rule *RuleEntry, fileName string) (string, bool) {
 	if sibling, ok := rule.Pattern.(*SiblingPattern); ok {
 		return sibling.seqTextOf(fileName)
 	}
-	seq := condxSeqSubjectOf(rule)
-	if seq == nil {
-		return "", false
+	base := BaseNameWithoutExt(fileName)
+	for _, seq := range condxSeqSubjectsOf(rule) {
+		if _, text, ok := seq.seqMemberKey(base); ok {
+			return text, true
+		}
 	}
-	_, text, ok := seq.seqMemberKey(BaseNameWithoutExt(fileName))
-	return text, ok
+	return "", false
 }
 
-// condxSeqSubjectOf 从规则编译缓存中取出序列主体模式（行包装内层，可为
-// And 首子式）；非序列规则返回 nil。
-func condxSeqSubjectOf(rule *RuleEntry) *SeqSubjectPattern {
+// condxSeqSubjectsOf 从规则编译缓存中收集全部序列主体模式（行包装内层；
+// Or 分支逐一下潜——多行 or 并列时各形态主体都入列）；非序列规则返回空。
+func condxSeqSubjectsOf(rule *RuleEntry) []*SeqSubjectPattern {
 	if rule.Pattern == nil {
 		return nil
 	}
-	inner := rule.Pattern
-	if row, ok := inner.(*RowSubjectPattern); ok {
-		inner = row.Inner
-	}
-	switch t := inner.(type) {
-	case *SeqSubjectPattern:
-		return t
-	case And:
-		if len(t) > 0 {
-			if s, ok := t[0].(*SeqSubjectPattern); ok {
-				return s
+	var out []*SeqSubjectPattern
+	var walk func(p Pattern)
+	walk = func(p Pattern) {
+		switch t := p.(type) {
+		case *RowSubjectPattern:
+			walk(t.Inner)
+		case *SeqSubjectPattern:
+			out = append(out, t)
+		case And:
+			for _, sub := range t {
+				walk(sub)
+			}
+		case *And:
+			for _, sub := range *t {
+				walk(sub)
+			}
+		case Or:
+			for _, sub := range t {
+				walk(sub)
 			}
 		}
-	case *And:
-		if len(*t) > 0 {
-			if s, ok := (*t)[0].(*SeqSubjectPattern); ok {
-				return s
-			}
-		}
 	}
-	return nil
+	walk(rule.Pattern)
+	return out
 }
 
 // runGroupStage 分组段：对启用规则逐条求值，首个命中的规则把群组分析写入
 // ctx 并作为定群结果返回（同时返回定群规则 ID，供识别全景的序号形态重放与
 // 规则命中统计消费）；全部不命中返回 nil（独立文件）。禁用规则与
-// 非定群形态（v3 SiblingPattern / v4 序列条件行）的规则不参与本段。
+// 非定群形态（v3 SiblingPattern / v4 全 seq 条件行规则）的规则不参与本段。
 // 求值上下文的群组字段另有一类写入方：规则未定群时由合并求值路径的前置
 // 结构群对齐补位（见 recognition.go 的 mergedFileConclusionWithStructural）
 // ——两类群共用同一字段，群组操作数与群组前缀提取对二者统一生效。
