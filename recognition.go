@@ -6,9 +6,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
@@ -150,6 +154,18 @@ func MergedRecognition(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, a
 	return MergedRecognitionWithTree(files, files, rules, lib, assigns)
 }
 
+// evalWorkerCount 求值相并行度（工作子数）的单一取值点：进程默认
+// GOMAXPROCS（=逻辑核数），不设用户配置面（未上线功能不背配置债）。var
+// 形态供测试覆写注入——模式等价锚以同一实现的 1 工作子与多工作子两模式互证。
+// 工作子 panic 沿串行同款冒泡（识别干跑的串行循环 panic 同样崩溃插件进程），
+// 全链严禁 recover：识别结论静默缺失比崩溃更危险。
+var evalWorkerCount = func() int { return runtime.GOMAXPROCS(0) }
+
+// evalFileChunkSize 逐文件结论循环的分块大小（块约百余个文件）：块是并行区2
+// 的取工单位，块内下标连续、块间不重叠；结论按下标写入预分配切片——输入序
+// 保持，汇流消费方（快照装配与命中预览）按文件序索引取用，语义不变。
+const evalFileChunkSize = 128
+
 // MergedRecognitionWithTree 带全量聚合视图的合并求值：treeFiles 为目录树全量
 // 文件清单（识别增量批时 evalFiles 仅含新目录文件——跨被跳目录的各层子女/
 // 子目录数必须按全量树聚合，否则目录终结谓词（childrenAllFormat/childDirCount
@@ -183,8 +199,12 @@ func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, l
 	}
 	// 结构群前置对齐每目录只算一次，成员按相对路径登记，各单文件结论取用
 	structuralByRel := precomputeStructuralMembers(files, rules, lib, siblingsByDir)
-	conclusions := make([]FileConclusion, 0, len(files))
-	for _, file := range files {
+	// 并行区2：逐文件结论按文件分块并行——每文件求值输入装配为兄弟表/聚合表
+	// 的只读查找、结论彼此独立，按下标写入预分配切片保输入序。共享输入
+	// （兄弟表/聚合表/结构群成员表/规则序列/谓词索引/会话赋值表）在此只读。
+	conclusions := make([]FileConclusion, len(files))
+	evaluateFileAt := func(i int) {
+		file := files[i]
 		in := &MatchInput{
 			FileName: file.FileName, DirNames: file.DirNames, RelPath: file.RelPath,
 			Siblings:               siblingsByDir[dirGroupKey(file.DirNames)],
@@ -195,7 +215,36 @@ func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, l
 		if a, ok := assigns[file.RelPath]; ok {
 			assign = &a
 		}
-		conclusions = append(conclusions, mergedFileConclusionWithStructural(in, rules, lib, assign, structuralByRel[file.RelPath]))
+		conclusions[i] = mergedFileConclusionWithStructural(in, rules, lib, assign, structuralByRel[file.RelPath])
+	}
+	if chunks := (len(files) + evalFileChunkSize - 1) / evalFileChunkSize; chunks > 1 && evalWorkerCount() > 1 {
+		// 工作子池取块：原子游标取块号，块间下标不重叠（零共享写），单工作子
+		// 或单块时同一求值实现在本 goroutine 内联执行（两模式同一实现）。
+		workers := min(evalWorkerCount(), chunks)
+		var cursor atomic.Int64
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for {
+					c := int(cursor.Add(1)) - 1
+					if c >= chunks {
+						return
+					}
+					start := c * evalFileChunkSize
+					end := min(start+evalFileChunkSize, len(files))
+					for i := start; i < end; i++ {
+						evaluateFileAt(i)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		return conclusions
+	}
+	for i := range files {
+		evaluateFileAt(i)
 	}
 	return conclusions
 }
@@ -845,7 +894,7 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	markStructuralPresentation(snap, structuralMarks)
 
 	// 序列群按集内序排列成员、规则定群群落元素公共性终判（结构群的元素终判在
-	// 对齐装配内完成），群间按目录与分组键排序（呈现稳定序）
+	// 对齐装配内完成），群间按目录、分组键与定群规则 ID 排序（呈现稳定序）
 	for _, group := range groups {
 		sort.SliceStable(group.Members, func(i, j int) bool {
 			return group.Members[i].Seq < group.Members[j].Seq
@@ -859,7 +908,15 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		if snap.Groups[i].DirRelKey != snap.Groups[j].DirRelKey {
 			return snap.Groups[i].DirRelKey < snap.Groups[j].DirRelKey
 		}
-		return snap.Groups[i].Key < snap.Groups[j].Key
+		if snap.Groups[i].Key != snap.Groups[j].Key {
+			return snap.Groups[i].Key < snap.Groups[j].Key
+		}
+		// 第三决胜键=定群规则 ID：同目录同键多群（规则群与结构群分立、或两条
+		// 定群规则同键）时前两键平局——结构群规则 ID 为空串、字典序居先，规则
+		// 群间按规则 ID 字典序。三分量即群卡唯一键（上方 groups 映射键），补齐
+		// 后比较器为全序，群卡终序不随上游 map 迭代序漂移（呈现序确定化，无
+		// 结论变更）。
+		return snap.Groups[i].RuleID < snap.Groups[j].RuleID
 	})
 
 	// —— 集名互证（批次二阶段3）：全部序列群（规则定群与结构群——此时群集合已
@@ -1296,40 +1353,83 @@ func siblingRelPath(relPath, fileName string) string {
 // 内各文件求规则定群段（规则群优先，命中者不入候选——与单文件结论内的定群
 // 求值同一输入），再对候选文件集跑对齐判定的唯一实现，成员按相对路径登记供
 // 各单文件结论取用。
+//
+// 并行区1：目录键切片后交工作子池、原子游标取目录号——群不跨目录（群聚合
+// 语义不变量）保证目录级分区完备，目录间零共享写；每工作子写私有结果 map，
+// 收尾按键（=文件相对路径，全库唯一）归并，归并次序无关。工作子 panic 沿串行
+// 同款冒泡，严禁 recover。单工作子（或单目录）时同一逐目录实现在本 goroutine
+// 内联执行——两模式同一实现。
 func precomputeStructuralMembers(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, siblingsByDir map[string][]string) map[string]*structuralMemberInfo {
 	byDir := make(map[string][]ScanFile, len(siblingsByDir))
 	for _, file := range files {
 		key := dirGroupKey(file.DirNames)
 		byDir[key] = append(byDir[key], file)
 	}
+	dirKeys := make([]string, 0, len(byDir))
+	for key := range byDir {
+		dirKeys = append(dirKeys, key)
+	}
 	out := make(map[string]*structuralMemberInfo)
-	for key, dirFiles := range byDir {
-		hints := dirNameHints(dirFiles[0].DirNames)
-		var entries []*alignEntry
-		for _, file := range dirFiles {
-			in := &MatchInput{
-				FileName: file.FileName, DirNames: file.DirNames, RelPath: file.RelPath,
-				Siblings: siblingsByDir[key],
-			}
-			if group, _ := runGroupStage(rules, in, lib, &ParseContext{DirNames: file.DirNames, Depth: len(file.DirNames)}); group != nil {
-				continue
-			}
-			entries = append(entries, newAlignEntry(file.FileName, file.RelPath, hints))
+	if workers := min(evalWorkerCount(), len(dirKeys)); workers > 1 {
+		privates := make([]map[string]*structuralMemberInfo, workers)
+		for w := range privates {
+			privates[w] = make(map[string]*structuralMemberInfo)
 		}
-		for _, g := range alignStructuralDir(dirRelKeyOf(dirFiles[0].RelPath), entries) {
-			for _, mem := range g.Members {
-				out[mem.RelPath] = &structuralMemberInfo{
-					analysis:    &GroupAnalysis{Key: g.Key, Prefix: g.Key, Seq: mem.Seq, Size: g.Size},
-					seqText:     mem.SeqText,
-					elements:    mem.Elements,
-					formName:    g.FormName,
-					formKeyExpr: g.FormKeyExpr,
-					formSeqExpr: g.FormSeqExpr,
+		var cursor atomic.Int64
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func(private map[string]*structuralMemberInfo) {
+				defer wg.Done()
+				for {
+					i := int(cursor.Add(1)) - 1
+					if i >= len(dirKeys) {
+						return
+					}
+					alignStructuralDirMembers(dirKeys[i], byDir[dirKeys[i]], rules, lib, siblingsByDir, private)
 				}
+			}(privates[w])
+		}
+		wg.Wait()
+		for _, private := range privates {
+			maps.Copy(out, private)
+		}
+		return out
+	}
+	for _, key := range dirKeys {
+		alignStructuralDirMembers(key, byDir[key], rules, lib, siblingsByDir, out)
+	}
+	return out
+}
+
+// alignStructuralDirMembers 单目录的结构群前置对齐（并行区1 的工作单元，串行
+// 与并行两模式共用同一实现）：dirFiles 为同目录键的参与文件（至少一条），
+// 成员信息按文件相对路径写入 out（相对路径全库唯一，调用方保证键不冲突）。
+func alignStructuralDirMembers(key string, dirFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, siblingsByDir map[string][]string, out map[string]*structuralMemberInfo) {
+	hints := dirNameHints(dirFiles[0].DirNames)
+	var entries []*alignEntry
+	for _, file := range dirFiles {
+		in := &MatchInput{
+			FileName: file.FileName, DirNames: file.DirNames, RelPath: file.RelPath,
+			Siblings: siblingsByDir[key],
+		}
+		if group, _ := runGroupStage(rules, in, lib, &ParseContext{DirNames: file.DirNames, Depth: len(file.DirNames)}); group != nil {
+			continue
+		}
+		entries = append(entries, newAlignEntry(file.FileName, file.RelPath, hints))
+	}
+	for _, g := range alignStructuralDir(dirRelKeyOf(dirFiles[0].RelPath), entries) {
+		for _, mem := range g.Members {
+			out[mem.RelPath] = &structuralMemberInfo{
+				analysis:    &GroupAnalysis{Key: g.Key, Prefix: g.Key, Seq: mem.Seq, Size: g.Size},
+				seqText:     mem.SeqText,
+				elements:    mem.Elements,
+				formName:    g.FormName,
+				formKeyExpr: g.FormKeyExpr,
+				formSeqExpr: g.FormSeqExpr,
 			}
 		}
 	}
-	return out
 }
 
 // alignStructuralForFile 单文件通道的结构群前置对齐：兄弟名单（含自身，与求值
