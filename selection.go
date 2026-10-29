@@ -1,15 +1,18 @@
 // 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品、多轨原子；
-// 集=序列群、默认聚合单元），承载选择集的持久化校验、创建编排动作（创建前磁盘
-// 对账 → 一次 CreateTask 走 Create 过滤产出分支 → 选择集清理）与会话模式任务
-// 产出的目录含义链构造（取快照回放结论，不触发目录问答）。
+// 集=序列群、默认聚合单元），承载选择集的持久化校验、创建编排动作（异步化：
+// 创建前磁盘对账 → 一次 CreateTask 走 Create 过滤产出分支 → 选择集清理，均移
+// 独立 goroutine；进度与终态经 createProgress/createDone 事件推送）与会话模式
+// 任务产出的目录含义链构造（取快照回放结论，不触发目录问答）。
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // —— 作品键与作品类别 ——
@@ -461,17 +464,9 @@ func (s *createBatchSummary) addNonLocal(siteName string) {
 	s.nonLocalBySite = append(s.nonLocalBySite, siteFileCount{siteName: siteName, files: 1})
 }
 
-// CreateTasksOutcome 创建编排动作的结果。
-type CreateTasksOutcome struct {
-	// TaskName 生效的任务名（用户名或默认名兜底后的裁决值）。
-	TaskName string
-	// Works 本次创建提交的作品数（选择集口径）。
-	Works int
-	// Tasks 宿主落库的任务计数（叶子+子任务，父容器不计——宿主 AddedQuantity 口径）。
-	Tasks int
-	// Message 用户可读摘要。
-	Message string
-}
+// —— 已随 createTasks 异步化（大载荷分页方案·设计 C）退役删除：原 CreateTasksOutcome
+//（编排动作的同步返回结构）随编排动作改为立即应答 started 而删除，创建结论经
+// createDone 事件推送（runCreateTasks）。
 
 // buildCreateTasksMessage 创建完成的通知文案：已创建任务「名」：N 件作品（M 个
 // 子任务，Created 待手动开始）；批次含非 local 归属子行时按归属分布追加
@@ -489,62 +484,198 @@ func buildCreateTasksMessage(taskName string, works, tasks int, summary createBa
 	return message
 }
 
-// ApplyCreateTasks 创建编排动作：选择集解析 → 创建前对账（磁盘存在性/目录 mtime
-// 游标 + 档案指纹与会话赋值修订号对快照基准一致）→ 置工作台发起标记并暂存任务名
-// 原文 → 经宿主 CreateTask 一次调用走 Create 过滤产出分支（批次应答组：按站点
-// 分组的单父多子行、任务级赋值快照固化；产出侧回写批次摘要）→ 清理选择集（赋值
-// 与快照保留）。taskName 为可选自定义任务名（空/全空白=默认名兜底）。任一守卫
-// 未过即阻断，零任务零标记残留。
-func (m *SessionManager) ApplyCreateTasks(root, taskName string) (*CreateTasksOutcome, error) {
+// —— 创建异步事件与运行态（createTasks 立即应答后的进度与终态推送，设计 C）——
+
+// 创建事件种类（workbenchTopicEvent 通道的 kind 词汇）。
+const (
+	// workbenchEventCreateProgress 创建进度（两相）：核对文件（verify，逐作品
+	// 哈希推进）→ 创建子任务（create，发射循环计数）。
+	workbenchEventCreateProgress = "createProgress"
+	// workbenchEventCreateDone 创建终态：成功携带摘要文案（选择集已清空）；失败
+	// 保留选择集并携带部分完成信息「已创建 X/N 个子任务」。
+	workbenchEventCreateDone = "createDone"
+)
+
+// 创建进度相词汇。
+const (
+	createPhaseVerify = "verify" // 核对文件（逐作品哈希推进）
+	createPhaseCreate = "create" // 创建子任务（发射循环计数）
+)
+
+// createRunRegistry 创建运行态登记表（归一化库根 → *createRunState）：同库根
+// 创建在跑互斥 + 发射进度槽（失败路径「已创建 X/N 个子任务」的数据源）。落位
+// 说明：SessionManager 结构面本阶段禁扩（session.go 限定只改 createTasks case
+// 与应答字段），运行态以包级登记表承载——键经 normalizeLibraryRoot 归一（跨
+// 管理器实例唯一识别同一库；生产进程单管理器，测试库根互不相交）。
+var createRunRegistry sync.Map
+
+// createRunState 单库根的创建运行态。
+type createRunState struct {
+	mu      sync.Mutex
+	running bool
+	// emitted / planned 已发射与计划子行总数（发射侧逐批落账；planned=0 表示
+	// 发射未开始——失败路径据此区分「零产出失败」与「部分完成中断」）。
+	emitted int
+	planned int
+}
+
+// createRunKey 创建运行态登记键（归一化库根，与会话键同一归一函数）。
+func createRunKey(root string) string {
+	return normalizeLibraryRoot(root)
+}
+
+// beginCreateRun 登记创建启动（重置进度槽）：已在跑返回假——同库根重复
+// createTasks 在守卫链以「创建进行中」拒绝。
+func beginCreateRun(root string) bool {
+	st, _ := createRunRegistry.LoadOrStore(createRunKey(root), &createRunState{})
+	state := st.(*createRunState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.running {
+		return false
+	}
+	state.running, state.emitted, state.planned = true, 0, 0
+	return true
+}
+
+// endCreateRun 结束创建运行并摘除登记（进度槽如需保留由调用方先行读取）。
+func endCreateRun(root string) {
+	if st, ok := createRunRegistry.LoadAndDelete(createRunKey(root)); ok {
+		state := st.(*createRunState)
+		state.mu.Lock()
+		state.running = false
+		state.mu.Unlock()
+	}
+}
+
+// recordCreateEmitProgress 落发射进度（发射侧每批回调；与终态读取间以 CreateTask
+// RPC 返回为大致界，失败时读到的是最近一批的快照——「已创建 X/N」按此近似）。
+func recordCreateEmitProgress(root string, emitted, planned int) {
+	st, _ := createRunRegistry.LoadOrStore(createRunKey(root), &createRunState{})
+	state := st.(*createRunState)
+	state.mu.Lock()
+	state.emitted, state.planned = emitted, planned
+	state.mu.Unlock()
+}
+
+// takeCreateEmitProgress 读取并清零发射进度（失败路径部分完成信息数据源）。
+func takeCreateEmitProgress(root string) (emitted, planned int) {
+	if st, ok := createRunRegistry.Load(createRunKey(root)); ok {
+		state := st.(*createRunState)
+		state.mu.Lock()
+		emitted, planned, state.emitted, state.planned = state.emitted, state.planned, 0, 0
+		state.mu.Unlock()
+	}
+	return emitted, planned
+}
+
+// noteCreateProgress 推送 createProgress 事件并登记发射进度：create 相（发射
+// 循环计数）同时落运行态进度槽（abortCreateTasks 的部分完成信息数据源），
+// verify 相只推事件。上下文不可用时静默（不影响创建本身）。
+func (m *SessionManager) noteCreateProgress(root, phase string, done, total int) {
+	if phase == createPhaseCreate {
+		recordCreateEmitProgress(root, done, total)
+	}
+	m.publishCreateEvent(&workbenchFrontendEvent{
+		Kind: workbenchEventCreateProgress, Root: root,
+		Phase: phase, Done: done, Total: total,
+	})
+}
+
+// publishCreateEvent 创建事件经工作台事件通道推送前端（与识别事件同通道同载荷
+// 结构，见 work_fetch.go workbenchFrontendEvent；序列化/发布失败仅告警）。
+func (m *SessionManager) publishCreateEvent(evt *workbenchFrontendEvent) {
+	if m.ctx == nil {
+		return
+	}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		m.warnf("创建事件序列化失败: %v", err)
+		return
+	}
+	if err := m.ctx.PublishToFrontend(workbenchTopicEvent, data); err != nil {
+		m.warnf("创建事件推送失败(kind=%s): %v", evt.Kind, err)
+	}
+}
+
+// ApplyCreateTasks 创建编排动作（异步化，大载荷分页方案·设计 C）：守卫链照旧
+// （选择集解析 → 创建前对账〔磁盘存在性/目录 mtime 游标 + 档案指纹与会话赋值
+// 修订号对快照基准一致〕，另置同库根「创建进行中」并发拒绝于链首）→ 置工作台
+// 发起标记并暂存任务名原文后立即返回 started=true（工作台订阅循环不再被长创建
+// 阻塞；前端经 createProgress/createDone 事件感知进度与终态）→ 创建 RPC（含
+// 完整 Create 流消费）在独立 goroutine 执行（runCreateTasks）。taskName 为可选
+// 自定义任务名（空/全空白=默认名兜底）。任一守卫未过即阻断（零任务零标记零
+// 运行态残留）。
+func (m *SessionManager) ApplyCreateTasks(root, taskName string) (bool, error) {
+	// 并发防护置首：同库根重复 createTasks 以「创建进行中」拒绝——先于其余守卫，
+	// 保证创建在途时的重复发起必中此拒因
+	if !beginCreateRun(root) {
+		return false, fmt.Errorf("创建进行中：该库根已有一次创建在途，请等待完成通知后再发起")
+	}
+	fail := func(err error) (bool, error) {
+		endCreateRun(root)
+		return false, err
+	}
 	sess, err := m.loadSession(root)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	if sess.Snapshot == nil {
-		return nil, fmt.Errorf("该会话尚未完成全量识别，无法创建任务")
+		return fail(fmt.Errorf("该会话尚未完成全量识别，无法创建任务"))
 	}
 	if len(sess.Selection) == 0 {
-		return nil, fmt.Errorf("未选择任何作品：请在识别全景勾选要导入的作品后再创建")
+		return fail(fmt.Errorf("未选择任何作品：请在识别全景勾选要导入的作品后再创建"))
 	}
 	domain := DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess))
 	works, missing := domain.ResolveAll(sess.Selection)
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("选择集中 %d 项已不在当前识别全景内（识别结构可能已变化），请刷新后重选", len(missing))
+		return fail(fmt.Errorf("选择集中 %d 项已不在当前识别全景内（识别结构可能已变化），请刷新后重选", len(missing)))
 	}
 	if err := ReconcileSelectionDisk(root, sess.Snapshot, works); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	if current := m.currentProfileDigest(); current != "" && sess.Snapshot.ProfileDigest != "" && current != sess.Snapshot.ProfileDigest {
-		return nil, fmt.Errorf("规则档案在识别后被变更，全景结论可能与最新规则不一致，请重新识别后再创建")
+		return fail(fmt.Errorf("规则档案在识别后被变更，全景结论可能与最新规则不一致，请重新识别后再创建"))
 	}
 	if sess.AssignRevision != sess.Snapshot.AssignmentRevision {
-		return nil, fmt.Errorf("会话赋值在识别后有变更，全景结论可能过期，请重新识别后再创建")
+		return fail(fmt.Errorf("会话赋值在识别后有变更，全景结论可能过期，请重新识别后再创建"))
 	}
 	if m.ctx == nil {
-		return nil, fmt.Errorf("插件上下文不可用，无法发起创建")
+		return fail(fmt.Errorf("插件上下文不可用，无法发起创建"))
 	}
 	// 任务名裁决（空/全空白=默认名）：编排侧文案与过滤产出侧父行命名共用同一函数
 	resolvedName := resolveCreateTaskName(taskName, root, len(works))
 	if err := m.BeginWorkbenchCreate(root); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	// 暂存任务名原文并重置摘要槽：过滤产出分支经宿主 CreateTask RPC 同步递归消费
-	// 暂存名、产出完成后回写批次摘要——RPC 返回时两侧均已就绪
+	// 暂存名、产出完成后回写批次摘要——RPC 返回时两侧均已就绪（时序契约不变，
+	// 仅外移 goroutine，见 runCreateTasks）
 	m.stageCreateTaskName(root, taskName)
+	go m.runCreateTasks(root, resolvedName, len(works))
+	return true, nil
+}
+
+// runCreateTasks 创建编排主体（ApplyCreateTasks 启动的独立 goroutine）：宿主
+// CreateTask RPC 同步覆盖完整产出流——返回时过滤产出侧的暂存名消费与批次摘要
+// 回写均已就绪（selection.go「创建编排与过滤产出之间的进程内传值」注释的时序
+// 契约在此保持）。终态经 createDone 事件推送：成功=清空选择集（赋值与快照保留）
+// +摘要文案；失败=abortCreateTasks（保留选择集+部分完成信息）。运行态由 defer
+// 摘除。
+func (m *SessionManager) runCreateTasks(root, taskName string, workCount int) {
+	defer endCreateRun(root)
 	resp, err := m.ctx.CreateTask("local://" + root)
 	if err != nil {
-		m.ConsumeWorkbenchCreateMarker(root)
-		m.takeStagedCreateTaskName(root)
-		return nil, fmt.Errorf("宿主创建任务失败: %w", err)
+		m.abortCreateTasks(root, fmt.Sprintf("宿主创建任务失败: %v", err))
+		return
 	}
 	if resp == nil || !resp.Succeed {
-		m.ConsumeWorkbenchCreateMarker(root)
-		m.takeStagedCreateTaskName(root)
 		msg := "宿主未说明原因"
 		if resp != nil {
 			msg = resp.Msg
 		}
-		return nil, fmt.Errorf("宿主创建任务失败: %s", msg)
+		m.abortCreateTasks(root, fmt.Sprintf("宿主创建任务失败: %s", msg))
+		return
 	}
 	if _, err := m.mutateSession(root, func(sess *WorkbenchSession) error {
 		sess.Selection = nil
@@ -553,14 +684,32 @@ func (m *SessionManager) ApplyCreateTasks(root, taskName string) (*CreateTasksOu
 		m.warnf("创建完成后清理选择集失败（任务已产出）: %v", err)
 	}
 	summary := m.takeCreateBatchSummary(root)
-	tasks := 0
-	if resp != nil {
-		tasks = int(resp.AddedQuantity)
+	tasks := int(resp.AddedQuantity)
+	m.publishCreateEvent(&workbenchFrontendEvent{
+		Kind: workbenchEventCreateDone, Root: root, Success: true,
+		Done: tasks, Total: tasks,
+		Message: buildCreateTasksMessage(taskName, workCount, tasks, summary),
+	})
+}
+
+// abortCreateTasks 创建失败收尾：回收发起标记与暂存任务名（零残留）+ createDone
+// 终态事件——保留选择集供重试；发射已开始（进度槽 planned>0）时携带部分完成
+// 信息「已创建 X/N 个子任务」（X=发射侧最近一批快照，近似宿主已收行数——
+// error 收流时已到子行与父行保留的部分完成语义，宿主按 Created 待开始承载）。
+func (m *SessionManager) abortCreateTasks(root, reason string) {
+	m.ConsumeWorkbenchCreateMarker(root)
+	m.takeStagedCreateTaskName(root)
+	emitted, planned := takeCreateEmitProgress(root)
+	var message string
+	done, total := 0, 0
+	if planned > 0 {
+		done, total = emitted, planned
+		message = fmt.Sprintf("任务创建中断：已创建 %d/%d 个子任务（父任务已入库，可删除后重试；选择集已保留）：%s", emitted, planned, reason)
+	} else {
+		message = fmt.Sprintf("任务创建失败（选择集已保留，可重试）：%s", reason)
 	}
-	return &CreateTasksOutcome{
-		TaskName: resolvedName,
-		Works:    len(works),
-		Tasks:    tasks,
-		Message:  buildCreateTasksMessage(resolvedName, len(works), tasks, summary),
-	}, nil
+	m.publishCreateEvent(&workbenchFrontendEvent{
+		Kind: workbenchEventCreateDone, Root: root, Success: false,
+		Done: done, Total: total, Message: message,
+	})
 }

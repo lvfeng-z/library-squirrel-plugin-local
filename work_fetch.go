@@ -20,6 +20,7 @@ import (
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 	"github.com/lvfeng-z/library-squirrel-sdk/identity"
+	"github.com/lvfeng-z/library-squirrel-sdk/transport"
 )
 
 // currentPluginDataVersion 当前插件支持的 task PluginData 格式版本
@@ -82,6 +83,11 @@ type LocalImportWorkFetcher struct {
 	sessions *SessionManager
 	// entryConfirm Create 流内入口确认弹窗协调器（Activate 装配）
 	entryConfirm *entryConfirmCoordinator
+
+	// hostContractFn 宿主契约版本读取（握手降级判定用）：缺省走 SDK 进程级访问器
+	// transport.HostContractVersion——Activate 协商值（ActivateRequest.host_contract_version）
+	// 已由 SDK 侧在 Activate 时落进程级原子值，插件无需自记；单测注入模拟旧宿主（<21）
+	hostContractFn func() uint32
 
 	// 执行期重算的库内谓词索引缓存（CreateWorkInfo 按任务逐个调用，逐次全量
 	// 分页拉取四轨会放大库查询；TTL 窗口内复用，见 libraryIndexCached）
@@ -244,12 +250,18 @@ func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string) (*sdk
 	// 缺席（测试直驱等未暂存路径）或空白按默认名兜底——单一裁决点见 resolveCreateTaskName
 	taskName := resolveCreateTaskName(h.sessions.takeStagedCreateTaskName(root), root, len(works))
 
-	ch := make(chan *sdkdto.TaskCreateResponse, 16)
+	// B1+ 分帧发射（条目形态流：task 块+子行批次块经 CreateStreamItem 装配）；中止
+	// 原因（握手降级的载荷超限）经 SetReason 以 error 块收流——须在 close(ch) 前
+	// 调用（消费侧对 reason 的读取依赖 channel close 的 happens-before 顺序）
+	ch := make(chan *sdkdto.CreateStreamItem, 16)
+	result := sdkdto.StreamItemsResult(ch)
 	go func() {
-		defer close(ch)
-		h.emitSelectedWorks(root, sess, works, taskName, ch)
+		if reason := h.emitSelectedWorks(root, sess, works, taskName, ch); reason != "" {
+			result.SetReason(reason)
+		}
+		close(ch)
 	}()
-	return sdkdto.StreamResult(ch), nil
+	return result, nil
 }
 
 // batchFileItem 批次应答的子行素材：带归属裁决的文件与其所属目录的含义链。
@@ -259,26 +271,143 @@ type batchFileItem struct {
 	metadata []PathMeaning
 }
 
-// emitSelectedWorks 按选择集产出批次应答（一次创建=一个父任务）：文件按选择域
-// 确定序（目录按域序，目录内先目录聚合作品后集成员〔域序=集内序〕）逐个裁决
-// 归属后归集进同一条父应答——站点键=identity.Local.Key（创建域），子行归属经
-// 各自 siteKey 字段声明：真实域归属子行携归属站点键（作品身份落库域，仍受宿主
-// 站点表存在性校验），local 回退子行留空（继承父应答站点键）。
-// 父行形态：
-//   - PluginTaskId=local-batch-<unix毫秒>（宿主按应答建树不依赖跨批唯一——
-//     同批二次创建产生新批次行，R3）；
-//   - TaskName=用户名；
-//   - children=全部文件子行（逐文件形态、FilePluginData、赋值快照与确定序
-//     保持 v1 形态——子行构造复用 buildChildResponses）；
-//   - 父 PluginData=DirPluginData 纯容器（DirRelPath 空、无含义链——执行语义
-//     全在子行）。
-//
+// —— 大批次子行分帧（契约 21 B1+，大载荷分页方案·设计 B）——
+
+const (
+	// createChildrenBatchMinHostContract 子行批次块（children_batch）所需的最低
+	// 宿主契约版本：握手协商值低于此（含未 Activate 的 0）时降级为现状单块全量
+	// 内联形态——捆绑发布形态下宿主恒 ≥21，降级路径仅兜异常组合（旧宿主手装等）。
+	createChildrenBatchMinHostContract = 21
+	// createChildrenBatchByteTarget 单批子行的序列化字节目标（16MB）：对 64MB
+	// 断路器留 4 倍余量；估和为保守上界（childWireSizeUpper），实际线尺寸只会更小。
+	createChildrenBatchByteTarget = 16 << 20
+	// createChildrenBatchCountLimit 单批子行条数上限（2 万）：字节目标之外的
+	// 第二道界，约束宿主侧单父聚合的峰值行数。
+	createChildrenBatchCountLimit = 20000
+	// degradeChildrenInlineLimit 握手降级（宿主契约 <21）时单块全量内联的序列化
+	// 字节上限（60MB）：超限返回中止原因明确报错（宿主契约过旧且载荷超限），
+	// 不静默撞 64MB 断路器。
+	degradeChildrenInlineLimit = 60 << 20
+	// createProgressEventStep createProgress 事件的节流步长：每推进该数量的作品/
+	// 子行推送一档（末条必发）——15 万级批次不至于逐条轰事件通道；发射进度槽
+	//（部分完成信息数据源）另在 noteCreateProgress 内逐批落账，不受此节流。
+	createProgressEventStep = 1000
+)
+
+// hostContractVersion 宿主契约版本（Activate 协商值，SDK 进程级记录；
+// hostContractFn 缺省即取访问器——未 Activate 时为 0，按保守降级处理）。
+func (h *LocalImportWorkFetcher) hostContractVersion() uint32 {
+	if h.hostContractFn != nil {
+		return h.hostContractFn()
+	}
+	return transport.HostContractVersion()
+}
+
+// childWireSizeUpper 子行序列化字节的保守上界（分帧估和用）：proto 线形态为逐
+// 字符串字段「tag+varint 长度+内容」（Go 字符串 len 即 UTF-8 字节数，与线编码
+// 内容一致），估和=全部字符串字段字节和+每字段垫头+消息级固定头——估和恒 ≥
+// 实际线尺寸，按此切块的批不会超出字节目标。
+func childWireSizeUpper(child *sdkdto.TaskCreateChildResponse) int {
+	const perFieldOverhead = 8 // tag(≤2B)+长度 varint(≤5B)+余量
+	size := len(child.TaskName) + len(child.SiteWorkId) + len(child.Url) + len(child.PluginData) +
+		len(child.SiteName) + len(child.ResourceType) + len(child.SiteKey) + 7*perFieldOverhead
+	for _, role := range child.InvolvedRoles {
+		size += len(role) + perFieldOverhead
+	}
+	return size + 16
+}
+
+// splitChildBatches 子行分帧切批：每批同时受序列化字节目标（createChildrenBatchByteTarget）
+// 与条数上限（createChildrenBatchCountLimit）双界约束；首条必装保证推进（单条超目标的
+// 巨子行独立成批）。恰一批=单批装得下（纯内联形态，无批次块）。
+func splitChildBatches(children []*sdkdto.TaskCreateChildResponse) [][]*sdkdto.TaskCreateChildResponse {
+	batches := make([][]*sdkdto.TaskCreateChildResponse, 0, 1)
+	var cur []*sdkdto.TaskCreateChildResponse
+	var curBytes int
+	for _, child := range children {
+		if len(cur) > 0 && (len(cur) >= createChildrenBatchCountLimit || curBytes+childWireSizeUpper(child) > createChildrenBatchByteTarget) {
+			batches = append(batches, cur)
+			cur, curBytes = nil, 0
+		}
+		cur = append(cur, child)
+		curBytes += childWireSizeUpper(child)
+	}
+	if len(cur) > 0 {
+		batches = append(batches, cur)
+	}
+	return batches
+}
+
+// emitChildBatches 发射子行批次序列（B1+ 单一代码路径）：父块（TaskItem）必带
+// 首批子行内联（执行期裁决 2026-10-29：保住宿主「无 children→独立叶」既有判定，
+// 不引入空 children 父声明），余批经 ChildrenBatchItem 发块（pluginTaskId 指称
+// 父声明所用 ID，末批 last=true）；恰一批时循环体不执行=纯内联形态（pixiv/
+// bilibili 单块内联同构）。onBatch 在每批发射后回调（emitted/total=累计已发射
+// 子行/计划子行总数——创建相进度的数据源）。
+func emitChildBatches(ch chan<- *sdkdto.CreateStreamItem, parentID, taskName, parentURL, siteKey string,
+	batches [][]*sdkdto.TaskCreateChildResponse, onBatch func(emitted, total int)) {
+	if len(batches) == 0 {
+		return
+	}
+	total := 0
+	for _, batch := range batches {
+		total += len(batch)
+	}
+	ch <- sdkdto.TaskItem(buildBatchParentResponse(parentID, taskName, parentURL, siteKey, batches[0]))
+	emitted := len(batches[0])
+	if onBatch != nil {
+		onBatch(emitted, total)
+	}
+	for i := 1; i < len(batches); i++ {
+		ch <- sdkdto.ChildrenBatchItem(parentID, batches[i], i == len(batches)-1)
+		emitted += len(batches[i])
+		if onBatch != nil {
+			onBatch(emitted, total)
+		}
+	}
+}
+
+// emitSelectedWorks 按选择集产出批次应答（一次创建=一个父任务，B1+ 分帧形态）：
+// 文件按选择域确定序（目录按域序，目录内先目录聚合作品后集成员〔域序=集内序〕）
+// 逐个裁决归属后归集——站点键=identity.Local.Key（创建域），子行归属经各自
+// siteKey 字段声明：真实域归属子行携归属站点键（作品身份落库域，仍受宿主站点
+// 表存在性校验），local 回退子行留空（继承父应答站点键）。
+// 产出形态（单一代码路径，契约 21）：父块必带首批子行内联，余下子行按「序列化
+// 字节目标+条数上限」切 children_batch 块（plugin_task_id=父声明所用 ID，末批
+// last=true）；单批装得下时=纯内联形态（无批次块）。握手降级：宿主契约协商值
+// <21（含未 Activate 的 0）时不分帧、按现状单块全量内联（子行序列化 ≤60MB 时），
+// 超限返回中止原因「宿主契约过旧且载荷超限」由调用方以 error 块收流。
+// 父行形态：PluginTaskId=local-batch-<unix毫秒>（宿主按应答建树不依赖跨批唯一——
+// 同批二次创建产生新批次行，R3）；TaskName=用户名；子行构造复用 buildChildResponses
+// （逐文件形态、FilePluginData、赋值快照与确定序保持 v1 形态）；父 PluginData=
+// DirPluginData 纯容器。
+// 进度（createTasks 异步化的数据源）：核对相（verify=逐作品哈希推进）与创建相
+// （create=发射循环计数）经 createProgress 事件推送（节流 createProgressEventStep，
+// 末条必发）。
 // 任一作品全部轨道不可访问（stat/哈希失败）即整件跳过（半作品结构性不产出，
 // v1 口径）。产出完成后向会话管理器记录批次摘要（子行总数与非 local 子行的
 // 归属分布，编排动作通知文案的数据源——宿主 CreateTask RPC 同步消费完整产出
-// 流后才返回，记录必先于编排读取）。
-func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchSession, works []*SelectableWork, taskName string, ch chan<- *sdkdto.TaskCreateResponse) {
+// 流后才返回，记录必先于编排读取）；降级超限中止时不产出、零簿记。返回空串=
+// 正常收尾，非空=中止原因。
+func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchSession, works []*SelectableWork, taskName string, ch chan<- *sdkdto.CreateStreamItem) string {
 	chains := dirMeaningChains(sess.Snapshot)
+
+	// 进度推送（createProgress）：经会话管理器发布事件（上下文不可用静默）；创建
+	// 相进度同时在 noteCreateProgress 内落运行态进度槽（失败路径部分完成信息源）
+	progress := func(phase string, done, total int) {
+		if h.sessions != nil {
+			h.sessions.noteCreateProgress(root, phase, done, total)
+		}
+	}
+	// 核对相进度：逐作品哈希推进（X=已处理作品数，N=选择集作品数）
+	verifyDone, verifySent := 0, -1
+	noteVerify := func() {
+		verifyDone++
+		if verifyDone == len(works) || verifyDone-verifySent >= createProgressEventStep {
+			progress(createPhaseVerify, verifyDone, len(works))
+			verifySent = verifyDone
+		}
+	}
 
 	// 按目录组织产出计划：目录聚合作品与集成员分桶，目录序=选择域序
 	type dirPlan struct {
@@ -339,21 +468,44 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			if files, ok := h.hashWorkFilesAllOrNothing(root, plan.dirWork); ok {
 				collect(files, metadata, classifiedSiteKey)
 			}
+			noteVerify()
 		}
 		// 集成员：单轨同口径（任一轨道失败仅弃该成员自身），成员按域序=集内序进批次
 		for _, member := range plan.setMembers {
 			if files, ok := h.hashWorkFilesAllOrNothing(root, member); ok {
 				collect(files, metadata, classifiedSiteKey)
 			}
+			noteVerify()
 		}
 	}
 
-	// 批次产出：单父应答承载全部子行（空批次不产出父行，v1 口径）
+	// 批次产出（空批次不产出父行，v1 口径）
 	children := buildChildResponses(items, sess.Assignments)
 	if len(children) > 0 {
+		// 分帧裁决：宿主契约 ≥21 按双界切批；<21（含未 Activate 的 0）降级现状
+		// 单块全量内联，超限中止（返回中止原因，零产出零簿记）
+		var batches [][]*sdkdto.TaskCreateChildResponse
+		if h.hostContractVersion() < createChildrenBatchMinHostContract {
+			var totalBytes int
+			for _, child := range children {
+				totalBytes += childWireSizeUpper(child)
+			}
+			if totalBytes > degradeChildrenInlineLimit {
+				return fmt.Sprintf("宿主契约过旧（协商版本 %d < %d）且子行载荷超限（约 %.0fMB ≥ %dMB 上限），无法以单块内联形态创建；请升级宿主后重试",
+					h.hostContractVersion(), createChildrenBatchMinHostContract,
+					float64(totalBytes)/(1<<20), degradeChildrenInlineLimit>>20)
+			}
+			batches = [][]*sdkdto.TaskCreateChildResponse{children}
+		} else {
+			batches = splitChildBatches(children)
+		}
+
+		// 父身份与集序记录同源毫秒时间戳（批次号=父行身份）
 		batchMs := time.Now().UnixMilli()
 		parentID := fmt.Sprintf("local-batch-%d", batchMs)
-		ch <- buildBatchParentResponse(parentID, taskName, "local://"+root, identity.Local.Key, children)
+		emitChildBatches(ch, parentID, taskName, "local://"+root, identity.Local.Key, batches, func(emitted, total int) {
+			progress(createPhaseCreate, emitted, total)
+		})
 
 		// 集序记录：为有集归属的子行按集归集落记录（集内原站序作答的数据源，
 		// 批次号=父行身份同源毫秒时间戳）；写入失败不阻断批次产出——记录缺席
@@ -370,6 +522,7 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		}
 	}
 	h.sessions.recordCreateBatchSummary(root, summary)
+	return ""
 }
 
 // hashWorkFilesAllOrNothing 对作品全部轨道计算内容哈希：任一轨道 stat/哈希失败
@@ -992,20 +1145,23 @@ const (
 )
 
 // workbenchFrontendEvent 插件→前端的事件载荷（无配对序号的主动通知；入口确认
-// 携带自身的确认配对序号供答复配对，识别进度/终态携带阶段与计数）。
+// 携带自身的确认配对序号供答复配对，识别/创建进度与终态携带阶段与计数）。
 type workbenchFrontendEvent struct {
 	Kind string `json:"kind"`
 	// Seq 入口确认的配对序号（entryConfirm/entryConfirmDismiss 携带）。
 	Seq int64 `json:"seq,omitempty"`
-	// Root 库根（entryConfirm 与识别进度/终态携带）。
+	// Root 库根（entryConfirm 与识别/创建进度、终态携带）。
 	Root string `json:"root,omitempty"`
-	// Phase / Done / Total 识别进度的阶段（scan/index/evaluate/save）与计数
-	//（recognitionProgress 携带；Done/Total 的口径随阶段：scan=待求值/全部文件，
-	// evaluate=已求值/待求值文件）。
+	// Phase / Done / Total 进度事件的阶段与计数（recognitionProgress/
+	// createProgress 携带；Done/Total 的口径随阶段：识别 scan=待求值/全部文件、
+	// evaluate=已求值/待求值文件；创建 verify=已核对/全部作品（逐作品哈希）、
+	// create=已发射/计划子行总数（发射循环计数））。
 	Phase string `json:"phase,omitempty"`
 	Done  int    `json:"done,omitempty"`
 	Total int    `json:"total,omitempty"`
-	// Success / Message 识别终态的成败与用户可读摘要（recognitionDone 携带）。
+	// Success / Message 终态事件的成败与用户可读摘要（recognitionDone/
+	// createDone 携带；createDone 失败态携带部分完成信息「已创建 X/N 个子任务」
+	// 于文案，X/N 同时镜像到 Done/Total）。
 	Success bool   `json:"success,omitempty"`
 	Message string `json:"message,omitempty"`
 }

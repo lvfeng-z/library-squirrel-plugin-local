@@ -286,12 +286,13 @@ func TestSetSelectionValidatesSelectability(t *testing.T) {
 
 // —— 退出标准 1/6：会话模式只产出所选作品（集父行按所选成员生成）+ 零弹问 —— //
 
-// collectWorkbenchCreate 经发起标记驱动 Create 的过滤产出分支并收集全部应答；
-// taskName 模拟编排动作暂存的创建任务名原文（空串=默认名兜底路径——与真实
-// 编排 ApplyCreateTasks 的暂存行为同构）。
+// collectWorkbenchCreate 经发起标记驱动 Create 的过滤产出分支并收集全部 task 块
+// （条目形态流的批次块由专门用例断言，此处取父行断言载体）；taskName 模拟编排
+// 动作暂存的创建任务名原文（空串=默认名兜底路径——与真实编排 ApplyCreateTasks
+// 的暂存行为同构）；hostContractFn 注入 21（B1+ 分帧路径）。
 func collectWorkbenchCreate(t *testing.T, m *SessionManager, ctx *workbenchTestCtx, root, taskName string) []*sdkdto.TaskCreateResponse {
 	t.Helper()
-	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx}
+	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract }}
 	m.stageCreateTaskName(root, taskName)
 	if err := m.BeginWorkbenchCreate(root); err != nil {
 		t.Fatalf("置位发起标记失败: %v", err)
@@ -300,14 +301,30 @@ func collectWorkbenchCreate(t *testing.T, m *SessionManager, ctx *workbenchTestC
 	if err != nil {
 		t.Fatalf("工作台发起创建不应报错: %v", err)
 	}
-	if !result.IsStream() {
-		t.Fatalf("过滤产出应为流式结果")
+	if result.Items() == nil {
+		t.Fatalf("过滤产出应为条目形态流式结果")
 	}
 	var out []*sdkdto.TaskCreateResponse
-	for resp := range result.Stream() {
-		out = append(out, resp)
+	for item := range result.Items() {
+		if task := item.Task(); task != nil {
+			out = append(out, task)
+		}
 	}
 	return out
+}
+
+// classifyQuestionCount 分类问答发布计数（零弹问断言的口径：classify:request
+// 主题的发布数——createProgress 等进度事件属预期发布，不计入）。
+func (c *workbenchTestCtx) classifyQuestionCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, p := range c.published {
+		if p.topic == "plugin:local-import:classify:request" {
+			n++
+		}
+	}
+	return n
 }
 
 // responseChildNames 应答的子任务文件名集合（批次父行子行形态的断言载体）。
@@ -334,7 +351,9 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
 
-	before := ctx.publishedCount()
+	// 零弹问（退出标准 6）：创建全程零分类问答（ClassifyDir 结构性不触问答，
+	// 目录含义取快照回放）；createProgress 进度事件属预期发布不计入
+	before := ctx.classifyQuestionCount()
 	resps := collectWorkbenchCreate(t, m, ctx, root, "")
 	if len(resps) != 1 {
 		t.Fatalf("纯 local 批次应为单应答单父（批次应答），实得 %d 个: %+v", len(resps), resps)
@@ -387,10 +406,11 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 		}
 	}
 
-	// 零弹问（退出标准 6）：创建全程零新增前端事件——ClassifyDir 的问答与入口
-	// 确认弹窗均不触发（过滤产出分支对分类器结构性零引用，目录含义取快照回放）
-	if after := ctx.publishedCount(); after != before {
-		t.Fatalf("会话模式创建应零前端事件（零 ClassifyDir 弹问），实得创建期新增 %d 条", after-before)
+	// 零弹问（退出标准 6）：创建全程零分类问答与零入口确认事件——ClassifyDir 的
+	// 问答与确认弹窗均不触发（过滤产出分支对分类器结构性零引用，目录含义取快照
+	// 回放）；createProgress 进度事件属预期发布不计入
+	if after := ctx.classifyQuestionCount(); after != before {
+		t.Fatalf("会话模式创建应零分类问答（零 ClassifyDir 弹问），实得创建期新增 %d 条", after-before)
 	}
 }
 
@@ -419,7 +439,8 @@ func TestCreateWorkbenchFilteredLoneSetMemberSingleChild(t *testing.T) {
 // —— 批次应答：纯 local 与混归属单父（emitSelectedWorks 直驱）—— //
 
 // emitFixture 构造直驱 emitSelectedWorks 的最小环境：临时库根 + 指定相对路径的
-// 文件集 + 空快照会话（快照无目录记录 → 含义链为空，归属裁决只走文件名形态）。
+// 文件集 + 空快照会话（快照无目录记录 → 含义链为空，归属裁决只走文件名形态）；
+// hostContractFn 注入 21（B1+ 分帧路径——单批装得下时即纯内联形态）。
 func emitFixture(t *testing.T, relPaths []string) (string, *LocalImportWorkFetcher, *SessionManager, *WorkbenchSession) {
 	t.Helper()
 	root := t.TempDir()
@@ -427,19 +448,52 @@ func emitFixture(t *testing.T, relPaths []string) (string, *LocalImportWorkFetch
 		writeTestFile(t, root+"/"+rel, rel)
 	}
 	m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
-	h := &LocalImportWorkFetcher{sessions: m}
+	h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract }}
 	return root, h, m, &WorkbenchSession{Snapshot: &RecognitionSnapshot{}}
 }
 
-// collectEmitted 直驱 emitSelectedWorks 收集全部应答（同步调用，结束后收卷）。
-func collectEmitted(t *testing.T, h *LocalImportWorkFetcher, root string, sess *WorkbenchSession, works []*SelectableWork, taskName string) []*sdkdto.TaskCreateResponse {
+// collectEmittedWithReason 直驱 emitSelectedWorks 收集全部发射条目与中止原因
+// （同步调用，结束后收卷）。
+func collectEmittedWithReason(t *testing.T, h *LocalImportWorkFetcher, root string, sess *WorkbenchSession, works []*SelectableWork, taskName string) ([]*sdkdto.CreateStreamItem, string) {
 	t.Helper()
-	ch := make(chan *sdkdto.TaskCreateResponse, 16)
-	h.emitSelectedWorks(root, sess, works, taskName, ch)
+	ch := make(chan *sdkdto.CreateStreamItem, 16)
+	reason := h.emitSelectedWorks(root, sess, works, taskName, ch)
 	close(ch)
+	var out []*sdkdto.CreateStreamItem
+	for item := range ch {
+		out = append(out, item)
+	}
+	return out, reason
+}
+
+// collectEmitted 直驱 emitSelectedWorks 收集全部发射条目（断言无中止原因）。
+func collectEmitted(t *testing.T, h *LocalImportWorkFetcher, root string, sess *WorkbenchSession, works []*SelectableWork, taskName string) []*sdkdto.CreateStreamItem {
+	t.Helper()
+	items, reason := collectEmittedWithReason(t, h, root, sess, works, taskName)
+	if reason != "" {
+		t.Fatalf("emitSelectedWorks 不应中止: %s", reason)
+	}
+	return items
+}
+
+// emittedTasks 发射条目序列中的全部 task 块（按发射序）。
+func emittedTasks(items []*sdkdto.CreateStreamItem) []*sdkdto.TaskCreateResponse {
 	var out []*sdkdto.TaskCreateResponse
-	for resp := range ch {
-		out = append(out, resp)
+	for _, item := range items {
+		if task := item.Task(); task != nil {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+
+// emittedBatches 发射条目序列中的全部子行批次块（按发射序）。
+func emittedBatches(items []*sdkdto.CreateStreamItem) []*sdkdto.TaskChildrenBatch {
+	var out []*sdkdto.TaskChildrenBatch
+	for _, item := range items {
+		if batch := item.ChildrenBatch(); batch != nil {
+			out = append(out, batch)
+		}
 	}
 	return out
 }
@@ -461,7 +515,7 @@ func TestEmitSelectedWorksPureLocalSingleParent(t *testing.T) {
 		{WorkID: "f:乙/集名_001.jpg", Kind: WorkKindSetMember, DirRelKey: "乙", Files: []string{"乙/集名_001.jpg"}, SetKey: workSetKey("乙", "集名")},
 		{WorkID: "f:乙/集名_002.jpg", Kind: WorkKindSetMember, DirRelKey: "乙", Files: []string{"乙/集名_002.jpg"}, SetKey: workSetKey("乙", "集名")},
 	}
-	resps := collectEmitted(t, h, root, sess, works, "整批导入")
+	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "整批导入"))
 	if len(resps) != 1 || resps[0].TaskName != "整批导入" {
 		t.Fatalf("纯 local 批次应为单应答（用户名直用），实得 %+v", resps)
 	}
@@ -496,7 +550,7 @@ func TestEmitSelectedWorksMixedAttributionSingleParent(t *testing.T) {
 		WorkID: "d:混合", Kind: WorkKindDirTracks, DirRelKey: "混合",
 		Files: []string{"混合/【作者A】标题1.jpg", "混合/11111111_p0.jpg"},
 	}}
-	resps := collectEmitted(t, h, root, sess, works, "混归属批次")
+	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "混归属批次"))
 	if len(resps) != 1 {
 		t.Fatalf("混归属批次应为单应答单父（全部子行进同一父），实得 %d: %+v", len(resps), resps)
 	}
@@ -606,13 +660,14 @@ func removeFile(t *testing.T, path string) error {
 	return os.Remove(path)
 }
 
-// —— 创建编排动作：对账通过后一次 CreateTask + 选择集清理 —— //
+// —— 创建编排动作：异步化（立即应答 started + goroutine 创建 + createDone 终态）—— //
 
-// TestApplyCreateTasksOrchestration 创建编排动作全链：对账通过 → 置发起标记+暂存
-// 任务名 → 经宿主 CreateTask 一次调用（local:// 库根）→ 按宿主结论回告创建数与
-// 通知文案（空任务名=默认名兜底；宿主桩不产出=无批次摘要，文案不追加归属
-// 附注——真实 Create 过滤产出分支由前述用例直接驱动）→ 清理选择集（赋值与
-// 快照保留）。CreateTask 由桩应答。
+// TestApplyCreateTasksOrchestration 创建编排动作全链（异步化后）：对账通过 → 置
+// 发起标记+暂存任务名 → 立即应答 started=true（创建在独立 goroutine）→ 宿主
+// CreateTask 一次调用（local:// 库根）→ createDone 成功事件携带默认名兜底通知
+// 文案（空任务名；宿主桩不产出=无批次摘要，文案不追加归属附注——真实 Create
+// 过滤产出分支由前述用例直接驱动）→ 清理选择集（赋值与快照保留）。CreateTask
+// 由桩应答。
 func TestApplyCreateTasksOrchestration(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, map[string]SessionAssignment{
 		"多轨/【作者C】标题3.jpg": {Title: "手工标题", UpdatedAtMs: 1},
@@ -620,19 +675,17 @@ func TestApplyCreateTasksOrchestration(t *testing.T) {
 	if _, err := m.SetSelection(root, []string{"d:多轨", "d:已识别", "f:序列/前缀名_001.jpg"}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
-	outcome, err := m.ApplyCreateTasks(root, "")
-	if err != nil {
-		t.Fatalf("创建编排失败: %v", err)
+	started, err := m.ApplyCreateTasks(root, "")
+	if err != nil || !started {
+		t.Fatalf("创建编排应立即应答已开始创建: started=%v err=%v", started, err)
 	}
 	wantName := fmt.Sprintf("本地导入 · %s · 3 件作品", filepath.Base(root))
-	if outcome.TaskName != wantName {
-		t.Fatalf("空任务名应按默认名兜底，期望 %q 实际 %q", wantName, outcome.TaskName)
+	done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+	if !done.Success {
+		t.Fatalf("桩创建应成功收尾，实际: %s", done.Message)
 	}
-	if outcome.Works != 3 || outcome.Tasks != 3 {
-		t.Fatalf("创建结论应为 3 作品/宿主 3 任务，实际 %+v", outcome)
-	}
-	if want := fmt.Sprintf("已创建任务「%s」：3 件作品（3 个子任务，Created 待手动开始）", wantName); outcome.Message != want {
-		t.Fatalf("通知文案应为批次任务形态，期望 %q 实际 %q", want, outcome.Message)
+	if want := fmt.Sprintf("已创建任务「%s」：3 件作品（3 个子任务，Created 待手动开始）", wantName); done.Message != want {
+		t.Fatalf("createDone 文案应为批次任务形态（默认名兜底），期望 %q 实际 %q", want, done.Message)
 	}
 	if got := ctx.createTaskURL(); got != "local://"+root {
 		t.Fatalf("CreateTask 应以 local:// 库根调用一次，实际 %q", got)
@@ -657,22 +710,236 @@ func TestApplyCreateTasksOrchestration(t *testing.T) {
 }
 
 // TestApplyCreateTasksCustomName 自定义任务名：非空载荷（含首尾空白）裁剪后生效，
-// 不走默认名兜底。
+// 不走默认名兜底（createDone 文案携带生效名）。
 func TestApplyCreateTasksCustomName(t *testing.T) {
-	root, m, _ := recognizedSelectionFixture(t, nil)
+	root, m, ctx := recognizedSelectionFixture(t, nil)
 	if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
-	outcome, err := m.ApplyCreateTasks(root, "  我的批次  ")
+	started, err := m.ApplyCreateTasks(root, "  我的批次  ")
+	if err != nil || !started {
+		t.Fatalf("创建编排应立即应答已开始创建: started=%v err=%v", started, err)
+	}
+	done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+	if !done.Success || !strings.Contains(done.Message, "已创建任务「我的批次」") {
+		t.Fatalf("createDone 文案应携带裁剪后生效的任务名，实际: %+v", done)
+	}
+}
+
+// —— createTasks 异步化：宿主同步递归链的事件序列（大载荷分页方案·设计 C）—— //
+
+// recursiveCreateTaskCtx CreateTask 桩模拟宿主同步递归：调用即同步驱动插件的
+// Create 过滤产出分支并消费完整产出流（还原「CreateTask RPC 同步覆盖完整产出
+// 流」的真实宿主时序），按实际产出子行数回告 AddedQuantity；transportFail=真
+// 返回传输错误（零产出）；afterEmitFail=真在产出消费完毕后回告宿主落库失败
+// （部分完成形态——发射进度槽已落账）；block 闸可挂起创建（并发拒绝断言用）。
+type recursiveCreateTaskCtx struct {
+	workbenchTestCtx
+	fetcher       *LocalImportWorkFetcher
+	block         chan struct{}
+	transportFail bool
+	afterEmitFail bool
+}
+
+// CreateTask 宿主同步递归桩：真实链=编排 goroutine → m.ctx.CreateTask → 宿主 →
+// 插件 Create（过滤产出分支）→ 完整产出流消费 → CreateTask 返回。
+func (c *recursiveCreateTaskCtx) CreateTask(url string) (*sdkdto.CreateTaskResult, error) {
+	if c.block != nil {
+		<-c.block
+	}
+	if c.transportFail {
+		return nil, fmt.Errorf("宿主连接中断（测试注入）")
+	}
+	result, err := c.fetcher.Create(url)
 	if err != nil {
-		t.Fatalf("创建编排失败: %v", err)
+		return nil, err
 	}
-	if outcome.TaskName != "我的批次" {
-		t.Fatalf("自定义任务名应裁剪首尾空白后生效，实际 %q", outcome.TaskName)
+	if result.Items() == nil {
+		return nil, fmt.Errorf("过滤产出应为条目形态流式结果（B1+）")
 	}
-	if !strings.Contains(outcome.Message, "已创建任务「我的批次」") {
-		t.Fatalf("通知文案应携带生效任务名，实际 %q", outcome.Message)
+	added := 0
+	for item := range result.Items() {
+		if task := item.Task(); task != nil {
+			added += len(task.Children)
+		} else if batch := item.ChildrenBatch(); batch != nil {
+			added += len(batch.Items)
+		}
 	}
+	if c.afterEmitFail {
+		return &sdkdto.CreateTaskResult{Succeed: false, Msg: "宿主任务落库失败（测试注入）"}, nil
+	}
+	return &sdkdto.CreateTaskResult{Succeed: true, AddedQuantity: added}, nil
+}
+
+// recursiveCreateFixture 「宿主同步递归」创建链测试环境：样例树+全量识别与
+// recognizedSelectionFixture 同构，但 CreateTask 桩同步驱动真实过滤产出分支
+// （宿主契约注入 21——B1+ 分帧路径）；block 为可选挂起闸。
+func recursiveCreateFixture(t *testing.T, block chan struct{}) (string, *SessionManager, *recursiveCreateTaskCtx) {
+	t.Helper()
+	root := t.TempDir()
+	store := newFakeSessionStore()
+	ctx := &recursiveCreateTaskCtx{workbenchTestCtx: workbenchTestCtx{store: store}, block: block}
+	ctx.library = libraryFixture{localAuthors: []string{"库内作者名"}}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: selectionTestRules(t)}
+	if err := SaveProfile(store, profile); err != nil {
+		t.Fatalf("写入测试规则档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	selectionSampleTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	ctx.fetcher = &LocalImportWorkFetcher{sessions: m, ctx: ctx, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract }}
+	return root, m, ctx
+}
+
+// collectWorkbenchEvents 收集工作台事件通道的全部事件（按发布序；ctx 为事件
+// 记录桩或其包装桩）。
+func collectWorkbenchEvents(t *testing.T, ctx workbenchEventReader) []workbenchFrontendEvent {
+	t.Helper()
+	var out []workbenchFrontendEvent
+	for _, p := range ctx.publishedSnapshot() {
+		if p.topic != workbenchTopicEvent {
+			continue
+		}
+		var evt workbenchFrontendEvent
+		if err := json.Unmarshal([]byte(p.data), &evt); err == nil {
+			out = append(out, evt)
+		}
+	}
+	return out
+}
+
+// TestApplyCreateTasksAsyncEventSequence createTasks 异步化全链事件序列（对齐
+// 大载荷分页方案测试锚定 10）：立即应答 Started → createProgress 两相（核对
+// 文件 X/N=逐作品哈希进度 → 创建子任务 X/N=发射循环计数）→ createDone（成功=
+// 清空选择集+摘要文案；失败=保留选择集+部分完成信息「已创建 X/N 个子任务」）；
+// 进行中重复 createTasks 以「创建进行中」拒绝、收尾后闸解除。
+func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
+	t.Run("成功全链清空选择集", func(t *testing.T) {
+		root, m, ctx := recursiveCreateFixture(t, nil)
+		if _, err := m.SetSelection(root, []string{"d:多轨", "d:已识别"}); err != nil {
+			t.Fatalf("写入选择集失败: %v", err)
+		}
+		started, err := m.ApplyCreateTasks(root, "异步批次")
+		if err != nil || !started {
+			t.Fatalf("创建编排应立即应答已开始创建: started=%v err=%v", started, err)
+		}
+		done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+		if !done.Success {
+			t.Fatalf("宿主同步递归桩应成功收尾，实际: %s", done.Message)
+		}
+		if !strings.Contains(done.Message, "已创建任务「异步批次」：2 件作品（3 个子任务") {
+			t.Fatalf("createDone 文案应携带真实产出计数（2 作品 3 子行），实际 %q", done.Message)
+		}
+		// 事件序列：createProgress(verify 2/2) → createProgress(create 3/3) → createDone
+		var verifyAt, createAt, doneAt = -1, -1, -1
+		var verifyEvt, createEvt workbenchFrontendEvent
+		for i, evt := range collectWorkbenchEvents(t, ctx) {
+			switch {
+			case evt.Kind == workbenchEventCreateProgress && evt.Phase == createPhaseVerify && verifyAt < 0:
+				verifyAt, verifyEvt = i, evt
+			case evt.Kind == workbenchEventCreateProgress && evt.Phase == createPhaseCreate && createAt < 0:
+				createAt, createEvt = i, evt
+			case evt.Kind == workbenchEventCreateDone:
+				doneAt = i
+			}
+		}
+		if verifyAt < 0 || verifyEvt.Done != 2 || verifyEvt.Total != 2 {
+			t.Fatalf("核对相事件应在场且计数=已核对/全部作品（2/2），实际 idx=%d %+v", verifyAt, verifyEvt)
+		}
+		if createAt <= verifyAt || createEvt.Done != 3 || createEvt.Total != 3 {
+			t.Fatalf("创建相事件应在核对相之后且计数=已发射/计划子行（3/3），实际 idx=%d %+v", createAt, createEvt)
+		}
+		if doneAt <= createAt {
+			t.Fatalf("createDone 应在两相进度之后，实际 idx=%d", doneAt)
+		}
+		sess, err := m.SessionOf(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		if len(sess.Selection) != 0 {
+			t.Fatalf("成功终态应清空选择集，实际 %v", sess.Selection)
+		}
+	})
+
+	t.Run("失败保留选择集并携带部分完成信息", func(t *testing.T) {
+		root, m, ctx := recursiveCreateFixture(t, nil)
+		ctx.afterEmitFail = true // 产出消费完毕后宿主回告失败（发射进度已落账 2/2）
+		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+			t.Fatalf("写入选择集失败: %v", err)
+		}
+		if _, err := m.ApplyCreateTasks(root, ""); err != nil {
+			t.Fatalf("创建编排失败: %v", err)
+		}
+		done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+		if done.Success {
+			t.Fatalf("注入失败应回告失败终态，实际 %+v", done)
+		}
+		if !strings.Contains(done.Message, "已创建 2/2 个子任务") || !strings.Contains(done.Message, "选择集已保留") {
+			t.Fatalf("失败终态应携带部分完成信息与选择集保留说明，实际 %q", done.Message)
+		}
+		if done.Done != 2 || done.Total != 2 {
+			t.Fatalf("失败终态计数应镜像部分完成信息（2/2），实际 %+v", done)
+		}
+		sess, err := m.SessionOf(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		if len(sess.Selection) != 1 {
+			t.Fatalf("失败终态应保留选择集供重试，实际 %v", sess.Selection)
+		}
+	})
+
+	t.Run("零产出传输失败走通用失败文案", func(t *testing.T) {
+		root, m, ctx := recursiveCreateFixture(t, nil)
+		ctx.transportFail = true
+		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+			t.Fatalf("写入选择集失败: %v", err)
+		}
+		if _, err := m.ApplyCreateTasks(root, ""); err != nil {
+			t.Fatalf("创建编排失败: %v", err)
+		}
+		done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+		if done.Success || !strings.Contains(done.Message, "任务创建失败") || !strings.Contains(done.Message, "宿主连接中断") {
+			t.Fatalf("零产出失败应为通用失败文案（不含部分完成计数），实际 %q", done.Message)
+		}
+		if done.Done != 0 || done.Total != 0 {
+			t.Fatalf("零产出失败终态计数应为 0/0，实际 %+v", done)
+		}
+	})
+
+	t.Run("进行中重复发起以创建进行中拒绝", func(t *testing.T) {
+		block := make(chan struct{})
+		root, m, ctx := recursiveCreateFixture(t, block)
+		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+			t.Fatalf("写入选择集失败: %v", err)
+		}
+		if started, err := m.ApplyCreateTasks(root, ""); err != nil || !started {
+			t.Fatalf("首次创建应立即应答已开始: started=%v err=%v", started, err)
+		}
+		// 创建挂在 block 上（RPC 未返回）期间重复发起 → 守卫链「创建进行中」拒绝
+		if _, err := m.ApplyCreateTasks(root, ""); err == nil || !strings.Contains(err.Error(), "创建进行中") {
+			t.Fatalf("进行中重复 createTasks 应被拒（创建进行中），实际 %v", err)
+		}
+		close(block)
+		done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+		if !done.Success {
+			t.Fatalf("放行后创建应成功收尾，实际 %q", done.Message)
+		}
+		// 收尾后运行态闸摘除：再次发起不再被「创建进行中」拒绝
+		if _, err := m.SetSelection(root, []string{"d:已识别"}); err != nil {
+			t.Fatalf("重建选择集失败: %v", err)
+		}
+		ctx.transportFail = true
+		if _, err := m.ApplyCreateTasks(root, ""); err != nil {
+			t.Fatalf("收尾后再次发起不应再被「创建进行中」拒绝: %v", err)
+		}
+		waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+	})
 }
 
 // TestBuildCreateTasksMessageAttributionNote 通知文案的归属附注：无非 local 子行
@@ -856,10 +1123,15 @@ func TestPredicateConsistencyAcrossDryRunCreateAndRecompute(t *testing.T) {
 // —— 前端动作分派：setSelection / createTasks —— //
 
 // TestWorkbenchSelectionActionsDispatch 前端事件协议的选择族动作分派：
-// setSelection 落库并回告决策态；createTasks 携可选 taskName 走编排（桩
-// CreateTask 成功）并回告创建数与摘要（任务名生效）；未知动作回告错误。
+// setSelection 落库并回告决策态；createTasks 携可选 taskName 走异步编排——
+// 立即应答 started=true（应答态决策态仍携带在选集，创建挂在桩闸上），终态经
+// createDone 事件（任务名生效、选择集随成功清空）；未知动作回告错误。
 func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, nil)
+	// 桩闸：立即应答断言前挂起创建 goroutine（时序确定性）
+	ctx.mu.Lock()
+	ctx.createTaskBlock = make(chan struct{})
+	ctx.mu.Unlock()
 
 	m.HandleFrontendRequest([]byte(`{"seq":41,"action":"setSelection","root":` + jsonQuote(root) + `,"works":["d:多轨","d:已识别"]}`))
 	resp := ctx.lastResponse(t)
@@ -869,14 +1141,28 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 
 	m.HandleFrontendRequest([]byte(`{"seq":42,"action":"createTasks","root":` + jsonQuote(root) + `,"taskName":"命名批次"}`))
 	resp = ctx.lastResponse(t)
-	if !resp.OK || resp.Created != 2 || resp.CreateMsg == "" {
-		t.Fatalf("createTasks 应回告创建结论，实际 %+v", resp)
+	if !resp.OK || !resp.Started {
+		t.Fatalf("createTasks 应回告已开始创建（started），实际 %+v", resp)
 	}
-	if !strings.Contains(resp.CreateMsg, "已创建任务「命名批次」") {
-		t.Fatalf("createTasks 摘要应携带生效任务名（taskName 载荷透传），实际 %q", resp.CreateMsg)
+	// 立即应答时创建在途：决策态的选择集仍在场（清空随 createDone 成功态发生）
+	if resp.Decisions == nil || len(resp.Decisions.Selection) != 2 {
+		t.Fatalf("createTasks 立即应答应携带在途决策态（选择集未清），实际 %+v", resp.Decisions)
 	}
-	if resp.Decisions == nil || len(resp.Decisions.Selection) != 0 {
-		t.Fatalf("createTasks 后选择集应清理，实际 %+v", resp.Decisions)
+
+	// 放行桩闸 → 创建收尾：createDone 成功携带生效任务名，选择集随之清空
+	ctx.mu.Lock()
+	close(ctx.createTaskBlock)
+	ctx.mu.Unlock()
+	done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+	if !done.Success || !strings.Contains(done.Message, "已创建任务「命名批次」") {
+		t.Fatalf("createDone 应为成功终态并携带生效任务名（taskName 载荷透传），实际 %+v", done)
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if len(sess.Selection) != 0 {
+		t.Fatalf("createDone 成功后选择集应清理，实际 %v", sess.Selection)
 	}
 
 	m.HandleFrontendRequest([]byte(`{"seq":43,"action":"setSelection","root":` + jsonQuote(root) + `,"works":["d:未识别"]}`))

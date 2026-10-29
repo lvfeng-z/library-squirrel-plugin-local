@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -632,7 +633,7 @@ func TestEmitSelectedWorksChildOrderFollowsGroupSeq(t *testing.T) {
 	ctx := stubPluginCtx{kv: make(map[string]string)}
 	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx}
 
-	resps := collectEmitted(t, h, root, sess, works, "集序批次")
+	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "集序批次"))
 	if len(resps) != 1 {
 		t.Fatalf("纯 local 批次应为单应答单父，实得 %d 个", len(resps))
 	}
@@ -657,4 +658,164 @@ func TestEmitSelectedWorksChildOrderFollowsGroupSeq(t *testing.T) {
 			t.Fatalf("作答第 %d 位身份键应与子行一致（%s），实得 %s", i+1, children[i].SiteWorkId, e.SiteWorkId)
 		}
 	}
+}
+
+// —— 大批次子行分帧（契约 21 B1+，大载荷分页方案·设计 B 测试锚定 5/9）—— //
+
+// TestSplitChildBatchesDualBoundAndEmitSequence 拆块序列：构造 3 万子行 → 条数
+// 上限主导切批（2 万+1 万）→ 发射序列=父块（首批内联）+批次块（末批 last=true），
+// 块序列化估和 ≤16MB、序保持；单条超字节目标的巨子行独立成批（首条必装保证推进）。
+func TestSplitChildBatchesDualBoundAndEmitSequence(t *testing.T) {
+	children := make([]*sdkdto.TaskCreateChildResponse, 30000)
+	for i := range children {
+		children[i] = &sdkdto.TaskCreateChildResponse{
+			TaskName:   fmt.Sprintf("f%06d.jpg", i),
+			SiteWorkId: fmt.Sprintf("h%06d", i),
+			Url:        fmt.Sprintf("local://lib/f%06d.jpg", i),
+			PluginData: `{"schemaVersion":3}`,
+		}
+	}
+	batches := splitChildBatches(children)
+	if len(batches) != 2 || len(batches[0]) != createChildrenBatchCountLimit || len(batches[1]) != 10000 {
+		t.Fatalf("3 万子行应按条数上限切 2 批（2万+1万），实得 %d 批", len(batches))
+	}
+	for bi, batch := range batches {
+		if len(batch) > createChildrenBatchCountLimit {
+			t.Fatalf("第 %d 批超条数上限: %d", bi, len(batch))
+		}
+		var size int
+		for _, c := range batch {
+			size += childWireSizeUpper(c)
+		}
+		if size > createChildrenBatchByteTarget {
+			t.Fatalf("第 %d 批序列化估和超字节目标: ~%dMB", bi, size>>20)
+		}
+	}
+
+	// 发射序列：父块首批内联 + 批次块（末批 last）+ 跨块序保持
+	ch := make(chan *sdkdto.CreateStreamItem, 8)
+	go func() {
+		emitChildBatches(ch, "local-batch-1", "大批次", "local://lib", identity.Local.Key, batches, nil)
+		close(ch)
+	}()
+	var items []*sdkdto.CreateStreamItem
+	for it := range ch {
+		items = append(items, it)
+	}
+	if len(items) != 2 {
+		t.Fatalf("发射序列应为父块+1 批次块，实得 %d 条目", len(items))
+	}
+	parent := items[0].Task()
+	if parent == nil || parent.PluginTaskId != "local-batch-1" || len(parent.Children) != createChildrenBatchCountLimit {
+		t.Fatalf("父块应带首批 2 万子行内联，实际 parent在场=%v children=%d", parent != nil, len(parent.Children))
+	}
+	if parent.Children[0].TaskName != "f000000.jpg" || parent.Children[19999].TaskName != "f019999.jpg" {
+		t.Fatalf("首批子行应保持输入序（首尾锚点），实际 %q…%q", parent.Children[0].TaskName, parent.Children[19999].TaskName)
+	}
+	batch := items[1].ChildrenBatch()
+	if batch == nil || batch.PluginTaskId != "local-batch-1" || !batch.Last || len(batch.Items) != 10000 {
+		t.Fatalf("批次块应指称父 ID、携带余批 1 万行且 last=true，实际在场=%v %+v", batch != nil, batch)
+	}
+	if batch.Items[0].TaskName != "f020000.jpg" || batch.Items[9999].TaskName != "f029999.jpg" {
+		t.Fatalf("批次块子行应保持输入序（首尾锚点），实际 %q…%q", batch.Items[0].TaskName, batch.Items[9999].TaskName)
+	}
+
+	// 单条巨子行：超字节目标也独立成批（首条必装保证推进，纯内联形态）
+	mega := []*sdkdto.TaskCreateChildResponse{{TaskName: "mega.jpg", PluginData: strings.Repeat("x", createChildrenBatchByteTarget+1)}}
+	if got := splitChildBatches(mega); len(got) != 1 || len(got[0]) != 1 {
+		t.Fatalf("单条巨子行应独立成批（首条必装），实得 %d 批", len(got))
+	}
+}
+
+// TestEmitSelectedWorksChildrenBatchSplitting 字节界拆块与握手降级（对齐大载荷
+// 分页方案测试锚定 5/9）：目录含义链携带 2MB 大值（每子行 PluginData ≈2.1MB）
+// ——契约 ≥21：首批内联父块+批次块（≤16MB、指称父 ID、末批 last、序保持、
+// 摘要全量统计）；协商 20：同载荷（~21MB ≤60MB）降级单块全量内联（无批次块）；
+// 协商 20 且 ~65MB ≥60MB：中止原因明确报错「宿主契约过旧且载荷超限」、零产出。
+func TestEmitSelectedWorksChildrenBatchSplitting(t *testing.T) {
+	root := t.TempDir()
+	files := make([]string, 10)
+	for i := range files {
+		files[i] = fmt.Sprintf("bulk/b%02d.bin", i)
+		writeTestFile(t, root+"/"+files[i], files[i])
+	}
+	newSess := func(dirKey string) *WorkbenchSession {
+		return &WorkbenchSession{Snapshot: &RecognitionSnapshot{
+			Dirs: []SnapDir{{RelKey: dirKey, Meanings: []PathMeaning{{Type: string(PathTypeLocalTag), Name: strings.Repeat("a", 2<<20)}}}},
+		}}
+	}
+
+	t.Run("字节界拆块", func(t *testing.T) {
+		m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
+		h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract }}
+		works := []*SelectableWork{{WorkID: "d:bulk", Kind: WorkKindDirTracks, DirRelKey: "bulk", Files: files}}
+		items := collectEmitted(t, h, root, newSess("bulk"), works, "大批次")
+		tasks, batches := emittedTasks(items), emittedBatches(items)
+		if len(tasks) != 1 || len(batches) != 1 {
+			t.Fatalf("~21MB 子行应拆为父块+1 批次块，实得 task=%d batch=%d", len(tasks), len(batches))
+		}
+		parent := tasks[0]
+		if len(parent.Children) == 0 || len(parent.Children) >= len(files) {
+			t.Fatalf("父块应带首批子行内联（0<首批<全部），实际 %d 条", len(parent.Children))
+		}
+		var firstBytes int
+		for _, c := range parent.Children {
+			firstBytes += childWireSizeUpper(c)
+		}
+		if firstBytes > createChildrenBatchByteTarget {
+			t.Fatalf("首批内联序列化估和应 ≤16MB，实际 ~%dMB", firstBytes>>20)
+		}
+		batch := batches[0]
+		if batch.PluginTaskId != parent.PluginTaskId || !batch.Last {
+			t.Fatalf("批次块应指称父声明 ID 且 last=true，实际 %q vs %q last=%v", batch.PluginTaskId, parent.PluginTaskId, batch.Last)
+		}
+		var names []string
+		names = append(names, responseChildNames(parent)...)
+		for _, c := range batch.Items {
+			names = append(names, c.TaskName)
+		}
+		var want []string
+		for _, f := range files {
+			want = append(want, filepath.Base(f))
+		}
+		if strings.Join(names, ",") != strings.Join(want, ",") {
+			t.Fatalf("拆块后子行总数应全等且序保持，实际 %v", names)
+		}
+		if summary := m.takeCreateBatchSummary(root); summary.total != len(files) {
+			t.Fatalf("批次摘要应全量统计（%d 子行），实际 %+v", len(files), summary)
+		}
+	})
+
+	t.Run("降级单块全量内联", func(t *testing.T) {
+		m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
+		h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract - 1 }}
+		works := []*SelectableWork{{WorkID: "d:bulk", Kind: WorkKindDirTracks, DirRelKey: "bulk", Files: files}}
+		items := collectEmitted(t, h, root, newSess("bulk"), works, "大批次")
+		if got := len(emittedBatches(items)); got != 0 {
+			t.Fatalf("降级形态不应有批次块，实得 %d", got)
+		}
+		tasks := emittedTasks(items)
+		if len(tasks) != 1 || len(tasks[0].Children) != len(files) {
+			t.Fatalf("降级应为单块全量内联（%d 子行），实得 %+v", len(files), tasks)
+		}
+	})
+
+	t.Run("降级超限明确报错", func(t *testing.T) {
+		// 31 文件 × ~2.1MB ≈ 65MB > 60MB 降级内联上限
+		overFiles := make([]string, 31)
+		for i := range overFiles {
+			overFiles[i] = fmt.Sprintf("over/o%02d.bin", i)
+			writeTestFile(t, root+"/"+overFiles[i], overFiles[i])
+		}
+		m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
+		h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract - 1 }}
+		works := []*SelectableWork{{WorkID: "d:over", Kind: WorkKindDirTracks, DirRelKey: "over", Files: overFiles}}
+		items, reason := collectEmittedWithReason(t, h, root, newSess("over"), works, "超限批次")
+		if reason == "" || !strings.Contains(reason, "宿主契约过旧") || !strings.Contains(reason, "载荷超限") {
+			t.Fatalf("降级超限应明确报错（宿主契约过旧且载荷超限），实际 %q", reason)
+		}
+		if len(items) != 0 {
+			t.Fatalf("降级超限应零产出，实得 %d 条目", len(items))
+		}
+	})
 }

@@ -1077,7 +1077,7 @@ const (
 	workbenchActionAdjudicate          = "adjudicate"          // 冲突裁决生成组合规则
 	workbenchActionGetDiff             = "getDiff"             // 最近一次重识别差异集
 	workbenchActionSetSelection        = "setSelection"        // 全量替换资源选择集（作品键）
-	workbenchActionCreateTasks         = "createTasks"         // 创建编排（对账→CreateTask→清理选择集）
+	workbenchActionCreateTasks         = "createTasks"         // 创建编排（异步：对账→置标记→goroutine 创建；立即应答 started，进度与终态经 createProgress/createDone 事件推送）
 
 	// —— 集名候选族（作品集识别强化 批次三阶段5）——
 	workbenchActionIgnoreCandidate  = "ignoreCandidate"         // 集名候选忽略（会话态分仓；target 寻址）
@@ -1249,7 +1249,9 @@ type workbenchFrontendResponse struct {
 	// ProfileChanged activateSession 的档案对账结论（真=档案被外部变更，提示重新识别）。
 	ProfileChanged bool `json:"profileChanged,omitempty"`
 	// Started / Running startRecognition 的启动结论：started=本次请求已启动干跑，
-	// running=同库根干跑已在途（本次未重复启动）。
+	// running=同库根干跑已在途（本次未重复启动）；createTasks 复用 started=已
+	// 开始创建（创建在独立 goroutine 执行，进度与终态经 createProgress/createDone
+	// 事件推送，选择集清空随 createDone 成功态发生——见 selection.go 设计 C）。
 	Started bool `json:"started,omitempty"`
 	Running bool `json:"running,omitempty"`
 	// Panorama getPanorama 的识别全景投影（overview 分节=概览裁剪、files 分节
@@ -1284,9 +1286,6 @@ type workbenchFrontendResponse struct {
 	// Page getPanorama 分节分页回执（overview 单页整答：count/total 恒 0、
 	// done 恒真）。
 	Page *workbenchPageReceipt `json:"page,omitempty"`
-	// Created / CreateMsg createTasks 的创建结论：已提交作品数与用户可读摘要。
-	Created   int    `json:"created,omitempty"`
-	CreateMsg string `json:"createMsg,omitempty"`
 	// RulesView getRules 与规则管理族动作随答返回的规则管理视图（档案条目+
 	// 内置表+禁用清单+备份态），前端每次动作后整份刷新。
 	RulesView *rulesAdminView `json:"rulesView,omitempty"`
@@ -1883,13 +1882,15 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		}
 		resp.Decisions = decisionsViewOf(sess)
 	case workbenchActionCreateTasks:
-		outcome, err := m.ApplyCreateTasks(req.Root, req.TaskName)
+		// 异步化（设计 C）：守卫链通过后立即应答「已开始创建」，创建 RPC 在独立
+		// goroutine 执行（订阅循环不再被长创建阻塞），进度与终态经
+		// createProgress/createDone 事件推送
+		started, err := m.ApplyCreateTasks(req.Root, req.TaskName)
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
-		resp.Created = outcome.Works
-		resp.CreateMsg = outcome.Message
+		resp.Started = started
 		if sess, err := m.SessionOf(req.Root); err == nil {
 			resp.Decisions = decisionsViewOf(sess)
 		}

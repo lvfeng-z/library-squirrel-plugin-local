@@ -85,14 +85,24 @@ type workbenchTestCtx struct {
 	createTaskStub    *sdkdto.CreateTaskResult
 	createTaskCount   int
 	createTaskLastURL string
+	// createTaskBlock 可选：CreateTask 桩入口挂起闸（close 放行——createTasks
+	// 异步化的立即应答与终态时序控制）。
+	createTaskBlock chan struct{}
 
 	mu        sync.Mutex
 	published []publishedEvent
 }
 
 // CreateTask 创建编排动作（ApplyCreateTasks）的桩：记录调用并回告预设结论
-// （真实 Create 过滤产出分支由测试直驱，不经此桩）。
+// （真实 Create 过滤产出分支由测试直驱，不经此桩）；createTaskBlock 在场时先
+// 挂起直到闸放行（createTasks 异步化的立即应答与终态时序控制）。
 func (c *workbenchTestCtx) CreateTask(url string) (*sdkdto.CreateTaskResult, error) {
+	c.mu.Lock()
+	block := c.createTaskBlock
+	c.mu.Unlock()
+	if block != nil {
+		<-block
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.createTaskCount++
@@ -124,6 +134,19 @@ func (c *workbenchTestCtx) PublishToFrontend(topic string, data []byte) error {
 	defer c.mu.Unlock()
 	c.published = append(c.published, publishedEvent{topic: topic, data: string(data)})
 	return nil
+}
+
+// publishedSnapshot 事件发布记录快照（事件等待/收集助手的数据面）。
+func (c *workbenchTestCtx) publishedSnapshot() []publishedEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]publishedEvent(nil), c.published...)
+}
+
+// workbenchEventReader 工作台事件读取的最小面（workbenchTestCtx 及其包装桩
+// ——宿主同步递归桩等——经嵌入提升实现）。
+type workbenchEventReader interface {
+	publishedSnapshot() []publishedEvent
 }
 
 // GetWorkDir 库根未配置形态：返回错误（会话管理器按未配置处理，默认库根缺席）。

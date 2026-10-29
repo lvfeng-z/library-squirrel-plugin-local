@@ -11,14 +11,13 @@ import (
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
-// waitForEntryConfirmEvent 轮询等待指定种类的工作台事件发布并解出载荷。
-func waitForEntryConfirmEvent(t *testing.T, ctx *workbenchTestCtx, kind string) workbenchFrontendEvent {
+// waitForWorkbenchEvent 轮询等待指定种类的工作台事件发布并解出载荷（ctx 为
+// 事件记录桩或其包装桩——宿主同步递归桩等）。
+func waitForWorkbenchEvent(t *testing.T, ctx workbenchEventReader, kind string) workbenchFrontendEvent {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		ctx.mu.Lock()
-		published := append([]publishedEvent(nil), ctx.published...)
-		ctx.mu.Unlock()
+		published := ctx.publishedSnapshot()
 		for i := len(published) - 1; i >= 0; i-- {
 			if published[i].topic != workbenchTopicEvent {
 				continue
@@ -143,7 +142,7 @@ func TestCreateBranchConfirmAccept(t *testing.T) {
 		done <- outcome{result, err}
 	}()
 
-	evt := waitForEntryConfirmEvent(t, ctx, workbenchEventEntryConfirm)
+	evt := waitForWorkbenchEvent(t, ctx, workbenchEventEntryConfirm)
 	if evt.Root != `D:\库丙` || evt.Seq == 0 {
 		t.Fatalf("拉起事件应携带库根与确认序号: %+v", evt)
 	}
@@ -185,7 +184,7 @@ func TestCreateBranchConfirmCancel(t *testing.T) {
 		done <- result
 	}()
 
-	evt := waitForEntryConfirmEvent(t, ctx, workbenchEventEntryConfirm)
+	evt := waitForWorkbenchEvent(t, ctx, workbenchEventEntryConfirm)
 	coord.HandleAnswer(evt.Seq, false)
 
 	select {
@@ -224,7 +223,7 @@ func TestCreateBranchConfirmTimeout(t *testing.T) {
 		done <- result
 	}()
 
-	evt := waitForEntryConfirmEvent(t, ctx, workbenchEventEntryConfirm)
+	evt := waitForWorkbenchEvent(t, ctx, workbenchEventEntryConfirm)
 	select {
 	case result := <-done:
 		if len(result.Array()) != 0 {
@@ -238,7 +237,7 @@ func TestCreateBranchConfirmTimeout(t *testing.T) {
 		t.Fatalf("超时后创建未收尾")
 	}
 
-	waitForEntryConfirmEvent(t, ctx, workbenchEventEntryConfirmDismiss)
+	waitForWorkbenchEvent(t, ctx, workbenchEventEntryConfirmDismiss)
 	if coord.HandleAnswer(evt.Seq, true) {
 		t.Fatalf("超时解除后的迟到答复不应命中")
 	}
@@ -257,7 +256,7 @@ func TestCreateConfirmHeartbeatDuringWait(t *testing.T) {
 		_, _ = h.CreateWithHeartbeat(`D:\库己`, reporter)
 	}()
 
-	waitForEntryConfirmEvent(t, ctx, workbenchEventEntryConfirm)
+	waitForWorkbenchEvent(t, ctx, workbenchEventEntryConfirm)
 	// 等待超时自然收尾（不答复），期间应已多次上报心跳
 	time.Sleep(200 * time.Millisecond)
 	if got := reporter.count.Load(); got < 2 {
