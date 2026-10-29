@@ -555,8 +555,8 @@ func TestGeneralizeSequence(t *testing.T) {
 		t.Fatalf("序列形态泛化应为单行序列条件: %+v", rule.Conditions)
 	}
 	cond := rule.Conditions[0].Condition
-	if cond.Format.Mode != CondxFormatTemplate || cond.Format.Tpl != "{键}_{序号}" {
-		t.Fatalf("成员模板不符（{键}盖住公共前缀、{序号}盖住尾缀数字）: %+v", cond.Format)
+	if cond.Format.Mode != CondxFormatTemplate || cond.Format.Tpl != "{公共段}_{序号}" {
+		t.Fatalf("成员模板不符（{公共段}盖住公共前缀、{序号}盖住尾缀数字）: %+v", cond.Format)
 	}
 	if len(cond.Attach) != 1 || cond.Attach[0].Kind != CondxAttachSeqMinLength || cond.Attach[0].MinCount != 2 {
 		t.Fatalf("成群门槛应为 seqMinLength=2: %+v", cond.Attach)
@@ -597,8 +597,8 @@ func TestGeneralizeSequence(t *testing.T) {
 }
 
 // TestBuildSequenceRuleFallbackWrappedSeq 规则定群群（无形态标识）回退分支的
-// v4 成员模板：包裹符原样入字面段（样本 `[01]` → 模板 `{键}_[{序号}]`，同包
-// 裹制的同形态成员可复现定群）。制式换代分歧注记：v3 提取式对括号/方括号
+// v4 成员模板：包裹符原样入字面段（样本 `[01]` → 模板 `{公共段}_[{序号}]`，
+// 同包裹制的同形态成员可复现定群）。制式换代分歧注记：v3 提取式对括号/方括号
 // 跨制混判，v4 模板字面段严格同制——跨包裹制混编群成员不再互认（分离为更
 // 小的群或不成群，宁缺勿错）。
 func TestBuildSequenceRuleFallbackWrappedSeq(t *testing.T) {
@@ -610,10 +610,10 @@ func TestBuildSequenceRuleFallbackWrappedSeq(t *testing.T) {
 	if len(rule.Conditions) != 1 || rule.Conditions[0].Condition.Target != CondxTargetSeq {
 		t.Fatalf("回退分支应为单行序列条件: %+v", rule.Conditions)
 	}
-	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_[{序号}]" {
+	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "{公共段}_[{序号}]" {
 		t.Fatalf("回退分支成员模板不符: %q", tpl)
 	}
-	// 括号序号成员经模板定群（≥2 同键、序号=段内数字、键={键} 捕获=前缀）。
+	// 括号序号成员经模板定群（≥2 同键、序号=段内数字、键={公共段} 捕获=前缀）。
 	bracketFiles := []ScanFile{
 		{Path: `E:\lib\集盒\[画师]_[123456789]_[集名]_[01].png`, FileName: "[画师]_[123456789]_[集名]_[01].png", DirNames: []string{"集盒"}, RelPath: "集盒/[画师]_[123456789]_[集名]_[01].png"},
 		{Path: `E:\lib\集盒\[画师]_[123456789]_[集名]_[02].png`, FileName: "[画师]_[123456789]_[集名]_[02].png", DirNames: []string{"集盒"}, RelPath: "集盒/[画师]_[123456789]_[集名]_[02].png"},
@@ -665,9 +665,9 @@ func TestDirectSeqFormSingleCharKey(t *testing.T) {
 	}
 	// FORM 分支配新键式复现单字符键定群——v4 语法换代注记：直连序号
 	//（键段与序号段无分隔字面）键式 `(.+?[^\d])\d{1,4}` 在模板语法中即相邻
-	// 占位词 {键}{序号}，词法禁止（切分歧义），构造侧如实拒绝（宁缺勿错）；
-	// 识别侧该形态键由元素拼接兜底的能力不受影响（识别建群与规则定群两码
-	// 事，规则侧本就该拒绝歧义形态）。
+	// 占位词 {公共段}{序号}，词法禁止（切分歧义），构造侧如实拒绝（宁缺勿
+	// 错）；识别侧该形态键由元素拼接兜底的能力不受影响（识别建群与规则定群
+	// 两码事，规则侧本就该拒绝歧义形态）。
 	if _, _, err := buildSequenceRule("单键集/m1.jpg", "m1.jpg", "m", &SnapGroup{
 		FormName: form.name, FormKeyExpr: form.keyExpr, FormSeqExpr: form.seqExpr,
 	}); err == nil {
@@ -721,15 +721,15 @@ func TestGeneralizeSequenceFormFollows(t *testing.T) {
 		rule.Conditions[0].Condition.Target != CondxTargetSeq {
 		t.Fatalf("泛化规则应为单行序列条件，实际 %+v", rule.Conditions)
 	}
-	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_[{序号}]" {
+	if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "{公共段}_[{序号}]" {
 		t.Fatalf("括号序号形态的成员模板不符: %q", tpl)
 	}
 	if !strings.Contains(rule.Description, "括号序号") {
 		t.Fatalf("泛化规则描述应携带形态名: %q", rule.Description)
 	}
 
-	// 复现定群：不同前缀的同类形态新文件经规则聚群，键={键} 捕获=剥尾 `_`
-	// 的全前缀。
+	// 复现定群：不同前缀的同类形态新文件经规则聚群，键={公共段} 捕获=剥尾
+	// `_` 的全前缀。
 	replicas := []ScanFile{
 		{Path: `E:\lib\别处\[作者乙]_[999888777]_画集_[01].jpg`, FileName: "[作者乙]_[999888777]_画集_[01].jpg", DirNames: []string{"别处"}, RelPath: "别处/[作者乙]_[999888777]_画集_[01].jpg"},
 		{Path: `E:\lib\别处\[作者乙]_[999888777]_画集_[02].jpg`, FileName: "[作者乙]_[999888777]_画集_[02].jpg", DirNames: []string{"别处"}, RelPath: "别处/[作者乙]_[999888777]_画集_[02].jpg"},
@@ -750,7 +750,7 @@ func TestGeneralizeSequenceFormFollows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("中段序号形态泛化失败: %v", err)
 	}
-	if tpl := midRule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_page_{序号}_by_x" {
+	if tpl := midRule.Conditions[0].Condition.Format.Tpl; tpl != "{公共段}_page_{序号}_by_x" {
 		t.Fatalf("中段序号成员模板不符（形态段入字面段）: %q", tpl)
 	}
 }

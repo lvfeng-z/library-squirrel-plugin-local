@@ -615,7 +615,7 @@ func buildDirLayerRule(relPath, dirRelKey string, assign *SessionAssignment) (Ru
 
 // buildSequenceRule 按序列形态泛化：该文件所属兄弟群固化一条 v4 序列条件行
 // （成员模板 + ≥2 成群门槛，纯定群不携带提取动作——群组规则不参与提取段，
-// 元数据由其余规则与赋值承载）。模板由**样本成员名**推导：{键}盖住键段
+// 元数据由其余规则与赋值承载）。模板由**样本成员名**推导：{公共段}盖住键段
 // （结构形态群的形态键提取式命中段，或规则定群群的公共前缀字面）、{序号}盖住
 // 尾缀数字段（包裹符 [ ] ( ) 原样入字面段——同包裹制的同形态新文件可复现
 // 定群；跨包裹制混编的群成员将不再互认，v3 的包裹容忍提取式随语法换代废止）。
@@ -653,9 +653,9 @@ func buildSequenceRule(relPath, fileName, groupKey string, group *SnapGroup) (Ru
 
 // seqMemberTemplateOf 由样本成员名推导 v4 序列成员模板：返回 (模板, 形态名, 错误)。
 // 结构形态群：键段=形态键提取式在样本上的命中段、序号段=形态序号提取式命中段，
-// 段外文本原样入字面段；规则定群群：{键}盖住公共前缀、尾缀数字段（含可选包裹
-// 符）入 {序号}。字面段含花括号、两段重叠或提取式不中样本时回退前缀路径；前缀
-// 路径再失败（无尾缀数字/花括号冲突）返回错误。
+// 段外文本原样入字面段；规则定群群：{公共段}盖住公共前缀、尾缀数字段（含可选
+// 包裹符）入 {序号}。字面段含花括号、两段重叠或提取式不中样本时回退前缀路径；
+// 前缀路径再失败（无尾缀数字/花括号冲突）返回错误。
 func seqMemberTemplateOf(base, groupKey string, group *SnapGroup) (string, string, error) {
 	if group != nil && group.FormName != "" && group.FormKeyExpr != "" && group.FormSeqExpr != "" {
 		if tpl, ok, err := seqTemplateFromForm(base, group.FormKeyExpr, group.FormSeqExpr); err != nil {
@@ -690,14 +690,14 @@ func seqTemplateFromForm(base, keyExpr, seqExpr string) (string, bool, error) {
 		// 键序重叠（或键空段）：回退前缀路径
 		return "", false, nil
 	}
-	tpl, err := condxTemplateFromSpans(base, [][2]int{keySpan, {seqSpan[0], seqSpan[1]}}, []string{"键", "序号"})
+	tpl, err := condxTemplateFromSpans(base, [][2]int{keySpan, {seqSpan[0], seqSpan[1]}}, []string{"公共段", "序号"})
 	if err != nil {
 		return "", false, nil
 	}
 	return tpl, true, nil
 }
 
-// seqTemplateFromPrefix 前缀路径：{键}盖住公共前缀字面（群组键=前缀，集命名
+// seqTemplateFromPrefix 前缀路径：{公共段}盖住公共前缀字面（群组键=前缀，集命名
 // 沿用），尾缀数字（可含单侧包裹符）为 {序号}。
 func seqTemplateFromPrefix(base, groupKey string) (string, error) {
 	if !condxTemplateBraceOK(groupKey) {
@@ -716,7 +716,7 @@ func seqTemplateFromPrefix(base, groupKey string) (string, error) {
 	openS, openE := span(2)
 	closeS, closeE := span(4)
 	var tpl strings.Builder
-	tpl.WriteString("{键}")
+	tpl.WriteString("{公共段}")
 	tpl.WriteString(rest[midS:midE])
 	tpl.WriteString(rest[openS:openE])
 	tpl.WriteString("{序号}")

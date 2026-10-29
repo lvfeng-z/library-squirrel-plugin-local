@@ -835,6 +835,7 @@ const (
 
 	// —— 规则管理族（规则子页）——
 	workbenchActionGetRules           = "getRules"           // 规则管理视图（档案条目+内置表+禁用清单+备份态）
+	workbenchActionPreviewRule        = "previewRule"        // 规则草稿命中预览（只读：档案∪草稿对会话识别快照全库合并求值，不写档案）
 	workbenchActionSaveRule           = "saveRule"           // 规则条目保存（新建/编辑，构造期单条校验）
 	workbenchActionDeleteRule         = "deleteRule"         // 删除档案规则条目
 	workbenchActionSetRuleEnabled     = "setRuleEnabled"     // 档案规则条目启停
@@ -940,8 +941,9 @@ type workbenchFrontendRequest struct {
 	TaskName string `json:"taskName,omitempty"`
 
 	// —— 规则管理族载荷（规则子页）——
-	// Rule saveRule 的完整规则条目 JSON（ruleEntryJSON 形态：pattern 与
-	// extractions 为 JSON 片段原文，synthesis 为表单化字段组装）。
+	// Rule saveRule 的完整规则条目 JSON 与 previewRule 的规则草稿 JSON
+	//（ruleEntryJSON 形态：pattern 与 extractions 为 JSON 片段原文，synthesis
+	// 为表单化字段组装；预览草稿与保存载荷同形）。
 	Rule json.RawMessage `json:"rule,omitempty"`
 	// RuleID deleteRule / setRuleEnabled 的档案条目寻址。
 	RuleID string `json:"ruleId,omitempty"`
@@ -1012,6 +1014,8 @@ type workbenchFrontendResponse struct {
 	// RulesView getRules 与规则管理族动作随答返回的规则管理视图（档案条目+
 	// 内置表+禁用清单+备份态），前端每次动作后整份刷新。
 	RulesView *rulesAdminView `json:"rulesView,omitempty"`
+	// RulePreview previewRule 的命中预览（命中数/快照文件总数/样例至多 3 条）。
+	RulePreview *rulesPreviewResult `json:"rulePreview,omitempty"`
 	// RolledBack rollbackProfile 的回退结论（真=已回退一代）。
 	RolledBack bool `json:"rolledBack,omitempty"`
 }
@@ -1393,6 +1397,13 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			break
 		}
 		resp.RulesView = view
+	case workbenchActionPreviewRule:
+		preview, err := m.PreviewRule(req.Root, req.Rule)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulePreview = preview
 	case workbenchActionSaveRule:
 		view, err := m.ApplySaveRule(req.Rule)
 		if err != nil {

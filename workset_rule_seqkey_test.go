@@ -438,7 +438,7 @@ func TestWorkSetSeqKeyAdjustAfterGeneralize(t *testing.T) {
 	if !isGroupingRule(siblingRule) || siblingRule.Conditions == nil {
 		t.Fatalf("回退式定群应为 v4 序列条件规则，实际 %T", siblingRule.Pattern)
 	}
-	if tpl := siblingRule.Conditions[0].Condition.Format.Tpl; tpl != "{键}_[{序号}]" {
+	if tpl := siblingRule.Conditions[0].Condition.Format.Tpl; tpl != "{公共段}_[{序号}]" {
 		t.Fatalf("回退式成员模板不符（包裹符入字面段）: %q", tpl)
 	}
 

@@ -51,11 +51,20 @@ func TestDeriveCondxTemplate(t *testing.T) {
 			expr: `^(?P<key>.+)_(?P<seq>[0-9]+)$`,
 			caps: []string{"key", "seq"},
 		},
+		{
+			name: "序列成员模板·新词公共段与旧词同组同义",
+			tpl:  "{公共段}_{序号}",
+			opts: deriveOpts{allowKey: true, requireSeq: true},
+			expr: `^(?P<key>.+)_(?P<seq>[0-9]+)$`,
+			caps: []string{"key", "seq"},
+		},
 		{name: "空模板", tpl: " ", wantErr: "格式模板不能为空"},
 		{name: "词表外", tpl: "{不存在}_{序号}", wantErr: "不在词表"},
 		{name: "重复占位词", tpl: "{作者}_{作者}", wantErr: "重复"},
 		{name: "相邻占位词", tpl: "{作者}{序号}", wantErr: "缺少分隔"},
 		{name: "键用于文件模板", tpl: "{键}_{序号}", wantErr: "仅适用于序列"},
+		{name: "公共段用于文件模板", tpl: "{公共段}_{序号}", wantErr: "仅适用于序列"},
+		{name: "新旧词同模板并用即重复", tpl: "{键}_{公共段}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "重复"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,6 +85,17 @@ func TestDeriveCondxTemplate(t *testing.T) {
 				t.Fatalf("捕获组不符: 得到 %v 期望 %v", caps, tc.caps)
 			}
 		})
+	}
+}
+
+// TestCondxVocabDualWord 换词后的双词映射与提示清单：{公共段} 为书写侧新词、
+// 与旧词 {键} 同组同义（旧档零迁移）；词表报错提示只列新词。
+func TestCondxVocabDualWord(t *testing.T) {
+	if condxVocab["公共段"] != "key" || condxVocab["键"] != "key" {
+		t.Fatalf("公共段应与旧词「键」同组 key: 作者=%q 公共段=%q", condxVocab["键"], condxVocab["公共段"])
+	}
+	if strings.Contains(condxVocabHint, "键") || !strings.Contains(condxVocabHint, "公共段") {
+		t.Fatalf("词表提示应只列新词「公共段」: %q", condxVocabHint)
 	}
 }
 

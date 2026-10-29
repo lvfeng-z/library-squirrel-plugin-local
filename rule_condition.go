@@ -14,6 +14,9 @@ import (
 // CondxTargetKind 为条件的目标类别（三级词表·目标三分）。
 type CondxTargetKind string
 
+// 三型有效范围：file 命中单个文件（匹配去扩展名的文件名）；dir 命中目录整个
+// 子树与求值面的交集（任一层祖先，不限直接父目录）；seq 命中同目录同键成套
+// 成员（计数≥下限，落单出局、不跨目录）。
 const (
 	// CondxTargetFile 表示目标=文件：按格式命中单个文件（匹配去扩展名的文件名）。
 	CondxTargetFile CondxTargetKind = "file"
@@ -178,14 +181,16 @@ type CondxRow struct {
 // ——泛化消费位（尾部码丢弃、未引用段等）专用，不与引用位争抢词表。
 var condxVocab = map[string]string{
 	"作者": "author", "集名": "setname", "序号": "seq", "标题": "title",
-	"标签": "tag", "作品号": "workid", "日期": "date", "键": "key", "任意": "any",
+	"标签": "tag", "作品号": "workid", "日期": "date",
+	"键": "key", "公共段": "key", "任意": "any",
 }
 
 // condxDigits 为数字类占位词（推导为 [0-9]+）。
 var condxDigits = map[string]bool{"序号": true, "作品号": true, "日期": true}
 
-// condxVocabHint 为报错提示用的词表清单（稳定顺序）。
-const condxVocabHint = "作者/集名/序号/标题/标签/作品号/日期/键/任意"
+// condxVocabHint 为报错提示用的词表清单（稳定顺序）；旧词「键」合法但不再
+// 鼓励书写，不入提示。
+const condxVocabHint = "作者/集名/序号/标题/标签/作品号/日期/公共段/任意"
 
 // deriveOpts 为模板推导选项。
 type deriveOpts struct {
@@ -253,8 +258,8 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) 
 		if !known {
 			return "", nil, fmt.Errorf("模板占位词 {%s} 不在词表（%s）", word, condxVocabHint)
 		}
-		if word == "键" && !opts.allowKey {
-			return "", nil, fmt.Errorf("模板占位词 {键} 仅适用于序列成员格式")
+		if (word == "键" || word == "公共段") && !opts.allowKey {
+			return "", nil, fmt.Errorf("模板占位词 {公共段} 仅适用于序列成员格式")
 		}
 		if word == "任意" {
 			// 非引用吞位词：非捕获贪婪段、可重复、不进捕获组清单（提取

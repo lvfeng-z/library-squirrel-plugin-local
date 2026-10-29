@@ -67,6 +67,9 @@
                   <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
                   <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
                   <div v-else-if="comboRefCount(r.id) > 0" class="li-rules-row-refnote">被 {{ comboRefCount(r.id) }} 条组合引用</div>
+                  <!-- 范围小字（B2）：组合行=直译句（与编辑弹窗同函数）；普通行=「类别 · N 形态」 -->
+                  <div v-if="isComboRule(r) && comboSentenceOf(r)" class="li-rules-row-shape">{{ comboSentenceOf(r) }}</div>
+                  <div v-else-if="!isComboRule(r) && shapeSummaryOf(r)" class="li-rules-row-shape">{{ shapeSummaryOf(r) }}</div>
                   <div v-if="isComboRule(r) && hasDisabledMember(r)" class="li-rules-row-combo-off">成员已停用——本组合不产出</div>
                   <div class="li-rules-row-id" :title="r.id">{{ r.id }}</div>
                 </div>
@@ -86,7 +89,7 @@
               </div>
               <p class="li-rules-hint">
                 例子模板是 v4 条件格式的写法参考（不参与求值、不入档案）：新建/编辑规则时在格式步点词条区同名 chips
-                可一步预填；占位词词表为封闭集（作者/集名/序号/标题/标签/作品号/日期/键/任意）
+                可一步预填；占位词词表为封闭集（作者/集名/序号/标题/标签/作品号/日期/公共段/任意）
               </p>
               <div v-for="ex in examples" :key="ex.name" class="li-rules-row">
                 <div class="li-rules-row-main">
@@ -124,7 +127,13 @@
         :all-rules="rules"
         :saving="savingRule"
         :save-error="dialogSaveError"
+        :preview-available="previewAvailable"
+        :previewing="previewing"
+        :preview-result="previewResult"
+        :preview-error="previewError"
         @save="onDialogSave"
+        @preview="onDialogPreview"
+        @preview-close="onDialogPreviewClose"
       />
 
       <!-- 级联管理确认框（W5 剧本二·帧2/帧4）：停用/删除被组合规则引用的成员规则
@@ -151,6 +160,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Events } from '@wailsio/runtime'
 import RuleEditDialog from './RuleEditDialog.vue'
+import { condxComboSentence, condxShapeSummary, type CondxComboMember } from './ruleFormModel'
 
 // 工作台事件协议通道（与插件 Go 侧 session.go 约定一致）
 const TOPIC_REQUEST = 'plugin:local-import:workbench:request'
@@ -206,12 +216,29 @@ interface RulesAdminView {
   backupAvailable: boolean
 }
 
+// previewRule 应答的命中样例（rulesPreviewSample 形态）：文件名+所在目录+该草稿
+// 规则产出的声明；result 缺省＝纯门组合退化形态——仅文件名+目录。
+interface RulePreviewSampleView {
+  fileName: string
+  dirRelKey?: string
+  result?: string
+}
+
+// previewRule 应答的命中预览（rulesPreviewResult 形态）：命中数/求值面文件总数/
+// 样例（至多 3 条）。
+interface RulePreviewView {
+  hitCount: number
+  hitTotal: number
+  samples: RulePreviewSampleView[]
+}
+
 interface WorkbenchResponse {
   seq: number
   ok: boolean
   error?: string
   session?: SessionSummary
   rulesView?: RulesAdminView
+  rulePreview?: RulePreviewView
   rolledBack?: boolean
 }
 
@@ -486,6 +513,50 @@ const savingRule = ref(false)
 // 保存失败文案（后端构造期校验拒绝等）：回填弹窗内呈现、不关窗
 const dialogSaveError = ref('')
 
+// —— 命中预览（E 件·剧本三）：等待态/结果卡/失败文案，父组件单点持有 ——
+
+// 预览可用性（帧3 判定源，打开弹窗时即已可判定）：会话在场且已完成全量识别
+//（会话状态 recognized ⟺ 识别快照在场——预览的求值面；无会话/未识别时按钮
+// 禁用+下方说明小字，与后端 previewRule 降级文案同源）
+const previewAvailable = computed<boolean>(() => session.value != null && session.value.state === 'recognized')
+
+const previewing = ref(false)
+const previewResult = ref<RulePreviewView | null>(null)
+const previewError = ref('')
+
+// 弹窗预览请求（载荷已过弹窗侧与保存同一条草稿构造闸门——归一后的保存草稿）：
+// 走 previewRule 只读 RPC（root 会话寻址）；失败文案呈现在弹窗底部（含后端同源
+// 降级文案），成功展示结果卡
+async function onDialogPreview(payload: Record<string, unknown>): Promise<void> {
+  const root = session.value ? session.value.rootPath : ''
+  previewing.value = true
+  previewError.value = ''
+  previewResult.value = null
+  const resp = await request('previewRule', { root: root, rule: payload })
+  previewing.value = false
+  if (!resp.ok) {
+    previewError.value = resp.error || '预览命中失败'
+    return
+  }
+  if (!resp.rulePreview) {
+    previewError.value = '预览应答缺少结果'
+    return
+  }
+  previewResult.value = resp.rulePreview
+}
+
+// 结果卡 [×] 关闭（帧2：关闭后可改表单重试）
+function onDialogPreviewClose(): void {
+  previewResult.value = null
+}
+
+// 打开弹窗即复位预览态（上一条的结果卡/失败文案不跨条残留）
+function resetDialogPreview(): void {
+  previewing.value = false
+  previewResult.value = null
+  previewError.value = ''
+}
+
 const sourceLabels: Record<string, string> = {
   builtin: '内置',
   manual: '手写',
@@ -524,6 +595,24 @@ function hasDisabledMember(rule: RuleEntryView): boolean {
   })
 }
 
+// —— 列表行范围小字（B2）：与编辑弹窗同函数生成 ——
+// 组合行=组合关系直译句（成员按 refs 寻址取档案现档；与弹窗摘要行同一纯函数）
+function comboSentenceOf(rule: RuleEntryView): string {
+  const members: CondxComboMember[] = (rule.refs || [])
+    .map((refId) => rules.value.find((r) => r.id === refId))
+    .filter((m): m is RuleEntryView => m !== undefined)
+    .map((m) => ({ label: m.description || m.id, rows: m.conditions }))
+  if (!members.length) return ''
+  return condxComboSentence(members)
+}
+
+// 普通行=「目标类别 · N 形态」（类别=条件行目标并集去重、多类别以 + 并列；
+// 条件行缺失的坏档行不显示）
+function shapeSummaryOf(rule: RuleEntryView): string {
+  const shape = condxShapeSummary(rule.conditions)
+  return shape.count > 0 ? `${shape.label} · ${shape.count} 形态` : ''
+}
+
 // 新建：空载荷入弹窗（v4 缺省样例〔【{作者}】{标题} 行 + 作者/标题提取行〕
 // 由弹窗侧缺省带入）
 function openNew(): void {
@@ -539,6 +628,7 @@ function openNew(): void {
     synthesis: { dimPolicies: [], roles: [] }
   }
   dialogSaveError.value = ''
+  resetDialogPreview()
   dialogVisible.value = true
   actionError.value = ''
 }
@@ -560,6 +650,7 @@ function openEdit(rule: RuleEntryView): void {
     }
   }
   dialogSaveError.value = ''
+  resetDialogPreview()
   dialogVisible.value = true
   actionError.value = ''
 }
@@ -775,6 +866,13 @@ onUnmounted(() => {
 .li-rules-row-refnote {
   font-size: 12px;
   color: var(--app-text-secondary);
+}
+
+/* B2 范围小字：组合行直译句 / 普通行「类别 · N 形态」 */
+.li-rules-row-shape {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  word-break: break-all;
 }
 
 /* W5 级联管理（剧本二·帧3）：组合行「成员已停用——本组合不产出」灰字 */

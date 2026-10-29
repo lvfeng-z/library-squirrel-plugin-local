@@ -114,8 +114,8 @@ func TestSeqFormSuggestionUserShape(t *testing.T) {
 		t.Fatalf("首条应为 v4 序列条件定群规则（行包装），实际 %T", out.rules[0].Pattern)
 	}
 	if len(out.rules[0].Conditions) != 1 || out.rules[0].Conditions[0].Condition.Target != CondxTargetSeq ||
-		out.rules[0].Conditions[0].Condition.Format.Tpl != "{键}_[{序号}]" {
-		t.Fatalf("sibling 形态跟随模板不符（{键} 全前缀 + 方括号序号）: %+v", out.rules[0].Conditions)
+		out.rules[0].Conditions[0].Condition.Format.Tpl != "{公共段}_[{序号}]" {
+		t.Fatalf("sibling 形态跟随模板不符（{公共段} 全前缀 + 方括号序号）: %+v", out.rules[0].Conditions)
 	}
 	if _, ok := out.rules[1].Pattern.(*RowSubjectPattern); !ok || out.rules[1].Conditions == nil {
 		t.Fatalf("次条应为 v4 文件行条件集名捕获规则，实际 %T", out.rules[1].Pattern)

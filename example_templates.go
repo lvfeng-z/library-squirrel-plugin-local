@@ -15,7 +15,7 @@ type exampleTemplate struct {
 }
 
 // exampleTemplates 返回例子模板表（v4 词条封闭词表演示：作者/标题/作品号/
-// 序号/集名/键/任意）。顺序即展示顺序。
+// 序号/集名/公共段/任意）。顺序即展示顺序。
 func exampleTemplates() []exampleTemplate {
 	return []exampleTemplate{
 		{
@@ -41,10 +41,10 @@ func exampleTemplates() []exampleTemplate {
 		},
 		{
 			Name:     "序列成套",
-			Template: "{键}_{序号}",
+			Template: "{公共段}_{序号}",
 			Target:   "seq",
-			Description: "序列主体行：同键文件 ≥2 件即成套归入同一作品集。" +
-				"{键} 为公共前缀位，{序号} 为序号位（序号词数字类）",
+			Description: "序列主体行：{公共段}相同 ≥2 件即成套归入同一作品集。" +
+				"{公共段} 为成员模板的公共相同部分，{序号} 为序号位（序号词数字类）",
 		},
 		{
 			Name:     "目录层作者",

@@ -172,6 +172,10 @@ func (a DirAssert) check(in *MatchInput, depth int) bool {
 // （子树包含语义，任意深度），且该层目录满足全部终结谓词时命中：绑定该层捕获、
 // 记 DirHit。谓词把「格式像」收紧为「结构像」（如 作品目录：作品目录里全是
 // {序号} 子女）。
+//
+// 命中范围是该目录的整个子树与本次求值面的交集：子树内每个文件向上回看时都会
+// 命中这一层目录（不限直接父目录）；但只有进入求值面（批量扫描清单或磁盘重扫
+// 所得文件）的文件才被求值，不在清单内的文件不计。
 type DirSubjectPattern struct {
 	// Expr 为推导出的锚定正则原文（模板推导或包含词推导）。
 	Expr string `json:"expr"`
@@ -230,6 +234,11 @@ func (p *DirSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 // 档 R3：模板的其余部分跨成员恒同，这正是「成套」的语义）。达到 MinSize 记
 // GroupAnalysis 并绑定捕获（键/序号等）；MemberTypes 非空时只统计指定类型的
 // 成员（seqMemberType 谓词，T3 散页成套排除目录内的说明 txt 等）。
+//
+// 命中范围：同目录内{公共段}（即上述键）相同的成员数达到下限即成套（同键≥下限）；
+// 不足下限的落单文件出局（不命中），序列不跨目录（只数同目录兄弟）。达成下限时写入
+// 群组分析，成套文件的群卡呈现归分组段（定群）；群卡归属本身不是文件级命中，
+// 只聚组不提取的定群形态不产文件级命中。
 type SeqSubjectPattern struct {
 	// Expr 为成员格式模板推导出的锚定正则原文。
 	Expr string `json:"expr"`

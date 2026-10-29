@@ -45,7 +45,7 @@
             >
               <div class="li-condx-row-head">
                 <span class="li-ref-no">引用 {{ i + 1 }}{{ r.ruleId ? '' : '（新行）' }}</span>
-                <span class="li-ref-desc">{{ r.ruleId ? `引用规则：${refRuleLabel(r.ruleId)}` : '引用规则' }}</span>
+                <span class="li-ref-desc">{{ refRowViews[i].desc }}</span>
                 <el-button size="small" text type="danger" class="li-condx-del" @click="refRows.splice(i, 1)">删行</el-button>
               </div>
               <el-select
@@ -64,6 +64,15 @@
                 </el-option>
               </el-select>
               <p v-if="!r.ruleId" class="li-red-row-hint">须选择要引用的规则</p>
+              <!-- 引用行透出成员目标类别与形态数（B3）+ 只读平铺成员条件行（F）+
+                   静态告警（D：单行序列零提取成员标红 ✗ / 成员独立产出提示 ⚠） -->
+              <template v-if="r.ruleId">
+                <div v-if="refRowViews[i].flatLines.length" class="li-ref-flat">
+                  <p v-for="(line, li) in refRowViews[i].flatLines" :key="li" class="li-ref-flat-line">{{ line }}</p>
+                </div>
+                <p v-if="refRowViews[i].alert" class="li-ref-alert">{{ refRowViews[i].alert }}</p>
+                <p v-if="refRowViews[i].notice" class="li-ref-notice">{{ refRowViews[i].notice }}</p>
+              </template>
             </div>
             <div v-if="refRows.length && condxRows.length" class="li-ref-divider"></div>
             <div v-for="(row, i) in condxRows" :key="i" class="li-condx-row" :class="{ 'is-invalid': !!condxRowHint(i) }">
@@ -95,11 +104,11 @@
                   <button
                     type="button"
                     class="li-condx-card"
-                    title="引用另一条规则——被引规则命中才算命中；成员停用或删除后本规则整体不产出"
+                    :title="CONDX_TARGET_REF_NOTE"
                     @click="setRowToRef(row)"
                   >
                     <span class="li-condx-card-label">引用规则</span>
-                    <span class="li-condx-card-note">引用另一条规则——被引规则命中才算命中；成员停用或删除后本规则整体不产出</span>
+                    <span class="li-condx-card-note">{{ CONDX_TARGET_REF_NOTE }}</span>
                   </button>
                 </div>
                 <template v-if="row.condition">
@@ -127,7 +136,7 @@
                       class="li-condx-tpl"
                       rows="2"
                       spellcheck="false"
-                      :placeholder="'如 【{作者}】{标题} / {键}_{序号}（点下方词条插入光标处）'"
+                      :placeholder="'如 【{作者}】{标题} / {公共段}_{序号}（点下方词条插入光标处）'"
                       @blur="onTplSelection(i, $event.target.selectionStart)"
                       @keyup="onTplSelection(i, $event.target.selectionStart)"
                       @click="onTplSelection(i, $event.target.selectionStart)"
@@ -271,12 +280,17 @@
           </p>
 
           <template v-if="!extractionsJsonMode">
-            <div
-              v-for="(row, i) in extractionRows"
-              :key="i"
-              class="li-red-ex-row"
-              :class="{ 'is-invalid': !!extractionRowHint(row) }"
-            >
+            <template v-for="(row, i) in extractionRows" :key="i">
+              <!-- 「来自被引规则」分组头（F）：置于首个被引捕获行之前，转写提示
+                   小字常驻（与镜像缺失 ⚠ 联动） -->
+              <div v-if="isFirstRefCaptureRow(i)" class="li-red-ref-group">
+                <div class="li-red-ref-group-title">── 来自被引规则 ──</div>
+                <p class="li-red-ref-group-hint">每条「被引规则捕获」提取行转写成员一行的捕获值；成员多形态（多行）时须逐行各接一条，未接线的形态取不到值</p>
+              </div>
+              <div
+                class="li-red-ex-row"
+                :class="{ 'is-invalid': !!extractionRowHint(row) }"
+              >
               <div class="li-red-ex-main">
                 <el-select v-model="row.dimension" size="small" placeholder="维度" class="li-red-ex-dim">
                   <el-option v-for="d in dimOptionsOf(row)" :key="d.value" :label="d.label" :value="d.value" />
@@ -366,7 +380,10 @@
                 <span v-if="extractionRowHasOtherConds(row) && row.from !== 'scan'" class="li-red-other">含其他手写条件（高级 JSON 模式可编辑）</span>
               </div>
               <p v-if="extractionRowHint(row)" class="li-red-row-hint">{{ extractionRowHint(row) }}</p>
+              <!-- 镜像缺失提示（D）：成员多行声明同组词而本行只接线部分行 -->
+              <p v-if="refCaptureMirrorWarn(row, i)" class="li-red-mirror-warn">{{ refCaptureMirrorWarn(row, i) }}</p>
             </div>
+            </template>
             <el-button size="small" text @click="addExtractionRow">+ 加一行</el-button>
           </template>
 
@@ -471,14 +488,42 @@
 
     <template #footer>
       <div class="li-red-footer">
+        <!-- 命中预览结果卡（E 件·剧本三帧2）：命中数/样例至多 3 条/口径小字；
+             [×] 关闭后可改表单重试，呈现与表单互不干扰 -->
+        <div v-if="mode === 'rule' && previewResult" class="li-red-preview-card">
+          <div class="li-red-preview-head">
+            <span class="li-red-preview-title">预览结果</span>
+            <el-button size="small" text class="li-red-preview-close" @click="closePreview">×</el-button>
+          </div>
+          <p class="li-red-preview-stat">命中 {{ previewResult.hitCount }} / 全库 {{ previewResult.hitTotal }} 个文件</p>
+          <div class="li-red-preview-samples">
+            <p class="li-red-preview-samples-label">样例：</p>
+            <p v-for="(s, i) in previewResult.samples" :key="i" class="li-red-preview-sample">{{ previewSampleLine(s) }}</p>
+          </div>
+          <p class="li-red-preview-note">按最近一次识别的文件清单与现行档案（含本条草稿）求值；保存后全量识别结果与此一致</p>
+        </div>
         <span v-if="saveError" class="li-red-save-error" :title="saveError">{{ saveError }}</span>
         <span class="li-red-footer-actions">
+          <!-- 预览命中（E 件·剧本三帧1/帧3）：置于保存/取消旁、按钮触发不随表单
+               实时联动；等待态「预览中…」不可再点；无会话/无识别快照禁用态+下方小字 -->
+          <el-button
+            v-if="mode === 'rule'"
+            size="small"
+            :disabled="!previewEnabled || previewing"
+            @click="preview"
+          >
+            {{ previewButtonLabel }}
+          </el-button>
           <el-button v-if="mode === 'setAdjust'" size="small" @click="resetAssignDefaults">还原默认指派</el-button>
           <el-button :disabled="saving" @click="cancel">取消</el-button>
           <el-button type="primary" :loading="saving" @click="save">
             {{ mode === 'rule' ? '保存入档案' : '保存规则' }}
           </el-button>
         </span>
+        <span v-if="mode === 'rule' && previewError" class="li-red-preview-error" :title="previewError">{{ previewError }}</span>
+        <p v-if="mode === 'rule' && !previewEnabled" class="li-red-preview-unavailable">
+          预览需要最近一次识别的文件清单——请先在解析视图执行识别
+        </p>
       </div>
     </template>
   </AutoHeightDialog>
@@ -521,6 +566,7 @@ import {
   buildWhenWithoutSeqAtom,
   hasOtherConds,
   CONDX_TARGETS,
+  CONDX_TARGET_REF_NOTE,
   CONDX_VOCAB,
   CONDX_ATTACH_OPTIONS,
   CONDX_TYPE_OPTIONS,
@@ -533,6 +579,10 @@ import {
   condxRowsError,
   condxRowError,
   condxCaptures,
+  condxNormalizeTpl,
+  condxNormalizeRows,
+  condxComboSentence,
+  condxShapeSummary,
   type CondxRowForm,
   type CondxForm,
   type CondxBadgeForm,
@@ -544,12 +594,14 @@ import {
 // —— 入口载荷形态（父组件组装的普通对象） ——
 
 // 档案规则条目最小投影（W4 引用通路：引用行候选过滤与成员占位词声明取值用——
-// SubpageRules 把完整规则列表经 allRules prop 传入）。
+// SubpageRules 把完整规则列表经 allRules prop 传入；extractions 供引用行静态
+// 告警判定〔成员独立产出/定群成员〕）。
 interface RuleArchiveItem {
   id: string
   description: string
   refs?: string[] | null
   conditions?: unknown
+  extractions?: unknown
 }
 
 // rule 模式初始档案条目（SubpageRules 的 RuleEntryView 投影；conditions 为
@@ -604,6 +656,15 @@ const props = defineProps<{
   // 父组件回填的保存失败文案（后端构造期校验拒绝等）：弹窗内呈现、不关窗
   saveError?: string
   saving?: boolean
+  // —— 命中预览（E 件·剧本三）：父组件持有的预览通路状态 ——
+  // previewAvailable 预览可用性（父组件按库根会话在场性与识别快照态判定，
+  // false＝按钮禁用态+按钮行下方说明小字；打开弹窗时即已可判定帧3）；
+  // previewing 等待态（按钮文案转「预览中…」不可再点）；previewResult 预览
+  // 应答（null＝不显示结果卡）；previewError 失败文案（后端同源降级文案等）。
+  previewAvailable?: boolean
+  previewing?: boolean
+  previewResult?: RulePreviewView | null
+  previewError?: string
 }>()
 
 // rule 模式保存载荷（完整规则条目 JSON——父组件原样进 saveRule；conditions
@@ -626,9 +687,28 @@ interface SetAdjustSavePayload {
   memberOnly: boolean
 }
 
+// previewRule 应答的命中样例（rulesPreviewSample 形态）：文件名+所在目录+该草稿
+// 规则产出的声明；result 缺省＝纯门组合退化形态——仅文件名+目录。
+interface RulePreviewSampleView {
+  fileName: string
+  dirRelKey?: string
+  result?: string
+}
+
+// previewRule 应答的命中预览（rulesPreviewResult 形态）：命中数/求值面文件总数/
+// 样例（至多 3 条，父组件回填、结果卡呈现）。
+interface RulePreviewView {
+  hitCount: number
+  hitTotal: number
+  samples: RulePreviewSampleView[]
+}
+
 const emit = defineEmits<{
   (e: 'update:state', value: boolean): void
   (e: 'save', payload: RuleSavePayload | SetAdjustSavePayload): void
+  // 命中预览请求（payload 由与保存同一条草稿构造路径产出）与结果卡 [×] 关闭
+  (e: 'preview', payload: RuleSavePayload): void
+  (e: 'preview-close'): void
   (e: 'dirty-change', dirty: boolean): void
 }>()
 
@@ -871,6 +951,105 @@ const refCaptureStaleOptions = computed<{ value: string; label: string }[]>(() =
   return out
 })
 
+// —— 引用行呈现模型（B3/F/D）：成员描述·类别·形态数、成员条件行只读平铺、
+// 单行序列零提取红色告警与成员独立产出提示。数据全部本地（成员现档经
+// allRules 传入，静态判定不挂后端校验、不拦截保存）。 ——
+
+// 引用行呈现（与 refRows 按下标一一对应）。
+interface RefRowView {
+  desc: string
+  flatLines: string[]
+  alert: string
+  notice: string
+}
+
+// 单行序列零提取成员判定（与内核 isGroupingRule 同构：恰 1 行条件 + 目标序列
+// + 提取动作空——只聚组不产生文件级命中，组合门段对其跳过=引用恒不产出；
+// 两行零提取成员不触发）。
+function isGroupingMember(member: RuleArchiveItem): boolean {
+  const rows = Array.isArray(member.conditions) ? (member.conditions as CondxRowForm[]) : []
+  const extractions = Array.isArray(member.extractions) ? member.extractions : []
+  return extractions.length === 0 && rows.length === 1 &&
+    rows[0].condition != null && rows[0].condition?.target === 'seq'
+}
+
+// 成员条件行只读平铺（F）：按行序列出「第N行 目标「模板」」（行号与占位词
+// 寻址同口径——括号子组递归计行）；括号子组行显示「括号子组（N 行）」；模板
+// 文本经旧词归一显示（{键} 显示为 {公共段}）。
+function memberFlatLines(rows: unknown): string[] {
+  const list = Array.isArray(rows) ? (rows as CondxRowForm[]) : []
+  const out: string[] = []
+  let n = 0
+  const walk = (listRows: CondxRowForm[]): void => {
+    for (const r of listRows) {
+      if (r.group) {
+        out.push(`括号子组（${r.group.length} 行）`)
+        walk(r.group)
+        continue
+      }
+      n += 1
+      if (!r.condition) continue
+      const target = CONDX_TARGETS.find((t) => t.value === r.condition?.target)
+      const fmt = r.condition.format.mode === 'contains'
+        ? `含「${r.condition.format.word || '?'}」`
+        : condxNormalizeTpl(r.condition.format.tpl || '?')
+      out.push(`第${n}行 ${target ? target.label : r.condition.target}「${fmt}」`)
+    }
+  }
+  walk(list)
+  return out
+}
+
+const refRowViews = computed<RefRowView[]>(() =>
+  refRows.value.map((r) => {
+    const member = r.ruleId ? refRuleById(r.ruleId) : undefined
+    if (!r.ruleId) return { desc: '引用规则', flatLines: [], alert: '', notice: '' }
+    const label = refRuleLabel(r.ruleId)
+    if (!member) return { desc: label, flatLines: [], alert: '', notice: '' }
+    const shape = condxShapeSummary(member.conditions)
+    const desc = shape.count > 0 ? `${label} · ${shape.label} · ${shape.count} 形态` : label
+    return {
+      desc,
+      flatLines: memberFlatLines(member.conditions),
+      alert: isGroupingMember(member)
+        ? '✗ 该成员只有一行序列条件、且不提取任何信息——它只用于把成套文件聚成一组、不会命中具体文件，组合引用它将永远不产出。出路：给成员加提取动作，或改成多行条件'
+        : '',
+      notice: Array.isArray(member.extractions) && member.extractions.length > 0
+        ? '⚠ 成员自身将独立产出声明、命中照常计数；若要它只作引用条件，请在成员编辑中清空提取动作'
+        : ''
+    }
+  })
+)
+
+// 首个「被引规则捕获」行位置（提取段「来自被引规则」分组头的插入点）。
+function isFirstRefCaptureRow(index: number): boolean {
+  if (extractionRows.value[index]?.from !== 'refCapture') return false
+  return extractionRows.value.slice(0, index).every((r) => r.from !== 'refCapture')
+}
+
+// 镜像缺失提示（D）：按成员×占位词组名聚合——成员在多行声明同组词、本表被引
+// 捕获行只接线其中部分行时，在该组首条接线行下提示（未接线行形态命中时取不到
+// 值）；成员声明与接线数据均来自本地。
+function refCaptureMirrorWarn(row: ExtractionRow, index: number): string {
+  if (row.from !== 'refCapture' || !row.refRule || !row.captureName) return ''
+  const group = refCaptureGroups.value.find((g) => g.ruleId === row.refRule)
+  if (!group) return ''
+  const declared = [...new Set(group.captures.filter((c) => c.group === row.captureName).map((c) => c.row))].sort((a, b) => a - b)
+  if (declared.length < 2) return ''
+  const wired = extractionRows.value
+    .filter((r) => r.from === 'refCapture' && r.refRule === row.refRule && r.captureName === row.captureName)
+    .map((r) => r.captureRow)
+  const firstWired = extractionRows.value.findIndex(
+    (r) => r.from === 'refCapture' && r.refRule === row.refRule && r.captureName === row.captureName
+  )
+  if (firstWired >= 0 && firstWired < index) return ''
+  const wiredUnique = [...new Set(wired)].sort((a, b) => a - b)
+  const missing = declared.filter((n) => wiredUnique.indexOf(n) < 0)
+  if (!wiredUnique.length || !missing.length) return ''
+  const list = (nums: number[]): string => nums.join('、')
+  return `⚠ {${groupWordOf(row.captureName)}}在成员第 ${list(declared)} 行都声明，你只接线了第 ${list(wiredUnique)} 行——第 ${list(missing)} 行形态命中时取不到值`
+}
+
 // 点「引用规则」卡（帧3）：该行转出条件行列表、追加为引用行——恒置条件行上方、
 // 独立编号「引用 N」、不占条件行「第 N 行」（占位词寻址不受影响）、不带且/或
 function setRowToRef(row: CondxRowForm): void {
@@ -888,14 +1067,22 @@ function condxRowsErrorWithRefs(rows: CondxRowForm[]): string {
 }
 
 const condxSummary = computed((): string => {
-  // 引用存在时前缀「引用 N 条成员规则；」接条件行摘要或「（无条件行）」（帧5/帧6）
-  const refPrefix = refRows.value.length ? `引用 ${refRows.value.length} 条成员规则；` : ''
+  // 引用行在场：摘要=组合关系直译句（与规则列表组合行小字同函数生成）；
+  // 自身还有条件行时尾接行数（成员全未选的新行保留原前缀呈现）
   const flat = condxFlatRows(activeCondxRows.value)
+  const members = refRows.value
+    .filter((r) => r.ruleId)
+    .map((r) => ({ label: refRuleLabel(r.ruleId), rows: refRuleById(r.ruleId)?.conditions ?? [] }))
+  if (members.length) {
+    const core = condxComboSentence(members)
+    return flat.length ? `${core}，且满足自身 ${flat.length} 行条件` : core
+  }
+  const refPrefix = refRows.value.length ? `引用 ${refRows.value.length} 条成员规则；` : ''
   if (!flat.length) return `${refPrefix}（无条件行）`
   const parts = flat.map((f) => {
     const c = f.condx
     const target = CONDX_TARGETS.find((t) => t.value === c.target)
-    const fmt = c.format.mode === 'contains' ? `含「${c.format.word || '?'}」` : (c.format.tpl || '?')
+    const fmt = c.format.mode === 'contains' ? `含「${c.format.word || '?'}」` : condxNormalizeTpl(c.format.tpl || '?')
     const badges = (c.badges || []).length ? ` ·${(c.badges || []).length} 枚小标` : ''
     const attach = (c.attach || []).length ? ` ·${(c.attach || []).length} 条附加` : ''
     return `第${f.row}行 ${target ? target.label : c.target}「${fmt}」${badges}${attach}`
@@ -931,9 +1118,9 @@ function setRowTarget(row: CondxRowForm, target: 'file' | 'dir' | 'seq'): void {
   if (target !== 'dir' && row.condition.format.mode === 'contains') {
     row.condition.format = { mode: 'template', tpl: '' }
   }
-  // 序列默认形态一步到位（{键}_{序号}）
+  // 序列默认形态一步到位（{公共段}_{序号}）
   if (target === 'seq' && row.condition.format.mode === 'template' && !(row.condition.format.tpl || '').trim()) {
-    row.condition.format.tpl = '{键}_{序号}'
+    row.condition.format.tpl = '{公共段}_{序号}'
   }
   row.condition.attach = (row.condition.attach || []).filter((a) => rowAttachValues(target).indexOf(a.kind) >= 0)
 }
@@ -1062,7 +1249,8 @@ function toggleCondxJson(): void {
       condxError.value = '顶层须为 JSON 数组（条件行列表）'
       return
     }
-    condxRows.value = rows
+    // 切回结构化：旧词 {键} 书写归一显示为 {公共段}（保存即落档新词）
+    condxRows.value = condxNormalizeRows(rows)
     condxParsed.value = null
     condxJsonMode.value = false
     condxError.value = condxRowsErrorWithRefs(condxRows.value)
@@ -1339,12 +1527,14 @@ function initFromProps(): void {
     if (!rule || rule.isNew) {
       condxRows.value = defaultRows()
     } else if (Array.isArray(rule.conditions)) {
-      condxRows.value = cloneJSON(rule.conditions) as CondxRowForm[]
+      // 旧档 {键} 模板归一显示为 {公共段}（与保存载荷构造同一归一函数——
+      // 弹窗所见即保存所得）
+      condxRows.value = condxNormalizeRows(cloneJSON(rule.conditions)) as CondxRowForm[]
     } else if (rule.conditions != null) {
       // 历史坏档（conditions 非数组）：原文进 JSON 高级模式，避免结构化缺省
-      // 形态静默改写档案内容
+      // 形态静默改写档案内容（旧词归一为语义等价换词，不属于形态改写）
       condxJsonMode.value = true
-      condxText.value = JSON.stringify(rule.conditions, null, 2)
+      condxText.value = JSON.stringify(condxNormalizeRows(rule.conditions), null, 2)
     } else {
       // 无 conditions 键的两义分流：组合规则（refs 在场）＝空条件表的落档形态
       //（内核 omitempty 序列化无键，剧本一·帧6 语义）——空行集起步，不得缺省
@@ -1401,81 +1591,128 @@ function cancel(): void {
   emit('update:state', false)
 }
 
-function save(): void {
-  if (props.mode === 'rule') {
-    // JSON 合法性闸门：识别/提取任一停在 JSON 模式且解析不过 → 不关窗不保存
-    if (condxJsonMode.value) {
-      if (condxError.value || !condxParsed.value) return
+// rule 模式保存载荷构造（含全部闸门：JSON 合法性/引用行完整/条件行完整/提取行
+// 校验——不过就地标红返回 null）。保存与命中预览共用本构造路径：预览载荷即
+// 归一后的保存草稿（{公共段} 归一在 conditions 构造层执行），非原始表单值——
+// 预览=保存后口径。
+function buildRulePayload(): RuleSavePayload | null {
+  // JSON 合法性闸门：识别/提取任一停在 JSON 模式且解析不过 → 不关窗不保存
+  if (condxJsonMode.value) {
+    if (condxError.value || !condxParsed.value) return null
+  }
+  // 引用行完整性闸门（W4）：未选成员的引用行 → 行内已标红，此处拦住不保存
+  if (refRows.value.some((r) => !r.ruleId)) return null
+  // 条件行完整性闸门（v4）：行表校验不过（词表外/相邻占位/附加缺字段等）
+  // → 行内已标红，此处拦住不保存；引用行在场时空条件表合法（组合可仅由成员门控）
+  if (!condxJsonMode.value && condxRowsErrorWithRefs(condxRows.value)) {
+    condxError.value = condxRowsErrorWithRefs(condxRows.value)
+    return null
+  }
+  // 保存载荷构造层统一执行旧词归一（{键} → {公共段}，语义等价）：结构化与
+  // JSON 高级模式同路径——JSON 手写 {键} 保存亦落档新词
+  const conditions = condxNormalizeRows(condxJsonMode.value ? condxParsed.value : condxRows.value)
+  let extractions: unknown
+  if (extractionsJsonMode.value) {
+    const parsed = tryParseJSON(extractionsText.value)
+    if (!parsed.ok) {
+      extractionsError.value = parsed.error || '解析失败'
+      return null
     }
-    // 引用行完整性闸门（W4）：未选成员的引用行 → 行内已标红，此处拦住不保存
-    if (refRows.value.some((r) => !r.ruleId)) return
-    // 条件行完整性闸门（v4）：行表校验不过（词表外/相邻占位/附加缺字段等）
-    // → 行内已标红，此处拦住不保存；引用行在场时空条件表合法（组合可仅由成员门控）
-    if (!condxJsonMode.value && condxRowsErrorWithRefs(condxRows.value)) {
-      condxError.value = condxRowsErrorWithRefs(condxRows.value)
-      return
+    if (!Array.isArray(parsed.value)) {
+      extractionsError.value = '顶层须为 JSON 数组'
+      return null
     }
-    const conditions = condxJsonMode.value ? condxParsed.value : condxRows.value
-    let extractions: unknown
-    if (extractionsJsonMode.value) {
-      const parsed = tryParseJSON(extractionsText.value)
-      if (!parsed.ok) {
-        extractionsError.value = parsed.error || '解析失败'
-        return
-      }
-      if (!Array.isArray(parsed.value)) {
-        extractionsError.value = '顶层须为 JSON 数组'
-        return
-      }
-      extractionsError.value = ''
-      // 占位词引用校验（JSON 模式聚合呈现）：引用未声明「行N·{词}」→ 行号化
-      // 错误就地列出
-      const problems: string[] = []
-      ;(parsed.value as ExtractionActionJSON[]).forEach((action, i) => {
-        if (action && action.from === 'capture' && action.captureName) {
-          const rowNo = action.row || 1
-          if (!declaredCaptures.value.has(`${rowNo}/${action.captureName}`)) {
-            problems.push(`第 ${i + 1} 行引用占位词「第 ${rowNo} 行·{${action.captureName}}」未在上半声明`)
-          }
+    extractionsError.value = ''
+    // 占位词引用校验（JSON 模式聚合呈现）：引用未声明「行N·{词}」→ 行号化
+    // 错误就地列出
+    const problems: string[] = []
+    ;(parsed.value as ExtractionActionJSON[]).forEach((action, i) => {
+      if (action && action.from === 'capture' && action.captureName) {
+        const rowNo = action.row || 1
+        if (!declaredCaptures.value.has(`${rowNo}/${action.captureName}`)) {
+          problems.push(`第 ${i + 1} 行引用占位词「第 ${rowNo} 行·{${action.captureName}}」未在上半声明`)
         }
-        if (action && action.from === 'refCapture') {
-          const rowNo = action.row || 1
-          const inRefs = refRows.value.some((r) => r.ruleId === action.refRule)
-          if (!action.refRule || !action.captureName || !inRefs || !declaredRefCaptures.value.has(`${action.refRule}/${rowNo}/${action.captureName}`)) {
-            problems.push(`第 ${i + 1} 行：引用的占位词已不在被引规则声明`)
-          }
-        }
-      })
-      if (problems.length) {
-        extractionsError.value = problems.join('；')
-        return
       }
-      extractions = parsed.value
-    } else {
-      // 结构化行：任一行级校验不过 → 行内已标红，此处拦住不保存
-      if (extractionRows.value.some((row) => extractionRowHint(row))) return
-      extractions = rowsToActions()
-    }
-    const rule = props.rule
-    emit('save', {
-      id: rule && !rule.isNew ? rule.id : '',
-      description: descInput.value,
-      source: (rule && rule.source) || 'manual',
-      enabled: enabledInput.value,
-      refs: refRows.value.map((r) => r.ruleId),
-      conditions: conditions,
-      extractions: extractions,
-      synthesis: {
-        dimPolicies: dimRows.value.filter((d) => d.dimension && d.strategy),
-        roles: roleRows.value.filter((r) => r.source && r.roleName)
+      if (action && action.from === 'refCapture') {
+        const rowNo = action.row || 1
+        const inRefs = refRows.value.some((r) => r.ruleId === action.refRule)
+        if (!action.refRule || !action.captureName || !inRefs || !declaredRefCaptures.value.has(`${action.refRule}/${rowNo}/${action.captureName}`)) {
+          problems.push(`第 ${i + 1} 行：引用的占位词已不在被引规则声明`)
+        }
       }
     })
+    if (problems.length) {
+      extractionsError.value = problems.join('；')
+      return null
+    }
+    extractions = parsed.value
+  } else {
+    // 结构化行：任一行级校验不过 → 行内已标红，此处拦住不保存
+    if (extractionRows.value.some((row) => extractionRowHint(row))) return null
+    extractions = rowsToActions()
+  }
+  const rule = props.rule
+  return {
+    id: rule && !rule.isNew ? rule.id : '',
+    description: descInput.value,
+    source: (rule && rule.source) || 'manual',
+    enabled: enabledInput.value,
+    refs: refRows.value.map((r) => r.ruleId),
+    conditions: conditions,
+    extractions: extractions,
+    synthesis: {
+      dimPolicies: dimRows.value.filter((d) => d.dimension && d.strategy),
+      roles: roleRows.value.filter((r) => r.source && r.roleName)
+    }
+  }
+}
+
+function save(): void {
+  if (props.mode === 'rule') {
+    const payload = buildRulePayload()
+    if (!payload) return
+    emit('save', payload)
     return
   }
   // setAdjust：任一指派行级提示在场 → 拦住不保存（行内已标红）
   const sugg = props.suggestion
   if (sugg && (sugg.clues || []).some((c) => clueRowHint(c))) return
   emit('save', { assigns: assignMap.value, memberOnly: memberOnly.value })
+}
+
+// —— 命中预览（E 件·剧本三帧1-3）：按钮触发、不随表单实时联动；等待态/结果卡
+// 与表单互不干扰，等待期间保存/取消行为保持既有 ——
+
+// 预览可用性（帧3 判定）：父组件按库根会话在场性与识别快照态传入；缺省视为
+// 可用（setAdjust 模式不渲染按钮，无消费面）。
+const previewEnabled = computed((): boolean => props.previewAvailable !== false)
+
+// 预览按钮文案（帧1/帧3 逐字）：等待态「预览中…」；禁用态「预览命中（不可用）」；
+// 常态「预览命中」。
+const previewButtonLabel = computed((): string => {
+  if (props.previewing) return '预览中…'
+  return previewEnabled.value ? '预览命中' : '预览命中（不可用）'
+})
+
+// 预览触发（帧1）：载荷走与保存同一条草稿构造路径（同一闸门与 {公共段} 归一）；
+// 校验不过时不发请求（行内已标红、就地呈现）；等待/禁用态不可再点。
+function preview(): void {
+  if (props.previewing || !previewEnabled.value) return
+  const payload = buildRulePayload()
+  if (!payload) return
+  emit('preview', payload)
+}
+
+// 结果卡关闭（帧2：可 [×] 关闭后改表单重试）——结果态归父组件，清空经事件上抛
+function closePreview(): void {
+  emit('preview-close')
+}
+
+// 样例行文案（帧2 模板「· {fileName}（{dirRelKey}）→ {result}」）：result 缺省
+// （纯门组合退化形态）时仅文件名+目录，不渲染「→ 」尾巴。
+function previewSampleLine(s: RulePreviewSampleView): string {
+  const base = `· ${s.fileName}（${s.dirRelKey ?? ''}）`
+  return s.result ? `${base}→ ${s.result}` : base
 }
 </script>
 
@@ -1836,11 +2073,13 @@ function save(): void {
   padding: 1px 4px;
 }
 
-/* 底部动作区：保存错误文案（父组件回填）+ 动作按钮 */
+/* 底部动作区：保存错误文案（父组件回填）+ 动作按钮；换行承载命中预览结果卡与
+   说明小字（整行元素 flex-basis 100%） */
 .li-red-footer {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .li-red-save-error {
@@ -1858,6 +2097,71 @@ function save(): void {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+
+/* —— 命中预览（E 件·剧本三）：结果卡（帧2）+ 失败文案/禁用态说明小字（帧3） —— */
+
+/* 结果卡：弹窗底部整行、按钮行上方；只读呈现与表单互不干扰 */
+.li-red-preview-card {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--app-border-color-light);
+  border-radius: var(--app-radius);
+  background: var(--app-bg-surface);
+  padding: 10px 12px;
+}
+
+.li-red-preview-head {
+  display: flex;
+  align-items: center;
+}
+
+.li-red-preview-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.li-red-preview-close {
+  margin-left: auto;
+}
+
+.li-red-preview-stat {
+  margin: 0;
+  font-size: 13px;
+  color: var(--app-text-primary);
+}
+
+.li-red-preview-samples-label,
+.li-red-preview-sample {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-text-regular);
+  word-break: break-all;
+}
+
+.li-red-preview-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* 预览失败文案（RPC 失败/后端降级）与帧3 禁用态说明小字：按钮行下方整行 */
+.li-red-preview-error {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--app-color-danger);
+  word-break: break-all;
+}
+
+.li-red-preview-unavailable {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
 }
 
 /* v4 条件行（三步漏斗）：行卡片 + 目标三卡 + 词条 chips + 附加/小标行 */
@@ -1949,6 +2253,63 @@ function save(): void {
 
 .li-ref-divider {
   border-top: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+}
+
+/* F：引用行下只读平铺成员条件行 */
+.li-ref-flat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--app-border-color-lighter, var(--app-border-color-light));
+}
+
+.li-ref-flat-line {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  word-break: break-all;
+}
+
+/* D：引用行静态告警（✗ 单行序列零提取成员=红色警示）与提示（⚠ 成员独立产出） */
+.li-ref-alert {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-color-danger);
+  word-break: break-all;
+}
+
+/* D：提示级 ⚠（成员独立产出 / 镜像缺失） */
+.li-ref-notice,
+.li-red-mirror-warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-color-warning, var(--app-text-secondary));
+  word-break: break-all;
+}
+
+/* F：提取段「来自被引规则」分组头（转写提示小字常驻） */
+.li-red-ref-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.li-red-ref-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-regular);
+}
+
+.li-red-ref-group-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-text-secondary);
 }
 
 .li-condx-targets {

@@ -208,7 +208,8 @@ export interface CondxRowForm {
 
 // 占位词词表（与内核 condxVocab 同源九词）：digit=数字类（[0-9]+）；
 // refable=false 仅 {任意}（吞位词：非捕获、可重复、不可被提取引用）；
-// note 为词条说明（chips 提示）。
+// note 为词条说明（chips 提示）。{公共段}=序列成套成员模板的公共相同部分
+// （英文组名 key，与旧词 {键} 同组同义）。
 export const CONDX_VOCAB: { word: string; group: string; digit: boolean; refable: boolean; note: string }[] = [
   { word: '作者', group: 'author', digit: false, refable: true, note: '贪婪取词（.+），相邻须有分隔文字' },
   { word: '集名', group: 'setname', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合' },
@@ -217,20 +218,36 @@ export const CONDX_VOCAB: { word: string; group: string; digit: boolean; refable
   { word: '序号', group: 'seq', digit: true, refable: true, note: '数字类（[0-9]+）' },
   { word: '作品号', group: 'workid', digit: true, refable: true, note: '数字类（pixiv 作品号等）' },
   { word: '日期', group: 'date', digit: true, refable: true, note: '数字类（YYYYMMDD 等）' },
-  { word: '键', group: 'key', digit: false, refable: true, note: '序列成员模板的公共前缀位' },
+  { word: '公共段', group: 'key', digit: false, refable: true, note: '序列成套成员模板的公共相同部分' },
   { word: '任意', group: 'any', digit: false, refable: false, note: '吞位词：不产出声明、可重复出现' }
 ]
 
-export function condxVocabOf(word: string): { word: string; group: string; digit: boolean; refable: boolean; note: string } | undefined {
-  return CONDX_VOCAB.find((v) => v.word === word)
+// 旧词别名（旧词 → 英文组名）：{键} 为 {公共段} 的旧书写词——旧档模板零迁移、
+// 照常解析求值；仅供模板解析/校验路径消费（condxVocabOf 先查词表再查别名），
+// chips 与显示永不出旧词（显示走组名反查=现行词条）。
+export const CONDX_VOCAB_ALIASES: Record<string, string> = {
+  键: 'key'
 }
 
-// 目标三分三卡（R3）：目录命中=整棵子树包含（任意深度）、主体回联内建。
+export function condxVocabOf(word: string): { word: string; group: string; digit: boolean; refable: boolean; note: string } | undefined {
+  const hit = CONDX_VOCAB.find((v) => v.word === word)
+  if (hit) return hit
+  const aliasGroup = CONDX_VOCAB_ALIASES[word]
+  if (!aliasGroup) return undefined
+  return CONDX_VOCAB.find((v) => v.group === aliasGroup)
+}
+
+// 目标三分三卡（R3）：note=范围语义说明小字（卡片小字与悬停提示同源消费——
+// 卡片与 title 用同一常量）。
 export const CONDX_TARGETS: { value: 'file' | 'dir' | 'seq'; label: string; note: string }[] = [
-  { value: 'file', label: '文件', note: '按格式命中单个文件（匹配去扩展名的文件名）' },
-  { value: 'dir', label: '目录', note: '按格式命中目录（命中=该目录位于祖先链上，整棵子树包含）；命中即集主体' },
-  { value: 'seq', label: '序列', note: '成员按模板成套（非{序号}部分跨成员相同为键）' }
+  { value: 'file', label: '文件', note: '按格式匹配文件名(不含扩展名)命中的满足格式的每个文件' },
+  { value: 'dir', label: '目录', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)' },
+  { value: 'seq', label: '序列', note: '文件名按模板成套—非序号部分为{公共段}；公共段相同≥2才算、落单不算、不跨目录' }
 ]
+
+// 第四卡「引用规则」的说明小字（组合引用的门槛与停用语义；卡片小字与悬停
+// 提示同源）。
+export const CONDX_TARGET_REF_NOTE = '引用另一条规则，仅当所有被引用规则命中时本规则才命中；被引用规则停用时本规则不可用'
 
 // 终结谓词封闭集（与内核 attachAllowed 镜像）：needs 列出必填字段族。
 export const CONDX_ATTACH_OPTIONS: Record<string, { value: string; label: string; needs: string[] }[]> = {
@@ -273,7 +290,7 @@ export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 
   { name: '【作者】标题', template: '【{作者}】{标题}', target: 'file', description: '方括号命名惯例' },
   { name: '作者 - 标题', template: '{作者} - {标题}', target: 'file', description: '连字符分隔（贪婪取最后分隔位）' },
   { name: 'pixiv 页级', template: '{作品号}_p{序号}', target: 'file', description: '作品号数字类 + _p 页号' },
-  { name: '序列成套', template: '{键}_{序号}', target: 'seq', description: '同键 ≥2 件成套归入同一作品集' },
+  { name: '序列成套', template: '{公共段}_{序号}', target: 'seq', description: '{公共段}相同 ≥2 件成套归入同一作品集' },
   { name: '目录层作者', template: 'Artist[{作者}]', target: 'dir', description: '剥壳惯例：字面括号 + 作者词' },
   { name: '任意段吞位', template: '{标题}_{任意}', target: 'file', description: '{任意} 吞掉标题之后的一切' }
 ]
@@ -330,6 +347,8 @@ export function condxFlatRows(rows: CondxRowForm[]): { row: number; condx: Condx
 
 // 一行的可引用占位词（模板中出现且 refable）：提取段「行N·{词}」下拉与
 // 小标占位词下拉的数据源；顺序=模板内出现序（引用词不可重复，天然唯一）。
+// 返回现行词——旧词 {键} 书写的模板归一为 {公共段}（组名同 key，寻址不受
+// 影响，显示不出旧词）。
 export function condxRowPlaceholders(condx: CondxForm): string[] {
   if (!condx || condx.format.mode !== 'template') return []
   const parsed = condxTemplateChips(condx.format.tpl || '')
@@ -338,13 +357,14 @@ export function condxRowPlaceholders(condx: CondxForm): string[] {
   for (const c of parsed.chips) {
     if (!c.ph) continue
     const v = condxVocabOf(c.text)
-    if (v && v.refable) out.push(c.text)
+    if (v && v.refable && out.indexOf(v.word) < 0) out.push(v.word)
   }
   return out
 }
 
 // 模板轻校验（与内核 deriveCondxRules 主要拒绝面同口径，构造期校验兜底真源）：
-// 词表外词 / 引用词重复 / 相邻占位词无分隔。返回中文错误（空串=通过）。
+// 词表外词（旧词别名合法）/ 引用词重复（按英文组名判重——{键} 与 {公共段}
+// 同组，同模板并用即重复）/ 相邻占位词无分隔。返回中文错误（空串=通过）。
 export function condxTemplateError(tpl: string): string {
   const parsed = condxTemplateChips(tpl)
   if (parsed.error) return parsed.error
@@ -353,10 +373,10 @@ export function condxTemplateError(tpl: string): string {
   for (const c of chips) {
     if (!c.ph) continue
     const v = condxVocabOf(c.text)
-    if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品号/日期/键/任意）`
+    if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品号/日期/公共段/任意）`
     if (!v.refable) continue
-    if (seen.has(c.text)) return `占位词「${c.text}」在同一模板内重复（引用词不可重复；吞位用 {任意}）`
-    seen.add(c.text)
+    if (seen.has(v.group)) return `占位词「${c.text}」在同一模板内重复（引用词不可重复；吞位用 {任意}）`
+    seen.add(v.group)
   }
   for (let i = 1; i < chips.length; i++) {
     if (chips[i].ph && chips[i - 1].ph) return '相邻占位词之间缺少分隔文字'
@@ -380,7 +400,7 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
     if (err) return err
     if (target === 'seq') {
       const chips = condxTemplateChips(condx.format.tpl || '').chips || []
-      if (!chips.some((c) => c.ph && c.text === '序号')) return '序列目标模板须含 {序号}（非序号部分为键）'
+      if (!chips.some((c) => c.ph && c.text === '序号')) return '序列目标模板须含 {序号}（非序号部分为{公共段}）'
     }
   }
   const allowed = (CONDX_ATTACH_OPTIONS[target] || []).map((o) => o.value)
@@ -397,13 +417,15 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
     }
   }
   for (const b of condx.badges || []) {
-    if (placeholders.indexOf(b.placeholder) < 0) return `小标占位词「{${b.placeholder || '?'}}」不在本行模板中`
+    if (!badgePlaceholderInRow(placeholders, b.placeholder)) {
+      return `小标占位词「{${b.placeholder || '?'}}」不在本行模板中`
+    }
     if (b.kind === 'library') {
       if (CONDX_BADGE_DIMS.indexOf(b.dim || '') < 0) return '在库名单小标须选择维度（作者/标签/作品集）'
     } else if (b.kind === 'equal') {
       const against = flat.find((f) => f.row === b.againstRow)
       if (!against || against.row >= rowNum) return '相等小标须引用更早的行'
-      if (condxRowPlaceholders(against.condx).indexOf(b.againstPh || '') < 0) {
+      if (!badgePlaceholderInRow(condxRowPlaceholders(against.condx), b.againstPh)) {
         return `相等小标的对方占位词「{${b.againstPh || '?'}}」不在第 ${b.againstRow} 行模板中`
       }
     } else if (b.kind === 'constant') {
@@ -411,6 +433,18 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
     }
   }
   return ''
+}
+
+// 小标占位词是否在本行可引用词内：现行词精确命中，或与某词同英文组名
+//（旧词 {键} 与 {公共段} 同组同义——JSON 手写旧词照常通过，保存时归一为新词）。
+function badgePlaceholderInRow(placeholders: string[], placeholder: string | undefined): boolean {
+  if (placeholders.indexOf(placeholder || '') >= 0) return true
+  const own = condxVocabOf(placeholder || '')
+  if (!own) return false
+  return placeholders.some((w) => {
+    const v = condxVocabOf(w)
+    return v ? v.group === own.group : false
+  })
 }
 
 // 全表校验：行完整性（至少一行 condition/Group 非空）+ 逐行 condxRowError。
@@ -425,7 +459,8 @@ export function condxRowsError(rows: CondxRowForm[]): string {
 }
 
 // 捕获声明清单（v4：行号+占位词+英文组名）：提取段「行N·{词}」选项与清单
-// 呈现用 word；captureName 落 JSON 用 group（内核寻址口径=英文组名）。
+// 呈现用 word（现行词——旧词 {键} 书写归一显示为 {公共段}）；captureName 落
+// JSON 用 group（内核寻址口径=英文组名）。
 export interface CondxCaptureDecl {
   row: number
   word: string
@@ -441,4 +476,129 @@ export function condxCaptures(rows: CondxRowForm[]): CondxCaptureDecl[] {
     }
   }
   return out
+}
+
+// —— 旧词归一（{键} → {公共段}：同一英文组名 key 的同义词书写，语义等价） ——
+
+// 模板文本归一：整位占位词 {键} 替换为 {公共段}（仅花括号整位匹配，字面
+// 文本不动）。
+export function condxNormalizeTpl(tpl: string): string {
+  return (tpl || '').replace(/\{键\}/g, '{公共段}')
+}
+
+// 条件行树归一：行/括号子组递归遍历，格式模板（含附加条件迷你模板）整位
+// 换词、值级小标的占位词字段（placeholder/againstPh）按词换词。编辑打开旧档
+// 的显示归一与保存载荷构造共用本函数——结构化与 JSON 高级模式同路径，保存
+// 即落档新词。
+export function condxNormalizeRows<T>(rows: T): T {
+  const walk = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(walk)
+    if (typeof value !== 'object' || value === null) return value
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      const v = (value as Record<string, unknown>)[key]
+      if (key === 'tpl' && typeof v === 'string') {
+        out[key] = condxNormalizeTpl(v)
+      } else if ((key === 'placeholder' || key === 'againstPh') && v === '键') {
+        out[key] = '公共段'
+      } else {
+        out[key] = walk(v)
+      }
+    }
+    return out
+  }
+  return walk(rows) as T
+}
+
+// —— 组合关系直译句与类别形态推导（弹窗摘要/引用行/列表小字同源） ——
+
+// 成员规则在直译句与引用行摘要中的数据面：label=成员描述（缺省回退成员
+// ID），rows=成员当前条件行（档案现档，组合求值对该形态的判定同源）。
+export interface CondxComboMember {
+  label: string
+  rows: unknown
+}
+
+// 成员直译形态：全部条件行单一且同目标 → 按目标成段（dir/seq/file）；括号
+// 子组、行级非或多行混合目标 → 该成员回退「被「A」命中」；任一析取（或）
+// 连接 → 组合关系不可直译，整句回退通用措辞。
+type CondxMemberSegKind = 'dir' | 'seq' | 'file' | 'fallback' | 'complex'
+
+export interface CondxMemberShape {
+  seg: CondxMemberSegKind
+  label: string
+}
+
+export function condxMemberShape(member: CondxComboMember): CondxMemberShape {
+  const rows = Array.isArray(member.rows) ? (member.rows as CondxRowForm[]) : []
+  let rowCount = 0
+  let hasGroup = false
+  let hasNegated = false
+  let hasOr = false
+  const targets: string[] = []
+  const walk = (list: CondxRowForm[]): void => {
+    for (const r of list) {
+      if (r.group) {
+        hasGroup = true
+        walk(r.group)
+        continue
+      }
+      if (r.negated) hasNegated = true
+      if (r.connector === 'or') hasOr = true
+      if (r.condition) {
+        rowCount += 1
+        if (targets.indexOf(r.condition.target) < 0) targets.push(r.condition.target)
+      }
+    }
+  }
+  walk(rows)
+  if (hasOr) return { seg: 'complex', label: member.label }
+  if (hasGroup || hasNegated || rowCount === 0 || targets.length > 1) {
+    return { seg: 'fallback', label: member.label }
+  }
+  return { seg: targets[0] as CondxMemberSegKind, label: member.label }
+}
+
+// 组合关系直译句：每成员一段、段间以「、」连接；dir 段=「位于「A」命中的
+// 目录之下的」、seq 段=「属于「B」的成员文件（公共段相同≥2、落单不算）」
+// （自带名词短语）、file/回退段=「被「C」命中」；末段非 seq 时整句尾接
+// 「的文件」（段尾恰为「的」时只接「文件」）。任一成员含析取连接 → 整句
+// 回退「命中=「A」与「B」都命中的文件」。
+export function condxComboSentence(members: CondxComboMember[]): string {
+  if (!members.length) return ''
+  const shapes = members.map(condxMemberShape)
+  if (shapes.some((s) => s.seg === 'complex')) {
+    const names = members.map((m) => `「${m.label}」`)
+    if (names.length === 1) return `命中=${names[0]}命中的文件`
+    return `命中=${names.join('与')}都命中的文件`
+  }
+  const segs = shapes.map((s) => {
+    if (s.seg === 'dir') return `位于「${s.label}」命中的目录之下的`
+    if (s.seg === 'seq') return `属于「${s.label}」的成员文件（公共段相同≥2、落单不算）`
+    return `被「${s.label}」命中`
+  })
+  const body = segs.join('、')
+  if (shapes[shapes.length - 1].seg === 'seq') return `命中=${body}`
+  return `命中=${body}${body.endsWith('的') ? '文件' : '的文件'}`
+}
+
+// 条件行的目标类别并集与形态数：label=按首次出现序去重并列（如「目录+文件」），
+// count=条件行数（括号子组递归计行，与占位词寻址的行号口径一致）。
+export interface CondxShapeSummary {
+  label: string
+  count: number
+}
+
+export function condxShapeSummary(rows: unknown): CondxShapeSummary {
+  const list = Array.isArray(rows) ? (rows as CondxRowForm[]) : []
+  const flat = condxFlatRows(list)
+  const targets: string[] = []
+  for (const f of flat) {
+    if (targets.indexOf(f.condx.target) < 0) targets.push(f.condx.target)
+  }
+  const names = targets.map((t) => {
+    const hit = CONDX_TARGETS.find((c) => c.value === t)
+    return hit ? hit.label : t
+  })
+  return { label: names.join('+'), count: flat.length }
 }

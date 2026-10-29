@@ -88,6 +88,11 @@ func ancestorChildDirCounts(dirNames []string, childDirsByParent map[string]map[
 //     归属产出规则）；
 //  4. 每文件一份 ParseContext，基础字段 DirNames/Depth 按文件预先填入；
 //     分组段写入的群组分析保留在同一 ctx 内，供 FromGroupPrefix 提取消费。
+//
+// 求值自下而上、逐文件进行（反向于「先命中目录或序列实体、再覆盖其下文件」的
+// 常规心智）：不存在实体级命中；每个文件各自构造 MatchInput（文件名、祖先目录
+// 链、同目录兄弟），各规则对该文件独立求值，结论回填该文件。目录目标的「整个
+// 子树」与序列目标的「成套」，都是逐文件结论在呈现层的汇出形态。
 func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileDecision {
 	siblingsByDir := make(map[string][]string, len(files))
 	childDirsByParent := make(map[string]map[string]struct{})
