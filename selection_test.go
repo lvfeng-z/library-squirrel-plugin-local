@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 	"github.com/lvfeng-z/library-squirrel-sdk/identity"
@@ -452,26 +453,27 @@ func emitFixture(t *testing.T, relPaths []string) (string, *LocalImportWorkFetch
 	return root, h, m, &WorkbenchSession{Snapshot: &RecognitionSnapshot{}}
 }
 
-// collectEmittedWithReason 直驱 emitSelectedWorks 收集全部发射条目与中止原因
-// （同步调用，结束后收卷）。
-func collectEmittedWithReason(t *testing.T, h *LocalImportWorkFetcher, root string, sess *WorkbenchSession, works []*SelectableWork, taskName string) ([]*sdkdto.CreateStreamItem, string) {
+// collectEmittedWithReason 直驱 emitSelectedWorks 收集全部发射条目与中止结论
+// （同步调用，结束后收卷；取消路径返回 cancelled=真——直驱不经编排 goroutine，
+// 中止原因/取消收尾由本助手原样转交断言面）。
+func collectEmittedWithReason(t *testing.T, h *LocalImportWorkFetcher, root string, sess *WorkbenchSession, works []*SelectableWork, taskName string) ([]*sdkdto.CreateStreamItem, string, bool) {
 	t.Helper()
 	ch := make(chan *sdkdto.CreateStreamItem, 16)
-	reason := h.emitSelectedWorks(root, sess, works, taskName, ch)
+	reason, cancelled := h.emitSelectedWorks(root, sess, works, taskName, ch, sdkdto.NoopHeartbeat{})
 	close(ch)
 	var out []*sdkdto.CreateStreamItem
 	for item := range ch {
 		out = append(out, item)
 	}
-	return out, reason
+	return out, reason, cancelled
 }
 
-// collectEmitted 直驱 emitSelectedWorks 收集全部发射条目（断言无中止原因）。
+// collectEmitted 直驱 emitSelectedWorks 收集全部发射条目（断言无中止原因与取消）。
 func collectEmitted(t *testing.T, h *LocalImportWorkFetcher, root string, sess *WorkbenchSession, works []*SelectableWork, taskName string) []*sdkdto.CreateStreamItem {
 	t.Helper()
-	items, reason := collectEmittedWithReason(t, h, root, sess, works, taskName)
-	if reason != "" {
-		t.Fatalf("emitSelectedWorks 不应中止: %s", reason)
+	items, reason, cancelled := collectEmittedWithReason(t, h, root, sess, works, taskName)
+	if reason != "" || cancelled {
+		t.Fatalf("emitSelectedWorks 不应中止: reason=%s cancelled=%v", reason, cancelled)
 	}
 	return items
 }
@@ -596,9 +598,11 @@ func TestEmitSelectedWorksMixedAttributionSingleParent(t *testing.T) {
 
 // —— 退出标准 8：识别后磁盘变动触发对账阻断 —— //
 
-// TestApplyCreateTasksGuards 创建编排动作的守卫链：空选择集、磁盘变动（目录
-// 新增文件=识别后变化；所选文件被删除）与赋值修订漂移均阻断（零 CreateTask
-// 调用、零标记残留）。
+// TestApplyCreateTasksGuards 创建编排动作的守卫链：空选择集、目录级 mtime 游标
+// 对账（识别后新增文件=游标漂移；仅推移目录 mtime 亦拒绝；所选文件被删除时其
+// 目录 mtime 随之漂移、同被拦截）与赋值修订漂移均阻断（零 CreateTask 调用、零
+// 标记残留）。逐文件存在性核对已并入 verify 哈希循环（对账拆分·刀4，中断语义
+// 见 TestReconcileSplitFileGoneAbortsInVerify）。
 func TestApplyCreateTasksGuards(t *testing.T) {
 	t.Run("空选择集", func(t *testing.T) {
 		root, m, ctx := recognizedSelectionFixture(t, nil)
@@ -622,7 +626,29 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 			t.Fatalf("对账阻断不应调用 CreateTask")
 		}
 	})
-	t.Run("所选文件被删除", func(t *testing.T) {
+	t.Run("仅目录 mtime 漂移（无文件变化）", func(t *testing.T) {
+		root, m, ctx := recognizedSelectionFixture(t, nil)
+		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+			t.Fatalf("写入选择集失败: %v", err)
+		}
+		dir := root + "/多轨"
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("读取目录失败: %v", err)
+		}
+		shifted := fi.ModTime().Add(2 * time.Second)
+		if err := os.Chtimes(dir, shifted, shifted); err != nil {
+			t.Fatalf("推移目录 mtime 失败: %v", err)
+		}
+		if _, err := m.ApplyCreateTasks(root, ""); err == nil ||
+			!strings.Contains(err.Error(), "磁盘对账未通过") || !strings.Contains(err.Error(), "在识别后有变动") {
+			t.Fatalf("目录 mtime 游标漂移应对账阻断（对账拆分后守卫链仍拒绝），实际: %v", err)
+		}
+		if ctx.createTaskCalls() != 0 {
+			t.Fatalf("对账阻断不应调用 CreateTask")
+		}
+	})
+	t.Run("所选文件被删除（目录 mtime 随之漂移，目录级对账拦截）", func(t *testing.T) {
 		root, m, ctx := recognizedSelectionFixture(t, nil)
 		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
@@ -631,7 +657,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 			t.Fatalf("删除所选文件失败: %v", err)
 		}
 		if _, err := m.ApplyCreateTasks(root, ""); err == nil || !strings.Contains(err.Error(), "磁盘对账未通过") {
-			t.Fatalf("所选文件被删除应对账阻断，实际: %v", err)
+			t.Fatalf("所选文件被删除应阻断（其目录 mtime 漂移由目录级对账拦截），实际: %v", err)
 		}
 		if ctx.createTaskCalls() != 0 {
 			t.Fatalf("对账阻断不应调用 CreateTask")
@@ -660,6 +686,164 @@ func removeFile(t *testing.T, path string) error {
 	return os.Remove(path)
 }
 
+// —— 对账拆分等价（守卫链与会话瘦身四刀之四，阶段3 退出标准③）—— //
+
+// TestReconcileSplitFileGoneAbortsInVerify 逐文件存在性核对移入 verify 哈希循环
+// 后的等价锚定：目录级游标不变（隔离目录对账路径）时守卫链放行，所选文件不可
+// 访问在 verify 循环 Stat 处整次创建中断——对账文案经中止原因收流（error 块 →
+// 宿主回告失败 → createDone 失败终态），零子行发射、选择集保留可重试（与拆分
+// 前守卫链拒绝同一用户可见结局，仅核对时机后移）。
+func TestReconcileSplitFileGoneAbortsInVerify(t *testing.T) {
+	t.Run("直驱 emitSelectedWorks：对账文案收流且零发射", func(t *testing.T) {
+		root, h, m, sess := emitFixture(t, []string{"对账甲/x1.jpg", "对账甲/x2.jpg"})
+		works := []*SelectableWork{{
+			WorkID: "d:对账甲", Kind: WorkKindDirTracks, DirRelKey: "对账甲",
+			Files: []string{"对账甲/x1.jpg", "对账甲/x2.jpg"},
+		}}
+		if err := removeFile(t, root+"/对账甲/x2.jpg"); err != nil {
+			t.Fatalf("删除所选文件失败: %v", err)
+		}
+		items, reason, cancelled := collectEmittedWithReason(t, h, root, sess, works, "对账批次")
+		if reason == "" || !strings.Contains(reason, "磁盘对账未通过") ||
+			!strings.Contains(reason, "对账甲/x2.jpg") || !strings.Contains(reason, "已不存在") {
+			t.Fatalf("文件缺失应经对账文案中止收流（沿用守卫链拒绝文案），实际 %q", reason)
+		}
+		if cancelled {
+			t.Fatalf("对账中止是失败收尾而非取消收尾")
+		}
+		if len(items) != 0 {
+			t.Fatalf("对账中止应零发射（含已哈希完成的在先轨道），实际 %d 条", len(items))
+		}
+		if summary := m.takeCreateBatchSummary(root); summary.total != 0 {
+			t.Fatalf("对账中止不应记录批次摘要，实际 %+v", summary)
+		}
+	})
+	t.Run("全链：守卫放行 → verify 中断 → 失败终态且选择集保留", func(t *testing.T) {
+		root, m, ctx := recursiveCreateFixture(t, nil)
+		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+			t.Fatalf("写入选择集失败: %v", err)
+		}
+		// 删除所选一轨并复原目录 mtime 至识别时值：目录级游标对账不动（隔离
+		// 逐文件路径），中断只能发生在 verify 哈希循环的 Stat
+		dir := root + "/多轨"
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("读取目录失败: %v", err)
+		}
+		if err := removeFile(t, root+"/多轨/【作者B】标题2.jpg"); err != nil {
+			t.Fatalf("删除所选文件失败: %v", err)
+		}
+		if err := os.Chtimes(dir, fi.ModTime(), fi.ModTime()); err != nil {
+			t.Fatalf("复原目录 mtime 失败: %v", err)
+		}
+		started, err := m.ApplyCreateTasks(root, "")
+		if err != nil || !started {
+			t.Fatalf("目录级对账通过时守卫链应放行（文件级核对已移入 verify）: started=%v err=%v", started, err)
+		}
+		done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+		if done.Success {
+			t.Fatalf("verify 期文件不可访问应中断创建，实际成功: %+v", done)
+		}
+		if !strings.Contains(done.Message, "磁盘对账未通过") || !strings.Contains(done.Message, "已不存在") {
+			t.Fatalf("中断文案应为对账文案（所选文件已不存在），实际 %q", done.Message)
+		}
+		sess, err := m.SessionOf(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		if len(sess.Selection) != 1 {
+			t.Fatalf("中断后选择集应保留供重试，实际 %v", sess.Selection)
+		}
+	})
+}
+
+// —— 守卫段提速锚定（阶段3 退出标准①）—— //
+
+// syntheticLargeSessionFixture 合成大会话夹具：指定目录数×每目录文件数的已识别
+// 快照（全部 identified → 目录聚合作品可选）经 CompleteRecognition 全保存落库
+//（真实 gzip 分片载荷），并预演「全景载入完成」形态——缓存条目装填 + 域推导
+// 驻留（真实时序=前端拉取 domain 分节）。DirMtimes 与磁盘 ProfileDigest 刻意
+// 缺席（目录级对账与档案指纹闸门按缺席放行，计时聚焦守卫链自身通路）。
+func syntheticLargeSessionFixture(t *testing.T, dirCount, filesPerDir int) (string, *SessionManager, *workbenchTestCtx, *countingSessionStore) {
+	t.Helper()
+	root := t.TempDir()
+	store := newCountingSessionStore()
+	ctx := &workbenchTestCtx{
+		store:          store.fakeSessionStore,
+		createTaskStub: &sdkdto.CreateTaskResult{Succeed: true, AddedQuantity: 3},
+	}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion, GeneratedAtMs: 1000, RootPath: root,
+	}
+	for d := 0; d < dirCount; d++ {
+		dirKey := fmt.Sprintf("目录%05d", d)
+		for f := 0; f < filesPerDir; f++ {
+			rel := fmt.Sprintf("%s/文件%03d.jpg", dirKey, f)
+			snap.Files = append(snap.Files, SnapFile{
+				RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: dirKey, State: snapStateIdentified,
+			})
+		}
+	}
+	if _, err := m.CompleteRecognition(root, snap); err != nil {
+		t.Fatalf("注入合成快照失败: %v", err)
+	}
+	shared, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("装填缓存失败: %v", err)
+	}
+	m.workDomainOf(shared) // 全景 domain 分节的域推导驻留
+	return root, m, ctx, store
+}
+
+// TestApplyCreateTasksGuardSegmentFastOnSyntheticLargeSession 合成大会话夹具下
+// createTasks 动作守卫段 <3s（阶段3 退出标准①）：12 万文件/6 千目录（真实库
+// 20.7 万文件量级过半、目录数同量级）全选创建——守卫链走缓存条目读（零分片
+// 解码）+ 域推导复用（零重推导）+ 目录级对账（零逐文件 Stat）+ 外置标记 O(1)
+// 置位；收尾清理（选择集清空）走信封级轻变异，全程零载荷分片写。
+func TestApplyCreateTasksGuardSegmentFastOnSyntheticLargeSession(t *testing.T) {
+	root, m, ctx, store := syntheticLargeSessionFixture(t, 6000, 20)
+	shared, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	ids := make([]string, 0, len(shared.Snapshot.Files))
+	for _, work := range m.workDomainOf(shared).Works {
+		ids = append(ids, work.WorkID)
+	}
+	if _, err := m.SetSelection(root, ids); err != nil {
+		t.Fatalf("写入全量选择集失败: %v", err)
+	}
+
+	store.resetWriteCounts()
+	start := time.Now()
+	started, err := m.ApplyCreateTasks(root, "守卫计时批次")
+	elapsed := time.Since(start)
+	if err != nil || !started {
+		t.Fatalf("合成大会话守卫链应放行: started=%v err=%v", started, err)
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("合成大会话（%d 文件）createTasks 守卫段耗时 %v ≥ 3s", 6000*20, elapsed)
+	}
+	done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+	if !done.Success {
+		t.Fatalf("桩创建应成功收尾: %s", done.Message)
+	}
+	if store.shardSetValueCalls() != 0 {
+		t.Fatalf("守卫与信封级收尾不得触载荷分片（刀2），实际分片写 %d 次", store.shardSetValueCalls())
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if len(sess.Selection) != 0 || sess.Snapshot == nil {
+		t.Fatalf("收尾应经信封级轻变异清空选择集且载荷仍在缓存实例: sel=%d snap=%v", len(sess.Selection), sess.Snapshot == nil)
+	}
+}
+
 // —— 创建编排动作：异步化（立即应答 started + goroutine 创建 + createDone 终态）—— //
 
 // TestApplyCreateTasksOrchestration 创建编排动作全链（异步化后）：对账通过 → 置
@@ -684,7 +868,7 @@ func TestApplyCreateTasksOrchestration(t *testing.T) {
 	if !done.Success {
 		t.Fatalf("桩创建应成功收尾，实际: %s", done.Message)
 	}
-	if want := fmt.Sprintf("已创建任务「%s」：3 件作品（3 个子任务，Created 待手动开始）", wantName); done.Message != want {
+	if want := fmt.Sprintf("已创建任务「%s」：3 件作品，共 3 个子任务，用时不足 1 分钟", wantName); done.Message != want {
 		t.Fatalf("createDone 文案应为批次任务形态（默认名兜底），期望 %q 实际 %q", want, done.Message)
 	}
 	if got := ctx.createTaskURL(); got != "local://"+root {
@@ -742,7 +926,9 @@ type recursiveCreateTaskCtx struct {
 }
 
 // CreateTask 宿主同步递归桩：真实链=编排 goroutine → m.ctx.CreateTask → 宿主 →
-// 插件 Create（过滤产出分支）→ 完整产出流消费 → CreateTask 返回。
+// 插件 Create（过滤产出分支）→ 完整产出流消费 → CreateTask 返回；产出流以
+// SetReason 中止（如对账文案收流，对账拆分·刀4）时按宿主口径回告失败——error
+// 块收流后 CreateTask RPC 返回 Succeed=false+Msg=reason。
 func (c *recursiveCreateTaskCtx) CreateTask(url string) (*sdkdto.CreateTaskResult, error) {
 	if c.block != nil {
 		<-c.block
@@ -764,6 +950,9 @@ func (c *recursiveCreateTaskCtx) CreateTask(url string) (*sdkdto.CreateTaskResul
 		} else if batch := item.ChildrenBatch(); batch != nil {
 			added += len(batch.Items)
 		}
+	}
+	if reason := result.Reason(); reason != "" {
+		return &sdkdto.CreateTaskResult{Succeed: false, Msg: reason}, nil
 	}
 	if c.afterEmitFail {
 		return &sdkdto.CreateTaskResult{Succeed: false, Msg: "宿主任务落库失败（测试注入）"}, nil
@@ -832,30 +1021,38 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 		if !done.Success {
 			t.Fatalf("宿主同步递归桩应成功收尾，实际: %s", done.Message)
 		}
-		if !strings.Contains(done.Message, "已创建任务「异步批次」：2 件作品（3 个子任务") {
+		if !strings.Contains(done.Message, "已创建任务「异步批次」：2 件作品，共 3 个子任务") {
 			t.Fatalf("createDone 文案应携带真实产出计数（2 作品 3 子行），实际 %q", done.Message)
 		}
-		// 事件序列：createProgress(verify 2/2) → createProgress(create 3/3) → createDone
-		var verifyAt, createAt, doneAt = -1, -1, -1
-		var verifyEvt, createEvt workbenchFrontendEvent
+		// 事件序列（阶段4 双计数模型）：createProgress(verify 0/2) 首反馈（甲1：
+		// works 解析完成即发、真分母即刻可见）→ createProgress(verify 2/2) 终值
+		//（恒发）→ createProgress(create 3/3)（单批不重叠；重叠期双计数锚定见
+		// create_pipeline_test.go）→ createDone
+		var firstVerifyAt, verifyFinalAt, createAt, doneAt = -1, -1, -1, -1
+		var firstVerifyEvt, verifyFinalEvt, createEvt workbenchFrontendEvent
 		for i, evt := range collectWorkbenchEvents(t, ctx) {
 			switch {
-			case evt.Kind == workbenchEventCreateProgress && evt.Phase == createPhaseVerify && verifyAt < 0:
-				verifyAt, verifyEvt = i, evt
+			case evt.Kind == workbenchEventCreateProgress && evt.Phase == createPhaseVerify && firstVerifyAt < 0:
+				firstVerifyAt, firstVerifyEvt = i, evt
+			case evt.Kind == workbenchEventCreateProgress && evt.Phase == createPhaseVerify:
+				verifyFinalAt, verifyFinalEvt = i, evt
 			case evt.Kind == workbenchEventCreateProgress && evt.Phase == createPhaseCreate && createAt < 0:
 				createAt, createEvt = i, evt
 			case evt.Kind == workbenchEventCreateDone:
 				doneAt = i
 			}
 		}
-		if verifyAt < 0 || verifyEvt.Done != 2 || verifyEvt.Total != 2 {
-			t.Fatalf("核对相事件应在场且计数=已核对/全部作品（2/2），实际 idx=%d %+v", verifyAt, verifyEvt)
+		if firstVerifyAt < 0 || firstVerifyEvt.Done != 0 || firstVerifyEvt.Total != 2 {
+			t.Fatalf("首个 createProgress 应为核对相首反馈（0/2，先于一切发射相事件），实际 idx=%d %+v", firstVerifyAt, firstVerifyEvt)
 		}
-		if createAt <= verifyAt || createEvt.Done != 3 || createEvt.Total != 3 {
-			t.Fatalf("创建相事件应在核对相之后且计数=已发射/计划子行（3/3），实际 idx=%d %+v", createAt, createEvt)
+		if verifyFinalAt < 0 || verifyFinalEvt.Done != 2 || verifyFinalEvt.Total != 2 {
+			t.Fatalf("核对相终值事件应在场且计数=已核对/全部作品（2/2），实际 idx=%d %+v", verifyFinalAt, verifyFinalEvt)
 		}
-		if doneAt <= createAt {
-			t.Fatalf("createDone 应在两相进度之后，实际 idx=%d", doneAt)
+		if createAt < 0 || createEvt.Done != 3 || createEvt.Total != 3 {
+			t.Fatalf("创建相事件应在场且计数=已发射/计划子行（3/3），实际 idx=%d %+v", createAt, createEvt)
+		}
+		if createAt < firstVerifyAt || doneAt <= createAt {
+			t.Fatalf("首反馈应先于发射相事件、createDone 应殿后，实际 first=%d create=%d done=%d", firstVerifyAt, createAt, doneAt)
 		}
 		sess, err := m.SessionOf(root)
 		if err != nil {
@@ -879,11 +1076,11 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 		if done.Success {
 			t.Fatalf("注入失败应回告失败终态，实际 %+v", done)
 		}
-		if !strings.Contains(done.Message, "已创建 2/2 个子任务") || !strings.Contains(done.Message, "选择集已保留") {
-			t.Fatalf("失败终态应携带部分完成信息与选择集保留说明，实际 %q", done.Message)
+		if !strings.Contains(done.Message, "已发射 2/2 个子任务随回滚删除") || !strings.Contains(done.Message, "选择集已保留") {
+			t.Fatalf("失败终态应携带在途清理信息与选择集保留说明（决策4 统一回滚），实际 %q", done.Message)
 		}
 		if done.Done != 2 || done.Total != 2 {
-			t.Fatalf("失败终态计数应镜像部分完成信息（2/2），实际 %+v", done)
+			t.Fatalf("失败终态计数应镜像发射进度（2/2），实际 %+v", done)
 		}
 		sess, err := m.SessionOf(root)
 		if err != nil {
@@ -946,22 +1143,22 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 // 无附注；有则追加「其中 n 件归属 站点名」（按归属分布逐站点一段、顿号连写，
 // 多站点分别列出——文案按归属分布组织，与父行形态正交）。
 func TestBuildCreateTasksMessageAttributionNote(t *testing.T) {
-	pure := buildCreateTasksMessage("本地导入 · 库 · 3 件作品", 3, 3, createBatchSummary{total: 3})
-	if want := "已创建任务「本地导入 · 库 · 3 件作品」：3 件作品（3 个子任务，Created 待手动开始）"; pure != want {
+	pure := buildCreateTasksMessage("本地导入 · 库 · 3 件作品", 3, 3, 14*time.Minute, createBatchSummary{total: 3})
+	if want := "已创建任务「本地导入 · 库 · 3 件作品」：3 件作品，共 3 个子任务，用时 14 分钟"; pure != want {
 		t.Fatalf("纯 local 批次文案不追加附注，期望 %q 实际 %q", want, pure)
 	}
-	mixed := buildCreateTasksMessage("混归属批次", 5, 5, createBatchSummary{
+	mixed := buildCreateTasksMessage("混归属批次", 5, 5, 14*time.Minute, createBatchSummary{
 		total:          5,
 		nonLocalBySite: []siteFileCount{{siteName: "pixiv", files: 2}},
 	})
-	if want := "已创建任务「混归属批次」：5 件作品（5 个子任务，Created 待手动开始）；其中 2 件归属 pixiv"; mixed != want {
+	if want := "已创建任务「混归属批次」：5 件作品，共 5 个子任务，用时 14 分钟；其中 2 件归属 pixiv"; mixed != want {
 		t.Fatalf("混归属批次文案应追加归属附注，期望 %q 实际 %q", want, mixed)
 	}
-	multiSite := buildCreateTasksMessage("多站点批次", 4, 4, createBatchSummary{
+	multiSite := buildCreateTasksMessage("多站点批次", 4, 4, 14*time.Minute, createBatchSummary{
 		total:          4,
 		nonLocalBySite: []siteFileCount{{siteName: "pixiv", files: 2}, {siteName: "bilibili", files: 1}},
 	})
-	if want := "已创建任务「多站点批次」：4 件作品（4 个子任务，Created 待手动开始）；其中 2 件归属 pixiv、1 件归属 bilibili"; multiSite != want {
+	if want := "已创建任务「多站点批次」：4 件作品，共 4 个子任务，用时 14 分钟；其中 2 件归属 pixiv、1 件归属 bilibili"; multiSite != want {
 		t.Fatalf("多站点归属附注应逐站点分别列出，期望 %q 实际 %q", want, multiSite)
 	}
 }

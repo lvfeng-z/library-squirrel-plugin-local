@@ -28,6 +28,12 @@ type stubPluginCtx struct {
 func (c stubPluginCtx) Infof(string, ...any) {}
 func (c stubPluginCtx) Warnf(string, ...any) {}
 
+// GetPreference 偏好读取桩：恒无记录（爬坡控制器偏好钉死层在直驱测试走自动轨；
+// 偏好钉死断言见 create_pipeline_test.go 的偏好桩环境）。
+func (c stubPluginCtx) GetPreference(string) (*sdkdto.PreferenceValue, bool, error) {
+	return nil, false, nil
+}
+
 func (c stubPluginCtx) ListSites() (*sdkdto.ListSitesResponse, error) {
 	return &sdkdto.ListSitesResponse{Items: c.sites}, nil
 }
@@ -810,9 +816,12 @@ func TestEmitSelectedWorksChildrenBatchSplitting(t *testing.T) {
 		m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
 		h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract - 1 }}
 		works := []*SelectableWork{{WorkID: "d:over", Kind: WorkKindDirTracks, DirRelKey: "over", Files: overFiles}}
-		items, reason := collectEmittedWithReason(t, h, root, newSess("over"), works, "超限批次")
+		items, reason, cancelled := collectEmittedWithReason(t, h, root, newSess("over"), works, "超限批次")
 		if reason == "" || !strings.Contains(reason, "宿主契约过旧") || !strings.Contains(reason, "载荷超限") {
 			t.Fatalf("降级超限应明确报错（宿主契约过旧且载荷超限），实际 %q", reason)
+		}
+		if cancelled {
+			t.Fatalf("降级超限是失败收尾而非取消收尾")
 		}
 		if len(items) != 0 {
 			t.Fatalf("降级超限应零产出，实得 %d 条目", len(items))

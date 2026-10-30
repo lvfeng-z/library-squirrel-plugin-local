@@ -94,6 +94,16 @@ type LocalImportWorkFetcher struct {
 	libMu      sync.Mutex
 	libIndex   *LibraryIndex
 	libBuiltAt time.Time
+
+	// —— 大选择集创建链（阶段4）单测注入点（零值=生产默认）——
+	// progressNow 进度时间节流时钟（nil=time.Now；节流时序锚单测注入步进时钟）。
+	progressNow func() time.Time
+	// verifyHeartbeatTick verify 期心跳节拍（0=生产 20s；心跳在场单测注入短节拍）。
+	verifyHeartbeatTick time.Duration
+	// childrenBatchByteLimit / childrenBatchCountLimit 单批子行双界（0=生产
+	// 16MB / 2 万条；流水线重叠期单测注入小值驱动多批）。
+	childrenBatchByteLimit int
+	childrenBatchCountLimit int
 }
 
 // libraryIndexTTL 谓词索引缓存时长。
@@ -172,6 +182,8 @@ var _ sdkdto.HeartbeatCreateFetcher = (*LocalImportWorkFetcher)(nil)
 //
 //  1. 工作台发起（会话带发起标记）→ 过滤产出分支：按会话识别快照推导选择域、
 //     只产出所选作品（集父行按所选成员生成、任务级赋值快照固化），零弹问；
+//     verify 哈希循环按 reporter 心跳保活（20s 节拍，甲4——工作台长创建不再
+//     误触宿主 60s 空闲窗），取消位经 cancelCreate 工作台动作置位（甲3）；
 //  2. 库根命中既有会话 → 不重问，意图信号「转入解析」收尾（零任务）；
 //  3. 无会话 → Create 流内弹确认（二选：开始解析〔默认〕/取消），等待期心跳
 //     保活 + 插件侧 5 分钟超时（超时=取消）；采纳即建会话并以「转入解析」收尾，
@@ -186,9 +198,10 @@ func (h *LocalImportWorkFetcher) CreateWithHeartbeat(url string, reporter sdkdto
 	}
 	root := localImportPathOf(url)
 
-	// 分支 1：工作台发起的创建（会话+选择集在）→ 过滤产出
+	// 分支 1：工作台发起的创建（会话+选择集在）→ 过滤产出（reporter 随传：
+	// verify 循环心跳接线，声明7 的两参调用缺口在此闭合）
 	if h.sessions.ConsumeWorkbenchCreateMarker(root) {
-		return h.createWorkbenchFiltered(url, root)
+		return h.createWorkbenchFiltered(url, root, reporter)
 	}
 
 	// 分支 2：库根命中既有活动会话 → 直接进既有会话，不重问
@@ -222,8 +235,12 @@ func (h *LocalImportWorkFetcher) CreateWithHeartbeat(url string, reporter sdkdto
 // 求值基面（干跑 MergedRecognition 注入索引与赋值的结论缓存，创建前经编排动作
 // 对账核验磁盘与档案/赋值修订一致）；最终元数据在执行期重算（recomputeFileDecision
 // 注入同一索引与赋值快照）产出——三点同一谓词与合并基面（风险12/13 闭环）。
-// 流式逐组产出（内容哈希只对所选作品计算，未选资源零哈希零任务）。
-func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string) (*sdkdto.TaskCreateResult, error) {
+// 流式逐组产出（内容哈希只对所选作品计算，未选资源零哈希零任务）；verify 并行
+// 化、取消收流与心跳保活在 emitSelectedWorks（reporter 随传）。
+// 取消收尾形态（甲3/决策3）：取消位置位后发射循环提前收流（末批 last 不发），
+// 宿主未收批统一回滚在途行，本流以意图块「已取消」收尾（零任务意图先例 :205
+// 同款）；零发射阶段取消则无开批父无行可删、直接终态。
+func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string, reporter sdkdto.HeartbeatReporter) (*sdkdto.TaskCreateResult, error) {
 	sess, err := h.sessions.SessionOf(root)
 	if err != nil {
 		return nil, fmt.Errorf("读取解析会话失败: %w", err)
@@ -238,7 +255,9 @@ func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string) (*sdk
 		result.SetReason("工作台发起的创建未携带有效选择集（选择集为空），本次未产出任务")
 		return result, nil
 	}
-	domain := DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess))
+	// 选择域求值接线缓存条目（守卫链与会话瘦身四刀之三）：会话是缓存共享实例，
+	// 经 workDomainOf 复用全景载入时推导过、条目内驻留的结果（零重推导）。
+	domain := h.sessions.workDomainOf(sess)
 	works, missing := domain.ResolveAll(sess.Selection)
 	if len(missing) > 0 {
 		result := sdkdto.BatchResult(nil)
@@ -250,13 +269,20 @@ func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string) (*sdk
 	// 缺席（测试直驱等未暂存路径）或空白按默认名兜底——单一裁决点见 resolveCreateTaskName
 	taskName := resolveCreateTaskName(h.sessions.takeStagedCreateTaskName(root), root, len(works))
 
-	// B1+ 分帧发射（条目形态流：task 块+子行批次块经 CreateStreamItem 装配）；中止
-	// 原因（握手降级的载荷超限）经 SetReason 以 error 块收流——须在 close(ch) 前
-	// 调用（消费侧对 reason 的读取依赖 channel close 的 happens-before 顺序）
+	// B1+ 分帧发射（条目形态流：task 块+子行批次块经 CreateStreamItem 装配）；
+	// 中止原因（握手降级的载荷超限/磁盘对账未通过）经 SetReason 以 error 块收流、
+	// 取消经 SetIntent 以意图块收尾（取消与完成竞态下意图不成立——末批 last 已
+	// 发即原子提交点，取消请求在编排侧应答「已完成」，风险10）——两者均须在
+	// close(ch) 前调用（消费侧的读取依赖 channel close 的 happens-before 顺序）
 	ch := make(chan *sdkdto.CreateStreamItem, 16)
 	result := sdkdto.StreamItemsResult(ch)
 	go func() {
-		if reason := h.emitSelectedWorks(root, sess, works, taskName, ch); reason != "" {
+		reason, cancelled := h.emitSelectedWorks(root, sess, works, taskName, ch, reporter)
+		switch {
+		case cancelled:
+			result.SetIntent(sdkdto.CreateIntentCancelled,
+				"已取消本次创建：未发射的子任务不再产出，已发射的在途任务由主程序统一回滚清理")
+		case reason != "":
 			result.SetReason(reason)
 		}
 		close(ch)
@@ -288,11 +314,21 @@ const (
 	// 字节上限（60MB）：超限返回中止原因明确报错（宿主契约过旧且载荷超限），
 	// 不静默撞 64MB 断路器。
 	degradeChildrenInlineLimit = 60 << 20
-	// createProgressEventStep createProgress 事件的节流步长：每推进该数量的作品/
-	// 子行推送一档（末条必发）——15 万级批次不至于逐条轰事件通道；发射进度槽
-	//（部分完成信息数据源）另在 noteCreateProgress 内逐批落账，不受此节流。
-	createProgressEventStep = 1000
+	// createProgressMinInterval createProgress 事件的时间基节流间隔（甲1）：两相
+	// 各自 ≥2s 推一档、终值恒发（末发必须恒发且晚于一切中间值，风险7）；事件
+	// 总量上限≈全程秒数/2，通道负载可控。计数步长节流（原 1000 步长）已退役
+	//（发射进度槽仍在 noteBatch 内逐批落账，不受节流影响）。
+	createProgressMinInterval = 2 * time.Second
+	// createVerifyHeartbeatTick verify 相心跳节拍（甲4）：宿主泵首块后 60s 空闲窗
+	// 豁免心跳块（心跳 ≥20s 节拍即保活）；SDK 上报器内置 20s 限频，本节拍恰每窗
+	// 一块——插件死亡/读挂起时 60s 内失败终态。残余已知：读挂起的单个 goroutine
+	// Windows 无强制中断原语，泄漏至进程重启（闸门与终态不受影响）。
+	createVerifyHeartbeatTick = 20 * time.Second
 )
+
+// errCreateCancelled 取消位在哈希单元内被观察到的中止哨兵（甲3：verify 循环
+// 作品间与 4MB 分块处的检查点统一映射为本哨兵，放行循环据此转取消收尾）。
+var errCreateCancelled = errors.New("创建已取消")
 
 // hostContractVersion 宿主契约版本（Activate 协商值，SDK 进程级记录；
 // hostContractFn 缺省即取访问器——未 Activate 时为 0，按保守降级处理）。
@@ -367,45 +403,251 @@ func emitChildBatches(ch chan<- *sdkdto.CreateStreamItem, parentID, taskName, pa
 	}
 }
 
+// unitHashOutcome 单件作品哈希三态结论（verify 哈希循环作品粒度）。
+type unitHashOutcome struct {
+	// files / ok ok=true=全部轨道哈希完成；ok=false 且 err=nil=哈希计算失败整件
+	// 放弃（多轨作品轨道集原子，结构上不产出半作品；单轨集成员作品同口径，
+	// 失败仅弃该成员自身——v1 口径），dropErr 携带首失败原因（聚合上报样本）。
+	files   []FileEntry
+	ok      bool
+	dropErr error
+	// err 非 nil=整次创建中止：轨道 Stat 失败=所选文件已不存在（磁盘对账未
+	// 通过——对账拆分·甲2 刀4 的逐文件存在性核对在本循环，文案经 err 由调用
+	// 方收流），或取消位（errCreateCancelled/context.Canceled）。
+	err error
+}
+
+// indexedUnitOutcome 重排缓冲条目：域序下标 + 单件结论（按下标逐件放行——
+// 保序不变量：并发度只影响速度不影响子行序）。
+type indexedUnitOutcome struct {
+	idx int
+	unitHashOutcome
+}
+
+// hashDropSample 哈希失败作品样本（风险6：并行下逐件告警会洪泛日志，聚合成批
+// 上报的载荷）。
+type hashDropSample struct {
+	workID string
+	err    error
+}
+
+// progressThrottle createProgress 事件的时间基节流器（甲1）：间隔内不推、终值
+// 恒推（末发必须恒发且晚于一切中间值，风险7）。发布侧只在放行循环单线程调用，
+// 无并发；now 可注入（时序锚单测）。
+type progressThrottle struct {
+	interval time.Duration
+	now      func() time.Time
+	started  bool
+	last     time.Time
+}
+
+// allow 是否放行一次发布；final=终值恒放行（不做时钟读写，终值不受时钟注入影响）。
+func (p *progressThrottle) allow(final bool) bool {
+	if final {
+		return true
+	}
+	now := p.now()
+	if !p.started || now.Sub(p.last) >= p.interval {
+		p.started, p.last = true, now
+		return true
+	}
+	return false
+}
+
+// emitPipeline 发射流水线（乙3）：verify 按域序放行的子行逐批组装发射——双界
+//（16MB/2 万条）满批即发，落库与剩余哈希重叠；批界裁决与 splitChildBatches
+// 同款（既有分帧函数不动，此处为流式增量的同一规则）。父块必带首批子行内联
+//（与 emitChildBatches 同形态，保宿主「无 children→独立叶」判定）；末批
+// last=true（契约 21 收批声明）。取消在场（ctx 已取消）时丢弃后续子行并置
+// aborted——末批 last 不发=宿主「流结束未收批」统一回滚（决策3/决策4）。
+type emitPipeline struct {
+	ctx        context.Context
+	ch         chan<- *sdkdto.CreateStreamItem
+	taskName   string
+	parentURL  string
+	siteKey    string
+	byteTarget int
+	countLimit int
+	// note 每批发射回调（emitted=累计已发射子行；final=末批）：进度槽逐批落账
+	// 不受节流（部分完成信息源），事件发布经 createPace 时间基节流。
+	note func(emitted int, final bool)
+
+	cur      []*sdkdto.TaskCreateChildResponse
+	curBytes int
+	batchIdx int // 已发批数（0=父块未发）
+	emitted  int
+	batchMs  int64 // 父身份与集序记录同源毫秒时间戳（首批发射时落定）
+	aborted  bool
+}
+
+// add 追加一子行：双界满批即先发一批（非末批，last=false——触发本调用的子行
+// 保证后续仍有内容，末批恒由 finish 以 last=true 发出）。
+func (p *emitPipeline) add(child *sdkdto.TaskCreateChildResponse) {
+	if p.aborted {
+		return
+	}
+	if p.ctx.Err() != nil {
+		p.aborted = true
+		return
+	}
+	if len(p.cur) > 0 && (len(p.cur) >= p.countLimit || p.curBytes+childWireSizeUpper(child) > p.byteTarget) {
+		if !p.flush(false) {
+			return
+		}
+	}
+	p.cur = append(p.cur, child)
+	p.curBytes += childWireSizeUpper(child)
+}
+
+// flush 发射当前批：首批随父块内联、余批经 children_batch（last 声明末批）。
+// 返回假=取消在场已中止。空批为无操作（零子行或界满批恰发完）。
+func (p *emitPipeline) flush(last bool) bool {
+	if p.ctx.Err() != nil {
+		p.aborted = true
+		return false
+	}
+	if len(p.cur) == 0 {
+		return true
+	}
+	if p.batchMs == 0 {
+		p.batchMs = time.Now().UnixMilli()
+	}
+	parentID := fmt.Sprintf("local-batch-%d", p.batchMs)
+	if p.batchIdx == 0 {
+		p.ch <- sdkdto.TaskItem(buildBatchParentResponse(parentID, p.taskName, p.parentURL, p.siteKey, p.cur))
+	} else {
+		p.ch <- sdkdto.ChildrenBatchItem(parentID, p.cur, last)
+	}
+	p.emitted += len(p.cur)
+	p.cur, p.curBytes = nil, 0
+	p.batchIdx++
+	if p.note != nil {
+		p.note(p.emitted, last)
+	}
+	return true
+}
+
+// finish 收尾：待发批以末批（last=true）发出；取消在场或已中止返回假（零末批
+// 收流=宿主回滚）。零子流（零发射）为合法收尾。
+func (p *emitPipeline) finish() bool {
+	if p.aborted || p.ctx.Err() != nil {
+		p.aborted = true
+		return false
+	}
+	return p.flush(true)
+}
+
+// progressClock 进度节流时钟（注入点；缺省 time.Now）。
+func (h *LocalImportWorkFetcher) progressClock() func() time.Time {
+	if h.progressNow != nil {
+		return h.progressNow
+	}
+	return time.Now
+}
+
+// verifyHeartbeatTickOrDefault verify 期心跳节拍（注入点；缺省 20s）。
+func (h *LocalImportWorkFetcher) verifyHeartbeatTickOrDefault() time.Duration {
+	if h.verifyHeartbeatTick > 0 {
+		return h.verifyHeartbeatTick
+	}
+	return createVerifyHeartbeatTick
+}
+
+// childrenBatchBounds 单批子行双界（注入点；缺省 16MB / 2 万条）。
+func (h *LocalImportWorkFetcher) childrenBatchBounds() (byteTarget, countLimit int) {
+	byteTarget, countLimit = createChildrenBatchByteTarget, createChildrenBatchCountLimit
+	if h.childrenBatchByteLimit > 0 {
+		byteTarget = h.childrenBatchByteLimit
+	}
+	if h.childrenBatchCountLimit > 0 {
+		countLimit = h.childrenBatchCountLimit
+	}
+	return byteTarget, countLimit
+}
+
 // emitSelectedWorks 按选择集产出批次应答（一次创建=一个父任务，B1+ 分帧形态）：
 // 文件按选择域确定序（目录按域序，目录内先目录聚合作品后集成员〔域序=集内序〕）
 // 逐个裁决归属后归集——站点键=identity.Local.Key（创建域），子行归属经各自
 // siteKey 字段声明：真实域归属子行携归属站点键（作品身份落库域，仍受宿主站点
 // 表存在性校验），local 回退子行留空（继承父应答站点键）。
+//
 // 产出形态（单一代码路径，契约 21）：父块必带首批子行内联，余下子行按「序列化
 // 字节目标+条数上限」切 children_batch 块（plugin_task_id=父声明所用 ID，末批
 // last=true）；单批装得下时=纯内联形态（无批次块）。握手降级：宿主契约协商值
 // <21（含未 Activate 的 0）时不分帧、按现状单块全量内联（子行序列化 ≤60MB 时），
 // 超限返回中止原因「宿主契约过旧且载荷超限」由调用方以 error 块收流。
-// 父行形态：PluginTaskId=local-batch-<unix毫秒>（宿主按应答建树不依赖跨批唯一——
-// 同批二次创建产生新批次行，R3）；TaskName=用户名；子行构造复用 buildChildResponses
-// （逐文件形态、FilePluginData、赋值快照与确定序保持 v1 形态）；父 PluginData=
-// DirPluginData 纯容器。
-// 进度（createTasks 异步化的数据源）：核对相（verify=逐作品哈希推进）与创建相
-// （create=发射循环计数）经 createProgress 事件推送（节流 createProgressEventStep，
-// 末条必发）。
-// 任一作品全部轨道不可访问（stat/哈希失败）即整件跳过（半作品结构性不产出，
-// v1 口径）。产出完成后向会话管理器记录批次摘要（子行总数与非 local 子行的
-// 归属分布，编排动作通知文案的数据源——宿主 CreateTask RPC 同步消费完整产出
-// 流后才返回，记录必先于编排读取）；降级超限中止时不产出、零簿记。返回空串=
-// 正常收尾，非空=中止原因。
-func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchSession, works []*SelectableWork, taskName string, ch chan<- *sdkdto.CreateStreamItem) string {
+//
+// 阶段4 结构（乙1 并行 + 乙3 流水线 + 甲1 进度 + 甲3 取消 + 甲4 心跳）：
+//   - verify 并行化：作品粒度 worker 池消费域序单元序列（并发度=爬坡控制器，
+//     决策1 三层），完成件进重排缓冲、放行循环按域序逐件放行——进度计数=放行
+//     计数，并行输出与串行基准逐字节全等（保序不变量）；
+//   - 发射流水线化：契约 ≥21 时放行即逐批组装发射（emitPipeline 双界切块），
+//     落库与剩余哈希重叠；进度升级双计数模型（核对行 X/N+速率 与发射行子行数
+//     并存，事件按 phase 维度分道，前端阶段6 消费）；
+//   - 进度首反馈与时间节流：works 解析完成即发 createProgress(verify, 0, N)
+//     （真分母即刻可见）；节流时间基 ≥2s 且必发终值（风险7）；速率字段=当前
+//     窗口读盘字节/秒（爬坡控制器同一窗口统计，风险5 口径：只计真实读盘）；
+//   - 取消通路：cancelCreate 工作台动作置位（经运行态登记表传播为本循环 runCtx
+//     取消）——verify 循环作品间与 4MB 分块处（ComputeFileHashCtx）检查、发射
+//     批间检查，取消即提前收流（末批 last 不发→宿主未收批统一回滚，决策3/4）、
+//     意图块「已取消」收尾；零发射阶段取消则无开批父无行可删、直接终态；
+//   - 挂死检测：放行循环按 20s 节拍上报心跳（甲4）——配合宿主 60s 空闲窗，插件
+//     读挂起 60s 内失败终态（残余已知：挂起读的单 goroutine 无法中断，泄漏至
+//     进程重启，闸门与终态不受影响）；
+//   - 哈希缓存（乙2/决策2）：verify 开始一次载入内存（loadHashCache）、创建
+//     结束一次回写+压实（saveHashCache，defer 覆盖全部收尾路径）——正常收尾按
+//     本轮流见集合压实（流见集合即存在性事实），中止/取消合并保留旧条目并
+//     叠加新算记录（取消→重试的命中面，交互剧本帧4）；命中判据与零读盘口径
+//     见 hashWorkFilesAllOrNothing（风险5）。
+//
+// 逐文件存在性核对在本循环（对账拆分·甲2 刀4）：任一轨道 Stat 失败=所选文件
+// 已不存在，整次创建立即中断、对账文案经返回值（中止原因→SetReason 以 error 块
+// 收流——并行/取消路径下语义不回退：早放行单元已发射的批次无 last 末批，由
+// 宿主未收批统一回滚，用户可见结局与中断一致）；哈希计算失败仍为整件跳过
+//（半作品结构性不产出，v1 口径），失败样本聚合上报（风险6）。产出完成后向会话
+// 管理器记录批次摘要（子行总数与非 local 子行的归属分布，编排动作通知文案的
+// 数据源——宿主 CreateTask RPC 同步消费完整产出流后才返回，记录必先于编排
+// 读取）；降级超限中止与取消中止时不产出、零簿记。
+//
+// 返回 (reason, cancelled)：reason 非空=中止原因（error 块收流）；cancelled 真=
+// 取消收尾（意图块收尾）；两者皆空=正常收尾（哈希缓存按流见集合压实回写，
+// 其余收尾形态合并保留——见函数内 defer）。
+func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchSession, works []*SelectableWork, taskName string, ch chan<- *sdkdto.CreateStreamItem, reporter sdkdto.HeartbeatReporter) (reason string, cancelled bool) {
 	chains := dirMeaningChains(sess.Snapshot)
 
-	// 进度推送（createProgress）：经会话管理器发布事件（上下文不可用静默）；创建
-	// 相进度同时在 noteCreateProgress 内落运行态进度槽（失败路径部分完成信息源）
-	progress := func(phase string, done, total int) {
+	// 进度推送（createProgress）：经会话管理器发布事件（上下文不可用静默）；发射
+	// 相进度同时在 noteBatch 内逐批落运行态进度槽（失败路径部分完成信息源）
+	progress := func(phase string, done, total int, bytesPerSec int64) {
 		if h.sessions != nil {
-			h.sessions.noteCreateProgress(root, phase, done, total)
+			h.sessions.noteCreateProgress(root, phase, done, total, bytesPerSec)
 		}
 	}
-	// 核对相进度：逐作品哈希推进（X=已处理作品数，N=选择集作品数）
-	verifyDone, verifySent := 0, -1
-	noteVerify := func() {
+	// 甲1 进度首反馈：works 解析完成后立即发核对相首事件（真分母即刻可见，
+	// 横幅不再「0 / 0」静默）
+	progress(createPhaseVerify, 0, len(works), 0)
+
+	// 乙2 哈希缓存（决策2）：verify 开始一次载入内存——置于首进度事件之后
+	//（载入是分片 KV 读，15 万级清单可达秒级，不得挤占横幅首反馈）；创建
+	// 结束一次回写+压实，defer 覆盖全部收尾路径（正常/中止/取消），压实口径
+	// 按收尾形态裁决：正常收尾按本轮流见集合压实，中止/取消合并保留旧条目
+	// 并叠加新算记录（取消→重试的命中面，交互剧本帧4）。
+	var hcache *hashCache
+	if h.sessions != nil {
+		hcache = h.sessions.loadHashCache(root)
+		defer func() {
+			h.sessions.saveHashCache(root, hcache, reason == "" && !cancelled)
+		}()
+	}
+
+	// 甲1 时间基节流：两相各自独立节流、共用同一可注入时钟（≥2s 且必发终值）
+	progressNow := h.progressClock()
+	verifyPace := &progressThrottle{interval: createProgressMinInterval, now: progressNow}
+	createPace := &progressThrottle{interval: createProgressMinInterval, now: progressNow}
+	verifyDone := 0
+	noteVerify := func(rate int64) {
 		verifyDone++
-		if verifyDone == len(works) || verifyDone-verifySent >= createProgressEventStep {
-			progress(createPhaseVerify, verifyDone, len(works))
-			verifySent = verifyDone
+		if verifyPace.allow(verifyDone == len(works)) {
+			progress(createPhaseVerify, verifyDone, len(works), rate)
 		}
 	}
 
@@ -447,107 +689,304 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		})
 	}
 
-	// 子行素材归集：逐文件裁决归属后按原序扁平进批次（目录序内先目录聚合作品
-	// 后集成员——同目录文件不按归属重排）
-	items := make([]batchFileItem, 0)
-	collect := func(files []FileEntry, metadata []PathMeaning, classifiedSiteKey string) {
-		for _, f := range files {
-			attr := resolveWorkAttribution(filepath.Base(f.FullPath), classifiedSiteKey)
-			items = append(items, batchFileItem{af: attributedFile{entry: f, attr: attr}, metadata: metadata})
-		}
+	// 域序单元序列（乙1 作品粒度消费面）：目录序内先目录聚合作品后集成员
+	//（集成员按上方集内序）——与串行基准同一序，单元只携计划素材（哈希在
+	// worker 池内做，归属裁决与子行构造在放行侧做，保序不变量锚定放行序）
+	type emitUnit struct {
+		work              *SelectableWork
+		metadata          []PathMeaning
+		classifiedSiteKey string
 	}
+	units := make([]emitUnit, 0, len(works))
 	for _, dirKey := range dirOrder {
 		plan := plans[dirKey]
 		metadata := chains[dirKey]
 		// 站点分类含义 → 子树归属站点键（快照回放含义不含 site 型——site 仅经
 		// 目录问答产生，会话模式问答不可达，此处恒走文件名形态归属裁决）
 		classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
-
 		if plan.dirWork != nil {
-			// 目录聚合作品：全轨道 all-or-nothing 哈希
-			if files, ok := h.hashWorkFilesAllOrNothing(root, plan.dirWork); ok {
-				collect(files, metadata, classifiedSiteKey)
-			}
-			noteVerify()
+			units = append(units, emitUnit{work: plan.dirWork, metadata: metadata, classifiedSiteKey: classifiedSiteKey})
 		}
-		// 集成员：单轨同口径（任一轨道失败仅弃该成员自身），成员按域序=集内序进批次
 		for _, member := range plan.setMembers {
-			if files, ok := h.hashWorkFilesAllOrNothing(root, member); ok {
-				collect(files, metadata, classifiedSiteKey)
-			}
-			noteVerify()
+			units = append(units, emitUnit{work: member, metadata: metadata, classifiedSiteKey: classifiedSiteKey})
 		}
 	}
 
-	// 批次产出（空批次不产出父行，v1 口径）
-	children := buildChildResponses(items, sess.Assignments)
-	if len(children) > 0 {
-		// 分帧裁决：宿主契约 ≥21 按双界切批；<21（含未 Activate 的 0）降级现状
-		// 单块全量内联，超限中止（返回中止原因，零产出零簿记）
-		var batches [][]*sdkdto.TaskCreateChildResponse
-		if h.hostContractVersion() < createChildrenBatchMinHostContract {
-			var totalBytes int
-			for _, child := range children {
-				totalBytes += childWireSizeUpper(child)
-			}
-			if totalBytes > degradeChildrenInlineLimit {
-				return fmt.Sprintf("宿主契约过旧（协商版本 %d < %d）且子行载荷超限（约 %.0fMB ≥ %dMB 上限），无法以单块内联形态创建；请升级宿主后重试",
-					h.hostContractVersion(), createChildrenBatchMinHostContract,
-					float64(totalBytes)/(1<<20), degradeChildrenInlineLimit>>20)
-			}
-			batches = [][]*sdkdto.TaskCreateChildResponse{children}
-		} else {
-			batches = splitChildBatches(children)
-		}
+	// 取消通路（甲3/决策3）：runCtx 由 cancelCreate 工作台动作经运行态登记表
+	// 传播取消（requestCreateCancel 置位即调用登记的 cancelFn）；原子提交点
+	//（末批 last 已发，markCreateCommitted）后的取消在请求侧即应答「已完成」，
+	// 本循环不再回退已收批产出（风险10）
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+	armCreateRunCancel(root, runCancel)
+	defer disarmCreateRunCancel(root)
 
-		// 父身份与集序记录同源毫秒时间戳（批次号=父行身份）
+	// 爬坡控制器 + 动态信号量（乙1/决策1 三层：偏好钉死 > 按盘记忆 > 会话内
+	// 自适应；控制器窗口只计真实读盘字节——风险5，速率字段同一窗口统计）
+	throttle := h.resolveHashThrottle(root)
+	sem := newDynSemaphore(throttle.limit())
+	throttle.bindAdjust(sem.setLimit)
+
+	// 供件与哈希 worker 池（乙1）：feeder 按域序供件、令牌闸门限并发（并发度
+	// 随控制器收放）；单件哈希结论带域序下标进结果通道，由下方放行循环重排
+	var wg sync.WaitGroup
+	results := make(chan indexedUnitOutcome, hashConcurrencyPinMax)
+	wg.Add(1)
+	go func() { // feeder：域序供件（取消即止，不抢占在途件）
+		defer wg.Done()
+		for idx := range units {
+			if !sem.acquire(runCtx) {
+				return
+			}
+			if runCtx.Err() != nil { // 取令牌阻塞期间取消已到：归还退出
+				sem.release()
+				return
+			}
+			unit := units[idx]
+			wg.Add(1)
+			go func() { // 哈希 worker：单件 all-or-nothing，完成即投递（取消后弃置）
+				defer wg.Done()
+				defer sem.release()
+				outcome := h.hashWorkFilesAllOrNothing(runCtx, root, unit.work, throttle, hcache)
+				select {
+				case results <- indexedUnitOutcome{idx: idx, unitHashOutcome: outcome}:
+				case <-runCtx.Done():
+				}
+			}()
+		}
+	}()
+	go func() { // 结果通道关闭哨（放行循环退出后 worker 仍可自然收尾）
+		wg.Wait()
+		close(results)
+	}()
+
+	// 发射形态裁决：契约 ≥21 走流水线（乙3 放行即逐批发射，落库与剩余哈希
+	// 重叠）；<21（含未 Activate 的 0）降级为全量内联（verify 完成后单块发射，
+	// 批界与超限中止语义不动）
+	pipelined := h.hostContractVersion() >= createChildrenBatchMinHostContract
+	byteTarget, countLimit := h.childrenBatchBounds()
+
+	// 计划子行总数上界（发射行 total 的初值=全部轨道数；整件放弃时递减修正，
+	// 终值收敛到实际产出）
+	plannedTotal := 0
+	for _, u := range units {
+		plannedTotal += len(u.work.Files)
+	}
+	var allItems []batchFileItem     // 子行素材全集（集序记录面）
+	var degradedChildren []*sdkdto.TaskCreateChildResponse // 降级形态的全量子行
+	var dropSamples []hashDropSample // 哈希失败样本（风险6 聚合上报）
+	totalBuilt := 0                  // 实际构造子行数（批次摘要 total）
+	var nonLocalSiteKeys []string    // 真实域归属子行键序列（批次摘要归属分布）
+
+	// 发射行进度：进度槽逐批落账（不受节流——部分完成信息源），事件经时间基
+	// 节流（终值恒发，风险7）
+	noteBatch := func(emitted int, final bool) {
+		recordCreateEmitProgress(root, emitted, max(plannedTotal, emitted))
+		if createPace.allow(final) && h.sessions != nil {
+			h.sessions.publishCreateProgress(root, createPhaseCreate, emitted, max(plannedTotal, emitted), 0)
+		}
+	}
+	var pipeline *emitPipeline
+	if pipelined {
+		pipeline = &emitPipeline{
+			ctx: runCtx, ch: ch, taskName: taskName, parentURL: "local://" + root,
+			siteKey: identity.Local.Key, byteTarget: byteTarget, countLimit: countLimit,
+			note: noteBatch,
+		}
+	}
+
+	// 放行循环：重排缓冲按域序逐件放行（进度计数=放行计数）——归属裁决、子行
+	// 构造、流水线发射与核对相进度都在此单线程串行（确定性锚定）；心跳按 20s
+	// 节拍上报（甲4，SDK 上报器内置 20s 限频）
+	releaseOne := func(out indexedUnitOutcome) (string, bool) {
+		unit := units[out.idx]
+		if out.err != nil {
+			if errors.Is(out.err, errCreateCancelled) || errors.Is(out.err, context.Canceled) {
+				return "", true
+			}
+			return out.err.Error(), false
+		}
+		if !out.ok {
+			// 整件放弃：计划总数修正 + 样本聚合（风险6：不逐件告警）
+			plannedTotal -= len(unit.work.Files)
+			dropSamples = append(dropSamples, hashDropSample{workID: unit.work.WorkID, err: out.dropErr})
+		} else {
+			// 逐文件裁决归属后按原序扁平进批次（目录序内先目录聚合作品后集
+			// 成员——同目录文件不按归属重排）
+			unitItems := make([]batchFileItem, 0, len(out.files))
+			for _, f := range out.files {
+				attr := resolveWorkAttribution(filepath.Base(f.FullPath), unit.classifiedSiteKey)
+				unitItems = append(unitItems, batchFileItem{af: attributedFile{entry: f, attr: attr}, metadata: unit.metadata})
+			}
+			allItems = append(allItems, unitItems...)
+			children := buildChildResponses(unitItems, sess.Assignments)
+			totalBuilt += len(children)
+			for _, child := range children {
+				if child.SiteKey != "" {
+					nonLocalSiteKeys = append(nonLocalSiteKeys, child.SiteKey)
+				}
+			}
+			if pipelined {
+				for _, child := range children {
+					pipeline.add(child) // 双界满批即发（内部含取消检查）
+					if pipeline.aborted {
+						return "", true
+					}
+				}
+			} else {
+				degradedChildren = append(degradedChildren, children...)
+			}
+		}
+		noteVerify(throttle.windowRate())
+		return "", false
+	}
+
+	buffered := make(map[int]indexedUnitOutcome, hashConcurrencyPinMax)
+	released := 0
+	heartbeat := time.NewTicker(h.verifyHeartbeatTickOrDefault())
+	defer heartbeat.Stop()
+	for released < len(units) {
+		select {
+		case out, ok := <-results:
+			if !ok {
+				// 结果通道关闭而放行未齐：仅取消路径可达（feeder/worker 因取消
+				// 早退）——按取消收尾
+				return "", true
+			}
+			buffered[out.idx] = out
+		case <-heartbeat.C:
+			if reporter != nil {
+				reporter.Heartbeat()
+			}
+			continue
+		case <-runCtx.Done():
+			// cancelCreate 置位（唯一中途取消源）：核对相/发射相（含重叠期）
+			// 均在此收流——不发末批 last，宿主未收批统一回滚（决策3/4）
+			return "", true
+		}
+		for {
+			next, ok := buffered[released]
+			if !ok {
+				break
+			}
+			delete(buffered, released)
+			if reason, cancelled := releaseOne(next); reason != "" || cancelled {
+				return reason, cancelled
+			}
+			released++
+		}
+	}
+
+	// 哈希失败聚合上报（风险6）：并行下逐件告警会并发洪泛日志，聚合成批一次上报
+	if len(dropSamples) > 0 && h.ctx != nil {
+		sample := dropSamples[0]
+		h.ctx.Warnf("所选文件哈希失败，已跳过其所属作品 %d 件（样本 %s: %v；完整清单见逐件排查）",
+			len(dropSamples), sample.workID, sample.err)
+	}
+
+	// 计划总数收敛到实际产出（终值事件 X=N；发射槽终值同步）
+	plannedTotal = totalBuilt
+	if pipelined {
+		// 末批收尾（last=true）；取消在场（收尾窗口内置位）则中止=未收批回滚
+		if !pipeline.finish() {
+			return "", true
+		}
+		if pipeline.batchMs > 0 {
+			// 原子提交点（风险10）：末批 last 已发——其后到达的取消请求由请求
+			// 侧应答「已完成」，创建照常成功收尾
+			markCreateCommitted(root)
+			// 集序记录：为有集归属的子行按集归集落记录（集内原站序作答的数据
+			// 源，批次号=父行身份同源毫秒时间戳）；写入失败不阻断批次产出——
+			// 记录缺席时作答为空，集原站序维持现状
+			h.recordWorkSetOrders(sess.Snapshot, allItems, pipeline.batchMs)
+		}
+	} else if len(degradedChildren) > 0 {
+		// 降级形态：单块全量内联（超限中止零产出零簿记）；纯内联整体发射即
+		// 原子提交点（无批次块=无回滚面）
+		var totalBytes int
+		for _, child := range degradedChildren {
+			totalBytes += childWireSizeUpper(child)
+		}
+		if totalBytes > degradeChildrenInlineLimit {
+			return fmt.Sprintf("宿主契约过旧（协商版本 %d < %d）且子行载荷超限（约 %.0fMB ≥ %dMB 上限），无法以单块内联形态创建；请升级宿主后重试",
+				h.hostContractVersion(), createChildrenBatchMinHostContract,
+				float64(totalBytes)/(1<<20), degradeChildrenInlineLimit>>20), false
+		}
+		if runCtx.Err() != nil {
+			return "", true
+		}
 		batchMs := time.Now().UnixMilli()
 		parentID := fmt.Sprintf("local-batch-%d", batchMs)
-		emitChildBatches(ch, parentID, taskName, "local://"+root, identity.Local.Key, batches, func(emitted, total int) {
-			progress(createPhaseCreate, emitted, total)
-		})
-
-		// 集序记录：为有集归属的子行按集归集落记录（集内原站序作答的数据源，
-		// 批次号=父行身份同源毫秒时间戳）；写入失败不阻断批次产出——记录缺席
-		// 时作答为空，集原站序维持现状
-		h.recordWorkSetOrders(sess.Snapshot, items, batchMs)
+		emitChildBatches(ch, parentID, taskName, "local://"+root, identity.Local.Key,
+			[][]*sdkdto.TaskCreateChildResponse{degradedChildren},
+			func(emitted, total int) { noteBatch(emitted, emitted == total) })
+		markCreateCommitted(root)
+		h.recordWorkSetOrders(sess.Snapshot, allItems, batchMs)
 	}
 
 	// 批次摘要：按实际产出子行的 siteKey 统计归属分布——local 子行键空（继承
 	// 语义）、真实域子行键=归属站点，与产出形态严格一致
-	summary := createBatchSummary{total: len(children)}
-	for _, child := range children {
-		if child.SiteKey != "" {
-			summary.addNonLocal(siteDisplayName(child.SiteKey))
-		}
+	summary := createBatchSummary{total: totalBuilt}
+	for _, siteKey := range nonLocalSiteKeys {
+		summary.addNonLocal(siteDisplayName(siteKey))
 	}
 	h.sessions.recordCreateBatchSummary(root, summary)
-	return ""
+	return "", false
 }
 
-// hashWorkFilesAllOrNothing 对作品全部轨道计算内容哈希：任一轨道 stat/哈希失败
-// 即整件放弃（返回 false）——多轨作品的轨道集原子，结构上不产出半作品；单轨
-// 集成员作品同口径（失败仅弃该成员自身）。
-func (h *LocalImportWorkFetcher) hashWorkFilesAllOrNothing(root string, work *SelectableWork) ([]FileEntry, bool) {
+// hashWorkFilesAllOrNothing 对作品全部轨道计算内容哈希（verify 哈希循环的单件
+// 入口，worker 池内并发调用）。三态结论见 unitHashOutcome：ok=true=全部轨道
+// 哈希完成；ok=false 且 err=nil=哈希计算失败整件放弃（多轨作品的轨道集原子，
+// 结构上不产出半作品；单轨集成员作品同口径，失败仅弃该成员自身——v1 口径，
+// 失败原因聚合上报见放行循环，风险6）；err 非 nil=整次中止——轨道 Stat 失败=
+// 所选文件已不存在（磁盘对账未通过——对账拆分·甲2 刀4：逐文件存在性核对自
+// 守卫链并入本循环，守卫链只留目录级 mtime 游标抽查；Stat 失败即整次创建中断，
+// 对账文案经 err 由调用方收流，与原守卫链拒绝文案同一句，并行/取消路径下语义
+// 不回退），或取消位（甲3：作品间检查点——ctx 取消映射 errCreateCancelled）。
+// throttle 为爬坡控制器（读盘字节进窗口统计；nil=不统计）。hcache 为乙2 哈希
+// 缓存（nil=不缓存）：命中（relPath+size+mtime 全符，决策2）直接复用 hash、
+// 跳过 ComputeFileHashCtx——零读盘字节进爬坡窗口与速率字段（风险5：noteReadBytes
+// 是窗口唯一进数口，命中不产生读 IO 不得进数）；未命中算后记入回写集
+//（record 先于结论投递——放行序保证中止前已放行单元的记录必已落账）。
+func (h *LocalImportWorkFetcher) hashWorkFilesAllOrNothing(ctx context.Context, root string, work *SelectableWork, throttle *hashThrottle, hcache *hashCache) unitHashOutcome {
+	var onBytes func(int64)
+	if throttle != nil {
+		onBytes = throttle.noteReadBytes
+	}
 	out := make([]FileEntry, 0, len(work.Files))
 	for _, rel := range work.Files {
-		full := filepath.Join(root, filepath.FromSlash(rel))
-		if _, err := os.Stat(full); err != nil {
-			if h.ctx != nil {
-				h.ctx.Warnf("所选文件不可访问，跳过其所属作品 %s: %v", work.WorkID, err)
-			}
-			return nil, false
+		// 甲3 取消检查点（作品间）：置位即整次收流（哨兵由放行循环转取消收尾）
+		if ctx.Err() != nil {
+			return unitHashOutcome{err: errCreateCancelled}
 		}
-		hash, err := ComputeFileHash(full)
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		fi, err := os.Stat(full)
 		if err != nil {
-			if h.ctx != nil {
-				h.ctx.Warnf("所选文件哈希失败，跳过其所属作品 %s: %v", work.WorkID, err)
+			return unitHashOutcome{err: fmt.Errorf("磁盘对账未通过：所选文件 %s 已不存在（可能被移动或删除），请重新识别受影响子树后再创建", rel)}
+		}
+		size, mtimeNs := fi.Size(), fi.ModTime().UnixNano()
+		// 乙2 缓存命中：直接复用 hash、跳过 ComputeFileHashCtx——零读盘字节
+		//（风险5 seam：命中不产生读 IO，onBytes 不因命中进数）
+		if hcache != nil {
+			if hash, hit := hcache.lookup(rel, size, mtimeNs); hit {
+				out = append(out, FileEntry{FullPath: full, RelPath: rel, Hash: hash})
+				continue
 			}
-			return nil, false
+		}
+		// 甲3 取消检查点（4MB 分块处，读循环内）；真实读盘字节逐块进爬坡窗口
+		hash, err := ComputeFileHashCtx(ctx, full, onBytes)
+		if err != nil {
+			if ctx.Err() != nil {
+				return unitHashOutcome{err: errCreateCancelled}
+			}
+			return unitHashOutcome{dropErr: err}
+		}
+		if hcache != nil {
+			hcache.record(rel, size, mtimeNs, hash) // 未命中算后记入回写集
 		}
 		out = append(out, FileEntry{FullPath: full, RelPath: rel, Hash: hash})
 	}
-	return out, true
+	return unitHashOutcome{files: out, ok: true}
 }
 
 // Create WorkFetcher 接口原方法：委托 CreateWithHeartbeat 的同一分派路径，上报器
@@ -1155,10 +1594,15 @@ type workbenchFrontendEvent struct {
 	// Phase / Done / Total 进度事件的阶段与计数（recognitionProgress/
 	// createProgress 携带；Done/Total 的口径随阶段：识别 scan=待求值/全部文件、
 	// evaluate=已求值/待求值文件；创建 verify=已核对/全部作品（逐作品哈希）、
-	// create=已发射/计划子行总数（发射循环计数））。
+	// create=已发射/计划子行总数（发射循环计数）——乙3 双计数模型：两相事件
+	// 按 phase 分道、可并存重叠（核对行核对完成即止、发射行自首批发射起出现，
+	// 前端阶段6 按相位消费）。
 	Phase string `json:"phase,omitempty"`
 	Done  int    `json:"done,omitempty"`
 	Total int    `json:"total,omitempty"`
+	// BytesPerSec 核对相当前窗口读盘字节/秒（甲1 速率字段：取自爬坡控制器同一
+	// 窗口统计，只计真实读盘字节——风险5 口径；发射相与首事件不带）。
+	BytesPerSec int64 `json:"bytesPerSec,omitempty"`
 	// Success / Message 终态事件的成败与用户可读摘要（recognitionDone/
 	// createDone 携带；createDone 失败态携带部分完成信息「已创建 X/N 个子任务」
 	// 于文案，X/N 同时镜像到 Done/Total）。

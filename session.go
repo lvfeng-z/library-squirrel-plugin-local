@@ -32,6 +32,13 @@ const (
 // workbenchSessionKeyPrefix 会话工件在插件 KV 中的键前缀，后接库根标识。
 const workbenchSessionKeyPrefix = "workbench-session:"
 
+// workbenchCreateMarkerKeyPrefix 工作台发起创建标记的外置单键前缀（后接库根
+// 标识）：标记置位/消费为 O(1) 单键读写，不经会话工件的全量重解码变异（守卫链
+// 瘦身四刀之一）；旧会话信封字段 PendingWorkbenchCreate 只存读侧一轮迁移消费
+//（见 ConsumeWorkbenchCreateMarker）。前缀与会话/分片键前缀互不重叠，索引扫描
+// 与回退扫描均不会误读。
+const workbenchCreateMarkerKeyPrefix = "workbench-create-marker:"
+
 // workbenchSessionSchemaVersion 会话工件 JSON 的结构版本（自管：主程序只存取明文，
 // 版本兼容性由插件自负）。
 const workbenchSessionSchemaVersion = 1
@@ -54,6 +61,11 @@ func normalizeLibraryRoot(root string) string {
 // workbenchSessionKey 库根 → 会话 KV 键。
 func workbenchSessionKey(root string) string {
 	return workbenchSessionKeyPrefix + normalizeLibraryRoot(root)
+}
+
+// workbenchCreateMarkerKey 库根 → 工作台发起创建标记 KV 键（归一与会话键同规则）。
+func workbenchCreateMarkerKey(root string) string {
+	return workbenchCreateMarkerKeyPrefix + normalizeLibraryRoot(root)
 }
 
 // WorkbenchSessionState 会话生命周期状态。
@@ -94,9 +106,10 @@ type WorkbenchSession struct {
 	// 被清除后其目录不再由赋值集锚定，修订号闸门保证清除前的结论不被 mtime
 	// 游标复用（赋值变更一律全量重算）。
 	AssignRevision int64 `json:"assignRevision,omitempty"`
-	// PendingWorkbenchCreate 工作台发起创建的标记：工作台创建编排动作
-	//（ApplyCreateTasks）在调用 CreateTask 前置位，Create 按此分派到「过滤产出」
-	// 分支（只产出所选作品，防递归确认），分派时消费。
+	// PendingWorkbenchCreate 旧工件字段（已退役）：工作台发起创建标记已外置为
+	// 独立 KV 键（workbench-create-marker:{库根}，O(1) 单键读写，BeginWorkbenchCreate/
+	// ConsumeWorkbenchCreateMarker）。新代码不再置位本字段，仅存读侧一轮迁移
+	// 消费——旧信封/旧整值读到 true 时消费并清除（方案风险4 兼容锚定）。
 	PendingWorkbenchCreate bool `json:"pendingWorkbenchCreate"`
 	// Snapshot 识别全景快照（裁剪形态，识别干跑完成时写入；含按目录 mtime 的
 	// 重识别增量游标）。
@@ -343,6 +356,20 @@ func (m *SessionManager) saveSession(sess *WorkbenchSession) error {
 	if (sess.Snapshot != nil || sess.LastDiff != nil) && (env == nil || env.Shards <= 0) {
 		return m.saveSessionFull(sess)
 	}
+	if err := m.writeSessionEnvelope(sess, env); err != nil {
+		return err
+	}
+	m.putSessionCache(sess) // 写路径一致性：保存成功即重建缓存项
+	return nil
+}
+
+// writeSessionEnvelope 写 meta 信封（轻保存共用段，调用方须持 mu）：载荷簿记
+// 字段（shardSet/shards/codec/digest）沿用入参 env（本方法不重读旧 meta），重
+// 载荷留在旧批次分片键组中。不触碰缓存——缓存刷新由调用方按路径负责：全会话
+// 保存走 putSessionCache（实例含载荷），信封级轻变异走 refreshSessionCacheEnvelope
+//（外层重建+载荷指针共享，见 mutateSessionEnvelope）。
+func (m *SessionManager) writeSessionEnvelope(sess *WorkbenchSession, env *sessionEnvelope) error {
+	sess.SchemaVersion = workbenchSessionSchemaVersion
 	saving := &sessionEnvelope{V: sessionEnvelopeVersion, Session: sessionLightCopy(sess)}
 	if env != nil {
 		saving.ShardSet, saving.Shards = env.ShardSet, env.Shards
@@ -358,7 +385,6 @@ func (m *SessionManager) saveSession(sess *WorkbenchSession) error {
 	if err := m.ensureSessionIndexed(normalizeLibraryRoot(sess.RootPath)); err != nil {
 		m.warnf("会话索引登记失败（root=%s）: %v", normalizeLibraryRoot(sess.RootPath), err)
 	}
-	m.putSessionCache(sess) // 写路径一致性：保存成功即重建缓存项
 	return nil
 }
 
@@ -854,19 +880,26 @@ func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, Profil
 }
 
 // mutateSession 轻保存入口：锁内会话读改写（单点串行）；mutate 返回错误即中止
-// 不落库。落库只写 meta 信封+索引（载荷簿记沿用旧 meta，见 saveSession）。
+// 不落库。落库只写 meta 信封+索引（载荷簿记沿用旧 meta，见 saveSession）。读侧
+// 为**全会话解码**（含载荷分片，秒级）——只动轻字段的高频变异（如创建成功后的
+// 选择集清理）应走 mutateSessionEnvelope（信封级通路，不触大载荷）。
 //
 // ⚠ 轻/全保存划分纪律（方案自曝风险4，护栏=「轻保存不触分片」单测）：本入口的
 // mutate 闭包**禁止修改 sess.Snapshot 与 sess.LastDiff**——轻保存不重写载荷分片，
 // 快照改动会被静默丢弃。既有轻入口清单（全部不触快照/差异）：
-//   - session.go：MarkRecognized（状态迁移）、BeginWorkbenchCreate /
-//     ConsumeWorkbenchCreateMarker（创建标记）、CreateSession（新建）、
+//   - session.go：MarkRecognized（状态迁移）、CreateSession（新建）、
 //     SetAssignment / SetIgnored（赋值与忽略）、SetCandidateIgnored /
 //     ConfirmWorkSetCandidate / UnconfirmWorkSetCandidate（集名候选族）；
 //   - parse_actions.go：ApplyDirAssignment / ClearDirAssignments（目录赋值族）、
 //     markScopedAssignments（泛化标记）；
-//   - selection.go：SetSelection（选择集）、ApplyCreateTasks 的选择集清理；
+//   - selection.go：SetSelection（选择集）；
 //   - workset_rule.go：集规则谱系簿记。
+//
+// 已外置/改走路由的入口：
+//   - BeginWorkbenchCreate / ConsumeWorkbenchCreateMarker（创建标记）——独立 KV
+//     单键 O(1) 读写，不再触会话工件（旧信封字段仅读侧一轮迁移消费）；
+//   - 创建成功后的选择集清理（runCreateTasks）与旧标记迁移清除——走
+//     mutateSessionEnvelope（信封级轻变异，禁触快照的护栏同上）。
 //
 // 触碰快照/差异的入口唯有 CompleteRecognitionWithDiff（走 mutateSessionFull）；
 // ReplaceSession 为重建语义（删除旧工件+轻保存新会话）。新增改快照的入口必须走
@@ -874,6 +907,12 @@ func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, Profil
 func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.mutateSessionFullDecodeLocked(root, mutate)
+}
+
+// mutateSessionFullDecodeLocked 全会话解码变异的锁内体（调用方须持 mu；语义与
+// 原 mutateSession 一致）：变异旁路私有实例 → 变异 → 轻保存。
+func (m *SessionManager) mutateSessionFullDecodeLocked(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
 	sess, err := m.loadSessionFresh(root) // 变异旁路：私有实例，缓存不外泄
 	if err != nil {
 		return nil, err
@@ -886,6 +925,72 @@ func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSessio
 		return nil, err
 	}
 	return sess, nil
+}
+
+// mutateSessionEnvelope 信封级轻变异入口（守卫链与会话瘦身四刀之二）：锁内
+// 「读 meta 信封（单键小读，不触载荷分片）→ 变异 → 轻保存」。适用只动轻字段
+// 的高频变异（创建成功后的选择集清理、旧创建标记迁移清除）——不再付全会话
+// 重解码（真实库大载荷解压反序列化秒级）的代价。护栏：mutate 触碰 Snapshot/
+// LastDiff 即报错中止（轻保存不重写分片，静默丢弃是数据损坏）——与 mutateSession
+// 的纪律清单同源，快照改动必须走 mutateSessionFull。
+//
+// 旧格式整值（信封化之前的单键单 JSON 会话）无独立信封可走，回落全会话路径
+//（读到即转：本次保存升级为信封+分片形态）。返回实例为信封轻字段投影（载荷
+// 字段恒 nil）——需要载荷的读侧走 SessionOf（缓存/全量解码装填）。
+func (m *SessionManager) mutateSessionEnvelope(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.mutateSessionEnvelopeLocked(root, mutate)
+}
+
+// mutateSessionEnvelopeLocked 信封级轻变异的锁内体（调用方须持 mu）。
+func (m *SessionManager) mutateSessionEnvelopeLocked(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
+	norm := normalizeLibraryRoot(root)
+	env, raw, err := m.readSessionEnvelope(root)
+	if err != nil {
+		return nil, fmt.Errorf("读取会话（键 %q）失败: %w", workbenchSessionKey(root), err)
+	}
+	if env == nil || env.Session == nil || env.V != sessionEnvelopeVersion ||
+		env.Session.SchemaVersion != workbenchSessionSchemaVersion {
+		if env == nil && raw == "" {
+			return nil, ErrWorkbenchSessionNotFound
+		}
+		// 旧格式整值/信封损坏或版本不符：回落全会话路径（沿用 loadSession 的
+		// 判定与告警口径——损坏按未命中处理）
+		return m.mutateSessionFullDecodeLocked(root, mutate)
+	}
+	sess := *env.Session // 轻字段投影（Snapshot/LastDiff 恒 nil）
+	if err := mutate(&sess); err != nil {
+		return nil, err
+	}
+	if sess.Snapshot != nil || sess.LastDiff != nil {
+		return nil, errors.New("信封级变异禁止触碰快照/差异（轻保存不重写载荷分片，改动会被静默丢弃），须走 mutateSessionFull")
+	}
+	sess.UpdatedAtMs = time.Now().UnixMilli()
+	if err := m.writeSessionEnvelope(&sess, env); err != nil {
+		return nil, err
+	}
+	m.refreshSessionCacheEnvelope(norm, &sess)
+	return &sess, nil
+}
+
+// refreshSessionCacheEnvelope 信封级轻保存后的缓存刷新（调用方须持 mu 且保存已
+// 成功）：**外层重建**缓存条目——轻字段取信封新值，载荷指针自旧条目只读共享
+//（沿用共享纪律：入缓存后任何路径不得再写字段；绝不改写旧条目实例，防缓存条
+// 目与信封双写漂移）。domain 惰性推导随条目重建整体作废（忽略集等影响推导的
+// 轻字段可能已变，重推导由下次使用摊销）。旧条目缺席（缓存未装填）时不入新
+// 条目——无载荷共享源，宁缺勿错（下次读走全量解码装填），防无载荷条目被读
+// 路径当作「未识别会话」误答。
+func (m *SessionManager) refreshSessionCacheEnvelope(norm string, light *WorkbenchSession) {
+	m.sessCacheMu.Lock()
+	defer m.sessCacheMu.Unlock()
+	prev, ok := m.sessCache[norm]
+	if !ok || prev.sess == nil {
+		return
+	}
+	rebuilt := *light
+	rebuilt.Snapshot, rebuilt.LastDiff = prev.sess.Snapshot, prev.sess.LastDiff // 只读共享
+	m.sessCache[norm] = &sessionCacheEntry{sess: &rebuilt, lastUsed: m.cacheNow()}
 }
 
 // mutateSessionFull 全保存入口：锁内会话读改写后按重载荷全量落库（gzip 分片+
@@ -954,31 +1059,65 @@ func (m *SessionManager) CompleteRecognitionWithDiff(root string, snapshot *Reco
 }
 
 // BeginWorkbenchCreate 置位工作台发起创建标记（工作台在调用 CreateTask 前置位，
-// Create 据此分派过滤产出分支）。接线属后续阶段。
+// Create 据此分派过滤产出分支）：独立 KV 单键 O(1) 写——外置自会话工件，不再付
+// 全会话重解码变异的秒级成本（守卫链与会话瘦身四刀之一）。不校验会话存在性
+//（调用方 ApplyCreateTasks 已在守卫链读得会话；未消费的孤立标记由后续消费自然
+// 清除）。旧信封字段不置位（其读侧迁移见 ConsumeWorkbenchCreateMarker）。
 func (m *SessionManager) BeginWorkbenchCreate(root string) error {
-	_, err := m.mutateSession(root, func(sess *WorkbenchSession) error {
-		sess.PendingWorkbenchCreate = true
-		return nil
-	})
-	return err
+	key := workbenchCreateMarkerKey(root)
+	if err := m.store.SetValue(key, "1"); err != nil {
+		return fmt.Errorf("置位工作台发起创建标记（键 %q）失败: %w", key, err)
+	}
+	return nil
 }
 
 // ConsumeWorkbenchCreateMarker 消费工作台发起创建标记：在位则清除并返回真
 // （Create 过滤产出分支的分派判据，消费语义防同一标记被后续创建重复命中）。
+// 外置单键缺席时读侧迁移消费一轮旧会话信封字段（方案风险4：外置化升级前置位
+// 的标记经旧字段读出——消费后经信封级轻保存清除，此后恒走外置键）。
 func (m *SessionManager) ConsumeWorkbenchCreateMarker(root string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sess, err := m.loadSessionFresh(root) // 变异旁路：私有实例，缓存不外泄
-	if err != nil || !sess.PendingWorkbenchCreate {
+	key := workbenchCreateMarkerKey(root)
+	stored, err := m.store.GetValue(key)
+	if err != nil {
+		m.warnf("读取工作台发起创建标记失败（键 %q）: %v", key, err)
 		return false
 	}
-	sess.PendingWorkbenchCreate = false
-	sess.UpdatedAtMs = time.Now().UnixMilli()
-	if err := m.saveSession(sess); err != nil {
-		m.warnf("清除工作台发起创建标记失败: %v", err)
+	if stored != nil && stored.Value != "" {
+		if derr := m.store.DeleteValue(key); derr != nil {
+			m.warnf("清除工作台发起创建标记失败（键 %q）: %v", key, derr)
+			return false
+		}
+		return true
+	}
+	return m.consumeLegacyWorkbenchCreateMarker(root)
+}
+
+// errCreateMarkerLegacyAbsent 旧信封字段迁移消费的「字段不在位」中止信号（与
+// 传输/存储错误区分：前者是正常路径，后者按消费失败处理）。
+var errCreateMarkerLegacyAbsent = errors.New("旧信封创建标记不在位")
+
+// consumeLegacyWorkbenchCreateMarker 旧信封字段迁移消费（恰一轮，调用方须持
+// mu）：PendingWorkbenchCreate=true 时经信封级轻通路清除并返回真；字段假/会话
+// 缺席返回假；清除失败按消费失败返回假（标记留在原处，下次消费重试）。
+func (m *SessionManager) consumeLegacyWorkbenchCreateMarker(root string) bool {
+	_, err := m.mutateSessionEnvelopeLocked(root, func(sess *WorkbenchSession) error {
+		if !sess.PendingWorkbenchCreate {
+			return errCreateMarkerLegacyAbsent
+		}
+		sess.PendingWorkbenchCreate = false
+		return nil
+	})
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, errCreateMarkerLegacyAbsent), errors.Is(err, ErrWorkbenchSessionNotFound):
+		return false
+	default:
+		m.warnf("迁移消费旧信封创建标记失败（root=%s）: %v", root, err)
 		return false
 	}
-	return true
 }
 
 // —— 会话赋值与忽略项写 API（经 mutateSession 与档案写同一锁串行）——
@@ -1255,6 +1394,7 @@ const (
 	workbenchActionGetDiff             = "getDiff"             // 最近一次重识别差异集
 	workbenchActionSetSelection        = "setSelection"        // 全量替换资源选择集（作品键）
 	workbenchActionCreateTasks         = "createTasks"         // 创建编排（异步：对账→置标记→goroutine 创建；立即应答 started，进度与终态经 createProgress/createDone 事件推送）
+	workbenchActionCancelCreate        = "cancelCreate"        // 取消在途创建（甲3/决策3：置取消位→verify/发射循环收流→宿主未收批回滚；应答 cancelState=cancelling/completed/idle）
 
 	// —— 集名候选族（作品集识别强化 批次三阶段5）——
 	workbenchActionIgnoreCandidate  = "ignoreCandidate"         // 集名候选忽略（会话态分仓；target 寻址）
@@ -1431,6 +1571,10 @@ type workbenchFrontendResponse struct {
 	// 事件推送，选择集清空随 createDone 成功态发生——见 selection.go 设计 C）。
 	Started bool `json:"started,omitempty"`
 	Running bool `json:"running,omitempty"`
+	// CancelState cancelCreate 的受理结论（甲3/决策3）：cancelling=取消已受理
+	//（正在收流清理，终态经 createDone 事件）、completed=恰好已完成（原子提交点
+	// 已过未执行取消，风险10）、idle=无在途创建（此时应答为错误形态）。
+	CancelState string `json:"cancelState,omitempty"`
 	// Panorama getPanorama 的识别全景投影（overview 分节=概览裁剪、files 分节
 	//=文件明细分页页片；其余分节不携带）。
 	Panorama *RecognitionSnapshot `json:"panorama,omitempty"`
@@ -2272,6 +2416,17 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.Started = started
 		if sess, err := m.SessionOf(req.Root); err == nil {
 			resp.Decisions = decisionsViewOf(sess)
+		}
+	case workbenchActionCancelCreate:
+		// 取消在途创建（甲3/决策3）：创建在独立 goroutine，请求循环可自由应答——
+		// 受理结论三态：cancelling=取消已受理（终态经 createDone 事件）、completed=
+		// 恰好已完成（原子提交点已过，未执行取消，风险10）、idle=无在途创建
+		state := requestCreateCancel(req.Root)
+		switch state {
+		case createCancelIdle:
+			resp.OK, resp.Error = false, "无在途创建可取消"
+		default:
+			resp.CancelState = state
 		}
 	case workbenchActionGetRules:
 		view, err := m.RulesAdminView()

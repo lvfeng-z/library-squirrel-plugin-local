@@ -112,6 +112,12 @@ func marshalSessionPayload(snapshot *RecognitionSnapshot, lastDiff *SnapDiff) (c
 	if err != nil {
 		return nil, "", err
 	}
+	return gzipWithDigest(raw)
+}
+
+// gzipWithDigest 任意字节 → gzip 压缩及其 sha256 hex（会话载荷与哈希缓存清单
+// 共用的压缩+摘要基建，hash_cache.go 复用——分片三件套基建之一）。
+func gzipWithDigest(raw []byte) (compressed []byte, digest string, err error) {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	if _, err := zw.Write(raw); err != nil {
@@ -125,17 +131,20 @@ func marshalSessionPayload(snapshot *RecognitionSnapshot, lastDiff *SnapDiff) (c
 	return compressed, hex.EncodeToString(sum[:]), nil
 }
 
-// unmarshalSessionPayload gzip 字节 → JSON → 载荷。
-func unmarshalSessionPayload(compressed []byte) (*sessionPayload, error) {
+// gunzipAll gzip 字节 → 原始字节（gzipWithDigest 的逆；会话载荷与哈希缓存清单共用）。
+func gunzipAll(compressed []byte) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(compressed))
 	if err != nil {
 		return nil, err
 	}
-	raw, err := io.ReadAll(zr)
+	defer zr.Close()
+	return io.ReadAll(zr)
+}
+
+// unmarshalSessionPayload gzip 字节 → JSON → 载荷。
+func unmarshalSessionPayload(compressed []byte) (*sessionPayload, error) {
+	raw, err := gunzipAll(compressed)
 	if err != nil {
-		return nil, err
-	}
-	if err := zr.Close(); err != nil {
 		return nil, err
 	}
 	var payload sessionPayload

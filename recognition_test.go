@@ -108,9 +108,9 @@ func (c *workbenchTestCtx) QueryLocalWorkSets(req *sdkdto.QueryLocalWorkSetsRequ
 	names := pageOf(c.library.localWorkSets, req.Page)
 	items := make([]*sdkdto.WorkSetNameEntry, 0, len(names))
 	for _, name := range names {
-		// 行 id 跨页单调递增（同桩多次拉取也稳定唯一），供 WorkSetIDs 断言
-		c.workSetIDSeq++
-		items = append(items, &sdkdto.WorkSetNameEntry{Id: c.workSetIDSeq, Name: name})
+		// 行 id 跨页单调递增（同桩多次拉取也稳定唯一），供 WorkSetIDs 断言；
+		// atomic 发号（见 workbenchTestCtx.workSetIDSeq 注释）
+		items = append(items, &sdkdto.WorkSetNameEntry{Id: c.workSetIDSeq.Add(1), Name: name})
 	}
 	return &sdkdto.QueryLocalWorkSetsResponse{Items: items}, nil
 }

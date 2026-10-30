@@ -445,36 +445,49 @@
                 </div>
                 </div>
               </el-scrollbar>
-              <!-- 创建反馈条落位区（卡底、常态不占行）：两相进度横幅（异步创建期）、
-                   红=创建中断/对账失败、绿=创建成功、黄字=悬空选择提示（重识别后
-                   选择集引用了已不存在的作品） -->
-              <!-- 创建异步进度横幅（剧本2·帧2/3）：核对文件/创建子任务两相计数+百分比；
-                   创建在插件侧独立 goroutine 执行，期间清单/目录树可继续浏览（不阻塞） -->
-              <div
-                v-if="createPhase === 'verify' || createPhase === 'create'"
-                class="li-ws-create-progress"
-              >
-                <div class="li-ws-progress-head">
-                  <span class="li-ws-progress-phase">{{ createPhase === 'verify' ? '正在核对文件…' : '正在创建子任务…' }} {{ createProgressDone }} / {{ createProgressTotal }}</span>
-                  <span class="li-ws-progress-count">{{ createProgressPercent }}</span>
-                </div>
-                <div class="li-ws-progress-track">
-                  <div class="li-ws-progress-bar" :style="{ width: createProgressPercent }"></div>
-                </div>
+              <!-- 创建反馈条落位区（卡底、常态不占行）：进度横幅（异步创建期，帧1/帧2
+                   双行双计数+取消入口、帧3→帧4 清理中转场）、终态横幅（帧4 取消✔/
+                   帧5 失败✖/帧6 完成✔）、黄字=悬空选择提示（重识别后选择集引用了
+                   已不存在的作品） -->
+              <!-- 创建异步进度横幅（剧本1·帧1/帧2）：createProgress 事件按 phase 分道
+                   双计数（乙3 重叠期双行并存——核对行核对完成即消失、发射行自首批发射
+                   起出现至终值）；核对行携带读盘速率与前端估算预计剩余（甲1）；取消
+                   入口双行期恒在（甲3）。创建在插件侧独立 goroutine 执行，期间清单/
+                   目录树可继续浏览（不阻塞） -->
+              <div v-if="creating" class="li-ws-create-progress">
+                <template v-if="createCancelling">
+                  <!-- 帧3→帧4 转场：取消已受理，等待在途回滚清理与终态事件 -->
+                  <p class="li-ws-progress-phase">正在清理在途任务…</p>
+                </template>
+                <template v-else>
+                  <div v-if="createVerify && !createVerifyFinished" class="li-ws-progress-head">
+                    <span class="li-ws-progress-phase">正在核对文件…{{ createVerifyCount }}</span>
+                    <span class="li-ws-progress-count">{{ createVerifyPercent }}</span>
+                  </div>
+                  <p v-if="createVerifyMeta" class="li-ws-progress-meta">{{ createVerifyMeta }}</p>
+                  <div v-if="createVerify && !createVerifyFinished && createVerify.total > 0" class="li-ws-progress-track">
+                    <div class="li-ws-progress-bar" :style="{ width: createVerifyPercent }"></div>
+                  </div>
+                  <div v-if="createEmit" class="li-ws-progress-head">
+                    <span class="li-ws-progress-phase">正在创建子任务… {{ fmtCount(createEmit.done) }} 个</span>
+                  </div>
+                  <p v-if="createCancelRaceNote" class="li-ws-progress-note">{{ createCancelRaceNote }}</p>
+                  <el-button size="small" class="li-ws-cancel-create" @click="openCancelConfirm">取消创建</el-button>
+                </template>
               </div>
-              <!-- 创建中断横幅（剧本2·帧5）：部分完成=结构化两行（中断计数+入库提示）；
-                   零产出失败=事件原文整行。选择集两种失败态均保留（重试走帧1） -->
+              <!-- 创建终态横幅（剧本1·帧4/帧5/帧6）：文案优先消费后端 createDone Message
+                   ——帧6 完成（✔）「已创建任务「名」：N 件作品，共 M 个子任务，用时
+                   X 分钟」（含归属附注）、帧4 取消（✔）「已取消创建：在途任务已清理
+                   （已删 N 个子任务）…」、帧5 失败（✖）「任务创建失败：…；在途任务
+                   已清理…，可重试」；失败/取消后选择集保留（重试走帧1） -->
               <el-alert
-                v-if="createFailMessage"
+                v-if="createDoneMessage"
                 class="li-ws-banner"
-                type="error"
+                :type="createDoneKind === 'failed' ? 'error' : 'success'"
                 :closable="false"
                 show-icon
-                :title="createFailPartial ? `任务创建中断：已创建 ${createProgressDone} / ${createProgressTotal} 个子任务` : createFailMessage"
-              >
-                <p v-if="createFailPartial" class="li-ws-create-fail-sub">父任务已入库，可删除后重试；选择集已保留</p>
-                <p v-if="createFailReason" class="li-ws-create-fail-reason">{{ createFailReason }}</p>
-              </el-alert>
+                :title="createDoneMessage"
+              />
               <el-alert
                 v-else-if="createError"
                 class="li-ws-banner"
@@ -482,14 +495,6 @@
                 :closable="false"
                 show-icon
                 :title="createError"
-              />
-              <el-alert
-                v-else-if="createSummary"
-                class="li-ws-banner"
-                type="success"
-                :closable="false"
-                show-icon
-                :title="createSummary"
               />
               <p v-if="danglingSelection > 0" class="li-ws-stale-hint">
                 选择集中 {{ danglingSelection }} 项已不在当前识别全景内（可能已重识别），创建前请刷新重选
@@ -671,6 +676,23 @@
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="createTasks">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 取消创建确认对话框（剧本1·帧3 逐字文案）：「继续创建」= 关窗回到进行中
+         形态（无副作用）；「确定取消」= cancelCreate 请求 → cancelling（横幅转
+         「正在清理在途任务…」帧3→帧4）/ completed（刚好已完成，未执行取消——
+         风险10，照常收帧6 完成通知）/ idle（无在途创建，终态横幅已先行呈现） -->
+    <el-dialog
+      v-model="cancelDialogVisible"
+      title="取消创建"
+      width="420px"
+      append-to-body
+    >
+      <p class="li-ws-cancel-dialog-text">将删除本次已创建的全部在途任务，选择集保留、可重新发起。确定取消？</p>
+      <template #footer>
+        <el-button @click="cancelDialogVisible = false">继续创建</el-button>
+        <el-button type="danger" :loading="createCancelPending" @click="confirmCancelCreate">确定取消</el-button>
       </template>
     </el-dialog>
 
@@ -953,6 +975,10 @@ interface WorkbenchResponse {
   // createTasks 立即应答「已开始创建」（大载荷分页方案·设计 C：进度与终态经
   // createProgress/createDone 事件推送，应答不再携带 created/createMsg）
   started?: boolean
+  // cancelCreate 受理结论（甲3/决策3）：cancelling=取消已受理（终态经 createDone
+  // 事件）/ completed=恰好已完成（原子提交点已过、未执行取消，风险10）；idle 走
+  // ok=false（无在途创建可取消）
+  cancelState?: string
 }
 
 interface WorkbenchEvent {
@@ -961,6 +987,8 @@ interface WorkbenchEvent {
   phase?: string
   done?: number
   total?: number
+  // 核对相当前窗口读盘字节/秒（甲1 速率字段：verify 相携带、发射相与首事件不带）
+  bytesPerSec?: number
   success?: boolean
   message?: string
 }
@@ -1303,23 +1331,66 @@ const domain = ref<WorkDomainView | null>(null)
 const selectedWorks = ref<Set<string>>(new Set())
 const creating = ref(false)
 const createError = ref('')
-const createSummary = ref('')
-// —— 创建异步呈现态（大载荷分页方案·设计 C/剧本2）——
-// 两相进度横幅：phase=verify 核对文件 / create 创建子任务（createProgress 事件
-// 驱动；idle=不在途）；创建在插件侧 goroutine 执行，creating 保持到 createDone
-const createPhase = ref<'idle' | 'verify' | 'create'>('idle')
-const createProgressDone = ref(0)
-const createProgressTotal = ref(0)
-// 终态失败横幅：message=事件原文（零产出失败整行直出）、partial=部分完成态
-//（结构化两行：中断计数+入库提示）、reason=文案尾段原因
-const createFailMessage = ref('')
-const createFailPartial = ref(false)
-const createFailReason = ref('')
+// —— 创建异步呈现态（大载荷分页方案·设计 C → 剧本1 六帧升级：双计数分道+取消）——
+// 双计数模型（乙3 重叠期语义）：verify 道=核对行（done/total=作品数、bytesPerSec=
+// 读盘速率；done 到达 total 即核对完成、核对行消失）、emit 道=发射行（done=已发射
+// 子行数，自首批发射起出现至终值）；两道按 createProgress 事件 phase 维度各自
+// 更新、可并存（null=该道未出现）。创建发起即预点亮 verify 道（计数待首事件 0/N）
+const createVerify = ref<{ done: number; total: number; bytesPerSec: number } | null>(null)
+const createEmit = ref<{ done: number } | null>(null)
+// 取消受理态（甲3/剧本帧3→帧4）：cancelling=横幅转「正在清理在途任务…」待终态；
+// raceNote=取消×完成竞态附注（应答 completed=风险10「刚好已完成，未执行取消」）
+const createCancelling = ref(false)
+const createCancelRaceNote = ref('')
+const createCancelPending = ref(false)
+const cancelDialogVisible = ref(false)
+// 终态横幅（帧4/帧5/帧6）：文案优先消费后端 createDone Message（前端自建摘要与
+// partial 结构化两行随帧5/帧6 收口退役）；kind 只决定横幅色（帧4 取消=✔、帧5
+// 失败=✖、帧6 完成=✔）
+const createDoneKind = ref<'cancelled' | 'failed' | 'success'>('success')
+const createDoneMessage = ref('')
 // 本次创建的任务名（成功通知兜底名；事件文案携带名为准）
 const createTaskLabel = ref('')
-const createProgressPercent = computed(() => {
-  if (createProgressTotal.value <= 0) return '0%'
-  return `${Math.min(100, Math.round((createProgressDone.value / createProgressTotal.value) * 100))}%`
+// verify 道 ETA 估算（速率=事件间 Δdone/Δt 的指数平滑；首个有效样本后可估）
+const verifyEmaWorksPerSec = ref(0)
+let verifySample: { done: number; at: number } | null = null
+// 千分位计数（帧1/帧2「1,240 / 4,528」「41,200 个」形态）
+function fmtCount(n: number): string {
+  return n.toLocaleString('en-US')
+}
+// 读盘速率文案（帧1/帧2「读取 96 MB/s」形态）：≥10 MB/s 取整、以下保留 1 位小数
+function formatRateMB(bytesPerSec: number): string {
+  const mb = bytesPerSec / 1048576
+  return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB/s`
+}
+const createVerifyFinished = computed(() => {
+  const v = createVerify.value
+  return !!v && v.total > 0 && v.done >= v.total
+})
+// 核对行计数段（total 未到时不显示数字——不呈现误导性 0 / 0，真分母由首事件到达）
+const createVerifyCount = computed(() => {
+  const v = createVerify.value
+  if (!v || v.total <= 0) return ''
+  return ` ${fmtCount(v.done)} / ${fmtCount(v.total)}`
+})
+const createVerifyPercent = computed(() => {
+  const v = createVerify.value
+  if (!v || v.total <= 0) return '0%'
+  return `${Math.min(100, Math.round((v.done / v.total) * 100))}%`
+})
+// 核对行速率/预计剩余行（帧1/帧2「读取 96 MB/s · 预计剩余 9 分钟」）：速率=事件
+// bytesPerSec、ETA=平滑速率外推（不可估段隐藏；剩余不足 1 分钟按「预计剩余
+// 不足 1 分钟」呈现）；核对完成后整行隐藏
+const createVerifyMeta = computed(() => {
+  const v = createVerify.value
+  if (!v || createVerifyFinished.value) return ''
+  const parts: string[] = []
+  if (v.bytesPerSec > 0) parts.push(`读取 ${formatRateMB(v.bytesPerSec)}`)
+  if (verifyEmaWorksPerSec.value > 0 && v.total > v.done) {
+    const remainSec = (v.total - v.done) / verifyEmaWorksPerSec.value
+    parts.push(remainSec < 60 ? '预计剩余不足 1 分钟' : `预计剩余 ${Math.max(1, Math.round(remainSec / 60))} 分钟`)
+  }
+  return parts.join(' · ')
 })
 // 剧本K 名称确认对话框：开窗态 + 任务名输入（每次打开预填默认名，清空=用默认）
 const createDialogVisible = ref(false)
@@ -1741,30 +1812,44 @@ function onEvent(event: { data?: unknown }) {
       recognError.value = evt.message || '全量识别失败'
     }
   } else if (evt.kind === 'createProgress') {
-    // 两相进度（phase 词汇对齐 selection.go：verify=核对文件、create=创建子任务）
-    if (evt.phase === 'verify' || evt.phase === 'create') {
-      creating.value = true
-      createPhase.value = evt.phase
-      createProgressDone.value = evt.done || 0
-      createProgressTotal.value = evt.total || 0
+    // 双计数分道（乙3 重叠期语义，phase 词汇对齐 selection.go）：verify=核对行
+    //（作品数+读盘速率，终值 done=total 即核对完成）、create=发射行（已发射子行数）
+    creating.value = true
+    if (evt.phase === 'verify') {
+      createVerify.value = { done: evt.done || 0, total: evt.total || 0, bytesPerSec: evt.bytesPerSec || 0 }
+      // ETA 样本：事件间 Δdone/Δt 指数平滑（首事件只记样本、第二样本起可估）
+      const now = Date.now()
+      if (verifySample && evt.done > verifySample.done) {
+        const perSec = (evt.done - verifySample.done) / Math.max(1, (now - verifySample.at) / 1000)
+        verifyEmaWorksPerSec.value = verifyEmaWorksPerSec.value > 0 ? verifyEmaWorksPerSec.value * 0.6 + perSec * 0.4 : perSec
+      }
+      verifySample = { done: evt.done || 0, at: now }
+    } else if (evt.phase === 'create') {
+      createEmit.value = { done: evt.done || 0 }
     }
   } else if (evt.kind === 'createDone') {
+    // 终态（帧4 取消/帧5 失败/帧6 完成）：文案优先消费后端 Message；取消终态按
+    // 「已取消创建」前缀归类（✔ 呈现，区别于 ✖ 失败）；成功时选择集已被插件侧
+    // 清空，本地同步镜像（已选计数归零）
     creating.value = false
-    createPhase.value = 'idle'
-    createProgressDone.value = evt.done || 0
-    createProgressTotal.value = evt.total || 0
+    createCancelling.value = false
+    createCancelRaceNote.value = ''
+    cancelDialogVisible.value = false
+    createVerify.value = null
+    createEmit.value = null
+    verifySample = null
+    verifyEmaWorksPerSec.value = 0
     if (evt.success) {
-      // 成功通知（剧本2·帧4）：任务名取事件摘要文案携带名，子任务数=done 镜像；
-      // 选择集已被插件侧清空，本地同步镜像（已选计数归零）
+      createDoneKind.value = 'success'
       const name = taskNameOfMessage(evt.message) || createTaskLabel.value
-      createSummary.value = `已创建任务「${name}」：${createProgressDone.value} 个子任务（Created 待手动开始）`
+      createDoneMessage.value = evt.message || `已创建任务「${name}」`
       selectedWorks.value = new Set()
+    } else if ((evt.message || '').startsWith('已取消创建')) {
+      createDoneKind.value = 'cancelled'
+      createDoneMessage.value = evt.message || '已取消创建：选择集已保留，可重新发起'
     } else {
-      // 失败（剧本2·帧5）：部分完成（total>0）=结构化中断横幅+选择集保留；
-      // 零产出失败=事件原文整行，选择集同样保留可重试
-      createFailPartial.value = createProgressTotal.value > 0
-      createFailMessage.value = evt.message || '任务创建失败（选择集已保留，可重试）'
-      createFailReason.value = createFailPartial.value ? failReasonOfMessage(evt.message) : ''
+      createDoneKind.value = 'failed'
+      createDoneMessage.value = evt.message || '任务创建失败（选择集已保留，可重试）'
     }
   }
 }
@@ -1774,13 +1859,6 @@ function taskNameOfMessage(message?: string): string {
   if (!message) return ''
   const m = message.match(/「([^」]+)」/)
   return m ? m[1] : ''
-}
-
-// 失败文案尾段原因（「…（…）：<原因>」末个括号冒号之后的段；兼容半角冒号）
-function failReasonOfMessage(message?: string): string {
-  if (!message) return ''
-  const idx = Math.max(message.lastIndexOf('）：'), message.lastIndexOf('）:'))
-  return idx >= 0 ? message.slice(idx + 2) : ''
 }
 
 const phaseLabel = (phase: string): string => {
@@ -2461,16 +2539,18 @@ async function createTasks(): Promise<void> {
   }
   creating.value = true
   createError.value = ''
-  createSummary.value = ''
-  createFailMessage.value = ''
-  createFailPartial.value = false
-  createFailReason.value = ''
+  createDoneMessage.value = ''
+  createDoneKind.value = 'success'
+  createCancelling.value = false
+  createCancelRaceNote.value = ''
   // 通知名预备：成功事件文案携带名为准，空输入回退前端同规则默认名
   createTaskLabel.value = createTaskName.value.trim() || defaultTaskName.value
-  // 两相横幅先行亮起（立即应答与首条 createProgress 之间的空窗也有呈现）
-  createPhase.value = 'verify'
-  createProgressDone.value = 0
-  createProgressTotal.value = 0
+  // 横幅先行亮起（立即应答与首条 createProgress 之间的空窗也有呈现）：verify 道
+  // 无计数形态待首事件 0/N 到达真分母（甲1），发射道待首批发射事件出现（帧2 起）
+  createVerify.value = { done: 0, total: 0, bytesPerSec: 0 }
+  createEmit.value = null
+  verifySample = null
+  verifyEmaWorksPerSec.value = 0
   let started = false
   try {
     const sel = await request('setSelection', { root: session.value.rootPath, works: [...selectedWorks.value] })
@@ -2496,9 +2576,38 @@ async function createTasks(): Promise<void> {
     if (!started) {
       // 未进入异步创建（守卫失败/超时）：横幅即刻收起
       creating.value = false
-      createPhase.value = 'idle'
+      createVerify.value = null
+      createEmit.value = null
     }
-    // started=true 保持两相横幅，收尾归 createDone 事件
+    // started=true 保持进度横幅，收尾归 createDone 事件
+  }
+}
+
+// —— 取消通路（甲3/决策3，剧本1·帧3→帧4）—— //
+
+// 帧3：取消确认对话框（逐字文案过审）——「继续创建」= 关窗回到进行中形态（无副作用）
+function openCancelConfirm(): void {
+  createCancelRaceNote.value = ''
+  cancelDialogVisible.value = true
+}
+
+// 帧3「确定取消」：cancelCreate 三态应答——cancelling=已受理（横幅转「正在清理
+// 在途任务…」，帧4 终态经 createDone 事件）；completed=恰好已完成（原子提交点
+// 已过、未执行取消——风险10，附注呈现并照常收帧6 完成通知）；idle（ok=false 无
+// 在途创建）=终态已先行到达，界面随终态横幅呈现
+async function confirmCancelCreate(): Promise<void> {
+  if (!session.value || createCancelPending.value) return
+  createCancelPending.value = true
+  try {
+    const resp = await request('cancelCreate', { root: session.value.rootPath })
+    if (resp.cancelState === 'cancelling') {
+      createCancelling.value = true
+    } else if (resp.cancelState === 'completed') {
+      createCancelRaceNote.value = '刚好已完成，未执行取消'
+    }
+  } finally {
+    createCancelPending.value = false
+    cancelDialogVisible.value = false
   }
 }
 
@@ -2864,7 +2973,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
-/* —— 创建异步横幅（剧本2·帧2/3/5）：卡底两相进度与中断两行 —— */
+/* —— 创建异步横幅（剧本1·帧1/帧2/帧3→帧4）：卡底双行双计数+速率/ETA+取消入口 —— */
 
 .li-ws-create-progress {
   display: flex;
@@ -2872,17 +2981,31 @@ onUnmounted(() => {
   gap: 6px;
 }
 
-.li-ws-create-fail-sub {
+/* 转场行（「正在清理在途任务…」在 progress-head 之外，自带字号与配色） */
+.li-ws-create-progress .li-ws-progress-phase {
   margin: 0;
   font-size: 13px;
-  line-height: 1.6;
+  color: var(--app-text-regular);
 }
 
-.li-ws-create-fail-reason {
-  margin: 2px 0 0;
+/* 核对行速率/ETA 行与取消×完成竞态附注（小字次级色） */
+.li-ws-progress-meta,
+.li-ws-progress-note {
+  margin: 0;
   font-size: 12px;
   color: var(--app-text-secondary);
-  word-break: break-all;
+}
+
+.li-ws-cancel-create {
+  align-self: flex-start;
+}
+
+/* 帧3 取消确认对话框正文 */
+.li-ws-cancel-dialog-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--app-text-regular);
 }
 
 /* —— 识别中状态条（清单卡体内，无快照/增量重识别共用） —— */

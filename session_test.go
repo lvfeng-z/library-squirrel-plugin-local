@@ -69,6 +69,10 @@ type publishedEvent struct {
 // Infof 观测日志桩（CreateWorkInfo 产出观测等合法调用面，非测试缺口）。
 func (c *workbenchTestCtx) Infof(string, ...any) {}
 
+// Warnf 告警桩（爬坡控制器非法偏好回退等路径经 h.ctx.Warnf 上报——内嵌接口
+// 零值不可解引用，测试桩必须显式提供；静默丢弃即可，断言面在专用桩 warnCountingCtx）。
+func (c *workbenchTestCtx) Warnf(string, ...any) {}
+
 // workbenchTestCtx 工作台测试用的插件上下文桩：KV 走内存存储、前端事件发布被
 // 记录供断言；其余方法一旦被调用即 panic 暴露测试缺口。
 type workbenchTestCtx struct {
@@ -77,8 +81,10 @@ type workbenchTestCtx struct {
 
 	// library 谓词索引构造的分页数据集（Query* 五方法的桩数据；零值=五轨全空）。
 	library libraryFixture
-	// workSetIDSeq QueryLocalWorkSets 桩的行 id 发号器（跨页单调递增）。
-	workSetIDSeq int64
+	// workSetIDSeq QueryLocalWorkSets 桩的行 id 发号器（跨页单调递增）；
+	// atomic：ApplyAssignment 异步识别刷新与测试自驱识别可并发拉取，
+	// 无锁自增曾致 -race 偶发（2026-10-30 AJ 阶段5 归因，pristine 树复现）。
+	workSetIDSeq atomic.Int64
 
 	// CreateTask 桩：createTaskStub 为应答（nil=默认成功 AddedQuantity=3），
 	// 计数与末次 URL 供创建编排断言。
@@ -88,6 +94,9 @@ type workbenchTestCtx struct {
 	// createTaskBlock 可选：CreateTask 桩入口挂起闸（close 放行——createTasks
 	// 异步化的立即应答与终态时序控制）。
 	createTaskBlock chan struct{}
+
+	// prefs 偏好桩数据（键 → 偏好值；爬坡控制器偏好钉死层注入面）。
+	prefs map[string]*sdkdto.PreferenceValue
 
 	mu        sync.Mutex
 	published []publishedEvent
@@ -111,6 +120,18 @@ func (c *workbenchTestCtx) CreateTask(url string) (*sdkdto.CreateTaskResult, err
 		return c.createTaskStub, nil
 	}
 	return &sdkdto.CreateTaskResult{Succeed: true, AddedQuantity: 3}, nil
+}
+
+// GetPreference 偏好读取桩：prefs 预置时按键回告（爬坡控制器偏好钉死层的注入
+// 面，create_pipeline_test.go 消费），未预置=无记录；错误路径恒无。
+func (c *workbenchTestCtx) GetPreference(key string) (*sdkdto.PreferenceValue, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.prefs == nil {
+		return nil, false, nil
+	}
+	value, ok := c.prefs[key]
+	return value, ok, nil
 }
 
 func (c *workbenchTestCtx) GetValue(key string) (*sdkdto.StorageValue, error) {
@@ -533,6 +554,90 @@ func TestWorkbenchCreateMarkerLifecycle(t *testing.T) {
 	}
 	if mgr.ConsumeWorkbenchCreateMarker(`D:\库己`) {
 		t.Fatalf("同一标记不应被重复消费")
+	}
+}
+
+// TestWorkbenchCreateMarkerLegacyMigration 标记旧字段迁移消费（阶段3 退出标准②，
+// 方案风险4）：外置单键缺席而旧会话信封字段读到 true 时，消费恰迁移一轮——
+// 首度消费命中并清除旧字段（此后恒走外置键），再度消费不再命中；旧格式整值
+// 会话（信封化之前）同口径迁移；新置位（BeginWorkbenchCreate）只写外置键、
+// 不触旧信封字段。
+func TestWorkbenchCreateMarkerLegacyMigration(t *testing.T) {
+	store := newFakeSessionStore()
+	mgr, _ := newTestManager(t, store)
+
+	// 信封会话的旧字段迁移：外置化升级前置位的标记（信封字段=true，外置键缺席）
+	root := `D:\库辛`
+	if _, err := mgr.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	if _, err := mgr.mutateSession(root, func(sess *WorkbenchSession) error {
+		sess.PendingWorkbenchCreate = true // 旧形态注入：模拟外置化前版本置位
+		return nil
+	}); err != nil {
+		t.Fatalf("注入旧信封标记失败: %v", err)
+	}
+	if !mgr.ConsumeWorkbenchCreateMarker(root) {
+		t.Fatalf("旧信封字段读到 true 应被迁移消费一轮")
+	}
+	sess, err := mgr.loadSession(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if sess.PendingWorkbenchCreate {
+		t.Fatalf("迁移消费后旧信封字段应清除")
+	}
+	if mgr.ConsumeWorkbenchCreateMarker(root) {
+		t.Fatalf("迁移消费恰一轮，再度消费不应命中")
+	}
+
+	// 旧格式整值会话（信封化之前的单键单 JSON）同口径迁移
+	rootLegacy := `D:\库癸`
+	legacy := &WorkbenchSession{
+		SchemaVersion: workbenchSessionSchemaVersion, RootPath: rootLegacy,
+		State: WorkbenchSessionRecognized, PendingWorkbenchCreate: true,
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("构造旧格式会话失败: %v", err)
+	}
+	if err := store.SetValue(workbenchSessionKey(rootLegacy), string(data)); err != nil {
+		t.Fatalf("写入旧格式会话失败: %v", err)
+	}
+	if !mgr.ConsumeWorkbenchCreateMarker(rootLegacy) {
+		t.Fatalf("旧整值会话的标记应被迁移消费")
+	}
+	reloaded, err := mgr.loadSession(rootLegacy)
+	if err != nil {
+		t.Fatalf("回读旧格式会话失败: %v", err)
+	}
+	if reloaded.PendingWorkbenchCreate {
+		t.Fatalf("迁移消费后旧整值会话字段应清除")
+	}
+	if mgr.ConsumeWorkbenchCreateMarker(rootLegacy) {
+		t.Fatalf("旧整值会话迁移消费恰一轮")
+	}
+
+	// 新路径不触旧字段：置位只写外置单键，消费恰一次
+	if err := mgr.BeginWorkbenchCreate(root); err != nil {
+		t.Fatalf("置位标记失败: %v", err)
+	}
+	marker, err := store.GetValue(workbenchCreateMarkerKey(root))
+	if err != nil || marker == nil || marker.Value == "" {
+		t.Fatalf("置位应落外置单键 %q: %+v %v", workbenchCreateMarkerKey(root), marker, err)
+	}
+	sess, err = mgr.loadSession(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if sess.PendingWorkbenchCreate {
+		t.Fatalf("新置位不得写旧信封字段")
+	}
+	if !mgr.ConsumeWorkbenchCreateMarker(root) {
+		t.Fatalf("外置键消费应返回真")
+	}
+	if mgr.ConsumeWorkbenchCreateMarker(root) {
+		t.Fatalf("外置键消费恰一次")
 	}
 }
 

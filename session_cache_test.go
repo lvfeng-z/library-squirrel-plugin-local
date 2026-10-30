@@ -398,3 +398,81 @@ func TestSessionCacheConcurrentReadWithRecognitionWrite(t *testing.T) {
 		t.Fatal(msg)
 	}
 }
+
+// TestMutateSessionEnvelopeLightPath 信封级轻变异通路（守卫链与会话瘦身四刀
+// 之二）：只动轻字段的变异（创建成功后的选择集清理同款形态）走「读信封单键
+// 小读→变异→轻保存」——零载荷分片写；缓存条目外层重建（轻字段即时可见、
+// 载荷指针只读共享、domain 推导随条目作废重推）；mutate 触碰快照即拒（轻保存
+// 静默丢掷的防线）；缓存未装填时不造无载荷条目（下次读走全量解码装填）。
+func TestMutateSessionEnvelopeLightPath(t *testing.T) {
+	root := `D:\缓存库壬`
+	m, _, store := newCacheTestManager(t, root, 1000, nil)
+
+	shared, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("SessionOf 失败: %v", err)
+	}
+	payload := shared.Snapshot
+	domain1 := m.workDomainOf(shared)
+
+	// 轻变异：写忽略项（影响域推导的轻字段，创建成功清理的同款通路形态）
+	store.resetWriteCounts()
+	if _, err := m.mutateSessionEnvelope(root, func(sess *WorkbenchSession) error {
+		sess.Ignored = []string{"甲/文件_00.jpg"}
+		return nil
+	}); err != nil {
+		t.Fatalf("信封级轻变异失败: %v", err)
+	}
+	if store.shardSetValueCalls() != 0 {
+		t.Fatalf("信封级轻变异不得触载荷分片，实际分片写 %d 次", store.shardSetValueCalls())
+	}
+
+	// 缓存条目外层重建：轻字段立即可见、载荷指针只读共享、domain 作废重推
+	after, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("SessionOf 失败: %v", err)
+	}
+	if len(after.Ignored) != 1 || after.Snapshot != payload {
+		t.Fatalf("缓存条目应外层重建且载荷指针只读共享: ignored=%d payloadShared=%v", len(after.Ignored), after.Snapshot == payload)
+	}
+	if domain2 := m.workDomainOf(after); domain2 == domain1 {
+		t.Fatal("domain 推导应随条目重建作废重推（忽略集已变）")
+	}
+
+	// 触碰快照的 mutate 拒绝：轻保存不重写分片，静默丢弃即数据损坏
+	if _, err := m.mutateSessionEnvelope(root, func(sess *WorkbenchSession) error {
+		sess.Snapshot = &RecognitionSnapshot{}
+		return nil
+	}); err == nil {
+		t.Fatal("信封级变异触碰快照应被拒绝")
+	}
+
+	// 存储真值核验（跨实例=重启形态）：轻字段已变、载荷经分片往返完整
+	m2 := NewSessionManagerWithStore(nil, nil, store)
+	reloaded, err := m2.loadSession(root)
+	if err != nil {
+		t.Fatalf("重启后读取会话失败: %v", err)
+	}
+	if len(reloaded.Ignored) != 1 || reloaded.Snapshot == nil || reloaded.Snapshot.GeneratedAtMs != 1000 {
+		t.Fatalf("重启后会话不符（轻字段已变、载荷完整）: ignored=%d snapshot=%+v", len(reloaded.Ignored), reloaded.Snapshot)
+	}
+
+	// 缓存未装填（逐出后）轻变异：不造无载荷条目，随后读走全量解码装填
+	m.evictSessionCache(normalizeLibraryRoot(root))
+	if _, err := m.mutateSessionEnvelope(root, func(sess *WorkbenchSession) error {
+		sess.Selection = []string{"d:甲"} // 值不经验证，只锚通路
+		return nil
+	}); err != nil {
+		t.Fatalf("缓存未装填时的信封级轻变异失败: %v", err)
+	}
+	warm, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("SessionOf 失败: %v", err)
+	}
+	if warm.Snapshot == nil {
+		t.Fatal("逐出后的重装填应为全量解码实例（含载荷），不得是无载荷轻条目")
+	}
+	if len(warm.Selection) != 1 {
+		t.Fatalf("重装填实例应携带信封级轻变异后的轻字段，实际 %v", warm.Selection)
+	}
+}
