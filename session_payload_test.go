@@ -20,8 +20,8 @@ import (
 )
 
 // countingSessionStore 带调用计数的内存会话存储（fakeSessionStore 外包一层）：
-// 记录 SetValue/DeleteValue 的逐键调用次数与 GetAllValues 调用数，供「轻保存
-// 不触分片」「索引路径不扫描」等断言。
+// 记录 SetValue/DeleteValue 的逐键调用次数与 GetAllValues/GetValue 调用数，供
+//「轻保存不触分片」「索引路径不扫描」「缓存命中零存储读」等断言。
 type countingSessionStore struct {
 	*fakeSessionStore
 
@@ -29,6 +29,7 @@ type countingSessionStore struct {
 	setValueHits map[string]int
 	deleteHits   map[string]int
 	getAllHits   int
+	getHits      int
 }
 
 func newCountingSessionStore() *countingSessionStore {
@@ -37,6 +38,20 @@ func newCountingSessionStore() *countingSessionStore {
 		setValueHits:     map[string]int{},
 		deleteHits:       map[string]int{},
 	}
+}
+
+// readHits 读侧（GetValue）累计调用数（含并发安全快照读取）。
+func (s *countingSessionStore) readHits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getHits
+}
+
+func (s *countingSessionStore) GetValue(key string) (*sdkdto.StorageValue, error) {
+	s.mu.Lock()
+	s.getHits++
+	s.mu.Unlock()
+	return s.fakeSessionStore.GetValue(key)
 }
 
 func (s *countingSessionStore) SetValue(key string, value string) error {

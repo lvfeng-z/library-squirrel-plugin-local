@@ -228,6 +228,18 @@ type SessionManager struct {
 	createCarryMu   sync.Mutex
 	stagedTaskNames map[string]string             // 库根 → 编排动作暂存的创建任务名原文
 	batchSummaries  map[string]createBatchSummary // 库根 → 过滤产出回写的批次摘要
+
+	// sessCacheMu 已解码会话缓存的叶锁：只保护 sessCache 映射与条目字段的
+	// 读写，持锁期间绝不调用其他会话方法（锁层级=单向嵌套 m.mu → sessCacheMu
+	// → 无：写路径 saveSession 在 m.mu 内更新缓存，读路径 cachedSession 只取
+	// sessCacheMu 不取 m.mu，workDomainOf 先释放 sessCacheMu 再取 domainMu，
+	// 无反向路径故无死锁）。
+	sessCacheMu sync.Mutex
+	// sessCache 归一化库根 → 已解码会话缓存条目（读路径共享只读实例；写路径
+	// 一致性铁律见 putSessionCache）。
+	sessCache map[string]*sessionCacheEntry
+	// sessCacheNow 时钟注入点（空闲 TTL 判定；单测覆写驱动过期，nil=time.Now）。
+	sessCacheNow func() time.Time
 }
 
 // NewSessionManager 创建会话管理器；ctx 为 nil 时可构造但读写报错（单测经
@@ -346,6 +358,7 @@ func (m *SessionManager) saveSession(sess *WorkbenchSession) error {
 	if err := m.ensureSessionIndexed(normalizeLibraryRoot(sess.RootPath)); err != nil {
 		m.warnf("会话索引登记失败（root=%s）: %v", normalizeLibraryRoot(sess.RootPath), err)
 	}
+	m.putSessionCache(sess) // 写路径一致性：保存成功即重建缓存项
 	return nil
 }
 
@@ -393,6 +406,7 @@ func (m *SessionManager) saveSessionFull(sess *WorkbenchSession) error {
 	if err := m.ensureSessionIndexed(norm); err != nil {
 		m.warnf("会话索引登记失败（root=%s）: %v", norm, err)
 	}
+	m.putSessionCache(sess) // 写路径一致性：保存成功即重建缓存项
 	return nil
 }
 
@@ -486,9 +500,169 @@ func (m *SessionManager) loadSessionFromEnvelope(root, key, raw string) (*Workbe
 	return &sess, nil
 }
 
-// SessionOf 按库根取会话。
+// —— 已解码会话缓存（读路径加速：getPanorama 每页不再全量重载快照）——
+//
+// 缓存内容=已解码 *WorkbenchSession（轻字段+Snapshot+LastDiff），键=归一化库根，
+// 进程内驻留。无缓存时每次读会话都走「逐片 store.GetValue + base64 + sha256 +
+// gunzip + 整包 JSON 反序列化」的全量重载——getPanorama files/domain 分节的全链
+// ~45-50 页每页重复付这笔全量成本（实测真实库 20.7 万文件的主要载入瓶颈之一）。
+//
+// 别名陷阱防线（方案 a：变异旁路）：缓存条目内的实例是**共享只读实例**——
+// SessionOf/cachedSession 与全部只读校验前置读用它；一切变异路径（mutateSession /
+// mutateSessionFull / ConsumeWorkbenchCreateMarker / runFullRecognition）走
+// loadSessionFresh 旁路（绕过缓存直读存储，返回私有实例；缓存失效由保存路径
+// putSessionCache 单点负责），绝不把缓存实例交给变异方。除「saveSession 成功时把已保存实例放入缓存」外，任何代码不得写缓存
+// 实例的字段（快照亦然——识别聚合对 prev 群成员有转置排序/markCommonElements
+// 的共享底层数组改写，故识别主体必须整段走旁路）。世代兜底：即使某条缓存项
+// 失效被漏检，getPanorama 的游标世代校验（Snapshot.GeneratedAtMs，见
+// decodePanoramaCursor）会让过期页以「世代变更，请整轮重拉」自曝，不会静默
+// 错答。
+//
+// 回收：空闲 TTL（sessionCacheTTL）+ 容量 LRU 上限（sessionCacheCapacity，
+// 防多库切换驻留堆积）；真实大库单会话解码态约数百 MB，TTL 过期后即不可达
+// 由 GC 回收。
+const (
+	// sessionCacheTTL 缓存条目空闲逐出时限（最近一次命中后未被读的时长）。
+	sessionCacheTTL = 10 * time.Minute
+	// sessionCacheCapacity 缓存库根数上限（LRU：超出逐出最久未用者）。
+	sessionCacheCapacity = 2
+)
+
+// sessionCacheEntry 单库根的缓存条目。
+type sessionCacheEntry struct {
+	// sess 共享只读会话实例（防线纪律见上：入缓存后任何路径不得再写字段）。
+	sess *WorkbenchSession
+	// domainMu 保护 domain 的惰性推导（推导 O(全库) 毫秒-秒级，不得持
+	// sessCacheMu 长跑）；domain 与 sess 同生命周期——缓存项被替换/逐出即
+	// 整体作废（世代与忽略集随 sess 一并失效）。
+	domainMu sync.Mutex
+	domain   *WorkDomain
+	// lastUsed 最近一次命中（或写入）时点，TTL 与 LRU 判定基准。
+	lastUsed time.Time
+}
+
+// cacheNow 缓存时钟（注入点；缺省墙钟）。
+func (m *SessionManager) cacheNow() time.Time {
+	if m.sessCacheNow != nil {
+		return m.sessCacheNow()
+	}
+	return time.Now()
+}
+
+// cachedSession 读路径取会话：缓存命中（未过 TTL）零存储读直接返回共享只读
+// 实例；未命中走 loadSession 全量解码后装填。并发未命中可各自解码、后写覆盖
+// 先写（两者均为当前存储真值，浪费一次解码但不损正确性）。
+func (m *SessionManager) cachedSession(root string) (*WorkbenchSession, error) {
+	norm := normalizeLibraryRoot(root)
+	now := m.cacheNow()
+	m.sessCacheMu.Lock()
+	if entry, ok := m.sessCache[norm]; ok {
+		if now.Sub(entry.lastUsed) < sessionCacheTTL {
+			entry.lastUsed = now
+			m.sessCacheMu.Unlock()
+			return entry.sess, nil
+		}
+		delete(m.sessCache, norm) // 空闲超时逐出
+	}
+	m.sessCacheMu.Unlock()
+
+	sess, err := m.loadSession(root) // 锁外解码：重载荷解压反序列化可秒级
+	if err != nil {
+		return nil, err
+	}
+	m.sessCacheMu.Lock()
+	if m.sessCache == nil {
+		m.sessCache = make(map[string]*sessionCacheEntry)
+	}
+	m.sessCache[norm] = &sessionCacheEntry{sess: sess, lastUsed: now}
+	m.trimSessionCacheLocked(now)
+	m.sessCacheMu.Unlock()
+	return sess, nil
+}
+
+// loadSessionFresh 变异旁路读：绕过缓存直读存储，返回**私有实例**——调用方可在
+// 其上原地改字段再经 saveSession/saveSessionFull 落库（落库成功由 putSessionCache
+// 重建缓存项），不会污染缓存共享实例。不做事前逐出：缓存失效由保存路径单点
+// 负责（变异失败不落库=存储与缓存均未变；变异成功=保存重建条目），事前逐出只会
+// 把变异窗口内的读者赶去存储侧，撞上全保存「新 meta 已写、旧批次分片正删」切换
+// 瞬态的既有竞态（窗口极窄、真实频率为每识别轮一次，维持原样不追修）。
+func (m *SessionManager) loadSessionFresh(root string) (*WorkbenchSession, error) {
+	return m.loadSession(root) // 私有实例（全量解码）；缓存交互只在保存侧
+}
+
+// evictSessionCache 逐出单库根缓存项（无项为幂等空转）。
+func (m *SessionManager) evictSessionCache(norm string) {
+	m.sessCacheMu.Lock()
+	delete(m.sessCache, norm)
+	m.sessCacheMu.Unlock()
+}
+
+// putSessionCache 保存成功后的缓存重建（写路径一致性铁律：saveSession/
+// saveSessionFull 每次成功必达此处——识别轮保存/赋值与解析动作保存/建会话全
+// 覆盖；ReplaceSession/DeleteSession 经 deleteSessionArtifactsLocked 的入口逐出
+// 覆盖）。存入的是刚落库的实例：调用方此后不得再改其字段（变异一律重走旁路）。
+func (m *SessionManager) putSessionCache(sess *WorkbenchSession) {
+	norm := normalizeLibraryRoot(sess.RootPath)
+	now := m.cacheNow()
+	m.sessCacheMu.Lock()
+	defer m.sessCacheMu.Unlock()
+	if m.sessCache == nil {
+		m.sessCache = make(map[string]*sessionCacheEntry)
+	}
+	m.sessCache[norm] = &sessionCacheEntry{sess: sess, lastUsed: now}
+	m.trimSessionCacheLocked(now)
+}
+
+// trimSessionCacheLocked 缓存修剪（调用方须持 sessCacheMu）：先逐空闲超时项，
+// 再按 LRU（lastUsed 最旧者）收到容量上限。
+func (m *SessionManager) trimSessionCacheLocked(now time.Time) {
+	for key, entry := range m.sessCache {
+		if now.Sub(entry.lastUsed) >= sessionCacheTTL {
+			delete(m.sessCache, key)
+		}
+	}
+	for len(m.sessCache) > sessionCacheCapacity {
+		oldestKey, oldest, first := "", time.Time{}, true
+		for key, entry := range m.sessCache {
+			if first || entry.lastUsed.Before(oldest) {
+				oldestKey, oldest, first = key, entry.lastUsed, false
+			}
+		}
+		delete(m.sessCache, oldestKey)
+	}
+}
+
+// workDomainOf 选择域求值：会话是缓存共享实例时复用条目内的惰性推导结果
+//（推导 O(全库)——getPanorama domain 分节全链逐页共摊一次），否则（变异旁路
+// 私有实例/测试直驱会话）现推导。返回值按只读消费。
+func (m *SessionManager) workDomainOf(sess *WorkbenchSession) *WorkDomain {
+	if entry := m.cachedEntryOf(sess); entry != nil {
+		entry.domainMu.Lock()
+		defer entry.domainMu.Unlock()
+		if entry.domain == nil {
+			entry.domain = DeriveWorkDomain(entry.sess.Snapshot, ignoredSetOf(entry.sess))
+		}
+		return entry.domain
+	}
+	return DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess))
+}
+
+// cachedEntryOf 会话对应的缓存条目（仅当指针同一于缓存共享实例时命中——
+// 私有实例不入缓存，恒 miss）。
+func (m *SessionManager) cachedEntryOf(sess *WorkbenchSession) *sessionCacheEntry {
+	m.sessCacheMu.Lock()
+	defer m.sessCacheMu.Unlock()
+	entry := m.sessCache[normalizeLibraryRoot(sess.RootPath)]
+	if entry == nil || entry.sess != sess {
+		return nil
+	}
+	return entry
+}
+
+// SessionOf 按库根取会话（读路径：进程内缓存命中零存储读；返回共享只读实例，
+// 调用方不得原地改其字段——变异走 mutateSession 族）。
 func (m *SessionManager) SessionOf(root string) (*WorkbenchSession, error) {
-	return m.loadSession(root)
+	return m.cachedSession(root)
 }
 
 // CreateSession 建立会话（同库根至多一活动会话：已有会话时返回
@@ -501,7 +675,7 @@ func (m *SessionManager) CreateSession(root string) (*WorkbenchSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if existing, err := m.loadSession(root); err == nil {
+	if existing, err := m.cachedSession(root); err == nil { // 只读存在性校验：缓存读路径
 		_ = existing
 		return nil, ErrWorkbenchSessionExists
 	} else if !errors.Is(err, ErrWorkbenchSessionNotFound) {
@@ -549,9 +723,12 @@ func (m *SessionManager) DeleteSession(root string) error {
 	return nil
 }
 
-// deleteSessionArtifactsLocked 删除会话全部工件（调用方须持 mu）。
+// deleteSessionArtifactsLocked 删除会话全部工件（调用方须持 mu）。入口先逐出
+// 缓存项——工件一旦开删，缓存实例与存储真值可能分叉（分片删除失败仅告警的
+// 半删态），不再可服务。
 func (m *SessionManager) deleteSessionArtifactsLocked(root string) error {
 	norm := normalizeLibraryRoot(root)
+	m.evictSessionCache(norm)
 	env, _, err := m.readSessionEnvelope(root)
 	if err != nil {
 		return fmt.Errorf("读取旧会话（键 %q）失败: %w", workbenchSessionKey(root), err)
@@ -697,7 +874,7 @@ func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, Profil
 func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sess, err := m.loadSession(root)
+	sess, err := m.loadSessionFresh(root) // 变异旁路：私有实例，缓存不外泄
 	if err != nil {
 		return nil, err
 	}
@@ -718,7 +895,7 @@ func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSessio
 func (m *SessionManager) mutateSessionFull(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sess, err := m.loadSession(root)
+	sess, err := m.loadSessionFresh(root) // 变异旁路：私有实例，缓存不外泄
 	if err != nil {
 		return nil, err
 	}
@@ -791,7 +968,7 @@ func (m *SessionManager) BeginWorkbenchCreate(root string) error {
 func (m *SessionManager) ConsumeWorkbenchCreateMarker(root string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	sess, err := m.loadSession(root)
+	sess, err := m.loadSessionFresh(root) // 变异旁路：私有实例，缓存不外泄
 	if err != nil || !sess.PendingWorkbenchCreate {
 		return false
 	}
@@ -910,7 +1087,7 @@ func (m *SessionManager) ConfirmWorkSetCandidate(root, target, setName string, e
 	if target == "" || setName == "" {
 		return nil, 0, errors.New("候选目标键与确认集名均不可为空")
 	}
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, 0, err
 	}
@@ -973,7 +1150,7 @@ func (m *SessionManager) UnconfirmWorkSetCandidate(root, target string) (*Workbe
 	if target == "" {
 		return nil, 0, errors.New("候选目标键为空，无法撤销归集")
 	}
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1703,25 +1880,46 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 		page.shrink = apply
 		return page, nil
 	case panoramaSectionFiles:
-		view := panoramaViewOf(sess.Snapshot)
-		if offset > len(view.Files) {
+		// 按页投影：不再全量投影 20 万级文件再切片——仅对打包扫描与出页涉及的
+		// 页内条目逐条展开结构线索（投影函数与全量投影 panoramaViewOf 的逐文件
+		// 投影同一实现，内容逐条等价，语义守卫=既有「逐页拼接与全量投影逐条
+		// 全等」测试）。projected 按相对页内下标惰性装填：估算与出页共用一次
+		// 投影（估算须计投影展开的线索字节，且收缩硬门 shrink 只取前缀不重投）。
+		snap := sess.Snapshot
+		if offset > len(snap.Files) {
 			return nil, errPanoramaCursorInvalid
 		}
-		files := view.Files
-		end := panoramaPackEnd(func(i int) int { return snapFileWireBytes(files[i]) }, offset, len(files), maxEntries)
+		projected := make([]SnapFile, 0, 64)
+		projectAt := func(i int) SnapFile {
+			f := snap.Files[i]
+			f.StructClues = StructCluesOf(snap.RootPath, f.RelPath, f.FileName)
+			return f
+		}
+		end := panoramaPackEnd(func(i int) int {
+			for len(projected) <= i-offset {
+				projected = append(projected, projectAt(offset+len(projected)))
+			}
+			return snapFileWireBytes(projected[i-offset])
+		}, offset, len(snap.Files), maxEntries)
 		page := &panoramaSectionPage{}
 		apply := func(e int) {
-			page.panorama = &RecognitionSnapshot{
-				SchemaVersion: view.SchemaVersion, GeneratedAtMs: view.GeneratedAtMs,
-				Files: files[offset:e],
+			files := snap.Files[offset:e] // 切片边界形态与旧实现同源（nil 语义保持）
+			if len(files) > 0 {
+				files = projected[:len(files)]
 			}
-			page.receipt = panoramaReceipt(panoramaSectionFiles, generation, offset, e, len(files))
+			page.panorama = &RecognitionSnapshot{
+				SchemaVersion: snap.SchemaVersion, GeneratedAtMs: snap.GeneratedAtMs,
+				Files: files,
+			}
+			page.receipt = panoramaReceipt(panoramaSectionFiles, generation, offset, e, len(snap.Files))
 		}
 		apply(end)
 		page.shrink = apply
 		return page, nil
 	default:
-		domain := domainViewOf(DeriveWorkDomain(sess.Snapshot, ignoredSetOf(sess)))
+		// 选择域推导 O(全库)：会话为缓存共享实例时经 workDomainOf 复用条目内
+		// 的惰性推导结果（全链逐页共摊一次，与快照同生命周期失效）。
+		domain := domainViewOf(m.workDomainOf(sess))
 		nWorks := len(domain.Works)
 		total := nWorks + len(domain.Sets)
 		if offset > total {
@@ -2046,13 +2244,15 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
-		if sess.LastDiff == nil {
-			// 未重识别过（首轮识别后无差异上下文）：空差异集（非 nil 序列化契约）
-			sess.LastDiff = &SnapDiff{
+		diff := sess.LastDiff
+		if diff == nil {
+			// 未重识别过（首轮识别后无差异上下文）：空差异集（非 nil 序列化契约）；
+			// 取局部变量不改会话——sess 为缓存共享只读实例，原地写会污染缓存
+			diff = &SnapDiff{
 				Changed: []SnapDiffEntry{}, Added: []SnapDiffEntry{}, Removed: []SnapDiffEntry{},
 			}
 		}
-		resp.Diff = sess.LastDiff
+		resp.Diff = diff
 	case workbenchActionSetSelection:
 		sess, err := m.SetSelection(req.Root, req.Works)
 		if err != nil {

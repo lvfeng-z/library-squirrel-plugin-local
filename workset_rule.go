@@ -411,7 +411,7 @@ func deriveWorkSetDirDraft(snap *RecognitionSnapshot, ws *workSetContext) (workS
 // 「泛化成规则」置灰、「调整规则」仍可用）；target 缺席已归集
 // （剧本步5c）回错误。
 func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleSuggestion, error) {
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读推导前置读：共享只读实例
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +489,7 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 // 同一判定）→ generalize 档案写单点入档 → 集成员作用域赋值标记（赋值保留
 // 双源互证）→ 验证轮排定。
 func (m *SessionManager) ApplyWorkSetRuleGeneralize(root, target string) (*GenerationResult, error) {
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读推导前置读：共享只读实例
 	if err != nil {
 		return nil, err
 	}
@@ -518,7 +518,7 @@ func (m *SessionManager) commitWorkSetRules(root string, ws *workSetContext, sna
 	}
 	// 同系旧族：会话谱系簿记里该 target 上一代入档的规则 ID。
 	var superseded []string
-	if sess, err := m.loadSession(root); err == nil {
+	if sess, err := m.cachedSession(root); err == nil { // 只读簿记读：共享只读实例
 		superseded = sess.WorkSetRuleLineage[ws.cand.target()]
 	}
 	if err := m.UpdateProfile(ArchiveWriteGeneralize, func(p *RuleProfile) error {
@@ -911,7 +911,7 @@ type setRuleDimAssign struct {
 // 目录锚定=捕获规则模式 And 目录层锚 / 序号段=数字类消费）→ 全员自检 →
 // 入档+消费+验证轮（效果与泛化入档相同）。
 func (m *SessionManager) ApplyWorkSetRuleAdjust(root, target string, in setRuleAdjustInput) (*GenerationResult, error) {
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读推导前置读：共享只读实例
 	if err != nil {
 		return nil, err
 	}

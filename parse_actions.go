@@ -168,7 +168,7 @@ func mergeDirAssignment(current, overlay SessionAssignment) SessionAssignment {
 // 出处引用对子树所有文件有效），单锁单次落库后经识别刷新调度排定一轮重识别。
 // 返回会话与生效文件数（子树文件数）。
 func (m *SessionManager) ApplyDirAssignment(root, dirRelKey string, overlay SessionAssignment) (*WorkbenchSession, int, error) {
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, 0, err
 	}
@@ -209,7 +209,7 @@ func (m *SessionManager) ApplyDirAssignment(root, dirRelKey string, overlay Sess
 // ClearDirAssignments 清除目录动作：删除 dirRelKey 子树内全部文件的赋值（含
 // 已泛化标记），排自动增量重识别。返回会话与清除数。
 func (m *SessionManager) ClearDirAssignments(root, dirRelKey string) (*WorkbenchSession, int, error) {
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, 0, err
 	}
@@ -270,7 +270,7 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 	}
 	relPath = filepath.ToSlash(relPath)
 
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, err
 	}
@@ -781,7 +781,7 @@ type adjudicationInput struct {
 func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDimension, in adjudicationInput) (*GenerationResult, error) {
 	relPath = filepath.ToSlash(relPath)
 
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, err
 	}

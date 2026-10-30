@@ -2113,7 +2113,7 @@ func (m *SessionManager) publishRecognitionEvent(evt *workbenchFrontendEvent) {
 // running=true）；会话不存在时返回错误。干跑完成经 recognitionDone 事件通知，
 // 快照与状态迁移由干跑主体完成。
 func (m *SessionManager) StartRecognition(root string) (started, running bool, err error) {
-	if _, err := m.loadSession(root); err != nil {
+	if _, err := m.cachedSession(root); err != nil { // 只读存在性校验：缓存读路径
 		return false, false, err
 	}
 	m.recogMu.Lock()
@@ -2150,7 +2150,11 @@ func (m *SessionManager) StartRecognition(root string) (started, running bool, e
 // 增量资格：上次快照在场且其档案指纹与当前一致——档案外部变更或首次识别一律
 // 全量重算；赋值文件所在目录即使 mtime 未变也强制重算（赋值按维度覆盖结论）。
 func (m *SessionManager) runFullRecognition(root string) error {
-	sess, err := m.loadSession(root)
+	// 变异旁路读：识别主体持有会话跨整轮（分钟级），且聚合阶段对 prev 快照的
+	// 复用群成员有共享底层数组的转置排序与元素终判改写（aggregatePanorama 的
+	// sort.SliceStable/markCommonElements）——必须私有实例，缓存共享实例不得
+	// 进入本通路。
+	sess, err := m.loadSessionFresh(root)
 	if err != nil {
 		return err
 	}

@@ -141,7 +141,7 @@ func (m *SessionManager) previewRuleConclusions(root string, ruleJSON []byte) ([
 	if err != nil {
 		return nil, nil, err
 	}
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读求值前置读：共享只读实例
 	if err != nil {
 		if errors.Is(err, ErrWorkbenchSessionNotFound) {
 			return nil, nil, ErrPreviewRuleNoSnapshot

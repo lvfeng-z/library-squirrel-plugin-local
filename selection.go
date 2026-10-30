@@ -289,7 +289,7 @@ func dirMeaningChains(snap *RecognitionSnapshot) map[string][]PathMeaning {
 // 可选（未识别/含待裁决的作品不可选），键去重后按稳定序落库。作品为原子——
 // 本接口只接受作品键，目录聚合作品的轨道不可单独进出选择集。
 func (m *SessionManager) SetSelection(root string, workIDs []string) (*WorkbenchSession, error) {
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +616,7 @@ func (m *SessionManager) ApplyCreateTasks(root, taskName string) (bool, error) {
 		endCreateRun(root)
 		return false, err
 	}
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读守卫链前置读：共享只读实例
 	if err != nil {
 		return fail(err)
 	}

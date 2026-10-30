@@ -782,7 +782,7 @@ func (m *SessionManager) ApplyDirStructSummary(root, dirRelKey string) (*RuleSug
 func (m *SessionManager) applyStructSummary(root, relPath, dirRelKey string) (*RuleSuggestion, error) {
 	relPath = filepath.ToSlash(relPath)
 	dirAddressed := relPath == ""
-	sess, err := m.loadSession(root)
+	sess, err := m.cachedSession(root) // 只读求值前置读：共享只读实例
 	if err != nil {
 		return nil, err
 	}
