@@ -186,9 +186,11 @@
               <!-- 平铺模式（虚拟滚动切片渲染；滚动承载=el-scrollbar 宿主样式条，高度由卡内
                     flex 链分配，切片窗口随 wrap 实测高度持续同步；模式切换时过滤与选择集保持）。
                     2026-10-27 滚轮缺陷修复：虚拟化改为「头/尾静态占位条夹切片行」，行回归常规流
-                    （原绝对定位+translateY 会被 WebView2 合成器滚轮命中链切断，滚轮失效） -->
+                    （原绝对定位+translateY 会被 WebView2 合成器滚轮命中链切断，滚轮失效）。
+                     三标签体（平铺/树/卡墙）v-if 惰性挂载：未打开标签零 DOM 零布局；
+                     重挂=全新滚动体，切片基准 scrollTop 与卡墙渲染上限随重挂重置（见 script） -->
               <el-scrollbar
-                v-show="listMode === 'flat'"
+                v-if="listMode === 'flat'"
                 ref="listViewport"
                 class="li-ws-list"
                 @scroll="onListScroll"
@@ -233,7 +235,7 @@
                    目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录解析面板）
                    + 文件数 + 含义覆盖标记；
                    文件行 = 行首作品级复选（勾选/禁用语义同平铺，目录行全选/半选态由选择集派生）+ 平铺同款元数据，点行 = 现有联动 -->
-              <el-scrollbar v-show="listMode === 'tree'" ref="treeViewport" class="li-ws-tree">
+              <el-scrollbar v-if="listMode === 'tree'" ref="treeViewport" class="li-ws-tree">
                 <template v-for="row in treeRows" :key="row.key">
                   <div v-if="row.kind === 'dir' && row.dir" class="li-ws-tree-dir" :style="{ paddingLeft: `${row.depth * 16 + 4}px` }">
                     <button
@@ -295,7 +297,7 @@
                    作品号命中→归入既有集）；成员文件名序列块底色（区间=后端形态表单一事实源）；
                    两段式归集（预填可改）；已归集/已忽略收纳分组（会话内，忽略可恢复）；
                    确认走集维度批量赋值+既有建议卡通路 -->
-              <el-scrollbar v-show="listMode === 'sets'" class="li-ws-sets">
+              <el-scrollbar v-if="listMode === 'sets'" class="li-ws-sets">
                 <div class="li-ws-sets-inner">
                 <!-- 已识别候选过滤条已上移工具栏位（2026-10-27 重整：口径=候选成员
                      全部已带集维度最终结论〔规则识别或赋值存档〕=已被识别为作品集） -->
@@ -304,7 +306,7 @@
                   class="li-ws-empty"
                 >无疑似作品集候选{{ hideIdentifiedCandidates && identifiedCandidateCount ? `（已隐藏已识别 ${identifiedCandidateCount} 条）` : '' }}</p>
                 <div
-                  v-for="c in visibleCandidates"
+                  v-for="c in renderedCandidates"
                   :key="candKey(c)"
                   class="li-ws-cand"
                   :class="{ 'is-confirming': confirming === candTarget(c) }"
@@ -319,17 +321,17 @@
                   <p v-if="c.reason" class="li-ws-cand-reason">{{ c.reason }}</p>
                   <div class="li-ws-cand-members">
                     <span
-                      v-for="m in c.members"
-                      :key="m.relPath"
+                      v-for="mv in candMembers(c)"
+                      :key="mv.m.relPath"
                       class="li-ws-cand-member"
-                      :class="{ 'is-selected': m.relPath === selectedRelPath }"
-                      :title="m.relPath"
-                      @click="selectFile(m.relPath)"
-                    ><template v-if="m.seqText"><span class="li-ws-seg-seq">#{{ m.seqText }} </span></template><span
-                        v-for="(s, si) in elSpans(fileNameOf(m.relPath), m.elements).spans"
+                      :class="{ 'is-selected': mv.m.relPath === selectedRelPath }"
+                      :title="mv.m.relPath"
+                      @click="selectFile(mv.m.relPath)"
+                    ><template v-if="mv.m.seqText"><span class="li-ws-seg-seq">#{{ mv.m.seqText }} </span></template><span
+                        v-for="(s, si) in mv.parts.spans"
                         :key="si"
                         :class="s.kind ? `li-ws-seg-${s.kind}` : ''"
-                      >{{ s.text }}</span><span class="li-ws-cand-ext">{{ elSpans(fileNameOf(m.relPath), m.elements).ext }}</span></span>
+                      >{{ s.text }}</span><span class="li-ws-cand-ext">{{ mv.parts.ext }}</span></span>
                   </div>
                   <div v-if="confirming === candTarget(c)" class="li-ws-cand-confirm">
                     <span class="li-ws-cand-namewrap">
@@ -358,6 +360,15 @@
                     <button type="button" class="li-ws-filter-btn" :disabled="candBusy" @click="ignoreCandidate(c)">忽略</button>
                   </div>
                 </div>
+                <!-- 增量渲染哨兵（性能修复）：候选卡墙 v-for 只渲染前缀切片
+                     （renderedCandidates），本哨兵由 IntersectionObserver 盯守（含 400px
+                     预取带），触底自动追加一批；清单见底即撤哨。空态判据仍用
+                     visibleCandidates 全量清单，语义不变 -->
+                <div
+                  v-if="renderedCandidates.length < visibleCandidates.length"
+                  ref="cardsSentinel"
+                  class="li-ws-cands-more"
+                >已显示 {{ renderedCandidates.length }}/{{ visibleCandidates.length }} 条候选，滚动载入更多…</div>
                 <!-- 收纳分组：已归集（与待归集卡同构〔剧本1〕：键名=所在目录的目录解析
                      面板入口、成员文件名块联动右栏；右上「撤销归集」〔剧本2〕；确认集名随卡回带） -->
                 <div v-if="(snapshot.confirmedCandidates || []).length" class="li-ws-cand-bin">
@@ -400,17 +411,17 @@
                       </div>
                       <div class="li-ws-cand-members">
                         <span
-                          v-for="m in c.members"
-                          :key="m.relPath"
+                          v-for="mv in candMembers(c)"
+                          :key="mv.m.relPath"
                           class="li-ws-cand-member"
-                          :class="{ 'is-selected': m.relPath === selectedRelPath }"
-                          :title="m.relPath"
-                          @click="selectFile(m.relPath)"
-                        ><template v-if="m.seqText"><span class="li-ws-seg-seq">#{{ m.seqText }} </span></template><span
-                          v-for="(s, si) in elSpans(fileNameOf(m.relPath), m.elements).spans"
+                          :class="{ 'is-selected': mv.m.relPath === selectedRelPath }"
+                          :title="mv.m.relPath"
+                          @click="selectFile(mv.m.relPath)"
+                        ><template v-if="mv.m.seqText"><span class="li-ws-seg-seq">#{{ mv.m.seqText }} </span></template><span
+                          v-for="(s, si) in mv.parts.spans"
                           :key="si"
                           :class="s.kind ? `li-ws-seg-${s.kind}` : ''"
-                        >{{ s.text }}</span><span class="li-ws-cand-ext">{{ elSpans(fileNameOf(m.relPath), m.elements).ext }}</span></span>
+                        >{{ s.text }}</span><span class="li-ws-cand-ext">{{ mv.parts.ext }}</span></span>
                       </div>
                     </div>
                   </div>
@@ -1025,6 +1036,16 @@ function candidateIdentified(c: SnapCandidate): boolean {
 const identifiedCandidateCount = computed(() => candidates.value.filter(candidateIdentified).length)
 const visibleCandidates = computed(() =>
   hideIdentifiedCandidates.value ? candidates.value.filter(c => !candidateIdentified(c)) : candidates.value)
+// —— 卡墙增量分批渲染（性能修复）：真实库候选量 ~2.8 万卡，一次性 v-for 全量
+// 渲染=百万级 DOM 节点（切标签 display 翻转整片 layout/paint ~10 秒；翻「隐藏
+// 已识别」跳全量瞬间建卡曾致 WebView2 渲染进程 OOM 崩溃重启）。v-for 改遍历
+// visibleCandidates 的前缀切片（renderedCandidates），卡墙尾部哨兵元素（模板
+// ref cardsSentinel）由 IntersectionObserver 盯守触底自动追加一批；底层清单
+// 变更（隐藏开关翻转/快照刷新）与离开卡墙标签时上限重置回首批，从 100 张
+// 起步随滚动续批（接线见 bindCardsIO 一节） ——
+const CARD_BATCH = 100
+const cardRenderLimit = ref(CARD_BATCH)
+const renderedCandidates = computed(() => visibleCandidates.value.slice(0, cardRenderLimit.value))
 const confirming = ref('')
 const confirmName = ref('')
 const candBusy = ref(false)
@@ -1051,6 +1072,25 @@ const elSpans = (fileName: string, els?: SnapEl[]): { spans: { text: string; kin
     if (base) spans.push({ text: base })
   }
   return { spans, ext }
+}
+// elSpans 单次计算（性能修复）：模板原先每成员两处绑定（.spans 与 .ext）各调
+// 一次 elSpans（成员级 ×2 切分与数组分配放大）。改为按候选对象弱缓存整卡成员
+// 预装配视图 { m, parts }——elSpans 每成员只算一次，同候选重复渲染（确认态
+// 翻转/滚动续批重排）零重算；候选对象随快照整体更换，弱键条目自动回收不泄漏
+// （快照成员数据不可变，缓存安全）。渲染输出与原模板逐字等价（#seqText 前缀、
+// 形态块 class、扩展名尾巴全保持）
+interface CandMemberView {
+  m: SnapCandMember
+  parts: { spans: { text: string; kind?: string }[]; ext: string }
+}
+const candMemberViews = new WeakMap<SnapCandidate, CandMemberView[]>()
+const candMembers = (c: SnapCandidate): CandMemberView[] => {
+  let views = candMemberViews.get(c)
+  if (!views) {
+    views = c.members.map(m => ({ m, parts: elSpans(fileNameOf(m.relPath), m.elements) }))
+    candMemberViews.set(c, views)
+  }
+  return views
 }
 // 剧本步2′：确认区元素插入池（决策2 A=键元素+目录名元素，后端 keyElements）；
 // 括号组元素双态成对出 chip（带壳 `[Isel]` / 剥壳 `Isel`），点击插入集名输入框
@@ -1930,7 +1970,10 @@ function jumpToPendingFile(relPath: string): void {
     })
   } else {
     selectFile(relPath)
-    void nextTick(() => scrollSelectedIntoView())
+    // v-if 惰性挂载：自卡墙切到平铺后 el-scrollbar 与其内部 wrapRef 需经挂载
+    // 补齐（内部结构跨组件层级，双 nextTick 确保滚动 ref 就绪再定位；平铺本就
+    // 打开时多等一拍无可感差异）
+    void nextTick(() => void nextTick(() => scrollSelectedIntoView()))
   }
 }
 
@@ -2577,10 +2620,66 @@ function bindViewportRO(): void {
   viewportRO.observe(wrap)
 }
 
-// 快照晚到（挂载后才识别）时清单滚动体才出现，经模板 ref 变化接入观察
+// 快照晚到（挂载后才识别）/ 标签体 v-if 惰性挂载时清单滚动体才出现，经模板
+// ref 变化接入观察。v-if 重挂=全新滚动体（实际滚动位归零），切片窗口基准
+// scrollTop 同步归零，防残留值与新 DOM 滚动位错位（切走再切回见空白墙）
 watch(listViewport, (inst) => {
   if (!inst) return
+  scrollTop.value = 0
   void nextTick(bindViewportRO)
+})
+
+// —— 卡墙增量渲染哨兵接线（IntersectionObserver；哨兵随卡墙标签 v-if 挂载/卸载，
+//    组件整体卸载由 onUnmounted 统一断线） —— //
+
+let cardsIO: IntersectionObserver | null = null
+const cardsSentinel = ref<HTMLElement | null>(null)
+
+// 重新挂起观察=按当前相交状态重发回调：用于①触底追加一批后哨兵仍在视口内
+// （一批不足以填屏）时继续追加，②底层清单重置上限后哨兵本就可见时立即续批
+// （IntersectionObserver 只在相交态变化时回调，静默 re-observe 迫使其重估）
+function rearmCardsIO(): void {
+  const node = cardsSentinel.value
+  if (!node || !cardsIO) return
+  cardsIO.unobserve(node)
+  cardsIO.observe(node)
+}
+
+function bindCardsIO(): void {
+  const el = cardsSentinel.value
+  if (!el) return
+  if (cardsIO) cardsIO.disconnect()
+  // 默认根（视口）+400px 预取带：哨兵接近可视区即续批，滚动衔接无停顿
+  cardsIO = new IntersectionObserver((entries) => {
+    if (!entries.some((e) => e.isIntersecting)) return
+    if (cardRenderLimit.value >= visibleCandidates.value.length) return
+    cardRenderLimit.value += CARD_BATCH
+    rearmCardsIO()
+  }, { rootMargin: '400px' })
+  cardsIO.observe(el)
+}
+
+// 哨兵挂载（卡墙标签打开且候选未渲染完）→ 接线；卸载（见底撤哨/离开卡墙）→ 断线
+watch(cardsSentinel, (el) => {
+  if (el) {
+    void nextTick(bindCardsIO)
+  } else if (cardsIO) {
+    cardsIO.disconnect()
+    cardsIO = null
+  }
+})
+
+// 底层清单变更（「隐藏已识别」翻转/快照刷新重灌候选）：上限重置回首批，防翻
+// 全量瞬间再炸；哨兵若仍在视口（或重置后被推回可视区）经 rearm 立即续批
+watch(visibleCandidates, () => {
+  cardRenderLimit.value = CARD_BATCH
+  rearmCardsIO()
+})
+
+// 离开卡墙标签：v-if 卸载整墙 DOM（滚动位随之丢失），上限同步重置回首批，
+// 重进从 100 张起步（与滚动归零一致，防重进瞬间重建巨量卡片）
+watch(listMode, (mode) => {
+  if (mode !== 'sets') cardRenderLimit.value = CARD_BATCH
 })
 
 onMounted(async () => {
@@ -2606,6 +2705,7 @@ onUnmounted(() => {
   if (offEvent) offEvent()
   // 断开观察与监听，防卸载后回调触达已失效节点
   viewportRO?.disconnect()
+  cardsIO?.disconnect()
   document.removeEventListener('selectionchange', onNameSelChange)
   for (const t of ['click', 'keyup', 'select', 'input'] as const) {
     document.removeEventListener(t, onNameSelDelegate, true)
@@ -3209,6 +3309,14 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 10px;
   padding: 8px 10px;
+}
+
+/* 增量渲染哨兵（触底续批提示行；见底撤哨不占位） */
+.li-ws-cands-more {
+  padding: 2px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--app-text-secondary);
 }
 
 
