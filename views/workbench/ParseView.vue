@@ -2091,24 +2091,62 @@ function onAuthorPick(): void {
 const worksUnderDirTree = (relKey: string): SelectableWorkView[] =>
   allWorks.value.filter((w) => relKey === '' || w.dirRelKey === relKey || w.dirRelKey.startsWith(relKey + '/'))
 
-const selectedCountOf = (works: SelectableWorkView[]): number => works.filter((w) => selectedWorks.value.has(w.workId)).length
-const selectableCountOf = (works: SelectableWorkView[]): number => works.filter((w) => w.selectable).length
+// 三态聚合映射：单遍遍历全部作品，把 {selected, selectable, total} 计数累加到各作品
+// dirRelKey 及其全部祖先前缀键（含库根 ''）——前缀语义与 worksUnderDirTree 逐字等价
+// （relKey==='' 匹配全部作品 / dirRelKey 等值 / startsWith(relKey+'/') 即祖先链逐级）。
+// 仅依赖 allWorks 与 selectedWorks（写点全部为 Set 整体替换，无原地变异），载入完成
+// 或选择集变更时重算一次。旧三函数每次渲染逐行各跑一遍全库 filter（可见目录行 ×3 次
+// O(作品数) 扫描，真实库 4,528 作品展开一次 ≈ 2 亿次比对），现改 O(1) 查表
+interface DirTreeAgg {
+  selected: number
+  selectable: number
+  total: number
+}
 
+const dirTreeAgg = computed<Map<string, DirTreeAgg>>(() => {
+  const agg = new Map<string, DirTreeAgg>()
+  const bucketOf = (key: string): DirTreeAgg => {
+    let b = agg.get(key)
+    if (!b) {
+      b = { selected: 0, selectable: 0, total: 0 }
+      agg.set(key, b)
+    }
+    return b
+  }
+  for (const w of allWorks.value) {
+    const selected = selectedWorks.value.has(w.workId)
+    const selectable = w.selectable
+    const count = (key: string): void => {
+      const b = bucketOf(key)
+      if (selected) b.selected++
+      if (selectable) b.selectable++
+      b.total++
+    }
+    let key = w.dirRelKey
+    while (key) {
+      count(key)
+      const cut = key.lastIndexOf('/')
+      key = cut >= 0 ? key.slice(0, cut) : ''
+    }
+    count('') // 库根聚合全部作品（worksUnderDirTree 的 relKey==='' 分支）
+  }
+  return agg
+})
+
+// 未命中键（空子树/防御）→ 全零三态：checked/indeterminate false、文案 0/0，与空子树现状一致
 const dirTreeChecked = (relKey: string): boolean => {
-  const works = worksUnderDirTree(relKey)
-  const selectable = selectableCountOf(works)
-  return selectable > 0 && selectedCountOf(works) === selectable
+  const b = dirTreeAgg.value.get(relKey)
+  return !!b && b.selectable > 0 && b.selected === b.selectable
 }
 
 const dirTreeIndeterminate = (relKey: string): boolean => {
-  const works = worksUnderDirTree(relKey)
-  const count = selectedCountOf(works)
-  return count > 0 && count < selectableCountOf(works)
+  const b = dirTreeAgg.value.get(relKey)
+  return !!b && b.selected > 0 && b.selected < b.selectable
 }
 
 const dirTreeSelectedText = (relKey: string): string => {
-  const works = worksUnderDirTree(relKey)
-  return `${selectedCountOf(works)}/${works.length}`
+  const b = dirTreeAgg.value.get(relKey)
+  return `${b ? b.selected : 0}/${b ? b.total : 0}`
 }
 
 function setDirTreeSelected(relKey: string, on: boolean): void {
