@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1320,8 +1321,9 @@ func TestPredicateConsistencyAcrossDryRunCreateAndRecompute(t *testing.T) {
 // —— 前端动作分派：setSelection / createTasks —— //
 
 // TestWorkbenchSelectionActionsDispatch 前端事件协议的选择族动作分派：
-// setSelection 落库并回告决策态；createTasks 携可选 taskName 走异步编排——
-// 立即应答 started=true（应答态决策态仍携带在选集，创建挂在桩闸上），终态经
+// setSelection 落库并回告选择集轻量回执（decisions 全量投影已从变更类动作
+// 应答剥离——大载荷断路器收口）；createTasks 携可选 taskName 走异步编排——
+// 立即应答 started=true（轻量回执仍携带在选集，创建挂在桩闸上），终态经
 // createDone 事件（任务名生效、选择集随成功清空）；未知动作回告错误。
 func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, nil)
@@ -1332,8 +1334,8 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 
 	m.HandleFrontendRequest([]byte(`{"seq":41,"action":"setSelection","root":` + jsonQuote(root) + `,"works":["d:多轨","d:已识别"]}`))
 	resp := ctx.lastResponse(t)
-	if !resp.OK || resp.Decisions == nil || len(resp.Decisions.Selection) != 2 {
-		t.Fatalf("setSelection 应回告已落库决策态，实际 %+v", resp)
+	if !resp.OK || resp.Decisions != nil || len(resp.Selection) != 2 {
+		t.Fatalf("setSelection 应回告选择集轻量回执（decisions 应剥离），实际 %+v", resp)
 	}
 
 	m.HandleFrontendRequest([]byte(`{"seq":42,"action":"createTasks","root":` + jsonQuote(root) + `,"taskName":"命名批次"}`))
@@ -1341,9 +1343,9 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 	if !resp.OK || !resp.Started {
 		t.Fatalf("createTasks 应回告已开始创建（started），实际 %+v", resp)
 	}
-	// 立即应答时创建在途：决策态的选择集仍在场（清空随 createDone 成功态发生）
-	if resp.Decisions == nil || len(resp.Decisions.Selection) != 2 {
-		t.Fatalf("createTasks 立即应答应携带在途决策态（选择集未清），实际 %+v", resp.Decisions)
+	// 立即应答时创建在途：轻量回执的选择集仍在场（清空随 createDone 成功态发生）
+	if resp.Decisions != nil || len(resp.Selection) != 2 {
+		t.Fatalf("createTasks 立即应答应携带在途选择集轻量回执，实际 selection=%v", resp.Selection)
 	}
 
 	// 放行桩闸 → 创建收尾：createDone 成功携带生效任务名，选择集随之清空
@@ -1367,6 +1369,101 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 	if resp.OK || !strings.Contains(resp.Error, "不可选") {
 		t.Fatalf("不可选作品的 setSelection 应回告错误，实际 %+v", resp)
 	}
+}
+
+// TestWorkbenchSelectionActionReplyBound 选择族动作应答尺寸界（延伸收口）：
+// 用户真实环境 decisions 67MB 级（长期目录赋值逐文件合并累计，2026-10-31
+// 实测 67,321,044 字节）下，变更类动作应答曾整答全量决策态——动作已生效而
+// 应答撞 64MB gRPC 断路器丢失、UI 误报失败。收口后断言：67MB 级 decisions
+// 夹具下 setSelection/createTasks 立即应答 json.Marshal 实测 ≤ 软界
+// panoramaPageSoftBytes、Decisions 恒不随答、选择集轻量回执与会话真值全等。
+func TestWorkbenchSelectionActionReplyBound(t *testing.T) {
+	// 118k 条 × ~583B ≈ 68MB 级（对齐用户真实 67,321,044 字节量级）
+	const assignTotal = 118000
+	assigns := make(map[string]SessionAssignment, assignTotal)
+	for i := 0; i < assignTotal; i++ {
+		rel := fmt.Sprintf("库根目录甲/子目录乙/作品集丙长名占位段/卷次目录_%03d/文件名前段占位文段甲乙丙丁_%06d.jpg", i%40, i)
+		assigns[rel] = SessionAssignment{
+			Author:     fmt.Sprintf("作者名占位文段甲乙丙丁_%06d", i),
+			AuthorRole: "画师",
+			Title:      fmt.Sprintf("标题文段占位甲乙丙丁戊己庚辛_%06d_尾注文段", i),
+			Tags: []string{
+				fmt.Sprintf("标签甲乙丙_%06d", i), "公共标签占位文段一",
+				fmt.Sprintf("标签丙丁戊_%06d", i%97), "公共标签占位文段二",
+				fmt.Sprintf("标签己庚辛_%06d", i%31),
+			},
+			Collection:       fmt.Sprintf("集名占位文段甲乙丙_%06d", i%53),
+			AuthorClueRef:    "dirLevelStripped[1]",
+			CollectionClueRef: "filenameSeg[0]",
+			UpdatedAtMs:      1700000000000 + int64(i),
+		}
+	}
+	root, m, ctx := recognizedSelectionFixture(t, assigns)
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	decJSON, err := json.Marshal(decisionsViewOf(sess))
+	if err != nil {
+		t.Fatalf("全量决策态序列化失败: %v", err)
+	}
+	if len(decJSON) < 64<<20 {
+		t.Fatalf("夹具量级不足：全量决策态 %d 字节 < 64MB（%d 条赋值）", len(decJSON), assignTotal)
+	}
+	// 桩闸：立即应答断言前挂起创建 goroutine（时序确定性——选择集清空只随
+	// createDone 成功态发生）
+	ctx.mu.Lock()
+	ctx.createTaskBlock = make(chan struct{})
+	ctx.mu.Unlock()
+
+	works := []string{"d:多轨", "d:已识别"}
+	setSelMeasured := 0
+	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+		Seq: 51, Action: workbenchActionSetSelection, Root: root, Works: works,
+	}))
+	resp := ctx.lastResponse(t)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("setSelection 应答序列化失败: %v", err)
+	}
+	setSelMeasured = len(data)
+	if !resp.OK || resp.Decisions != nil {
+		t.Fatalf("setSelection 应答不符（decisions 应剥离）: %+v", resp)
+	}
+	if len(data) > panoramaPageSoftBytes {
+		t.Fatalf("setSelection 应答实测 %d 字节超软界 %d（decisions=%d 字节）", len(data), panoramaPageSoftBytes, len(decJSON))
+	}
+	if !reflect.DeepEqual(resp.Selection, works) {
+		t.Fatalf("setSelection 轻量回执与会话真值不全等: %v vs %v", resp.Selection, works)
+	}
+
+	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+		Seq: 52, Action: workbenchActionCreateTasks, Root: root, TaskName: "大载荷界批次",
+	}))
+	resp = ctx.lastResponse(t)
+	data, err = json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("createTasks 应答序列化失败: %v", err)
+	}
+	if !resp.OK || !resp.Started || resp.Decisions != nil {
+		t.Fatalf("createTasks 应答不符（decisions 应剥离）: %+v", resp)
+	}
+	if len(data) > panoramaPageSoftBytes {
+		t.Fatalf("createTasks 应答实测 %d 字节超软界 %d（decisions=%d 字节）", len(data), panoramaPageSoftBytes, len(decJSON))
+	}
+	if !reflect.DeepEqual(resp.Selection, works) {
+		t.Fatalf("createTasks 立即应答轻量回执与在途选择集不全等: %v vs %v", resp.Selection, works)
+	}
+
+	// 放行桩闸收尾（后台创建 goroutine 收流终态，防测试泄漏挂起）
+	ctx.mu.Lock()
+	close(ctx.createTaskBlock)
+	ctx.mu.Unlock()
+	if done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone); !done.Success {
+		t.Fatalf("createDone 应为成功终态，实际 %+v", done)
+	}
+	t.Logf("decisions=%d 字节夹具下 setSelection/createTasks 立即应答实测 %d / %d 字节",
+		len(decJSON), setSelMeasured, len(data))
 }
 
 // jsonQuote 测试内 JSON 字符串转义。

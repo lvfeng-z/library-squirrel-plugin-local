@@ -1035,12 +1035,16 @@ func TestHandleFrontendRequestParseActions(t *testing.T) {
 		t.Fatalf("getPanorama 应附带差异集: %+v", resp)
 	}
 
-	// setIgnored
+	// setIgnored（decisions 全量投影已从变更类动作应答剥离——大载荷断路器
+	// 收口，恒不随答；忽略态随下次 getPanorama 分页到达，此处直读会话核验）
 	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
 		Seq: 16, Action: workbenchActionSetIgnored, Root: root, RelPath: "顶层说明.txt", Ignored: true,
 	}))
-	if resp := ctx.lastResponse(t); !resp.OK || len(resp.Decisions.Ignored) != 1 {
-		t.Fatalf("setIgnored 应答不符: %+v", resp)
+	if resp := ctx.lastResponse(t); !resp.OK || resp.Decisions != nil {
+		t.Fatalf("setIgnored 应答不符（decisions 应剥离）: %+v", resp)
+	}
+	if sess, err := m.SessionOf(root); err != nil || len(sess.Ignored) != 1 || sess.Ignored[0] != "顶层说明.txt" {
+		t.Fatalf("setIgnored 应已登记忽略项: err=%v ignored=%v", err, sess.Ignored)
 	}
 }
 

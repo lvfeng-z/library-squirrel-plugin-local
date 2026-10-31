@@ -938,8 +938,9 @@ interface WorkSetRowView {
 
 // getPanorama 分节分页回执（后端 workbenchPageReceipt，json 驼峰逐字对齐）：
 // section=本页分节（overview/files/domain）、offset/count=分节序列起点与条数、
-// total=序列总条数（overview=重载荷清单六段共用下标空间合计）、nextCursor=
-// 续拉游标（末页空）、done=本页即末页、generation=快照世代（GeneratedAtMs）
+// total=序列总条数（overview=全景六段+决策态三清单+差异集三清单共用下标空间
+// 合计）、nextCursor=续拉游标（末页空）、done=本页即末页、generation=快照世代
+//（GeneratedAtMs）
 interface PageReceipt {
   section: string
   offset: number
@@ -975,6 +976,9 @@ interface WorkbenchResponse {
   panorama?: PanoramaSnapshot
   decisions?: DecisionsView
   diff?: SnapDiff
+  // setSelection/createTasks 的选择集轻量回执（后端 decisions 全量投影已从
+  // 变更类动作应答剥离——大载荷断路器收口；选择族以本回执回读选择态）
+  selection?: string[]
   domain?: WorkDomainView
   // getPanorama 分节分页回执（与 panorama/domain 分节数据同答）
   page?: PageReceipt
@@ -1504,14 +1508,16 @@ async function restoreSession(attempt = 0): Promise<string> {
 }
 
 // —— 全景分节分页装载（大载荷分页方案·设计 A/剧本1）—— //
-// 拉取链：overview 逐页（重载荷清单六段共用下标空间——目录树/序列群/候选三仓/
-// 待裁决明细逐页拼接，统计与规则档案态等小字段每页随答，Decisions/Diff 仅首页
-// 随答）→ files 逐页（cursor 串行续拉）→ domain 逐页 → 全部就绪一次性进入现有
-// 呈现（决策3=整体装载，就绪前清单区只显示专用载入态）；每页一请求，30s 超时
-// 按页适用。进度计数=各分节 Page 回执 total/累计 count 汇总（overview 清单条目
-// 计入）。页失败（含超时）→ 暂停出「载入中断」+「第 X/Y 页失败」断点重试
-// （已收页不重拉）；「世代变更/游标无效」→ 整轮重拉（回到载入态从头，连续
-// 自动重拉至多 2 次后转中断态人工重启）。
+// 拉取链：overview 逐页（重载荷清单共用下标空间——目录树/序列群/候选三仓/
+// 待裁决明细六段 + 决策态三清单（赋值/忽略/选择集）+ 差异集三清单（变更/
+// 新增/消失）逐页拼接，统计与规则档案态等小字段及决策态/差异集容器每页
+// 随答）→ files 逐页（cursor 串行续拉）→ domain 逐页 → 全部就绪一次性进入
+// 现有呈现（决策3=整体装载，就绪前清单区只显示专用载入态）；每页一请求，
+// 30s 超时按页适用。进度计数=各分节 Page 回执 total/累计 count 汇总（overview
+// 清单条目计入——全景六段+决策态+差异集同口径）。页失败（含超时）→ 暂停出
+// 「载入中断」+「第 X/Y 页失败」断点重试（已收页不重拉）；「世代变更/游标
+// 无效」→ 整轮重拉（回到载入态从头，连续自动重拉至多 2 次后转中断态人工
+// 重启）。
 
 // 载入态呈现面（响应式小量；累积的大数组归 PanoLoadRun 普通对象承载，避免
 // 数十万条的深层响应式开销）
@@ -1527,6 +1533,9 @@ const panoEstPages = ref(0)
 interface PanoLoadRun {
   // overview 各页拼接的重载荷清单（首页另携小字段；files 明细恒不在场）
   overview: PanoramaSnapshot | null
+  // decisions/diff：overview 各页拼接的决策态三清单/差异集三清单（与全景
+  // 六段同一预算装配分页，容器每页随答、页片逐页追加——大载荷赋值档案与
+  // 差异清单全量拼接可达）
   decisions: DecisionsView | null
   diff: SnapDiff | null
   files: SnapFile[]
@@ -1571,7 +1580,7 @@ function resetPanoRun(run: PanoLoadRun): void {
   Object.assign(run, fresh)
 }
 
-// overview 已收清单条目数（六段合计；进度计数用）
+// overview 已收清单条目数（全景六段合计；进度计数用）
 function overviewListCount(o: PanoramaSnapshot | null): number {
   if (!o) return 0
   return (
@@ -1584,11 +1593,31 @@ function overviewListCount(o: PanoramaSnapshot | null): number {
   )
 }
 
-// 载入进度同步：已接收=各分节累计条目数（overview 清单条目计入）；总量=已知
-// 分节 total 之和；估算总页数=各分节 ceil(total/首页条数) 之和（overview 至少
-// 1 页；未知分节不计），且不低于失败页号（首页即败时保证「第 X/Y 页」分母可读）
+// 决策态已收清单条目数（赋值/忽略/选择集三清单合计；进度计数用——后端
+// overview 的 total 含这三段，接收计数须同口径才能收敛到 100%）
+function decisionsListCount(d: DecisionsView | null): number {
+  if (!d) return 0
+  return ((d.assignments && d.assignments.length) || 0) + ((d.ignored && d.ignored.length) || 0) + ((d.selection && d.selection.length) || 0)
+}
+
+// 差异集已收清单条目数（变更/新增/消失三清单合计；进度计数用，口径同上）
+function diffListCount(d: SnapDiff | null): number {
+  if (!d) return 0
+  return ((d.changed && d.changed.length) || 0) + ((d.added && d.added.length) || 0) + ((d.removed && d.removed.length) || 0)
+}
+
+// 载入进度同步：已接收=各分节累计条目数（overview 清单条目计入——全景六段+
+// 决策态三清单+差异集三清单）；总量=已知分节 total 之和；估算总页数=各分节
+// ceil(total/首页条数) 之和（overview 至少 1 页；未知分节不计），且不低于
+// 失败页号（首页即败时保证「第 X/Y 页」分母可读）
 function syncPanoProgress(run: PanoLoadRun): void {
-  panoReceivedCount.value = overviewListCount(run.overview) + run.files.length + run.domainWorks.length + run.domainSets.length
+  panoReceivedCount.value =
+    overviewListCount(run.overview) +
+    decisionsListCount(run.decisions) +
+    diffListCount(run.diff) +
+    run.files.length +
+    run.domainWorks.length +
+    run.domainSets.length
   panoTotalCount.value = run.overviewTotal + run.filesTotal + run.domainTotal
   const overviewEst =
     run.overviewTotal > 0 && run.overviewFirstCount > 0
@@ -1641,7 +1670,8 @@ async function runPanoPages(
     const page = resp.page
     if (section === 'overview') {
       // overview 逐页拼接：首页整体入账（含小字段），后续页只追加六段清单；
-      // Decisions/Diff 仅首页随答（在场才入账，后续页空载不覆盖）
+      // 决策态/差异集容器每页随答、三清单页片逐页追加（与全景六段同一预算
+      // 装配分页——大载荷赋值档案/差异清单全量拼接可达）
       const pan = resp.panorama || null
       if (pan) {
         if (!run.overview) {
@@ -1658,8 +1688,28 @@ async function runPanoPages(
         run.overviewTotal = page.total
         if (run.overviewFirstCount === 0) run.overviewFirstCount = page.count
       }
-      if (resp.decisions) run.decisions = resp.decisions
-      if (resp.diff) run.diff = resp.diff
+      const dec = resp.decisions
+      if (dec) {
+        if (!run.decisions) {
+          run.decisions = dec
+        } else {
+          const d = run.decisions
+          d.assignments = (d.assignments || []).concat(dec.assignments || [])
+          d.ignored = (d.ignored || []).concat(dec.ignored || [])
+          d.selection = (d.selection || []).concat(dec.selection || [])
+        }
+      }
+      const df = resp.diff
+      if (df) {
+        if (!run.diff) {
+          run.diff = df
+        } else {
+          const d = run.diff
+          d.changed = (d.changed || []).concat(df.changed || [])
+          d.added = (d.added || []).concat(df.added || [])
+          d.removed = (d.removed || []).concat(df.removed || [])
+        }
+      }
     } else if (section === 'files') {
       const pageFiles = (resp.panorama && resp.panorama.files) || []
       for (const f of pageFiles) run.files.push(f)
@@ -2574,7 +2624,9 @@ async function createTasks(): Promise<void> {
       createError.value = sel.error || '选择集写入失败'
       return
     }
-    if (sel.decisions) decisions.value = sel.decisions
+    // 选择集轻量回执：本地决策态镜像只同步 selection 子集（全量 decisions 不
+    // 随动作应答整答——大载荷断路器收口）
+    if (sel.selection && decisions.value) decisions.value.selection = sel.selection
     const resp = await request('createTasks', { root: session.value.rootPath, taskName: createTaskName.value })
     if (!resp.ok) {
       createError.value = resp.error || '任务创建失败'
@@ -2585,9 +2637,10 @@ async function createTasks(): Promise<void> {
       createError.value = resp.error || '任务创建未能开始'
       return
     }
-    // 已开始创建：立即应答随答的决策态回读选择集（此刻选择集尚未被清空）
-    if (resp.decisions) decisions.value = resp.decisions
-    selectedWorks.value = new Set((resp.decisions && resp.decisions.selection) || [])
+    // 已开始创建：立即应答携选择集轻量回执（此刻选择集尚未被清空）——回读
+    // 选择态；清空随 createDone 成功态发生
+    if (resp.selection && decisions.value) decisions.value.selection = resp.selection
+    selectedWorks.value = new Set(resp.selection || [])
   } finally {
     if (!started) {
       // 未进入异步创建（守卫失败/超时）：横幅即刻收起

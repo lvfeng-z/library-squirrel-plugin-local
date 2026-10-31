@@ -290,8 +290,9 @@ func TestAdjudicateDoesNotConsumeAssignments(t *testing.T) {
 }
 
 // TestHandleFrontendRequestDirActions 前端协议分派：assignDir 应答带生效文件数
-// 与决策态、summarizeRule 目录寻址建议卡 RelPath 呈现目录键、clearDirAssignments
-// 应答带清除数、generalize 目录寻址目录不在全景时回可读错误。
+//（decisions 全量投影已从变更类动作应答剥离——大载荷断路器收口，恒不随答）、
+// summarizeRule 目录寻址建议卡 RelPath 呈现目录键、clearDirAssignments 应答带
+// 清除数、generalize 目录寻址目录不在全景时回可读错误。
 func TestHandleFrontendRequestDirActions(t *testing.T) {
 	root := t.TempDir()
 	m, ctx := dirAssignFixture(t, root)
@@ -301,8 +302,8 @@ func TestHandleFrontendRequestDirActions(t *testing.T) {
 		Author: "X", AuthorClueRef: "dirLevelStripped1",
 	}))
 	resp := ctx.lastResponse(t)
-	if !resp.OK || resp.Affected != 2 || resp.Decisions == nil || len(resp.Decisions.Assignments) != 2 {
-		t.Fatalf("assignDir 应答不符: %+v", resp)
+	if !resp.OK || resp.Affected != 2 || resp.Decisions != nil {
+		t.Fatalf("assignDir 应答不符（decisions 应剥离）: %+v", resp)
 	}
 
 	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
@@ -320,8 +321,8 @@ func TestHandleFrontendRequestDirActions(t *testing.T) {
 		Seq: 42, Action: workbenchActionClearDirAssignments, Root: root, DirRelKey: "Artist[X]",
 	}))
 	resp = ctx.lastResponse(t)
-	if !resp.OK || resp.Affected != 2 || resp.Decisions == nil || len(resp.Decisions.Assignments) != 0 {
-		t.Fatalf("clearDirAssignments 应答不符: %+v", resp)
+	if !resp.OK || resp.Affected != 2 || resp.Decisions != nil {
+		t.Fatalf("clearDirAssignments 应答不符（decisions 应剥离）: %+v", resp)
 	}
 
 	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{

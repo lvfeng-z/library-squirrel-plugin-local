@@ -1422,9 +1422,9 @@ const (
 // 缺省请求按 overview 应答；旧值 "files" 在新词汇下语义=文件分节（cursor 空
 // =首页）。
 const (
-	// panoramaSectionOverview 概览分节（单页整答，当前量级小）：统计+目录树+
-	// 群+规则统计+三清单+待裁决+过期赋值，并随答会话决策态与最近差异
-	//（Decisions/Diff 仅本分节随答）。
+	// panoramaSectionOverview 概览分节：统计+目录树+群+规则统计+三清单+待裁决+
+	// 过期赋值，并随答会话决策态与最近差异（Decisions/Diff 仅本分节随答；其
+	// 赋值/忽略/选择与变更/新增/消失六清单与全景六段共用下标空间按页预算分页）。
 	panoramaSectionOverview = "overview"
 	// panoramaSectionFiles 文件明细分节：按游标（投影数组下标）分页拉取。
 	panoramaSectionFiles = "files"
@@ -1579,11 +1579,19 @@ type workbenchFrontendResponse struct {
 	//=文件明细分页页片；其余分节不携带）。
 	Panorama *RecognitionSnapshot `json:"panorama,omitempty"`
 	// Decisions getPanorama overview 分节随答的会话决策态（元素7：赋值/忽略/
-	// 选择集的活数据）。
+	// 选择集的活数据）——预算装配器分页：三清单与全景六段共用下标空间逐页
+	// 切片，前端跨页拼接得全量（赋值档案全量可达）。
 	Decisions *workbenchSessionDecisionsView `json:"decisions,omitempty"`
 	// Diff getPanorama overview 分节随答的最近一次重识别差异集（getDiff 同源；
-	// 生成规则后强制验证轮的高亮载荷）。
+	// 生成规则后强制验证轮的高亮载荷）——预算装配器分页：三清单逐页切片，
+	// 前端跨页拼接得全量。
 	Diff *SnapDiff `json:"diff,omitempty"`
+	// Selection setSelection/createTasks 动作应答的选择集轻量回执（作品键
+	// []string，作品级量级百 KB 可整答）：两动作原随答全量决策态投影——用户
+	// 真实 67MB 级 decisions（长期目录赋值逐文件累计）下动作应答撞 64MB 断路
+	// 器（动作已生效而应答丢失、UI 误报失败），2026-10-31 收口：变更类动作
+	// 应答一律不再携带 decisions 全量投影，选择族以本轻量回执供前端回读。
+	Selection []string `json:"selection,omitempty"`
 	// Assignment assign/clearAssignment 后该文件的赋值呈现（清除后为空）。
 	Assignment *workbenchAssignmentView `json:"assignment,omitempty"`
 	// Affected assignDir/clearDirAssignments 的生效文件计数（目录赋值合并写
@@ -1605,7 +1613,8 @@ type workbenchFrontendResponse struct {
 	// 集视图，前端选择交互与选择集键的单一推导源），按游标分页。
 	Domain *WorkDomain `json:"domain,omitempty"`
 	// Page getPanorama 分节分页回执（三分节统一按共用下标空间分页：overview
-	// 重载荷清单六段共用空间，files/domain 各自条目序列）。
+	// 重载荷清单十二段共用空间——全景六段+决策态三清单+差异集三清单，
+	// files/domain 各自条目序列）。
 	Page *workbenchPageReceipt `json:"page,omitempty"`
 	// RulesView getRules 与规则管理族动作随答返回的规则管理视图（档案条目+
 	// 内置表+禁用清单+备份态），前端每次动作后整份刷新。
@@ -1623,7 +1632,7 @@ type workbenchPageReceipt struct {
 	// Section 本页所属分节（overview / files / domain）。
 	Section string `json:"section"`
 	// Offset / Count 本页在分节条目序列中的起点与条数；Total 序列总条数
-	//（overview 为六段共用下标空间合计）。
+	//（overview 为全景六段+决策态三清单+差异集三清单共用下标空间合计）。
 	Offset int `json:"offset"`
 	Count  int `json:"count"`
 	Total  int `json:"total"`
@@ -1875,6 +1884,49 @@ func snapPendingWireBytes(p SnapPending) int {
 	return n
 }
 
+// assignmentWireBytes 决策态赋值条目的序列化字节估算（口径同 snapFileWireBytes：
+// 骨架按定长、字符串按 UTF-8 字节数；目录赋值逐文件合并累计的巨量赋值清单是
+// overview 大载荷的主体，估算偏保守让首遍装页宁小勿大）。
+func assignmentWireBytes(a workbenchAssignmentView) int {
+	n := 128 + len(a.RelPath) + len(a.Author) + len(a.AuthorRole) + len(a.Title) +
+		len(a.Collection) + len(a.AuthorClueRef) + len(a.TitleClueRef) + len(a.CollectionClueRef)
+	for _, t := range a.Tags {
+		n += 8 + len(t)
+	}
+	for _, r := range a.TagClueRefs {
+		n += 10 + len(r)
+	}
+	return n
+}
+
+// stringItemWireBytes 字符串清单条目（决策态忽略清单/选择集）的序列化字节估算。
+func stringItemWireBytes(s string) int { return 8 + len(s) }
+
+// snapConclusionWireBytes 差异条目前/后结论摘要的序列化字节估算（口径同上）。
+func snapConclusionWireBytes(c SnapConclusion) int {
+	n := 40 + len(c.State)
+	for _, d := range c.Final {
+		n += 72 + len(d.Dimension) + len(d.Value) + len(d.Source) + len(d.RoleName) + len(d.RuleID)
+	}
+	for _, dim := range c.PendingDims {
+		n += 16 + len(dim)
+	}
+	return n
+}
+
+// snapDiffEntryWireBytes 差异集条目的序列化字节估算（口径同上；Before/After
+// 单侧缺席时为 nil 不计）。
+func snapDiffEntryWireBytes(e SnapDiffEntry) int {
+	n := 44 + len(e.RelPath)
+	if e.Before != nil {
+		n += snapConclusionWireBytes(*e.Before)
+	}
+	if e.After != nil {
+		n += snapConclusionWireBytes(*e.After)
+	}
+	return n
+}
+
 // panoramaPackEnd 估算首遍打包：从 offset 起按页字节目标与条数上限装页
 //（首条必装保证推进），返回页终点下标；cost 为共用下标空间内单条目的估算
 // 字节。估算只作首遍提示，实测硬门兜底其漂移。
@@ -1890,70 +1942,78 @@ func panoramaPackEnd(cost func(i int) int, offset, total, maxEntries int) int {
 	return end
 }
 
-// panoramaOverviewSpans overview 重载荷清单的共用下标空间：六段按固定顺序
-// 线性拼接（目录树→序列群→候选三仓→待裁决明细），段边界由各段条数确定；
-// 与 domain 分节作品/集共用下标空间同构。
-type panoramaOverviewSpans struct {
-	dirs, groups, candidates, ignored, confirmed, pending int
+// panoramaSeg 装配段：共用下标空间中的一段重载荷清单——条数、逐条估算字节、
+// 区间落页三件事。fill 收段内局部下标区间 [lo,hi)（lo==hi=本页不含该段条目，
+// 空形态由应答字段缺省承载：全景清单保持 nil、决策态/差异集保持空容器）。
+type panoramaSeg struct {
+	n    int              // 段条数
+	cost func(i int) int  // 段内第 i 条的估算字节
+	fill func(lo, hi int) // 区间落本页应答字段
 }
 
-func (s panoramaOverviewSpans) total() int {
-	return s.dirs + s.groups + s.candidates + s.ignored + s.confirmed + s.pending
-}
-
-// cost 共用空间第 i 条的估算字节（按段分派到对应清单条目）。
-func (s panoramaOverviewSpans) cost(view *RecognitionSnapshot, i int) int {
-	switch {
-	case i < s.dirs:
-		return snapDirWireBytes(view.Dirs[i])
-	case i < s.dirs+s.groups:
-		return snapGroupWireBytes(view.Groups[i-s.dirs])
-	case i < s.dirs+s.groups+s.candidates:
-		return snapCandidateWireBytes(view.Candidates[i-s.dirs-s.groups])
-	case i < s.dirs+s.groups+s.candidates+s.ignored:
-		return snapCandidateWireBytes(view.IgnoredCandidates[i-s.dirs-s.groups-s.candidates])
-	case i < s.dirs+s.groups+s.candidates+s.ignored+s.confirmed:
-		return snapCandidateWireBytes(view.ConfirmedCandidates[i-s.dirs-s.groups-s.candidates-s.ignored])
-	default:
-		return snapPendingWireBytes(view.Pending[i-s.dirs-s.groups-s.candidates-s.ignored-s.confirmed])
+// panoramaSegOf 清单段的通用构造：条目序列 + 逐条估算 + 切片落页。
+func panoramaSegOf[T any](items []T, cost func(T) int, fill func([]T)) panoramaSeg {
+	return panoramaSeg{
+		n:    len(items),
+		cost: func(i int) int { return cost(items[i]) },
+		fill: func(lo, hi int) {
+			if hi > lo {
+				fill(items[lo:hi])
+			}
+		},
 	}
 }
 
-// slice 共用空间 [offset,end) 区间拆回各段切片：未涉及的段为 nil，部分涉及
-// 的段按区间截取。
-func (s panoramaOverviewSpans) slice(view *RecognitionSnapshot, offset, end int) (
-	dirs []SnapDir, groups []SnapGroup, candidates, ignored, confirmed []SnapCandidate, pending []SnapPending,
-) {
-	seg := func(lo, hi int) (int, int, bool) {
-		if end <= lo || offset >= hi {
-			return 0, 0, false
+// panoramaAssembler 预算装配器（getPanorama 大载荷纪律的组装点形态）：应答的
+// 全部重载荷清单以段注册进同一「世代:下标」游标空间，按 panoramaPageTargetBytes
+// 预算首遍装页（首条必装保证推进）、实测硬门（boundPanoramaPage）从尾部卸条目
+// 兜底估算漂移。任何新增清单只要注册为段即自动受同一预算纪律约束，不再依赖
+// 各节记住要分页——2026-10-31 overview 首页 decisions/diff 按小载荷假设整答
+// 67MB 撞 64MB 应答断路器（恢复会话失败）的根治形态。
+type panoramaAssembler struct {
+	segs  []panoramaSeg
+	bases []int // 各段在共用空间的起点（构造时缓存）
+}
+
+func newPanoramaAssembler(segs ...panoramaSeg) *panoramaAssembler {
+	a := &panoramaAssembler{segs: segs, bases: make([]int, len(segs))}
+	for i := 1; i < len(segs); i++ {
+		a.bases[i] = a.bases[i-1] + segs[i-1].n
+	}
+	return a
+}
+
+// total 共用空间合计条数。
+func (a *panoramaAssembler) total() int {
+	if len(a.segs) == 0 {
+		return 0
+	}
+	return a.bases[len(a.segs)-1] + a.segs[len(a.segs)-1].n
+}
+
+// cost 共用空间第 i 条的估算字节（按段分派到段内条目）。
+func (a *panoramaAssembler) cost(i int) int {
+	for idx, seg := range a.segs {
+		if i < a.bases[idx]+seg.n {
+			return seg.cost(i - a.bases[idx])
 		}
-		return max(offset, lo), min(end, hi), true
 	}
-	if lo, hi, ok := seg(0, s.dirs); ok {
-		dirs = view.Dirs[lo:hi]
+	return 0
+}
+
+// fillPage 把共用空间 [offset,end) 拆回各段局部区间落页：段与页区间无交集时
+// fill(0,0)（空形态），部分交集按 [max(offset,base), min(end,base+n)) 截取——
+// 一页可同时携带相邻多段的条目（跨界页）。
+func (a *panoramaAssembler) fillPage(offset, end int) {
+	for idx, seg := range a.segs {
+		base := a.bases[idx]
+		lo, hi := max(offset, base), min(end, base+seg.n)
+		if lo < hi {
+			seg.fill(lo-base, hi-base)
+		} else {
+			seg.fill(0, 0)
+		}
 	}
-	base := s.dirs
-	if lo, hi, ok := seg(base, base+s.groups); ok {
-		groups = view.Groups[lo-base : hi-base]
-	}
-	base += s.groups
-	if lo, hi, ok := seg(base, base+s.candidates); ok {
-		candidates = view.Candidates[lo-base : hi-base]
-	}
-	base += s.candidates
-	if lo, hi, ok := seg(base, base+s.ignored); ok {
-		ignored = view.IgnoredCandidates[lo-base : hi-base]
-	}
-	base += s.ignored
-	if lo, hi, ok := seg(base, base+s.confirmed); ok {
-		confirmed = view.ConfirmedCandidates[lo-base : hi-base]
-	}
-	base += s.confirmed
-	if lo, hi, ok := seg(base, base+s.pending); ok {
-		pending = view.Pending[lo-base : hi-base]
-	}
-	return
 }
 
 // panoramaReceipt 分页回执构造：终点越过 total 即末页，非末页携带续拉游标。
@@ -1972,18 +2032,21 @@ func panoramaReceipt(section string, generation int64, offset, end, total int) *
 // 未请求的分节恒空。shrink 为测量硬门的卸条目通道——按卸后条目数重建页载荷
 // 与回执（n ∈ [1, 回执 Count]；分节恒有条目空间，恒非 nil）。
 type panoramaSectionPage struct {
-	receipt  *workbenchPageReceipt
-	panorama *RecognitionSnapshot
-	domain   *WorkDomain
-	overview bool // overview 分节（Decisions/Diff 仅该分节首页随答）
-	shrink   func(n int)
+	receipt   *workbenchPageReceipt
+	panorama  *RecognitionSnapshot
+	decisions *workbenchSessionDecisionsView // overview 分节：决策态容器每页随答（三清单由装配器区间落页）
+	diff      *SnapDiff                       // overview 分节：差异集容器每页随答（LastDiff 缺席恒 nil）
+	domain    *WorkDomain
+	shrink    func(n int)
 }
 
 // panoramaPageOf getPanorama 分节分页求值：按 section 词汇裁剪投影、按游标
 // （先过世代校验）切页并落 Page 回执。三分节统一按共用下标空间切页——
-// overview 的重载荷清单（目录树/序列群/候选三仓/待裁决明细）六段共用一个
-// 下标空间逐页（统计/规则档案态等小字段每页随答）；files/domain 语义不变
-//（domain 作品序列在前集在后，页可跨界）。
+// overview 应答的全部重载荷清单经预算装配器逐页切页：全景六段（目录树/
+// 序列群/候选三仓/待裁决明细）+决策态三清单（赋值/忽略/选择集）+差异集
+// 三清单（变更/新增/消失）共用一个下标空间，统计/规则档案态等小字段与
+// 决策态/差异集容器每页随答；files/domain 语义不变（domain 作品序列在
+// 前集在后，页可跨界）。
 func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFrontendRequest) (*panoramaSectionPage, error) {
 	generation := sess.Snapshot.GeneratedAtMs
 	switch req.Section {
@@ -2005,22 +2068,50 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 	switch req.Section {
 	case "", panoramaSectionOverview:
 		view := panoramaOverviewViewOf(sess.Snapshot)
-		spans := panoramaOverviewSpans{
-			dirs: len(view.Dirs), groups: len(view.Groups), candidates: len(view.Candidates),
-			ignored: len(view.IgnoredCandidates), confirmed: len(view.ConfirmedCandidates),
-			pending: len(view.Pending),
+		dec := decisionsViewOf(sess)
+		diff := sess.LastDiff
+		hasDiff := diff != nil
+		if !hasDiff {
+			// 空差异占位：三段 0 条（page.diff 恒 nil——LastDiff 缺席不随答差异集）
+			diff = &SnapDiff{}
 		}
-		total := spans.total()
+		page := &panoramaSectionPage{}
+		// 预算装配器：overview 应答的全部重载荷清单注册进同一「世代:下标」游标
+		// 空间——全景六段在前、决策态三清单与差异集三清单在后。决策态为会话
+		// 活数据（赋值/忽略/选择随动作即时变化，不随快照世代对齐）：跨页拉取
+		// 期间按拉取时点切页（前端装载期为独占交互、动作后整轮重拉——与旧
+		// 「首页整答」同一时点语义，世代游标守卫覆盖快照代差异）。
+		assembler := newPanoramaAssembler(
+			panoramaSegOf(view.Dirs, snapDirWireBytes, func(v []SnapDir) { page.panorama.Dirs = v }),
+			panoramaSegOf(view.Groups, snapGroupWireBytes, func(v []SnapGroup) { page.panorama.Groups = v }),
+			panoramaSegOf(view.Candidates, snapCandidateWireBytes, func(v []SnapCandidate) { page.panorama.Candidates = v }),
+			panoramaSegOf(view.IgnoredCandidates, snapCandidateWireBytes, func(v []SnapCandidate) { page.panorama.IgnoredCandidates = v }),
+			panoramaSegOf(view.ConfirmedCandidates, snapCandidateWireBytes, func(v []SnapCandidate) { page.panorama.ConfirmedCandidates = v }),
+			panoramaSegOf(view.Pending, snapPendingWireBytes, func(v []SnapPending) { page.panorama.Pending = v }),
+			panoramaSegOf(dec.Assignments, assignmentWireBytes, func(v []workbenchAssignmentView) { page.decisions.Assignments = v }),
+			panoramaSegOf(dec.Ignored, stringItemWireBytes, func(v []string) { page.decisions.Ignored = v }),
+			panoramaSegOf(dec.Selection, stringItemWireBytes, func(v []string) { page.decisions.Selection = v }),
+			panoramaSegOf(diff.Changed, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Changed = v }),
+			panoramaSegOf(diff.Added, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Added = v }),
+			panoramaSegOf(diff.Removed, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Removed = v }),
+		)
+		total := assembler.total()
 		if offset > total {
 			return nil, errPanoramaCursorInvalid
 		}
-		end := panoramaPackEnd(func(i int) int { return spans.cost(&view, i) }, offset, total, maxEntries)
-		page := &panoramaSectionPage{overview: true}
+		end := panoramaPackEnd(assembler.cost, offset, total, maxEntries)
 		apply := func(e int) {
-			pan := view
+			pan := view // 小字段每页随答；六段清单先清空，由装配器按区间落页
 			pan.Dirs, pan.Groups, pan.Candidates, pan.IgnoredCandidates, pan.ConfirmedCandidates, pan.Pending =
-				spans.slice(&view, offset, e)
+				nil, nil, nil, nil, nil, nil
 			page.panorama = &pan
+			page.decisions = &workbenchSessionDecisionsView{}
+			if hasDiff {
+				page.diff = &SnapDiff{Changed: []SnapDiffEntry{}, Added: []SnapDiffEntry{}, Removed: []SnapDiffEntry{}}
+			} else {
+				page.diff = nil
+			}
+			assembler.fillPage(offset, e)
 			page.receipt = panoramaReceipt(panoramaSectionOverview, generation, offset, e, total)
 		}
 		apply(end)
@@ -2129,7 +2220,8 @@ func (m *SessionManager) boundPanoramaPage(resp *workbenchFrontendResponse, page
 		}
 		n -= drop
 		page.shrink(n)
-		resp.Page, resp.Panorama, resp.Domain = page.receipt, page.panorama, page.domain
+		resp.Page, resp.Panorama, resp.Domain, resp.Decisions, resp.Diff =
+			page.receipt, page.panorama, page.domain, page.decisions, page.diff
 		if data, err = json.Marshal(resp); err != nil {
 			return
 		}
@@ -2226,13 +2318,10 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.Page = page.receipt
 		resp.Panorama = page.panorama
 		resp.Domain = page.domain
-		if page.overview && page.receipt.Offset == 0 {
-			// Decisions/Diff 仅 overview 分节首页随答（会话决策态与差异高亮随概览
-			// 首屏一次到达，后续页与明细分节不重复携带）
-			resp.Decisions = decisionsViewOf(sess)
-			resp.Diff = sess.LastDiff
-		}
-		// 测量硬门：估算首遍打包后实测完整应答字节，超软界从尾部卸条目
+		resp.Decisions = page.decisions
+		resp.Diff = page.diff
+		// 测量硬门：估算首遍打包后实测完整应答字节（含 decisions/diff 页片），
+		// 超软界从尾部卸条目
 		m.boundPanoramaPage(resp, page)
 	case workbenchActionAssign:
 		sess, view, err := m.ApplyAssignment(req.Root, req.RelPath, SessionAssignment{
@@ -2267,7 +2356,6 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			break
 		}
 		resp.Session = summarizeSession(sess)
-		resp.Decisions = decisionsViewOf(sess)
 		resp.Affected = affected
 	case workbenchActionClearDirAssignments:
 		sess, affected, err := m.ClearDirAssignments(req.Root, req.DirRelKey)
@@ -2276,26 +2364,23 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			break
 		}
 		resp.Session = summarizeSession(sess)
-		resp.Decisions = decisionsViewOf(sess)
 		resp.Affected = affected
 	case workbenchActionSetIgnored:
+		// decisions 不随动作应答整答（前端不消费；大载荷撞断路器——见
+		// Selection 字段注释），忽略态随下次 getPanorama 分页到达
 		if _, err := m.SetIgnored(req.Root, req.RelPath, req.Ignored); err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
-		if sess, err := m.SessionOf(req.Root); err == nil {
-			resp.Decisions = decisionsViewOf(sess)
-		}
 	case workbenchActionIgnoreCandidate, workbenchActionRestoreCandidate:
 		// 候选分仓为快照态：动作登记会话清单并排一轮重识别，分仓清单随刷新
-		// 到达（应答只回会话摘要与决策态，与赋值族通路一致）
+		// 到达（应答只回会话摘要，与赋值族通路一致）
 		sess, err := m.SetCandidateIgnored(req.Root, req.Target, req.Action == workbenchActionIgnoreCandidate)
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
 		resp.Session = summarizeSession(sess)
-		resp.Decisions = decisionsViewOf(sess)
 	case workbenchActionConfirmCandidate:
 		sess, affected, err := m.ConfirmWorkSetCandidate(req.Root, req.Target, req.SetName, req.ExistingSetID)
 		if err != nil {
@@ -2303,7 +2388,6 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			break
 		}
 		resp.Session = summarizeSession(sess)
-		resp.Decisions = decisionsViewOf(sess)
 		resp.Affected = affected
 	case workbenchActionUndoConfirm:
 		sess, affected, err := m.UnconfirmWorkSetCandidate(req.Root, req.Target)
@@ -2312,7 +2396,6 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			break
 		}
 		resp.Session = summarizeSession(sess)
-		resp.Decisions = decisionsViewOf(sess)
 		resp.Affected = affected
 	case workbenchActionSummarizeWorkSetRule:
 		sugg, err := m.ApplyWorkSetRuleSummary(req.Root, req.Target)
@@ -2414,7 +2497,9 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
-		resp.Decisions = decisionsViewOf(sess)
+		// 轻量回执：仅选择集（前端创建流回读选择态；全量 decisions 投影不随
+		// 动作应答整答——大载荷撞断路器，见 Selection 字段注释）
+		resp.Selection = sess.Selection
 	case workbenchActionCreateTasks:
 		// 异步化（设计 C）：守卫链通过后立即应答「已开始创建」，创建 RPC 在独立
 		// goroutine 执行（订阅循环不再被长创建阻塞），进度与终态经
@@ -2425,8 +2510,10 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			break
 		}
 		resp.Started = started
+		// 轻量回执：立即应答时创建在途、选择集尚未清空——前端凭本回执回读
+		// 选择态（此刻的真值）；清空随 createDone 成功态发生
 		if sess, err := m.SessionOf(req.Root); err == nil {
-			resp.Decisions = decisionsViewOf(sess)
+			resp.Selection = sess.Selection
 		}
 	case workbenchActionCancelCreate:
 		// 取消在途创建（甲3/决策3）：创建在独立 goroutine，请求循环可自由应答——

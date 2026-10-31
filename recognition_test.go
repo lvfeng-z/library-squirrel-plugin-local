@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1174,13 +1175,30 @@ func TestGetPanoramaPageByteBound(t *testing.T) {
 	}
 }
 
-// TestGetPanoramaOverviewPaging overview 分节分页：重载荷清单（目录树/序列群/
-// 候选三仓/待裁决明细）六段共用一个下标空间逐页，逐页拼接与全量投影逐条
-// 全等（含跨界页：一页同时携带相邻两段条目）；统计/规则档案态小字段每页
-// 随答、文件明细恒不随答；Decisions/Diff 仅首页随答；每页实测 ≤ 软界。
+// TestGetPanoramaOverviewPaging overview 分节分页：应答的全部重载荷清单——
+// 全景六段（目录树/序列群/候选三仓/待裁决明细）+决策态三清单（赋值/忽略/
+// 选择集）+差异集三清单（变更/新增/消失）——共用一个下标空间逐页预算装配，
+// 逐页拼接与全量投影/全量决策态/全量差异集逐条全等（含跨界页：一页同时携带
+// 相邻段条目）；统计/规则档案态小字段与决策态/差异集容器每页随答、文件明细
+// 恒不随答；每页实测 ≤ 软界。
 func TestGetPanoramaOverviewPaging(t *testing.T) {
 	root := t.TempDir()
-	m, ctx := newRecognitionFixture(t, root, nil)
+	m, ctx := newRecognitionFixture(t, root, map[string]SessionAssignment{
+		"甲/a_1.jpg": {Author: "作者甲", Title: "标题甲", UpdatedAtMs: 1700000000001},
+		"乙/b_1.jpg": {Author: "作者乙", Collection: "集乙", UpdatedAtMs: 1700000000002},
+	})
+	// 决策态另两清单入段：忽略清单与选择集直接注入会话（轻字段）
+	{
+		sess, err := m.loadSession(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		sess.Ignored = []string{"乙/b_1.jpg"}
+		sess.Selection = []string{"f:甲/a_1.jpg"}
+		if err := m.saveSession(sess); err != nil {
+			t.Fatalf("注入忽略/选择集失败: %v", err)
+		}
+	}
 
 	snap := &RecognitionSnapshot{
 		SchemaVersion: recognitionSnapshotSchemaVersion,
@@ -1201,22 +1219,36 @@ func TestGetPanoramaOverviewPaging(t *testing.T) {
 		Stats:    SnapStats{TotalFiles: 4, GroupCount: 1, PendingFiles: 1},
 	}
 	diff := &SnapDiff{
-		Changed: []SnapDiffEntry{}, Removed: []SnapDiffEntry{},
-		Added: []SnapDiffEntry{{RelPath: "甲/a_1.jpg", After: &SnapConclusion{State: snapStatePlain}}},
+		Changed: []SnapDiffEntry{{RelPath: "乙/b_1.jpg",
+			Before: &SnapConclusion{State: snapStatePlain}, After: &SnapConclusion{State: snapStateClueful}}},
+		Removed: []SnapDiffEntry{},
+		Added:   []SnapDiffEntry{{RelPath: "甲/a_1.jpg", After: &SnapConclusion{State: snapStatePlain}}},
 	}
 	if _, err := m.CompleteRecognitionWithDiff(root, snap, diff); err != nil {
 		t.Fatalf("注入快照与差异集失败: %v", err)
 	}
+	sessFull, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取全会话失败: %v", err)
+	}
 	want := panoramaOverviewViewOf(snap)
+	wantDec := decisionsViewOf(sessFull)
 	total := len(snap.Dirs) + len(snap.Groups) + len(snap.Candidates) +
-		len(snap.IgnoredCandidates) + len(snap.ConfirmedCandidates) + len(snap.Pending)
+		len(snap.IgnoredCandidates) + len(snap.ConfirmedCandidates) + len(snap.Pending) +
+		len(wantDec.Assignments) + len(wantDec.Ignored) + len(wantDec.Selection) +
+		len(diff.Changed) + len(diff.Added) + len(diff.Removed)
 
 	var gotDirs []SnapDir
 	var gotGroups []SnapGroup
 	var gotCands, gotIgnored, gotConfirmed []SnapCandidate
 	var gotPending []SnapPending
+	gotDec := &workbenchSessionDecisionsView{
+		Assignments: []workbenchAssignmentView{}, Ignored: []string{}, Selection: []string{},
+	}
+	gotDiff := &SnapDiff{Changed: []SnapDiffEntry{}, Added: []SnapDiffEntry{}, Removed: []SnapDiffEntry{}}
 	straddled := false
 	cursor := ""
+	pages := 0
 	for page := 0; ; page++ {
 		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
 			Seq: int64(600 + page), Action: workbenchActionGetPanorama, Root: root,
@@ -1234,22 +1266,21 @@ func TestGetPanoramaOverviewPaging(t *testing.T) {
 			t.Fatalf("第 %d 页实测 %d 字节超软界 %d", page+1, len(data), panoramaPageSoftBytes)
 		}
 		p := resp.Page
-		received := len(gotDirs) + len(gotGroups) + len(gotCands) + len(gotIgnored) + len(gotConfirmed) + len(gotPending)
+		received := len(gotDirs) + len(gotGroups) + len(gotCands) + len(gotIgnored) + len(gotConfirmed) +
+			len(gotPending) + len(gotDec.Assignments) + len(gotDec.Ignored) + len(gotDec.Selection) +
+			len(gotDiff.Changed) + len(gotDiff.Added) + len(gotDiff.Removed)
+		count := countOverviewPage(resp.Panorama) + countDecisionsPage(resp.Decisions) + countDiffPage(resp.Diff)
 		if p.Section != panoramaSectionOverview || p.Generation != snap.GeneratedAtMs ||
-			p.Total != total || p.Offset != received || p.Count != countOverviewPage(resp.Panorama) {
-			t.Fatalf("overview 页回执不符（第 %d 页）: %+v（已收 %d 条）", page+1, p, received)
+			p.Total != total || p.Offset != received || p.Count != count {
+			t.Fatalf("overview 页回执不符（第 %d 页）: %+v（已收 %d 条，页计 %d）", page+1, p, received, count)
 		}
 		// 小字段每页随答；文件明细恒不随答
 		if len(resp.Panorama.RuleStats) == 0 || resp.Panorama.Stats.TotalFiles != 4 || len(resp.Panorama.Files) != 0 {
 			t.Fatalf("overview 页应每页随答小字段且不携带文件明细（第 %d 页）", page+1)
 		}
-		// Decisions/Diff 仅首页随答
-		if page == 0 {
-			if resp.Decisions == nil || !reflect.DeepEqual(resp.Diff, diff) {
-				t.Fatalf("overview 首页应随答决策态与差异集: decisions=%v diff=%v", resp.Decisions, resp.Diff)
-			}
-		} else if resp.Decisions != nil || resp.Diff != nil {
-			t.Fatalf("overview 非首页不应随答决策态/差异集（第 %d 页）", page+1)
+		// 决策态/差异集容器每页随答（清单页片由装配器区间落页）
+		if resp.Decisions == nil || resp.Diff == nil {
+			t.Fatalf("overview 页应每页随答决策态与差异集容器（第 %d 页）", page+1)
 		}
 		pan := resp.Panorama
 		if len(pan.Dirs) > 0 && len(pan.Groups) > 0 || len(pan.Groups) > 0 && len(pan.Candidates) > 0 ||
@@ -1257,12 +1288,23 @@ func TestGetPanoramaOverviewPaging(t *testing.T) {
 			len(pan.ConfirmedCandidates) > 0 && len(pan.Pending) > 0 {
 			straddled = true
 		}
+		if len(pan.Pending) > 0 && len(resp.Decisions.Assignments) > 0 ||
+			len(resp.Decisions.Selection) > 0 && len(resp.Diff.Changed) > 0 {
+			straddled = true // 决策态/差异集段的跨界页同样成立
+		}
 		gotDirs = append(gotDirs, pan.Dirs...)
 		gotGroups = append(gotGroups, pan.Groups...)
 		gotCands = append(gotCands, pan.Candidates...)
 		gotIgnored = append(gotIgnored, pan.IgnoredCandidates...)
 		gotConfirmed = append(gotConfirmed, pan.ConfirmedCandidates...)
 		gotPending = append(gotPending, pan.Pending...)
+		gotDec.Assignments = append(gotDec.Assignments, resp.Decisions.Assignments...)
+		gotDec.Ignored = append(gotDec.Ignored, resp.Decisions.Ignored...)
+		gotDec.Selection = append(gotDec.Selection, resp.Decisions.Selection...)
+		gotDiff.Changed = append(gotDiff.Changed, resp.Diff.Changed...)
+		gotDiff.Added = append(gotDiff.Added, resp.Diff.Added...)
+		gotDiff.Removed = append(gotDiff.Removed, resp.Diff.Removed...)
+		pages = page + 1
 		if p.Done {
 			if p.NextCursor != "" {
 				t.Fatal("末页不应携带续拉游标")
@@ -1275,19 +1317,240 @@ func TestGetPanoramaOverviewPaging(t *testing.T) {
 		cursor = p.NextCursor
 	}
 	if !straddled {
-		t.Fatal("提示 2 条/页的六段序列应出现跨段页")
+		t.Fatal("提示 2 条/页的清单序列应出现跨段页")
+	}
+	if pages < 5 {
+		t.Fatalf("十二段序列提示 2 条/页应 ≥5 页，实际 %d 页", pages)
 	}
 	if !reflect.DeepEqual(gotDirs, want.Dirs) || !reflect.DeepEqual(gotGroups, want.Groups) ||
 		!reflect.DeepEqual(gotCands, want.Candidates) || !reflect.DeepEqual(gotIgnored, want.IgnoredCandidates) ||
 		!reflect.DeepEqual(gotConfirmed, want.ConfirmedCandidates) || !reflect.DeepEqual(gotPending, want.Pending) {
 		t.Fatal("overview 逐页拼接与全量投影逐条不全等")
 	}
+	if !reflect.DeepEqual(gotDec, wantDec) {
+		t.Fatalf("决策态逐页拼接与全量决策态不全等: %+v vs %+v", gotDec, wantDec)
+	}
+	if !reflect.DeepEqual(gotDiff, sessFull.LastDiff) {
+		t.Fatalf("差异集逐页拼接与全量差异集不全等: %+v vs %+v", gotDiff, sessFull.LastDiff)
+	}
 }
 
-// countOverviewPage overview 页回执条数复核：页内六段条目合计。
+// countOverviewPage overview 页回执条数复核：页内全景六段条目合计。
 func countOverviewPage(pan *RecognitionSnapshot) int {
 	return len(pan.Dirs) + len(pan.Groups) + len(pan.Candidates) +
 		len(pan.IgnoredCandidates) + len(pan.ConfirmedCandidates) + len(pan.Pending)
+}
+
+// countDecisionsPage overview 页回执条数复核：页内决策态三清单条目合计。
+func countDecisionsPage(dec *workbenchSessionDecisionsView) int {
+	if dec == nil {
+		return 0
+	}
+	return len(dec.Assignments) + len(dec.Ignored) + len(dec.Selection)
+}
+
+// countDiffPage overview 页回执条数复核：页内差异集三清单条目合计。
+func countDiffPage(d *SnapDiff) int {
+	if d == nil {
+		return 0
+	}
+	return len(d.Changed) + len(d.Added) + len(d.Removed)
+}
+
+// TestGetPanoramaOverviewDecisionsDiffBudget 大载荷预算装配实证：decisions/diff
+// 巨量条目（用户真实事故形态的 ≥2 倍——长期目录赋值逐文件合并累计的赋值
+// 清单 + 重识别差异集；2026-10-31 用户环境 getPanorama overview 首页
+// decisions/diff 按小载荷假设整答实测 67,321,044 字节，撞 64MB gRPC 应答
+// 断路器致「恢复会话失败」，净室复测同根形态 110,951,071 字节三次。本夹具
+// decisions 合成 ≥140MB 级（245k 条赋值 + 忽略/选择集各 4 万条 + 差异集
+// 6 万条）。断言面：
+//   - 每页整答 json.Marshal 实测 ≤ panoramaPageSoftBytes 软界（装配器页预算
+//     设计上 64MB 硬门不可达）；
+//   - 跨页拼接与全量决策态/全量差异集逐字节全等（赋值档案/差异清单全量可达，
+//     语义零丢失）；
+//   - 回执 offset/count/total 含 decisions/diff 段合计，末页声明收敛。
+func TestGetPanoramaOverviewDecisionsDiffBudget(t *testing.T) {
+	root := t.TempDir()
+
+	// 赋值条目形态对齐真实目录赋值（每赋值一目录=每文件一条，五维度+出处引用）；
+	// 实测 ~613B/条 × 245k ≈ 150MB ≥ 140MB（用户真实 67MB 的 ≥2 倍）
+	const assignTotal = 245000
+	assigns := make(map[string]SessionAssignment, assignTotal)
+	for i := 0; i < assignTotal; i++ {
+		rel := fmt.Sprintf("库根目录甲/子目录乙/作品集丙长名占位段/卷次目录_%03d/文件名前段占位文段甲乙丙丁_%06d.jpg", i%40, i)
+		assigns[rel] = SessionAssignment{
+			Author:     fmt.Sprintf("作者名占位文段甲乙丙丁_%06d", i),
+			AuthorRole: "画师",
+			Title:      fmt.Sprintf("标题文段占位甲乙丙丁戊己庚辛_%06d_尾注文段", i),
+			Tags: []string{
+				fmt.Sprintf("标签甲乙丙_%06d", i), "公共标签占位文段一",
+				fmt.Sprintf("标签丙丁戊_%06d", i%97), "公共标签占位文段二",
+				fmt.Sprintf("标签己庚辛_%06d", i%31),
+			},
+			Collection:       fmt.Sprintf("集名占位文段甲乙丙_%06d", i%53),
+			AuthorClueRef:    "dirLevelStripped[1]",
+			CollectionClueRef: "filenameSeg[0]",
+			UpdatedAtMs:      1700000000000 + int64(i),
+		}
+	}
+	m, ctx := newRecognitionFixture(t, root, assigns)
+	// 决策态另两清单入段：忽略/选择集各 4 万条（各 ~2MB 级）
+	{
+		sess, err := m.loadSession(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		ignored := make([]string, 0, 40000)
+		selection := make([]string, 0, 40000)
+		for i := 0; i < 40000; i++ {
+			ignored = append(ignored, fmt.Sprintf("库根目录甲/子目录乙/忽略文件占位_%06d.jpg", i))
+			selection = append(selection, fmt.Sprintf("d:库根目录甲/子目录乙/作品集丙长名占位段/卷次目录_%03d", i%40))
+		}
+		sess.Ignored = ignored
+		sess.Selection = selection
+		if err := m.saveSession(sess); err != nil {
+			t.Fatalf("注入忽略/选择集失败: %v", err)
+		}
+	}
+
+	// 快照本体保持小量（六段在场即可），差异集巨量：变更 5 万 + 新增/消失各 5 千
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1700000000005,
+		RootPath:      root,
+		Dirs: []SnapDir{
+			{RelKey: "库根目录甲", Name: "库根目录甲", Depth: 1, FileCount: assignTotal},
+			{RelKey: "库根目录甲/子目录乙", Name: "子目录乙", Depth: 2, FileCount: assignTotal},
+		},
+		Stats: SnapStats{TotalFiles: assignTotal},
+	}
+	diff := &SnapDiff{
+		Changed: make([]SnapDiffEntry, 0, 50000),
+		Added:   make([]SnapDiffEntry, 0, 5000),
+		Removed: make([]SnapDiffEntry, 0, 5000),
+	}
+	for i := 0; i < 50000; i++ {
+		rel := fmt.Sprintf("库根目录甲/子目录乙/作品集丙长名占位段/卷次目录_%03d/变更文件占位文段甲乙丙_%06d.jpg", i%40, i)
+		diff.Changed = append(diff.Changed, SnapDiffEntry{RelPath: rel,
+			Before: &SnapConclusion{State: snapStatePlain, PendingDims: []string{"标题", "作者"},
+				Final: []SnapDecl{{Dimension: "作者", Value: fmt.Sprintf("旧作者占位_%06d", i), Source: "rule", RoleName: "画师"}}},
+			After: &SnapConclusion{State: snapStateIdentified,
+				Final: []SnapDecl{{Dimension: "作者", Value: fmt.Sprintf("新作者占位_%06d", i), Source: "assign", RoleName: "画师"},
+					{Dimension: "标题", Value: fmt.Sprintf("新标题占位_%06d", i), Source: "assign"}}}})
+	}
+	for i := 0; i < 5000; i++ {
+		diff.Added = append(diff.Added, SnapDiffEntry{
+			RelPath: fmt.Sprintf("库根目录甲/子目录乙/新增文件占位文段甲乙丙_%06d.jpg", i),
+			After:   &SnapConclusion{State: snapStatePlain}})
+		diff.Removed = append(diff.Removed, SnapDiffEntry{
+			RelPath: fmt.Sprintf("库根目录甲/子目录乙/消失文件占位文段甲乙丙_%06d.jpg", i),
+			Before:  &SnapConclusion{State: snapStateIdentified}})
+	}
+	if _, err := m.CompleteRecognitionWithDiff(root, snap, diff); err != nil {
+		t.Fatalf("注入快照与差异集失败: %v", err)
+	}
+	sessFull, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取全会话失败: %v", err)
+	}
+	wantDec := decisionsViewOf(sessFull)
+	wantDecJSON, err := json.Marshal(wantDec)
+	if err != nil {
+		t.Fatalf("全量决策态序列化失败: %v", err)
+	}
+	// 夹具量级自检：decisions ≥140MB（用户真实 67,321,044 字节的 ≥2 倍）
+	if len(wantDecJSON) < 140<<20 {
+		t.Fatalf("夹具量级不足：全量决策态 %d 字节 < 140MB（%d 条赋值）", len(wantDecJSON), assignTotal)
+	}
+
+	wantDirCount := len(snap.Dirs)
+	gotDirs := 0
+	gotDec := &workbenchSessionDecisionsView{
+		Assignments: []workbenchAssignmentView{}, Ignored: []string{}, Selection: []string{},
+	}
+	gotDiff := &SnapDiff{Changed: []SnapDiffEntry{}, Added: []SnapDiffEntry{}, Removed: []SnapDiffEntry{}}
+	total := len(snap.Dirs) + len(wantDec.Assignments) + len(wantDec.Ignored) + len(wantDec.Selection) +
+		len(diff.Changed) + len(diff.Added) + len(diff.Removed)
+	var lastMeasured int
+	cursor := ""
+	pages := 0
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(900 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionOverview, Cursor: cursor,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Panorama == nil || resp.Page == nil {
+			t.Fatalf("overview 大载荷分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("页应答序列化失败: %v", err)
+		}
+		// 整答实测尺寸断言：≤12MB 软界（12MB 与 64MB 断路器之间的安全带，
+		// 分页预算设计上排除硬门可达性）
+		if len(data) > panoramaPageSoftBytes {
+			t.Fatalf("第 %d 页整答实测 %d 字节超软界 %d", page+1, len(data), panoramaPageSoftBytes)
+		}
+		lastMeasured = len(data)
+		p := resp.Page
+		received := gotDirs + len(gotDec.Assignments) + len(gotDec.Ignored) + len(gotDec.Selection) +
+			len(gotDiff.Changed) + len(gotDiff.Added) + len(gotDiff.Removed)
+		count := countOverviewPage(resp.Panorama) + countDecisionsPage(resp.Decisions) + countDiffPage(resp.Diff)
+		if p.Section != panoramaSectionOverview || p.Generation != snap.GeneratedAtMs ||
+			p.Total != total || p.Offset != received || p.Count != count || count < 1 {
+			t.Fatalf("overview 页回执不符（第 %d 页）: %+v（已收 %d 条，页计 %d）", page+1, p, received, count)
+		}
+		if resp.Decisions == nil || resp.Diff == nil {
+			t.Fatalf("overview 页应每页随答决策态与差异集容器（第 %d 页）", page+1)
+		}
+		gotDirs += countOverviewPage(resp.Panorama)
+		gotDec.Assignments = append(gotDec.Assignments, resp.Decisions.Assignments...)
+		gotDec.Ignored = append(gotDec.Ignored, resp.Decisions.Ignored...)
+		gotDec.Selection = append(gotDec.Selection, resp.Decisions.Selection...)
+		gotDiff.Changed = append(gotDiff.Changed, resp.Diff.Changed...)
+		gotDiff.Added = append(gotDiff.Added, resp.Diff.Added...)
+		gotDiff.Removed = append(gotDiff.Removed, resp.Diff.Removed...)
+		pages = page + 1
+		if p.Done {
+			if p.NextCursor != "" {
+				t.Fatal("末页不应携带续拉游标")
+			}
+			break
+		}
+		if p.NextCursor == "" {
+			t.Fatal("非末页缺续拉游标")
+		}
+		cursor = p.NextCursor
+	}
+	if pages < 15 {
+		t.Fatalf("≥140MB 决策态 + 6 万差异条目按 8MB 页目标应 ≥15 页，实际 %d 页", pages)
+	}
+	if gotDirs != wantDirCount {
+		t.Fatalf("全景六段逐页合计目录条数 = %d，期望 %d", gotDirs, wantDirCount)
+	}
+	// 跨页拼接语义全等锚：与全量决策态/差异集 JSON 逐字节全等（赋值档案/
+	// 差异清单全量可达，语义零丢失）
+	gotDecJSON, err := json.Marshal(gotDec)
+	if err != nil {
+		t.Fatalf("拼接决策态序列化失败: %v", err)
+	}
+	if !bytes.Equal(gotDecJSON, wantDecJSON) {
+		t.Fatalf("决策态跨页拼接与全量决策态 JSON 不逐字节全等（%d vs %d 字节）", len(gotDecJSON), len(wantDecJSON))
+	}
+	gotDiffJSON, err := json.Marshal(gotDiff)
+	if err != nil {
+		t.Fatalf("拼接差异集序列化失败: %v", err)
+	}
+	wantDiffJSON, err := json.Marshal(sessFull.LastDiff)
+	if err != nil {
+		t.Fatalf("全量差异集序列化失败: %v", err)
+	}
+	if !bytes.Equal(gotDiffJSON, wantDiffJSON) {
+		t.Fatalf("差异集跨页拼接与全量差异集 JSON 不逐字节全等（%d vs %d 字节）", len(gotDiffJSON), len(wantDiffJSON))
+	}
+	t.Logf("decisions=%d 字节 diff=%d 字节，%d 页拉完，末页整答 %d 字节",
+		len(wantDecJSON), len(wantDiffJSON), pages, lastMeasured)
 }
 
 // previewBoundFixture 巨条目夹具（条目成员无界击穿页界的真实形态）：巨群 +
