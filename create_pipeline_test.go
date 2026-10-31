@@ -872,3 +872,39 @@ func TestCancelCreateActionDispatch(t *testing.T) {
 		t.Fatalf("提交点后的取消应应答 completed，实际 %+v", resp)
 	}
 }
+
+// TestEmitHeartbeatSurvivesChannelBackpressure 心跳节拍与发射通道背压解耦的锚定：
+// 发射通道无消费方、缓冲填满时释放环阻塞在通道发送处——独立心跳 goroutine 的
+// 节拍仍按注入周期在场（随放行循环驱动的节拍在阻塞期全停）。停摆解除后发射
+// 完整收尾（无死锁、产出齐全）。
+func TestEmitHeartbeatSurvivesChannelBackpressure(t *testing.T) {
+	// 25 单文件作品 × 单批条数界 1 = 25 批 > 通道缓冲 16：消费方停摆期释放环
+	// 必然阻塞在通道发送处
+	root, h, _, _, sess, works := newParallelEmitFixture(t, 25, 1, emitDirectCfg{batchCount: 1})
+	h.verifyHeartbeatTick = 20 * time.Millisecond
+	reporter := &countingStubReporter{}
+	ch := make(chan *sdkdto.CreateStreamItem, 16)
+	var reason string
+	var cancelled bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		reason, cancelled = h.emitSelectedWorks(root, sess, works, "背压批次", ch, reporter)
+		close(ch)
+	}()
+	<-ch // 首件（父块内联批）到达即停摆消费方，通道填满后释放环阻塞
+	time.Sleep(200 * time.Millisecond)
+	during := reporter.count.Load()
+	items := 1 // 首件已预读，收卷计数自 1 起
+	for range ch {
+		items++
+	}
+	wg.Wait()
+	if during < 5 {
+		t.Fatalf("通道背压期心跳节拍应在场（200ms 停摆 × 20ms 节拍应 ≥5 次），实际 %d 次", during)
+	}
+	if items != 25 || reason != "" || cancelled {
+		t.Fatalf("背压解除后发射应完整收尾：items=%d reason=%q cancelled=%v", items, reason, cancelled)
+	}
+}

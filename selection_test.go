@@ -1374,3 +1374,101 @@ func jsonQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// —— 宿主创建流提前终结的撤回链（终态后核对池随撤 + 帧5 计数定格）—— //
+
+// streamDeathCreateTaskCtx CreateTask 桩模拟宿主创建流提前终结：同步驱动插件
+// Create 过滤产出分支取得条目流后不消费任何条目（宿主泵建流即收流的形态——
+// 首块前或批间隙空闲收流），回告失败。发射通道 16 缓冲填满后释放环阻塞在通道
+// 发送处，撤回链经取消解除阻塞收流。
+type streamDeathCreateTaskCtx struct {
+	workbenchTestCtx
+	fetcher *LocalImportWorkFetcher
+}
+
+// CreateTask 宿主泵收流桩：等发射通道缓冲填满（释放环阻塞在通道发送处、进度槽
+// 已落账 16 批）后不消费即回告空闲收流失败。
+func (c *streamDeathCreateTaskCtx) CreateTask(url string) (*sdkdto.CreateTaskResult, error) {
+	result, err := c.fetcher.Create(url)
+	if err != nil {
+		return nil, err
+	}
+	items := result.Items()
+	if items == nil {
+		return nil, fmt.Errorf("过滤产出应为条目形态流式结果（B1+）")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(items) < 16 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(items) < 16 {
+		return nil, fmt.Errorf("发射通道未按预期填满（len=%d）——夹具失效", len(items))
+	}
+	return &sdkdto.CreateTaskResult{Succeed: false, Msg: "插件流空闲超时: 1m0s 内未收到数据（测试注入）"}, nil
+}
+
+// streamDeathCreateFixture 宿主流断链测试环境：单目录 25 轨聚合作品（全量识别后
+// 可选，选择集=该作品 → 25 子行），fetcher 单批条数界 1（每子行一批——发射通道
+// 16 缓冲必然填满、释放环阻塞在通道发送处）。
+func streamDeathCreateFixture(t *testing.T, tracks int) (string, *SessionManager, *streamDeathCreateTaskCtx) {
+	t.Helper()
+	root := t.TempDir()
+	store := newFakeSessionStore()
+	ctx := &streamDeathCreateTaskCtx{workbenchTestCtx: workbenchTestCtx{store: store}}
+	ctx.library = libraryFixture{localAuthors: []string{"库内作者名"}}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: selectionTestRules(t)}
+	if err := SaveProfile(store, profile); err != nil {
+		t.Fatalf("写入测试规则档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	for i := 0; i < tracks; i++ {
+		writeTestFile(t, fmt.Sprintf("%s/聚合目录/【作者甲】标题%02d.jpg", root, i), fmt.Sprintf("内容%02d", i))
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	ctx.fetcher = &LocalImportWorkFetcher{
+		sessions: m, ctx: ctx,
+		hostContractFn:          func() uint32 { return createChildrenBatchMinHostContract },
+		childrenBatchCountLimit: 1,
+	}
+	return root, m, ctx
+}
+
+// TestStreamDeathHaltsEmissionAndFreezesCount 宿主创建流提前终结后编排侧撤回在途
+// 核对与发射：createDone 失败终态（帧5）的已发射计数=撤回时点真实已发射数（发射
+// 通道缓冲容纳的 16 子行，计划 25），终态后无残余 createProgress 事件，哈希缓存
+// 按中止合并语义落盘（发射 goroutine 退出路径的 defer 已执行——撤回前阻塞在通道
+// 发送处的形态永不落盘）。
+func TestStreamDeathHaltsEmissionAndFreezesCount(t *testing.T) {
+	root, m, ctx := streamDeathCreateFixture(t, 25)
+	if _, err := m.SetSelection(root, []string{"d:聚合目录"}); err != nil {
+		t.Fatalf("写入选择集失败: %v", err)
+	}
+	started, err := m.ApplyCreateTasks(root, "流断批次")
+	if err != nil || !started {
+		t.Fatalf("创建编排应立即应答已开始: started=%v err=%v", started, err)
+	}
+	done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
+	if done.Success {
+		t.Fatalf("宿主收流桩应失败收尾，实际成功: %s", done.Message)
+	}
+	if !strings.Contains(done.Message, "宿主创建任务失败: 插件流空闲超时") {
+		t.Fatalf("帧5 文案应携带宿主收流原因，实际 %q", done.Message)
+	}
+	if !strings.Contains(done.Message, "已发射 16/25 个子任务随回滚删除") {
+		t.Fatalf("帧5 计数应为撤回时点真实已发射数（通道缓冲 16 子行/计划 25），实际 %q", done.Message)
+	}
+	events := collectWorkbenchEvents(t, ctx)
+	for i, evt := range events {
+		if evt.Kind == workbenchEventCreateDone && i != len(events)-1 {
+			t.Fatalf("createDone 后不应再有创建事件（撤回后核对/发射停摆），残余: %+v", events[i+1:])
+		}
+	}
+	if _, err := ctx.store.GetValue(hashCacheKey(root)); err != nil {
+		t.Fatalf("哈希缓存应随发射侧收尾按中止合并语义落盘: %v", err)
+	}
+}

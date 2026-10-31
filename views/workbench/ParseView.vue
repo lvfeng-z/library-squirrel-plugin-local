@@ -1355,6 +1355,9 @@ const cancelDialogVisible = ref(false)
 // 失败=✖、帧6 完成=✔）
 const createDoneKind = ref<'cancelled' | 'failed' | 'success'>('success')
 const createDoneMessage = ref('')
+// 终态粘滞位：createDone 到达后置位，下一次创建发起时复位——终态后的迟到
+// createProgress 事件（发射侧收流前的残余推送）不再把横幅拉回进行态
+const createTerminalReached = ref(false)
 // 本次创建的任务名（成功通知兜底名；事件文案携带名为准）
 const createTaskLabel = ref('')
 // verify 道 ETA 估算（速率=事件间 Δdone/Δt 的指数平滑；首个有效样本后可估）
@@ -1818,6 +1821,9 @@ function onEvent(event: { data?: unknown }) {
       recognError.value = evt.message || '全量识别失败'
     }
   } else if (evt.kind === 'createProgress') {
+    // 终态粘滞：createDone 已到达后的迟到进度事件不回拉横幅（防御层——终态后
+    // 插件侧核对/发射应收流停摆，残余推送不改变已定格的终态呈现）
+    if (createTerminalReached.value) return
     // 双计数分道（乙3 重叠期语义，phase 词汇对齐 selection.go）：verify=核对行
     //（作品数+读盘速率，终值 done=total 即核对完成）、create=发射行（已发射子行数）
     creating.value = true
@@ -1836,7 +1842,9 @@ function onEvent(event: { data?: unknown }) {
   } else if (evt.kind === 'createDone') {
     // 终态（帧4 取消/帧5 失败/帧6 完成）：文案优先消费后端 Message；取消终态按
     // 「已取消创建」前缀归类（✔ 呈现，区别于 ✖ 失败）；成功时选择集已被插件侧
-    // 清空，本地同步镜像（已选计数归零）
+    // 清空，本地同步镜像（已选计数归零）。终态粘滞位置位——后续迟到进度事件
+    // 不再把横幅拉回进行态（复位=下一次创建发起）
+    createTerminalReached.value = true
     creating.value = false
     createCancelling.value = false
     createCancelRaceNote.value = ''
@@ -2547,6 +2555,8 @@ async function createTasks(): Promise<void> {
   createError.value = ''
   createDoneMessage.value = ''
   createDoneKind.value = 'success'
+  // 新一次创建发起：解除终态粘滞（上一轮终态后的迟到事件防线随新轮重置）
+  createTerminalReached.value = false
   createCancelling.value = false
   createCancelRaceNote.value = ''
   // 通知名预备：成功事件文案携带名为准，空输入回退前端同规则默认名

@@ -558,6 +558,10 @@ type createRunState struct {
 	// cancelFn 在途创建的 runCtx 取消函数（verify 发射循环注册 arm/收尾 disarm；
 	// 置位取消位时同步调用，令读循环 4MB 分块处立即感知）。
 	cancelFn context.CancelFunc
+	// done 发射侧收尾信号（emitSelectedWorks 全部退出路径关闭）：宿主创建流
+	// 提前终结时编排侧等待发射侧落定的观测点——关闭即核对 worker 池已收流、
+	// 发射进度槽已定格（哈希缓存回写在其后进行，不纳入等待）。
+	done chan struct{}
 }
 
 // createRunKey 创建运行态登记键（归一化库根，与会话键同一归一函数）。
@@ -577,6 +581,7 @@ func beginCreateRun(root string) bool {
 	}
 	state.running, state.emitted, state.planned = true, 0, 0
 	state.cancelled, state.committed, state.cancelFn = false, false, nil
+	state.done = nil
 	return true
 }
 
@@ -712,6 +717,63 @@ func disarmCreateRunCancel(root string) {
 	}
 }
 
+// armCreateRunDone 登记在途创建的收尾信号并返回待关闭通道（emitSelectedWorks
+// 起始调用、全部退出路径经 defer 关闭）。无运行态=直驱路径，返回 nil（关闭方
+// 忽略）。
+func armCreateRunDone(root string) chan struct{} {
+	st, ok := createRunRegistry.Load(createRunKey(root))
+	if !ok {
+		return nil
+	}
+	state := st.(*createRunState)
+	done := make(chan struct{})
+	state.mu.Lock()
+	state.done = done
+	state.mu.Unlock()
+	return done
+}
+
+// closeCreateRunDone 关闭收尾信号（幂等于登记表侧：信号只随本次发射生命周期
+// 关闭一次，运行态条目此后由 endCreateRun 摘除）。
+func closeCreateRunDone(root string, done chan struct{}) {
+	if done == nil {
+		return
+	}
+	close(done)
+}
+
+// createHaltEmissionWaitLimit 撤回后等待发射侧落定的时间上限：在途哈希单元按
+// 4MB 分块检查取消、通道背压阻塞点即时解除，常态秒级落定；挂起读等不可中断
+// 形态超时后照常发终态（发射 goroutine 自行收尾，不阻塞用户可见结局）。
+const createHaltEmissionWaitLimit = 10 * time.Second
+
+// haltCreateRunEmission 宿主创建流提前终结（空闲收流/传输中断/error 收流）后
+// 撤回插件侧在途核对与发射：调用登记的 runCtx 取消函数（核对 worker 池供件/
+// 分块处收流、发射通道背压阻塞点解除），并限时等待发射侧退出——终态事件发布
+// 前进度事件停摆、发射进度槽定格（失败文案的已发射计数不再与在途批次竞态）。
+// 与 cancelCreate 工作台动作共用取消函数但不置取消位：宿主流终结不是用户取消，
+// 终态仍走失败文案；发射侧以取消形态收尾（末批 last 不发，宿主未收批统一回滚）。
+func haltCreateRunEmission(root string) {
+	st, ok := createRunRegistry.Load(createRunKey(root))
+	if !ok {
+		return
+	}
+	state := st.(*createRunState)
+	state.mu.Lock()
+	cancel, done := state.cancelFn, state.done
+	state.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(createHaltEmissionWaitLimit):
+	}
+}
+
 // noteCreateProgress 推送 createProgress 事件并登记发射进度：create 相（发射
 // 循环计数）同时落运行态进度槽（abortCreateTasks 的在途清理量数据源），
 // verify 相只推事件；bytesPerSec 为核对相当前窗口读盘字节/秒（甲1 速率字段，
@@ -813,7 +875,9 @@ func (m *SessionManager) ApplyCreateTasks(root, taskName string) (bool, error) {
 // runCreateTasks 创建编排主体（ApplyCreateTasks 启动的独立 goroutine）：宿主
 // CreateTask RPC 同步覆盖完整产出流——返回时过滤产出侧的暂存名消费与批次摘要
 // 回写均已就绪（selection.go「创建编排与过滤产出之间的进程内传值」注释的时序
-// 契约在此保持）。终态经 createDone 事件推送：成功=清空选择集（赋值与快照保留）
+// 契约在此保持）。宿主创建流提前终结（空闲收流/传输中断/error 收流）时 RPC 返回
+// 失败：先撤回插件侧在途核对与发射（haltCreateRunEmission——进度事件停摆、发射
+// 计数定格）再发终态。终态经 createDone 事件推送：成功=清空选择集（赋值与快照保留）
 // +摘要文案；失败=abortCreateTasks（保留选择集+在途清理信息，决策4 统一回滚）；取消（甲3/决策3，
 // 判读先于应答形态——取消位与取消意图块的应答形态不保证一致）=finishCancelledCreate
 //（保留选择集+清理量文案；原子提交点已过的取消不成立，照常成功收尾，风险10）。
@@ -829,6 +893,7 @@ func (m *SessionManager) runCreateTasks(root, taskName string, workCount int) {
 		return
 	}
 	if err != nil {
+		haltCreateRunEmission(root)
 		m.abortCreateTasks(root, fmt.Sprintf("宿主创建任务失败: %v", err))
 		return
 	}
@@ -837,6 +902,7 @@ func (m *SessionManager) runCreateTasks(root, taskName string, workCount int) {
 		if resp != nil {
 			msg = resp.Msg
 		}
+		haltCreateRunEmission(root)
 		m.abortCreateTasks(root, fmt.Sprintf("宿主创建任务失败: %s", msg))
 		return
 	}

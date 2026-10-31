@@ -500,7 +500,9 @@ func (p *emitPipeline) add(child *sdkdto.TaskCreateChildResponse) {
 }
 
 // flush 发射当前批：首批随父块内联、余批经 children_batch（last 声明末批）。
-// 返回假=取消在场已中止。空批为无操作（零子行或界满批恰发完）。
+// 返回假=取消在场已中止。空批为无操作（零子行或界满批恰发完）。发射通道无
+// 消费方（宿主创建流已终结且收流侧停摆）时背压阻塞可被取消解除——取消在场
+// 按中止收流，发射不随通道滞留。
 func (p *emitPipeline) flush(last bool) bool {
 	if p.ctx.Err() != nil {
 		p.aborted = true
@@ -513,10 +515,15 @@ func (p *emitPipeline) flush(last bool) bool {
 		p.batchMs = time.Now().UnixMilli()
 	}
 	parentID := fmt.Sprintf("local-batch-%d", p.batchMs)
-	if p.batchIdx == 0 {
-		p.ch <- sdkdto.TaskItem(buildBatchParentResponse(parentID, p.taskName, p.parentURL, p.siteKey, p.cur))
-	} else {
-		p.ch <- sdkdto.ChildrenBatchItem(parentID, p.cur, last)
+	item := sdkdto.TaskItem(buildBatchParentResponse(parentID, p.taskName, p.parentURL, p.siteKey, p.cur))
+	if p.batchIdx > 0 {
+		item = sdkdto.ChildrenBatchItem(parentID, p.cur, last)
+	}
+	select {
+	case p.ch <- item:
+	case <-p.ctx.Done():
+		p.aborted = true
+		return false
 	}
 	p.emitted += len(p.cur)
 	p.cur, p.curBytes = nil, 0
@@ -712,14 +719,43 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		}
 	}
 
-	// 取消通路（甲3/决策3）：runCtx 由 cancelCreate 工作台动作经运行态登记表
-	// 传播取消（requestCreateCancel 置位即调用登记的 cancelFn）；原子提交点
-	//（末批 last 已发，markCreateCommitted）后的取消在请求侧即应答「已完成」，
-	// 本循环不再回退已收批产出（风险10）
+	// 取消通路（甲3/决策3）：runCtx 的取消源有两个——cancelCreate 工作台动作经
+	// 运行态登记表传播取消（requestCreateCancel 置位即调用登记的 cancelFn），与
+	// 宿主创建流提前终结后编排侧的撤回（haltCreateRunEmission 直接调用同一
+	// cancelFn，不置取消位）；原子提交点（末批 last 已发，markCreateCommitted）
+	// 后的用户取消在请求侧即应答「已完成」，本循环不再回退已收批产出（风险10）
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 	armCreateRunCancel(root, runCancel)
 	defer disarmCreateRunCancel(root)
+
+	// 收尾信号：本循环全部退出路径（完成/中止/取消）经 defer 关闭——编排侧在
+	// 宿主创建流提前终结后据此等待发射侧落定（终态事件发布前进度停摆、发射
+	// 计数定格）；关闭先于哈希缓存回写（defer 后进先出），等待不覆盖缓存落盘
+	runDone := armCreateRunDone(root)
+	defer closeCreateRunDone(root, runDone)
+
+	// 心跳独立节拍 goroutine：与放行循环解耦——释放环阻塞在发射通道背压时
+	// 放行循环不排水，随循环驱动的节拍会随发射停摆；独立 goroutine 按节拍
+	// 周期上报，不受释放环与通道背压影响（上报器并发安全，限频由上报器自持）。
+	// Create 延迟发射形态下 SDK 上报器随 handler 返回即关闭，发射期上报在其
+	// 关闭后为 no-op——发射期喂窗需上报器生命周期覆盖条目流排空（SDK 侧语义）
+	hbStop := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(h.verifyHeartbeatTickOrDefault())
+		defer tick.Stop()
+		for {
+			select {
+			case <-tick.C:
+				if reporter != nil {
+					reporter.Heartbeat()
+				}
+			case <-hbStop:
+				return
+			}
+		}
+	}()
+	defer close(hbStop)
 
 	// 爬坡控制器 + 动态信号量（乙1/决策1 三层：偏好钉死 > 按盘记忆 > 会话内
 	// 自适应；控制器窗口只计真实读盘字节——风险5，速率字段同一窗口统计）
@@ -843,8 +879,6 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 
 	buffered := make(map[int]indexedUnitOutcome, hashConcurrencyPinMax)
 	released := 0
-	heartbeat := time.NewTicker(h.verifyHeartbeatTickOrDefault())
-	defer heartbeat.Stop()
 	for released < len(units) {
 		select {
 		case out, ok := <-results:
@@ -854,14 +888,10 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 				return "", true
 			}
 			buffered[out.idx] = out
-		case <-heartbeat.C:
-			if reporter != nil {
-				reporter.Heartbeat()
-			}
-			continue
 		case <-runCtx.Done():
-			// cancelCreate 置位（唯一中途取消源）：核对相/发射相（含重叠期）
-			// 均在此收流——不发末批 last，宿主未收批统一回滚（决策3/4）
+			// 取消源收流（cancelCreate 工作台动作或宿主创建流提前终结的撤回）：
+			// 核对相/发射相（含重叠期）均在此收流——不发末批 last，宿主未收批
+			// 统一回滚（决策3/4）；心跳节拍在独立 goroutine，随本返回关闭
 			return "", true
 		}
 		for {
