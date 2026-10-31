@@ -333,6 +333,10 @@
                         :class="s.kind ? `li-ws-seg-${s.kind}` : ''"
                       >{{ s.text }}</span><span class="li-ws-cand-ext">{{ mv.parts.ext }}</span></span>
                   </div>
+                  <!-- 成员预览截断说明：后端投影层截前 panoramaMemberPreviewLimit=200 个成员
+                       （size 恒为真总数），被截成员不可点击定位=可接受展示降级；
+                       确认归集/忽略动作按目标键全量生效，不受截断影响 -->
+                  <p v-if="c.size > (c.members || []).length" class="li-ws-cand-preview">仅预览前 {{ (c.members || []).length }} 个成员（共 {{ c.size }} 个）</p>
                   <div v-if="confirming === candTarget(c)" class="li-ws-cand-confirm">
                     <span class="li-ws-cand-namewrap">
                       <input v-model="confirmName" class="li-ws-cand-name" type="text" maxlength="200" placeholder="集名" :style="{ width: nameInputWidth }">
@@ -423,6 +427,8 @@
                           :class="s.kind ? `li-ws-seg-${s.kind}` : ''"
                         >{{ s.text }}</span><span class="li-ws-cand-ext">{{ mv.parts.ext }}</span></span>
                       </div>
+                      <!-- 成员预览截断说明（已归集卡同待归集卡：size=真总数，动作全量生效） -->
+                      <p v-if="c.size > (c.members || []).length" class="li-ws-cand-preview">仅预览前 {{ (c.members || []).length }} 个成员（共 {{ c.size }} 个）</p>
                     </div>
                   </div>
                 </div>
@@ -3519,6 +3525,13 @@ onUnmounted(() => {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+/* 成员预览截断说明（size > len(members) 时呈现：投影层截前 200 个成员，size=真总数） */
+.li-ws-cand-preview {
+  margin: 0;
+  color: var(--app-text-secondary);
+  font-size: 11px;
 }
 
 .li-ws-cand-member {

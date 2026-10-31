@@ -1290,6 +1290,347 @@ func countOverviewPage(pan *RecognitionSnapshot) int {
 		len(pan.IgnoredCandidates) + len(pan.ConfirmedCandidates) + len(pan.Pending)
 }
 
+// previewBoundFixture 巨条目夹具（条目成员无界击穿页界的真实形态）：巨群 +
+// 候选三仓各一条 giantMembers 成员（每成员带元素数组=目录来源候选的元素级
+// 放大），另备落单目录 250 文件（domain 分节的目录聚合多轨作品形态）。
+func previewBoundFixture(root string, giantMembers int) (snap *RecognitionSnapshot, dirTracksFiles int) {
+	bigElements := func(i int) []SnapEl {
+		return []SnapEl{
+			{Text: fmt.Sprintf("公共前缀文段_%05d_尾注文段甲乙丙丁", i), Kind: elKindTitle},
+			{Text: "_", Kind: elKindSep},
+			{Text: fmt.Sprintf("%05d", i), Kind: elKindSeq},
+			{Text: "【作者名占位文段】", Kind: elKindAuthor},
+			{Text: "（标题文段占位）", Kind: elKindTitle},
+		}
+	}
+	groupMembers := make([]SnapGroupMember, 0, giantMembers)
+	candMembers := make([]SnapCandMember, 0, giantMembers)
+	files := make([]SnapFile, 0, giantMembers+250)
+	for i := 0; i < giantMembers; i++ {
+		rel := fmt.Sprintf("巨目录/成员_%05d.jpg", i)
+		groupMembers = append(groupMembers, SnapGroupMember{
+			RelPath: rel, Seq: i + 1, SeqText: fmt.Sprintf("%05d", i+1), Elements: bigElements(i),
+		})
+		candMembers = append(candMembers, SnapCandMember{
+			RelPath: rel, SeqText: fmt.Sprintf("%05d", i+1), Elements: bigElements(i),
+		})
+		files = append(files, SnapFile{
+			RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: "巨目录",
+			State: snapStatePlain, GroupKey: "公共前缀文段", GroupSeq: i + 1,
+		})
+	}
+	const dirTracksTotal = 250 // > panoramaMemberPreviewLimit：目录聚合作品截断实证
+	for i := 0; i < dirTracksTotal; i++ {
+		rel := fmt.Sprintf("落单目录/散件_%03d.jpg", i)
+		files = append(files, SnapFile{
+			RelPath: rel, FileName: fileNameOfRel(rel), DirRelKey: "落单目录", State: snapStatePlain,
+		})
+	}
+	snap = &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1700000000004,
+		RootPath:      root,
+		Dirs: []SnapDir{
+			{RelKey: "巨目录", Name: "巨目录", Depth: 1, FileCount: giantMembers},
+			{RelKey: "落单目录", Name: "落单目录", Depth: 1, FileCount: dirTracksTotal},
+		},
+		Files:  files,
+		Groups: []SnapGroup{{DirRelKey: "巨目录", Key: "公共前缀文段", Size: giantMembers, Members: groupMembers}},
+		Candidates:          []SnapCandidate{{Key: "公共前缀文段", Dir: "巨目录", Source: candSourceGroup, Size: giantMembers, Reason: "巨群候选", Members: candMembers}},
+		IgnoredCandidates:   []SnapCandidate{{Key: "忽略巨候选", Dir: "巨目录", Source: candSourceDir, Size: giantMembers, Reason: "忽略分仓", Members: candMembers}},
+		ConfirmedCandidates: []SnapCandidate{{Key: "确认巨候选", Dir: "巨目录", Source: candSourceDir, Size: giantMembers, Reason: "确认分仓", Members: candMembers}},
+	}
+	return snap, dirTracksTotal
+}
+
+// TestGetPanoramaMemberPreviewBound 条目成员预览截断（协议级页界修复）：overview
+// 六段与 domain 分节的重载荷条目成员原本无界——清存储新库首用时巨目录候选
+// 单条 ~3.8 万成员 × ~2KB ≈ 79MB 直撞 64MB 应答断路器。投影层按
+// panoramaMemberPreviewLimit 截前 200 个（Size=真总数）：逐页 json.Marshal 实测
+// 全 ≤ 软界、条目 Members ≤ 上限、逐页拼接与全量投影逐条全等（语义守卫两侧
+// 同截断）、存储快照与推导域保持全量成员（服务端动作按目标键全量解析）。
+func TestGetPanoramaMemberPreviewBound(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+
+	const giantMembers = 5000
+	snap, dirTracksTotal := previewBoundFixture(root, giantMembers)
+	injectSessionSnapshot(t, m, root, snap)
+	want := panoramaOverviewViewOf(snap)
+
+	// overview：提示 2 条/页逐页拉完（六段跨界页全覆盖）
+	var gotGroups []SnapGroup
+	var gotCands, gotIgnored, gotConfirmed []SnapCandidate
+	cursor := ""
+	pages := 0
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(700 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionOverview, Cursor: cursor, PageSizeHint: 2,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Panorama == nil || resp.Page == nil {
+			t.Fatalf("overview 分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("页应答序列化失败: %v", err)
+		}
+		if len(data) > panoramaPageSoftBytes {
+			t.Fatalf("第 %d 页实测 %d 字节超软界 %d", page+1, len(data), panoramaPageSoftBytes)
+		}
+		pan := resp.Panorama
+		for _, g := range pan.Groups {
+			if len(g.Members) > panoramaMemberPreviewLimit || g.Size != giantMembers {
+				t.Fatalf("群条目应截 %d 成员且 Size=真总数: members=%d size=%d",
+					panoramaMemberPreviewLimit, len(g.Members), g.Size)
+			}
+		}
+		for _, c := range append(append(append([]SnapCandidate{}, pan.Candidates...),
+			pan.IgnoredCandidates...), pan.ConfirmedCandidates...) {
+			if len(c.Members) > panoramaMemberPreviewLimit || c.Size != giantMembers {
+				t.Fatalf("候选条目应截 %d 成员且 Size=真总数: members=%d size=%d",
+					panoramaMemberPreviewLimit, len(c.Members), c.Size)
+			}
+		}
+		gotGroups = append(gotGroups, pan.Groups...)
+		gotCands = append(gotCands, pan.Candidates...)
+		gotIgnored = append(gotIgnored, pan.IgnoredCandidates...)
+		gotConfirmed = append(gotConfirmed, pan.ConfirmedCandidates...)
+		pages = page + 1
+		if resp.Page.Done {
+			if resp.Page.NextCursor != "" {
+				t.Fatal("末页不应携带续拉游标")
+			}
+			break
+		}
+		cursor = resp.Page.NextCursor
+	}
+	if pages < 3 {
+		t.Fatalf("提示 2 条/页的六段快照应多页，实际 %d 页", pages)
+	}
+	if len(gotGroups) != 1 || len(gotCands) != 1 || len(gotIgnored) != 1 || len(gotConfirmed) != 1 {
+		t.Fatalf("逐页条目合计不符: groups=%d cands=%d ignored=%d confirmed=%d",
+			len(gotGroups), len(gotCands), len(gotIgnored), len(gotConfirmed))
+	}
+	if len(gotGroups[0].Members) != panoramaMemberPreviewLimit {
+		t.Fatalf("巨群应恰截 %d 成员，实际 %d", panoramaMemberPreviewLimit, len(gotGroups[0].Members))
+	}
+	if !reflect.DeepEqual(gotGroups, want.Groups) || !reflect.DeepEqual(gotCands, want.Candidates) ||
+		!reflect.DeepEqual(gotIgnored, want.IgnoredCandidates) || !reflect.DeepEqual(gotConfirmed, want.ConfirmedCandidates) {
+		t.Fatal("overview 逐页拼接与截断后全量投影逐条不全等")
+	}
+
+	// 存储快照成员保持全量（投影截断不回写会话；服务端动作按目标键全量解析）
+	after, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if len(after.Snapshot.Groups[0].Members) != giantMembers || len(after.Snapshot.Candidates[0].Members) != giantMembers {
+		t.Fatal("存储快照成员被投影截断意外改写")
+	}
+
+	// domain：5000 集成员作品 + 1 目录聚合作品（250 轨）+ 1 巨集，共 5002 条目；
+	// 提示 2501 条/页 → 末页作品尾+集头同页（跨界页全覆盖）
+	fullDomain := DeriveWorkDomain(snap, nil)
+	if len(fullDomain.Sets) != 1 || len(fullDomain.Sets[0].Members) != giantMembers {
+		t.Fatalf("推导域巨集形态不符: sets=%d members=%d", len(fullDomain.Sets), len(fullDomain.Sets[0].Members))
+	}
+	dirTracksSeen := false
+	for _, w := range fullDomain.Works {
+		if w.Kind == WorkKindDirTracks {
+			if len(w.Files) != dirTracksTotal || dirTracksSeen {
+				t.Fatalf("目录聚合作品形态不符: files=%d", len(w.Files))
+			}
+			dirTracksSeen = true
+		}
+	}
+	if !dirTracksSeen {
+		t.Fatal("推导域应含目录聚合多轨作品")
+	}
+
+	wantDomain := domainViewOf(fullDomain)
+	var gotWorks []*SelectableWork
+	var gotSets []*WorkSetView
+	cursor = ""
+	straddled := false
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(800 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionDomain, Cursor: cursor, PageSizeHint: 2501,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Domain == nil || resp.Page == nil || resp.Panorama != nil {
+			t.Fatalf("domain 分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("页应答序列化失败: %v", err)
+		}
+		if len(data) > panoramaPageSoftBytes {
+			t.Fatalf("domain 第 %d 页实测 %d 字节超软界 %d", page+1, len(data), panoramaPageSoftBytes)
+		}
+		for _, w := range resp.Domain.Works {
+			if len(w.Files) > panoramaMemberPreviewLimit {
+				t.Fatalf("作品条目轨道 %d 超预览上限 %d", len(w.Files), panoramaMemberPreviewLimit)
+			}
+		}
+		for _, s := range resp.Domain.Sets {
+			if len(s.Members) > panoramaMemberPreviewLimit {
+				t.Fatalf("集条目成员 %d 超预览上限 %d", len(s.Members), panoramaMemberPreviewLimit)
+			}
+		}
+		if len(resp.Domain.Works) > 0 && len(resp.Domain.Sets) > 0 {
+			straddled = true
+		}
+		gotWorks = append(gotWorks, resp.Domain.Works...)
+		gotSets = append(gotSets, resp.Domain.Sets...)
+		if resp.Page.Done {
+			break
+		}
+		cursor = resp.Page.NextCursor
+	}
+	if !straddled {
+		t.Fatal("提示 2501 条/页的 5002 条目序列应出现作品→集跨界页")
+	}
+	if !reflect.DeepEqual(gotWorks, wantDomain.Works) || !reflect.DeepEqual(gotSets, wantDomain.Sets) {
+		t.Fatal("domain 逐页拼接与截断后全量投影逐条不全等")
+	}
+	truncatedTracks, truncatedSet := false, false
+	for _, w := range gotWorks {
+		if w.Kind == WorkKindDirTracks && len(w.Files) == panoramaMemberPreviewLimit {
+			truncatedTracks = true
+		}
+	}
+	for _, s := range gotSets {
+		if len(s.Members) == panoramaMemberPreviewLimit {
+			truncatedSet = true
+		}
+	}
+	if !truncatedTracks || !truncatedSet {
+		t.Fatalf("巨集与目录聚合作品应截至 %d 成员出线: tracks=%v set=%v",
+			panoramaMemberPreviewLimit, truncatedTracks, truncatedSet)
+	}
+}
+
+// TestCandidateActionsOnPreviewTruncatedCandidate 截断展示下的候选动作全量生效：
+// 前端仅见前 panoramaMemberPreviewLimit 个成员，忽略/确认按目标键服务端解析
+// 全量成员——忽略分仓携带完整成员、确认对全部成员写集维度赋值（affected=真
+// 总数），识别刷新后快照分仓仍为全量成员。
+func TestCandidateActionsOnPreviewTruncatedCandidate(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+
+	// 真实磁盘树：250 个尾缀数字形态文件在单目录 → 结构群成集（成员=250 > 上限）
+	const total = 250
+	for i := 1; i <= total; i++ {
+		p := filepath.Join(root, "巨目录", fmt.Sprintf("成员_%03d.jpg", i))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("建目录失败: %v", err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("建文件失败: %v", err)
+		}
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	snapshotOf := func() *RecognitionSnapshot {
+		t.Helper()
+		sess, err := m.SessionOf(root)
+		if err != nil {
+			t.Fatalf("读取会话失败: %v", err)
+		}
+		if sess.Snapshot == nil {
+			t.Fatal("快照缺席")
+		}
+		return sess.Snapshot
+	}
+	snap := snapshotOf()
+	var cand *SnapCandidate
+	for i := range snap.Candidates {
+		if len(snap.Candidates[i].Members) == total {
+			cand = &snap.Candidates[i]
+			break
+		}
+	}
+	if cand == nil {
+		t.Fatalf("应存在 %d 成员的巨候选，实际: %+v", total, snap.Candidates)
+	}
+	target := cand.target()
+
+	// 出线仅预览前 200（Size=真总数）
+	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+		Seq: 901, Action: workbenchActionGetPanorama, Root: root,
+	}))
+	resp := ctx.lastResponse(t)
+	if !resp.OK || resp.Panorama == nil {
+		t.Fatalf("getPanorama 失败: %+v", resp)
+	}
+	var wire *SnapCandidate
+	for i := range resp.Panorama.Candidates {
+		if resp.Panorama.Candidates[i].target() == target {
+			wire = &resp.Panorama.Candidates[i]
+			break
+		}
+	}
+	if wire == nil || len(wire.Members) != panoramaMemberPreviewLimit || wire.Size != total {
+		t.Fatalf("出线候选应仅预览 %d 成员且 Size=真总数: %+v", panoramaMemberPreviewLimit, wire)
+	}
+
+	waitIdle := func() {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			m.recogMu.Lock()
+			idle := !m.recogRunning[root]
+			m.recogMu.Unlock()
+			if idle {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("候选动作触发的识别刷新超时未完成")
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	// 忽略 → 分仓携带完整成员（会话全量成员解析，不受出线截断影响）
+	if _, err := m.SetCandidateIgnored(root, target, true); err != nil {
+		t.Fatalf("忽略候选失败: %v", err)
+	}
+	waitIdle()
+	snap = snapshotOf()
+	if len(snap.IgnoredCandidates) != 1 || snap.IgnoredCandidates[0].target() != target ||
+		len(snap.IgnoredCandidates[0].Members) != total {
+		t.Fatalf("忽略分仓应携带完整 %d 成员: %+v", total, snap.IgnoredCandidates[0])
+	}
+	if _, err := m.SetCandidateIgnored(root, target, false); err != nil {
+		t.Fatalf("恢复候选失败: %v", err)
+	}
+	waitIdle()
+
+	// 确认 → 全量成员写集维度赋值（affected=真总数）
+	sess, affected, err := m.ConfirmWorkSetCandidate(root, target, "确认巨集", 0)
+	if err != nil || affected != total {
+		t.Fatalf("确认候选应生效 %d 成员: err=%v affected=%d", total, err, affected)
+	}
+	assigned := 0
+	for _, mem := range cand.Members {
+		if a := sess.Assignments[mem.RelPath]; a.Collection == "确认巨集" {
+			assigned++
+		}
+	}
+	if assigned != total {
+		t.Fatalf("确认应对全量 %d 成员写集维度赋值，实际 %d", total, assigned)
+	}
+	waitIdle()
+	snap = snapshotOf()
+	if len(snap.ConfirmedCandidates) != 1 || len(snap.ConfirmedCandidates[0].Members) != total {
+		t.Fatalf("confirmed 分仓应携带完整 %d 成员: %+v", total, snap.ConfirmedCandidates[0])
+	}
+}
+
 // TestDetectStructuralGroups 验证规则无关的兄弟群结构探测（元素4 结构面与
 // 元素3 集名候选线索）：尾缀数字形态成群、序号形态单成员不成群、已识别成员
 // 入群不加线索、规则群成员不参与。

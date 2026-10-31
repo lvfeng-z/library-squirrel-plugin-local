@@ -1794,21 +1794,23 @@ func snapFileWireBytes(f SnapFile) int {
 	return n
 }
 
-// selectableWorkWireBytes 选择域作品条目的序列化字节估算（口径同上）。
+// selectableWorkWireBytes 选择域作品条目的序列化字节估算（口径同上；轨道按
+// 投影层预览上限截断后形态估算——与 domain 分节逐条投影的出线形态一致）。
 func selectableWorkWireBytes(w *SelectableWork) int {
 	n := 104
 	n += len(w.WorkID) + len(w.Kind) + len(w.DirRelKey) + len(w.SetKey) + len(w.State)
-	for _, rel := range w.Files {
+	for _, rel := range previewWireMembers(w.Files) {
 		n += 14 + len(rel)
 	}
 	return n
 }
 
-// workSetViewWireBytes 选择域集条目的序列化字节估算（口径同上）。
+// workSetViewWireBytes 选择域集条目的序列化字节估算（口径同上；成员作品键按
+// 投影层预览上限截断后形态估算）。
 func workSetViewWireBytes(s *WorkSetView) int {
 	n := 68
 	n += len(s.SetKey) + len(s.DirRelKey) + len(s.Key)
-	for _, m := range s.Members {
+	for _, m := range previewWireMembers(s.Members) {
 		n += 12 + len(m)
 	}
 	return n
@@ -1833,11 +1835,11 @@ func snapDirWireBytes(d SnapDir) int {
 }
 
 // snapGroupWireBytes 序列群条目的序列化字节估算（口径同上；成员携带文件名
-// 元素数组）。
+// 元素数组，按投影层预览上限截断后形态估算——与 overview 投影的出线形态一致）。
 func snapGroupWireBytes(g SnapGroup) int {
 	n := 118 + len(g.DirRelKey) + len(g.Key) + len(g.RuleID) +
 		len(g.FormName) + len(g.FormKeyExpr) + len(g.FormSeqExpr)
-	for _, m := range g.Members {
+	for _, m := range previewWireMembers(g.Members) {
 		n += 38 + len(m.RelPath) + len(m.SeqText)
 		for _, el := range m.Elements {
 			n += snapElWireBytes(el)
@@ -1847,11 +1849,12 @@ func snapGroupWireBytes(g SnapGroup) int {
 }
 
 // snapCandidateWireBytes 集名候选条目的序列化字节估算（口径同上；成员携带
-// 文件名元素数组）。
+// 文件名元素数组，按投影层预览上限截断后形态估算——与 overview 投影的出线
+// 形态一致）。
 func snapCandidateWireBytes(c SnapCandidate) int {
 	n := 108 + len(c.Key) + len(c.Dir) + len(c.Source) + len(c.FormName) +
 		len(c.Reason) + len(c.ExistingSetName) + len(c.ConfirmedSetName)
-	for _, m := range c.Members {
+	for _, m := range previewWireMembers(c.Members) {
 		n += 32 + len(m.RelPath) + len(m.SeqText)
 		for _, el := range m.Elements {
 			n += snapElWireBytes(el)
@@ -2062,8 +2065,21 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 		return page, nil
 	default:
 		// 选择域推导 O(全库)：会话为缓存共享实例时经 workDomainOf 复用条目内
-		// 的惰性推导结果（全链逐页共摊一次，与快照同生命周期失效）。
-		domain := domainViewOf(m.workDomainOf(sess))
+		// 的惰性推导结果（全链逐页共摊一次，与快照同生命周期失效）。页内条目
+		// 按投影层成员上限截成员后出页（作品轨道/集成员作品键，与全量投影
+		// domainViewOf 同一截断、逐条浅拷贝不动推导域本体——语义守卫=逐页拼接
+		// 与全量投影逐条全等，两侧同截断）。
+		domain := m.workDomainOf(sess)
+		projectWork := func(i int) *SelectableWork {
+			w := *domain.Works[i]
+			w.Files = previewWireMembers(w.Files)
+			return &w
+		}
+		projectSet := func(i int) *WorkSetView {
+			s := *domain.Sets[i]
+			s.Members = previewWireMembers(s.Members)
+			return &s
+		}
 		nWorks := len(domain.Works)
 		total := nWorks + len(domain.Sets)
 		if offset > total {
@@ -2077,22 +2093,17 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 		}, offset, total, maxEntries)
 		page := &panoramaSectionPage{}
 		apply := func(e int) {
-			var works []*SelectableWork
-			var sets []*WorkSetView
-			if offset < nWorks {
-				worksEnd := min(e, nWorks)
-				works = domain.Works[offset:worksEnd]
-				if e > nWorks {
-					sets = domain.Sets[:e-nWorks]
-				}
-			} else {
-				sets = domain.Sets[offset-nWorks : e-nWorks]
+			// 页域投影：两序列恒为非 nil 空切片形态（序列化出 []，与全量域视图
+			// 一致）；作品序列在前集在后，页可跨界（与共用下标空间同构）。
+			works := make([]*SelectableWork, 0, e-offset)
+			for i := offset; i < e && i < nWorks; i++ {
+				works = append(works, projectWork(i))
 			}
-			// 页域投影：两序列恒为非 nil 空切片形态（序列化出 []，与全量域视图一致）
-			page.domain = &WorkDomain{
-				Works: append([]*SelectableWork{}, works...),
-				Sets:  append([]*WorkSetView{}, sets...),
+			sets := make([]*WorkSetView, 0, e-offset)
+			for i := max(offset, nWorks); i < e; i++ {
+				sets = append(sets, projectSet(i-nWorks))
 			}
+			page.domain = &WorkDomain{Works: works, Sets: sets}
 			page.receipt = panoramaReceipt(panoramaSectionDomain, generation, offset, e, total)
 		}
 		apply(end)

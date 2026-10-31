@@ -235,12 +235,29 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 	return domain
 }
 
-// domainViewOf 选择域的前端投影（ Works/Sets 已是非 nil 切片，直接透传）。
+// domainViewOf 选择域的前端投影：条目成员数组按预览上限截断——作品的轨道
+//（Files）与集的成员作品键（Members）截前 panoramaMemberPreviewLimit 个（浅拷贝
+// 条目，不动推导域本体；getPanorama domain 分节分页按同一截断逐条投影，语义
+// 守卫=逐页拼接与本全量投影逐条全等，两侧同截断）。截断仅出线层：创建/守卫链
+// 等服务端动作仍消费全量域（workDomainOf），选择/创建按作品键寻址不受影响。
 func domainViewOf(domain *WorkDomain) *WorkDomain {
 	if domain == nil {
 		return nil
 	}
-	view := &WorkDomain{Works: domain.Works, Sets: domain.Sets}
+	view := &WorkDomain{
+		Works: make([]*SelectableWork, len(domain.Works)),
+		Sets:  make([]*WorkSetView, len(domain.Sets)),
+	}
+	for i, w := range domain.Works {
+		cw := *w
+		cw.Files = previewWireMembers(cw.Files)
+		view.Works[i] = &cw
+	}
+	for i, s := range domain.Sets {
+		cs := *s
+		cs.Members = previewWireMembers(cs.Members)
+		view.Sets[i] = &cs
+	}
 	return view
 }
 

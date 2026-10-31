@@ -1922,13 +1922,71 @@ func matchExistingWorkSet(key string, lib *LibraryIndex) (crossMatch bool, setID
 	return crossMatch, 0, ""
 }
 
+// panoramaMemberPreviewLimit 全景投影的条目成员预览上限：overview/domain 分节
+// 条目内的成员数组（序列群/集名候选的成员、选择域作品的轨道与集的成员作品键）
+// 在投影层截前本上限个——存储快照与服务端动作（确认归集/忽略/创建守卫链）仍用
+// 全量成员按目标键解析，仅出线载荷截断；Size 等总数字段保持真值，前端由
+// size>len(members) 推导截断并加说明。条目最坏 ≈ 200 成员 × ~2KB ≈ 400KB，按
+// 构造远离 12MB 页软界——新库首用（清存储=档案空、全员未识别）的巨目录候选
+// 单条 ~3.8 万成员 × ~2KB ≈ 79MB 直撞 64MB 应答断路器的形态由此封死，页界
+// 首条必装 warn 退化为不可达兜底（测量硬门仍兜底估算漂移）。
+const panoramaMemberPreviewLimit = 200
+
+// previewWireMembers 投影层成员预览截断（泛型）：截前 panoramaMemberPreviewLimit
+// 个（重切共享底层数组，零复制）；未超限原样返回（小夹具零行为变化）。
+func previewWireMembers[T any](members []T) []T {
+	if len(members) <= panoramaMemberPreviewLimit {
+		return members
+	}
+	return members[:panoramaMemberPreviewLimit]
+}
+
+// previewSnapGroups 群清单的投影层成员截断：超限条目浅拷贝结构体 + 成员重切
+//（不动存储快照，Size 保持真总数）；全清单未超限时原切片透传。
+func previewSnapGroups(groups []SnapGroup) []SnapGroup {
+	copied := false
+	for i := range groups {
+		if len(groups[i].Members) <= panoramaMemberPreviewLimit {
+			continue
+		}
+		if !copied {
+			groups = append([]SnapGroup(nil), groups...)
+			copied = true
+		}
+		groups[i].Members = groups[i].Members[:panoramaMemberPreviewLimit]
+	}
+	return groups
+}
+
+// previewSnapCandidates 候选清单的投影层成员截断（口径同 previewSnapGroups，
+// 候选三仓共用）。
+func previewSnapCandidates(cands []SnapCandidate) []SnapCandidate {
+	copied := false
+	for i := range cands {
+		if len(cands[i].Members) <= panoramaMemberPreviewLimit {
+			continue
+		}
+		if !copied {
+			cands = append([]SnapCandidate(nil), cands...)
+			copied = true
+		}
+		cands[i].Members = cands[i].Members[:panoramaMemberPreviewLimit]
+	}
+	return cands
+}
+
 // panoramaOverviewViewOf 快照的 overview 分节投影：文件明细不随答（files 分节
 // 逐页拉取），仅展开目录级结构线索集；候选三仓/序列群/待裁决明细等重载荷
-// 清单由分节切页逐段携带，小字段（统计/规则档案态等）每页随答。
+// 清单由分节切页逐段携带，小字段（统计/规则档案态等）每页随答。重载荷条目的
+// 成员按投影层预览上限截断（服务端动作仍用全量成员，见 panoramaMemberPreviewLimit）。
 func panoramaOverviewViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 	view := *snap
 	view.DirMtimes = nil
 	view.Files = nil
+	view.Groups = previewSnapGroups(view.Groups)
+	view.Candidates = previewSnapCandidates(view.Candidates)
+	view.IgnoredCandidates = previewSnapCandidates(view.IgnoredCandidates)
+	view.ConfirmedCandidates = previewSnapCandidates(view.ConfirmedCandidates)
 	if len(snap.Dirs) > 0 {
 		dirs := make([]SnapDir, len(snap.Dirs))
 		for i, d := range snap.Dirs {
