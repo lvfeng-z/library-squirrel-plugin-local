@@ -157,7 +157,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated } from 'vue'
 import { Events } from '@wailsio/runtime'
 import RuleEditDialog from './RuleEditDialog.vue'
 import { condxComboSentence, condxShapeSummary, type CondxComboMember } from './ruleFormModel'
@@ -692,6 +692,8 @@ async function doRollback(): Promise<void> {
 }
 
 onMounted(() => {
+  // Events.On 保持长活（保活契约3）：仅 mounted 注册、unmounted 断开、失活不断——
+  // 保活期后台继续收插件应答（本页全局资源仅此一项，无 document 监听/观察器可迁）
   offResponse = Events.On(TOPIC_RESPONSE, onResponse)
   // 取走即剥离：必须在任何导航发生前读取（进入时地址即携参形态）
   const ruleParam = consumeRuleParam()
@@ -700,6 +702,14 @@ onMounted(() => {
     await loadRules()
     if (ruleParam) openRuleById(ruleParam)
   })()
+})
+
+// rule 参数对账（保活契约4，与解析视图 root 对账同构）：保活后携 rule 参数再进入
+// 不再重挂载，activated 取走参数并按 ID 打开该规则编辑（规则档案已在实例内直接
+// 打开；首挂后的 activated 参数已被 mounted 取走，自然空转，幂等）
+onActivated(() => {
+  const ruleParam = consumeRuleParam()
+  if (ruleParam) openRuleById(ruleParam)
 })
 
 onUnmounted(() => {

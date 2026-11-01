@@ -771,7 +771,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue'
 import { Events } from '@wailsio/runtime'
 import ParsePanel from './ParsePanel.vue'
 import SetRulePanel from './SetRulePanel.vue'
@@ -2827,14 +2827,18 @@ const formatTime = (ms: number): string => {
 let viewportRO: ResizeObserver | null = null
 
 // 滚动承载元素尺寸变化 → viewportH 同步（窗口缩放/右栏收起/模式切换后切片窗口正确）
+// 保活切回（activated）亦直接调用做一次即时补测——保活期窗口尺寸变化观察器断线
+// 不回传，重挂后立即重测防切片窗口陈旧
+function syncViewportH(): void {
+  const el = listViewport.value ? listViewport.value.wrapRef : null
+  if (el) viewportH.value = el.clientHeight || 420
+}
+
 function bindViewportRO(): void {
   const wrap = listViewport.value ? listViewport.value.wrapRef : null
   if (!wrap) return
   if (viewportRO) viewportRO.disconnect()
-  viewportRO = new ResizeObserver(() => {
-    const el = listViewport.value ? listViewport.value.wrapRef : null
-    if (el) viewportH.value = el.clientHeight || 420
-  })
+  viewportRO = new ResizeObserver(syncViewportH)
   viewportRO.observe(wrap)
 }
 
@@ -2848,7 +2852,7 @@ watch(listViewport, (inst) => {
 })
 
 // —— 卡墙增量渲染哨兵接线（IntersectionObserver；哨兵随卡墙标签 v-if 挂载/卸载，
-//    组件整体卸载由 onUnmounted 统一断线） —— //
+//    组件失活/卸载由 deactivated/onUnmounted 统一断线） —— //
 
 let cardsIO: IntersectionObserver | null = null
 const cardsSentinel = ref<HTMLElement | null>(null)
@@ -2900,34 +2904,121 @@ watch(listMode, (mode) => {
   if (mode !== 'sets') cardRenderLimit.value = CARD_BATCH
 })
 
-onMounted(async () => {
-  offResponse = Events.On(TOPIC_RESPONSE, onResponse)
-  offEvent = Events.On(TOPIC_EVENT, onEvent)
-  // 光标追踪（集名输入框 chips 插入用）：事件流维护选区快照
+// —— 保活生命周期迁移（本页声明 keepAlive；契约见「视图切换保活方案·插件侧生命
+//    周期契约」）—— //
+// document 级监听与观察器随 deactivated 断开、activated 重挂（契约1/2：保活态不在
+// 其他页面的事件链上运行；切回重挂并立即重测，防保活期窗口/右栏尺寸变化陈旧）；
+// Events.On 保持长活（契约3）：仅 mounted 注册、unmounted 断开、失活不断——保活
+// 期后台继续收识别进度/完成/创建链事件（recognitionDone 自动重载全景在后台完成，
+// 切回即最新，创建链两相横幅进度连续）。
+
+const NAME_SEL_EVENTS = ['click', 'keyup', 'select', 'input'] as const
+
+// 光标追踪（集名输入框 chips 插入用）：事件流维护选区快照
+function bindDocumentListeners(): void {
   document.addEventListener('selectionchange', onNameSelChange)
-  for (const t of ['click', 'keyup', 'select', 'input'] as const) {
+  for (const t of NAME_SEL_EVENTS) {
     document.addEventListener(t, onNameSelDelegate, true)
   }
+}
+
+function unbindDocumentListeners(): void {
+  document.removeEventListener('selectionchange', onNameSelChange)
+  for (const t of NAME_SEL_EVENTS) {
+    document.removeEventListener(t, onNameSelDelegate, true)
+  }
+}
+
+// activated 对账并发簿记：快速往返切换时仅最新一轮生效，迟到应答静默废弃
+let reconcileSeq = 0
+// 挂载路径恢复是否已落定（成功或失败）——区分「首挂恢复在途」（activated 紧随
+// mounted 触发，由挂载路径接管）与「此前恢复失败/无会话」（重试整条恢复路径）
+let initialRestoreSettled = false
+
+// activated 轻对账（契约4，幂等——首挂后的 activated 也要过）：比对地址库根与当前
+// 会话——不同（会话切换）重走等价挂载路径（restoreSession + 按态装载全景）；相同
+// 只发一次 activateSession 轻请求做档案对账（刷新 session 状态与 profileChanged
+// 横幅），不重载全景（快照未变时重载零收益，保活目的所在）
+async function reconcileOnActivated(): Promise<void> {
+  const seq = ++reconcileSeq
+  const hashRoot = rootFromHash()
+  if (!session.value && !initialRestoreSettled) return
+  if (session.value && (!hashRoot || hashRoot === session.value.rootPath)) {
+    const resp = await request('activateSession', { root: session.value.rootPath })
+    if (seq !== reconcileSeq) return
+    if (resp.ok && resp.session) {
+      session.value = resp.session
+      profileChanged.value = resp.profileChanged === true
+      loadError.value = ''
+    } else {
+      loadError.value = resp.error || '恢复解析会话失败'
+    }
+    return
+  }
   const root = await restoreSession()
+  if (seq !== reconcileSeq) return
   if (root && session.value) {
     if (session.value.state === 'recognized') {
       await loadPanorama(root)
+    } else {
+      // 新会话未识别：清旧会话呈现，回到引导/识别进度面（等价首挂载的空态）
+      snapshot.value = null
+      decisions.value = null
+      diff.value = null
+      domain.value = null
     }
     await nextTick()
     bindViewportRO()
   }
+}
+
+onMounted(async () => {
+  offResponse = Events.On(TOPIC_RESPONSE, onResponse)
+  offEvent = Events.On(TOPIC_EVENT, onEvent)
+  bindDocumentListeners()
+  try {
+    const root = await restoreSession()
+    if (root && session.value) {
+      if (session.value.state === 'recognized') {
+        await loadPanorama(root)
+      }
+      await nextTick()
+      bindViewportRO()
+    }
+  } finally {
+    initialRestoreSettled = true
+  }
 })
 
+onActivated(() => {
+  // document 监听重挂（契约1；首挂与 mounted 的重复注册由浏览器同引用去重吸收）+
+  // 观察器重挂并立即重测一次（契约2：viewportH 即时补测，哨兵 re-observe 重估）+
+  // 会话/档案轻对账（契约4）
+  bindDocumentListeners()
+  syncViewportH()
+  bindViewportRO()
+  if (cardsSentinel.value) bindCardsIO()
+  void reconcileOnActivated()
+})
+
+onDeactivated(() => {
+  // 契约1/2：document 级监听与观察器全部断开（Events.On 不断，见上方契约3注记）
+  unbindDocumentListeners()
+  viewportRO?.disconnect()
+  viewportRO = null
+  cardsIO?.disconnect()
+  cardsIO = null
+})
+
+// 契约5：onUnmounted 清理保留——缓存修剪/应用卸载（include 变化或整页 reload 触
+// 达）时的最终清理，保活期不触达
 onUnmounted(() => {
   if (offResponse) offResponse()
   if (offEvent) offEvent()
   // 断开观察与监听，防卸载后回调触达已失效节点
   viewportRO?.disconnect()
   cardsIO?.disconnect()
-  document.removeEventListener('selectionchange', onNameSelChange)
-  for (const t of ['click', 'keyup', 'select', 'input'] as const) {
-    document.removeEventListener(t, onNameSelDelegate, true)
-  }
+  unbindDocumentListeners()
 })
 </script>
 

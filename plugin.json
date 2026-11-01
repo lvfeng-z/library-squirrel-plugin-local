@@ -58,7 +58,8 @@
         "content": {
           "contentType": "precompiled",
           "source": {"js": "views/workbench/parse.js", "css": "views/workbench/parse.css"},
-          "parent": "workbench"
+          "parent": "workbench",
+          "keepAlive": true
         }
       },
       {
@@ -69,7 +70,8 @@
         "content": {
           "contentType": "precompiled",
           "source": {"js": "views/workbench/rules.js", "css": "views/workbench/rules.css"},
-          "parent": "workbench-parse"
+          "parent": "workbench-parse",
+          "keepAlive": true
         }
       },
       {
