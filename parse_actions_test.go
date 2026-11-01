@@ -443,7 +443,7 @@ func TestGeneralizeFilenameShape(t *testing.T) {
 	// 复现赋值两维但赋值全量保留并置已泛化标记；验证轮终选声明继续由赋值
 	// 显式维度覆盖（赋值=最强源，双源互证）。
 	sess := waitForVerificationRound(t, m, root)
-	if kept := sess.Assignments[rel]; kept.Author != "作者A" || kept.Title != "标题1" || !kept.Generalized {
+	if kept := resolveFileAssignment(sess.Assignments, rel); kept.Author != "作者A" || kept.Title != "标题1" || !kept.Generalized {
 		t.Fatalf("泛化后赋值应全量保留并置标记: %+v", kept)
 	}
 	file := waitAssignmentRefresh(t, m, root, rel, func(f *SnapFile) bool {

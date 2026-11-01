@@ -39,9 +39,26 @@ const workbenchSessionKeyPrefix = "workbench-session:"
 // 与回退扫描均不会误读。
 const workbenchCreateMarkerKeyPrefix = "workbench-create-marker:"
 
-// workbenchSessionSchemaVersion 会话工件 JSON 的结构版本（自管：主程序只存取明文，
-// 版本兼容性由插件自负）。
-const workbenchSessionSchemaVersion = 1
+// 会话工件 JSON 的结构版本（自管：主程序只存取明文，版本兼容性由插件自负）。
+// 版本闸语义=高拒低容（『迁移设计与回滚』：高于当前=未来版本按未命中；v1
+// 旧形态=兼容读取，首个全解码变异时懒压实升级，见 assign_migrate.go）。
+const (
+	// workbenchSessionSchemaVersion 当前结构版本。v2=赋值已目录粒度化（压实
+	// 写回时置 2）；旧版插件读 v2 按未命中呈现（可见失败优于静默错读——
+	// 压实形态被逐文件直查读取会近乎全丢赋值而无报错）。
+	workbenchSessionSchemaVersion = 2
+	// legacyWorkbenchSessionSchemaVersion 旧形态结构版本（v1：赋值为逐文件
+	// 全量条目）。新代码原生兼容读取（纯旧形态经解析器直读等价），懒压实
+	// 挂钩（mutateSessionFullDecodeLocked）以本值为触发判据。
+	legacyWorkbenchSessionSchemaVersion = 1
+)
+
+// sessionSchemaVersionReadable 会话结构版本读侧判定（高拒低容）：高于当前
+// 支持=未来版本（未命中）；v1..当前=兼容读取；v0/负值=非正当形态（按未
+// 命中处理——旧代码恒写正当版本号，0 只能来自字段缺席的脏值）。
+func sessionSchemaVersionReadable(v int) bool {
+	return v >= legacyWorkbenchSessionSchemaVersion && v <= workbenchSessionSchemaVersion
+}
 
 // 库根与会话标识。
 var (
@@ -437,7 +454,8 @@ func (m *SessionManager) saveSessionFull(sess *WorkbenchSession) error {
 }
 
 // loadSession 读单键会话（锁外读亦安全：只读本会话的键组）；未写入返回
-// ErrWorkbenchSessionNotFound，载荷损坏或版本不符按未命中处理并告警——含分片
+// ErrWorkbenchSessionNotFound，载荷损坏或版本不可读（高于当前=未来版本；v1
+// 旧形态兼容读取——首个全解码变异时懒压实升级）按未命中处理并告警——含分片
 // digest 校验不符（全保存半写窗口的兜底语义：按未命中处理重新识别，同方案自曝
 // 风险3）。旧格式「单键单 JSON」整值兼容可读（读到即转：下次保存升级为信封+
 // 分片形态）。
@@ -458,8 +476,8 @@ func (m *SessionManager) loadSession(root string) (*WorkbenchSession, error) {
 		m.warnf("会话载荷无法解析，按未命中处理（键 %q）: %v", key, err)
 		return nil, ErrWorkbenchSessionNotFound
 	}
-	if sess.SchemaVersion != workbenchSessionSchemaVersion {
-		m.warnf("会话结构版本 %d 与当前支持版本 %d 不符，按未命中处理（键 %q）",
+	if !sessionSchemaVersionReadable(sess.SchemaVersion) {
+		m.warnf("会话结构版本 %d 不可读（当前支持 %d，高于当前=未来版本），按未命中处理（键 %q）",
 			sess.SchemaVersion, workbenchSessionSchemaVersion, key)
 		return nil, ErrWorkbenchSessionNotFound
 	}
@@ -480,8 +498,8 @@ func (m *SessionManager) loadSessionFromEnvelope(root, key, raw string) (*Workbe
 		return nil, ErrWorkbenchSessionNotFound
 	}
 	sess := *env.Session
-	if sess.SchemaVersion != workbenchSessionSchemaVersion {
-		m.warnf("会话结构版本 %d 与当前支持版本 %d 不符，按未命中处理（键 %q）",
+	if !sessionSchemaVersionReadable(sess.SchemaVersion) {
+		m.warnf("会话结构版本 %d 不可读（当前支持 %d，高于当前=未来版本），按未命中处理（键 %q）",
 			sess.SchemaVersion, workbenchSessionSchemaVersion, key)
 		return nil, ErrWorkbenchSessionNotFound
 	}
@@ -820,8 +838,9 @@ func (m *SessionManager) ListSessions() ([]WorkbenchSession, error) {
 }
 
 // listSessionOfRoot 读单根 meta 仅取轻字段（列表投影，不读分片载荷）。meta 缺失/
-// 损坏/版本不符返回 nil（调用方跳过+修剪索引）；读取传输层失败返回错误（整体
-// 枚举不可靠，不静默修剪）。
+// 损坏/版本不可读（高于当前=未来版本；v1 旧形态兼容可列——否则未压实会话会从
+// 清单消失而 loadSession 仍可读）返回 nil（调用方跳过+修剪索引）；读取传输层
+// 失败返回错误（整体枚举不可靠，不静默修剪）。
 func (m *SessionManager) listSessionOfRoot(normRoot string) (*WorkbenchSession, error) {
 	key := workbenchSessionKeyPrefix + normRoot
 	stored, err := m.store.GetValue(key)
@@ -835,8 +854,8 @@ func (m *SessionManager) listSessionOfRoot(normRoot string) (*WorkbenchSession, 
 	if probeSessionEnvelope(stored.Value) {
 		env, perr := parseSessionEnvelope(stored.Value)
 		if perr != nil || env.Session == nil || env.V != sessionEnvelopeVersion ||
-			env.Session.SchemaVersion != workbenchSessionSchemaVersion {
-			m.warnf("会话信封损坏或版本不符，跳过并自索引修剪（键 %q）", key)
+			!sessionSchemaVersionReadable(env.Session.SchemaVersion) {
+			m.warnf("会话信封损坏或版本不可读，跳过并自索引修剪（键 %q）", key)
 			return nil, nil
 		}
 		return env.Session, nil
@@ -847,8 +866,8 @@ func (m *SessionManager) listSessionOfRoot(normRoot string) (*WorkbenchSession, 
 		m.warnf("会话载荷无法解析，跳过并自索引修剪（键 %q）: %v", key, uerr)
 		return nil, nil
 	}
-	if sess.SchemaVersion != workbenchSessionSchemaVersion {
-		m.warnf("会话结构版本 %d 不符，跳过并自索引修剪（键 %q）", sess.SchemaVersion, key)
+	if !sessionSchemaVersionReadable(sess.SchemaVersion) {
+		m.warnf("会话结构版本 %d 不可读，跳过并自索引修剪（键 %q）", sess.SchemaVersion, key)
 		return nil, nil
 	}
 	return &sess, nil
@@ -911,10 +930,15 @@ func (m *SessionManager) mutateSession(root string, mutate func(*WorkbenchSessio
 }
 
 // mutateSessionFullDecodeLocked 全会话解码变异的锁内体（调用方须持 mu；语义与
-// 原 mutateSession 一致）：变异旁路私有实例 → 变异 → 轻保存。
+// 原 mutateSession 一致）：变异旁路私有实例 → 懒压实挂钩（v1 旧形态赋值在此
+// 压实升级，备份先行——变异闭包与轻保存都作用于压实后的新形态）→ 变异 →
+// 轻保存。
 func (m *SessionManager) mutateSessionFullDecodeLocked(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
 	sess, err := m.loadSessionFresh(root) // 变异旁路：私有实例，缓存不外泄
 	if err != nil {
+		return nil, err
+	}
+	if err := m.maybeCompactLegacyAssignmentsLocked(root, sess); err != nil {
 		return nil, err
 	}
 	if err := mutate(sess); err != nil {
@@ -951,12 +975,17 @@ func (m *SessionManager) mutateSessionEnvelopeLocked(root string, mutate func(*W
 		return nil, fmt.Errorf("读取会话（键 %q）失败: %w", workbenchSessionKey(root), err)
 	}
 	if env == nil || env.Session == nil || env.V != sessionEnvelopeVersion ||
-		env.Session.SchemaVersion != workbenchSessionSchemaVersion {
+		!sessionSchemaVersionReadable(env.Session.SchemaVersion) {
 		if env == nil && raw == "" {
 			return nil, ErrWorkbenchSessionNotFound
 		}
-		// 旧格式整值/信封损坏或版本不符：回落全会话路径（沿用 loadSession 的
-		// 判定与告警口径——损坏按未命中处理）
+		// 旧格式整值/信封损坏/版本不可读：回落全会话路径（沿用 loadSession 的
+		// 判定与告警口径——损坏或未来版本按未命中处理）
+		return m.mutateSessionFullDecodeLocked(root, mutate)
+	}
+	if env.Session.SchemaVersion != workbenchSessionSchemaVersion {
+		// v1 旧形态不走信封级轻变异（轻字段投影无快照在手，压实无从以快照
+		// 文件集为底）：回落全会话路径——兼容读取且首个变异触发懒压实升级
 		return m.mutateSessionFullDecodeLocked(root, mutate)
 	}
 	sess := *env.Session // 轻字段投影（Snapshot/LastDiff 恒 nil）
@@ -996,7 +1025,9 @@ func (m *SessionManager) refreshSessionCacheEnvelope(norm string, light *Workben
 // mutateSessionFull 全保存入口：锁内会话读改写后按重载荷全量落库（gzip 分片+
 // 批次原子切换，见 saveSessionFull）。生产调用方唯一=CompleteRecognitionWithDiff
 // （识别完成/重识别覆写快照与差异）；其余入口禁止经此写会话级轻字段（徒增整个
-// 载荷的重写成本）。
+// 载荷的重写成本）。v1 旧形态赋值在此路径同样懒压实（识别轮完成触发）——挂钩
+// 置于 saveSessionFull 之前，压实以变异闭包刚写入的新快照为底，版本盖 2 与
+// 赋值压实随同一次信封写落库（无「版本已 2 而赋值未压」窗口）。
 func (m *SessionManager) mutateSessionFull(root string, mutate func(*WorkbenchSession) error) (*WorkbenchSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1005,6 +1036,9 @@ func (m *SessionManager) mutateSessionFull(root string, mutate func(*WorkbenchSe
 		return nil, err
 	}
 	if err := mutate(sess); err != nil {
+		return nil, err
+	}
+	if err := m.maybeCompactLegacyAssignmentsLocked(root, sess); err != nil {
 		return nil, err
 	}
 	sess.UpdatedAtMs = time.Now().UnixMilli()
@@ -1122,8 +1156,10 @@ func (m *SessionManager) consumeLegacyWorkbenchCreateMarker(root string) bool {
 
 // —— 会话赋值与忽略项写 API（经 mutateSession 与档案写同一锁串行）——
 
-// SetAssignment 写入单文件的手工解析赋值（特异性知识，会话态）：显式维度
-// 覆盖档案求值的同维度终选；不指定任何维度的空赋值等价于清除该文件的赋值。
+// SetAssignment 写入单文件的手工解析赋值（特异性知识，会话态）：整条替换该
+// 文件的**例外条目**（目录粒度表示下文件条目=就近覆盖例外；表单值整体写入，
+// 不与目录条目供值合并）；显式维度覆盖档案求值的同维度终选，不指定任何维度
+// 的空赋值等价于删除该文件的例外（目录条目供值不受影响）。
 // 相对路径规范化为 '/' 形态后寻址（与识别快照的 relPath 同键）。
 func (m *SessionManager) SetAssignment(root, relPath string, assign SessionAssignment) (*WorkbenchSession, error) {
 	relPath = filepath.ToSlash(relPath)
@@ -1216,8 +1252,9 @@ func (m *SessionManager) SetCandidateIgnored(root, target string, ignored bool) 
 }
 
 // ConfirmWorkSetCandidate 确认集名候选（两段式归集的确认动作）：对候选全部
-// 成员逐文件合并写集维度赋值（collection=setName，其余维度不动——复用目录
-// 赋值的合并通路），目标键登记进 confirmed 清单并移出 ignored，
+// 成员逐文件在**既有文件例外**上增量合并集维度（collection=setName，其余维度
+// 不动——不从解析值重建，复用 mergeDirAssignment 合并通路；目录条目供值
+// 不受影响），目标键登记进 confirmed 清单并移出 ignored，
 // existingSetID>0 记会话旁路簿记（集名→既有集行 id）。赋值写走 mutateSession
 // 单点串行与修订号递增（与单次赋值同通路），成功后排一轮增量重识别（成员
 // 终选声明与快照 confirmedCandidates 分仓随之刷新）。返回会话与生效成员数。
@@ -1277,9 +1314,10 @@ func (m *SessionManager) ConfirmWorkSetCandidate(root, target, setName string, e
 
 // UnconfirmWorkSetCandidate 撤销集名候选的归集（剧本2）：目标在快照 confirmed
 // 分仓内寻址（与前端已归集卡同源），缺席回可读错误、卡片不动（会话已刷新或
-// 识别结构已变）。撤销只清成员的「作品集」维度赋值（collection 置空、出处
-// 引用一并清，其余维度原样保留；全维度剥空的赋值整条删除——与单次赋值「空
-// 赋值=清除」同语义，含已泛化标记一并移除），目标键移出 confirmed 清单，
+// 识别结构已变）。撤销只清成员「作品集」维度的文件例外（collection 置空、出处
+// 引用一并清，其余维度原样保留；全维度剥空的例外整条删除——与单次赋值「空
+// 赋值=清除」同语义，含已泛化标记一并移除；上级目录条目维度不受影响），
+// 目标键移出 confirmed 清单，
 // 确认集名的既有集旁路簿记（ConfirmedSetIDs，单键记账）一并清理。赋值写走
 // mutateSession 单点串行，修订号递增驱动增量闸门失效（清赋值后成员目录不再
 // 由赋值集锚定，靠修订号防止旧结论被 mtime 游标复用）；成功后排一轮增量重
@@ -1597,6 +1635,12 @@ type workbenchFrontendResponse struct {
 	// Affected assignDir/clearDirAssignments 的生效文件计数（目录赋值合并写
 	// 触及的子树文件数 / 清除的赋值数）。
 	Affected int `json:"affected,omitempty"`
+	// SurvivorDirKey / SurvivorDims clearDirAssignments 的范围判定增补：清除
+	// 后上级目录条目仍有赋值在场时，携带最近供值上级的目录条目键（含尾斜杠）
+	// 与在场维度标签（帧D-2 通知文案数据源）；无上级在场则字段缺省——维持
+	// 现文案。现前端只读 affected，加字段向后安全。
+	SurvivorDirKey string   `json:"survivorDirKey,omitempty"`
+	SurvivorDims   []string `json:"survivorDims,omitempty"`
 	// Rule generalize/adjudicate 生成的规则摘要（已入档案并触发验证轮）。
 	Rule *GeneratedRuleView `json:"rule,omitempty"`
 	// Rules generalize（mode=struct）入档的组合规则摘要序列（单规则维度仍填
@@ -1647,7 +1691,9 @@ type workbenchPageReceipt struct {
 // 选择集随用户操作即时变化，不入识别快照）。
 type workbenchSessionDecisionsView struct {
 	// Assignments 已手动解析项（泛化后赋值全量保留——2026-10-25 用户裁决
-	// 废除消费剥离，与规则声明双源互证；含已泛化标记）。
+	// 废除消费剥离，与规则声明双源互证；含已泛化标记）。目录粒度表示下
+	// 按存储原样直出：目录条目（键带尾斜杠，库根="/"）+文件例外，计数=
+	// 条目数（决策①A）。
 	Assignments []workbenchAssignmentView `json:"assignments,omitempty"`
 	// Ignored 已忽略项；Selection 已选定为任务的作品键集合（两类前缀见
 	// selection.go——作品原子，半作品不可表达）。
@@ -1674,7 +1720,9 @@ type workbenchAssignmentView struct {
 	TagClueRefs       []string `json:"tagClueRefs,omitempty"`
 }
 
-// decisionsViewOf 会话 → 决策态投影（按路径稳定序呈现）。
+// decisionsViewOf 会话 → 决策态投影（按路径稳定序呈现）：赋值条目按存储
+// 原样出线（目录条目+文件例外，目录键带尾斜杠即前端判别依据——决策①A
+// 条目直出，不做每请求展开）；ignored/selection 原样透出。
 func decisionsViewOf(sess *WorkbenchSession) *workbenchSessionDecisionsView {
 	view := &workbenchSessionDecisionsView{}
 	for _, relPath := range sortedKeys(sess.Assignments) {
@@ -1885,8 +1933,9 @@ func snapPendingWireBytes(p SnapPending) int {
 }
 
 // assignmentWireBytes 决策态赋值条目的序列化字节估算（口径同 snapFileWireBytes：
-// 骨架按定长、字符串按 UTF-8 字节数；目录赋值逐文件合并累计的巨量赋值清单是
-// overview 大载荷的主体，估算偏保守让首遍装页宁小勿大）。
+// 骨架按定长、字符串按 UTF-8 字节数；条目化后赋值清单=目录条目+例外文件，
+// 远小于旧逐文件展开形态，估算偏保守让首遍装页宁小勿大——条目化不改估算
+// 器，只令数据源变短）。
 func assignmentWireBytes(a workbenchAssignmentView) int {
 	n := 128 + len(a.RelPath) + len(a.Author) + len(a.AuthorRole) + len(a.Title) +
 		len(a.Collection) + len(a.AuthorClueRef) + len(a.TitleClueRef) + len(a.CollectionClueRef)
@@ -2365,6 +2414,12 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		}
 		resp.Session = summarizeSession(sess)
 		resp.Affected = affected
+		// 范围判定增补：清除后上级目录条目仍有赋值在场时随答最近供值上级的
+		// 目录条目键与在场维度（帧D-2 通知文案数据源；无上级在场则缺省）
+		if survivor := clearDirSurvivorOf(sess.Assignments, req.DirRelKey); survivor != nil {
+			resp.SurvivorDirKey = survivor.DirKey
+			resp.SurvivorDims = survivor.Dims
+		}
 	case workbenchActionSetIgnored:
 		// decisions 不随动作应答整答（前端不消费；大载荷撞断路器——见
 		// Selection 字段注释），忽略态随下次 getPanorama 分页到达

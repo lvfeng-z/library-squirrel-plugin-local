@@ -420,8 +420,8 @@ func TestSessionPayloadLightSaveNoShardWrite(t *testing.T) {
 	if !reflect.DeepEqual(loaded.Snapshot, snapshot) {
 		t.Fatalf("轻保存后快照应保留在分片中不丢失")
 	}
-	if assign, ok := loaded.Assignments["画集/人物画.jpg"]; !ok || assign.Author != "作者乙" {
-		t.Fatalf("轻保存后赋值不符: %+v", loaded.Assignments)
+	if r := resolveFileAssignment(loaded.Assignments, "画集/人物画.jpg"); r.Author != "作者乙" {
+		t.Fatalf("轻保存后赋值不符: %+v", r)
 	}
 }
 

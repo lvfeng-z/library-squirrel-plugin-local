@@ -83,7 +83,7 @@ func (m *SessionManager) ApplyAssignment(root, relPath string, assign SessionAss
 	return sess, nil, nil
 }
 
-// —— 目录赋值（子树展开合并写）——
+// —— 目录赋值（目录条目合并写+扇出）——
 
 // dirSubtreeFilesOf 快照内展开目录子树的文件集（快照序）：DirRelKey==dirRelKey
 // 或以 dirRelKey+"/" 为前缀（dirRelKey 空串=库根全树）。第二返回值=目录键是否
@@ -118,8 +118,9 @@ func dirSubtreeFilesOf(snap *RecognitionSnapshot, dirRelKey string) ([]*SnapFile
 }
 
 // dirScopedFiles 目录寻址的作用域解析（目录赋值外的动作共用）：返回子树文件集
-// （快照序）与样本文件（子树内首个有赋值的文件）。目录键不在快照、子树无文件、
-// 子树无赋值文件分别回可读错误；actionNoun 为动作名（泛化/总结规则）。
+// （快照序）与样本文件（子树内首个就近解析非空的文件——仅目录条目覆盖也算，
+// 与旧展开形态「首个有条目文件」等值）。目录键不在快照、子树无文件、子树无
+// 赋值文件分别回可读错误；actionNoun 为动作名（泛化/总结规则）。
 func dirScopedFiles(sess *WorkbenchSession, dirRelKey, actionNoun string) ([]*SnapFile, string, error) {
 	if sess.Snapshot == nil {
 		return nil, "", fmt.Errorf("该会话尚未完成全量识别，缺少%s所需的文件上下文，请先识别", actionNoun)
@@ -132,11 +133,21 @@ func dirScopedFiles(sess *WorkbenchSession, dirRelKey, actionNoun string) ([]*Sn
 		return nil, "", errors.New("该目录下没有文件")
 	}
 	for _, f := range files {
-		if _, has := sess.Assignments[f.RelPath]; has {
+		if resolved := resolveFileAssignment(sess.Assignments, f.RelPath); len(resolved.coveredDimensions()) > 0 {
 			return files, f.RelPath, nil
 		}
 	}
 	return nil, "", fmt.Errorf("目录 %s 子树内没有已赋值文件，请先完成赋值再%s", dirRelKey, actionNoun)
+}
+
+// isDeeperAssignmentKey 赋值键是否位于目录条目键 dirKey 的子树内（更深条目：
+// 更深的目录条目或文件例外）：目录键前缀+尾斜杠判别；库根目录键 "/" 命中全体
+// 其余键。dirKey 须为目录条目键形态（含尾斜杠）。
+func isDeeperAssignmentKey(key, dirKey string) bool {
+	if dirKey == "/" {
+		return key != "/"
+	}
+	return strings.HasPrefix(key, dirKey) && key != dirKey
 }
 
 // mergeDirAssignment 目录赋值与文件既有赋值的逐维度合并：非空维度覆盖该文件
@@ -163,11 +174,17 @@ func mergeDirAssignment(current, overlay SessionAssignment) SessionAssignment {
 	return current
 }
 
-// ApplyDirAssignment 目录赋值动作：以当前识别快照展开 dirRelKey 子树（空串=
-// 库根全树），逐文件合并写 SessionAssignment（非空维度覆盖、空维度不动；目录级
-// 出处引用对子树所有文件有效），单锁单次落库后经识别刷新调度排定一轮重识别。
-// 返回会话与生效文件数（子树文件数）。
+// ApplyDirAssignment 目录赋值动作（条目化写）：以当前识别快照定位 dirRelKey
+// 子树（空串=库根全树），写**一个目录条目**——在既有目录条目上合并覆盖
+// （mergeDirAssignment：非空维度覆盖、空维度不动，目录级出处引用对子树所有
+// 文件有效），并**扇出**：把覆盖层同样合并进该目录子树内所有更深条目（更深的
+// 目录条目与文件例外，条目键前缀+尾斜杠判别）。扇出是旧「逐文件合并写」等价
+// 的必要件：旧语义=后作用的显式维度覆盖全子树每文件（无论其上曾有何种更深
+// 赋值），无扇出则更深的既有条目会以「就近」挡掉浅层覆盖（语义漂移）；深层
+// 后作用无需扇出——就近天然给出正确结果。单锁单次落库后经识别刷新调度排定
+// 一轮重识别。返回会话与生效文件数（子树文件数，现口径）。
 func (m *SessionManager) ApplyDirAssignment(root, dirRelKey string, overlay SessionAssignment) (*WorkbenchSession, int, error) {
+	dirRelKey = strings.Trim(filepath.ToSlash(dirRelKey), "/")
 	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, 0, err
@@ -190,12 +207,20 @@ func (m *SessionManager) ApplyDirAssignment(root, dirRelKey string, overlay Sess
 		if sess.Assignments == nil {
 			sess.Assignments = make(map[string]SessionAssignment)
 		}
-		for _, f := range files {
-			merged := mergeDirAssignment(sess.Assignments[f.RelPath], overlay)
-			merged.UpdatedAtMs = now
-			sess.Assignments[f.RelPath] = merged
+		dirKey := assignmentDirKeyOf(dirRelKey)
+		merged := mergeDirAssignment(sess.Assignments[dirKey], overlay)
+		merged.UpdatedAtMs = now
+		sess.Assignments[dirKey] = merged
+		// 扇出：子树内更深条目（更深的目录条目与文件例外）逐条合并覆盖层
+		for key, entry := range sess.Assignments {
+			if !isDeeperAssignmentKey(key, dirKey) {
+				continue
+			}
+			entry = mergeDirAssignment(entry, overlay)
+			entry.UpdatedAtMs = now
+			sess.Assignments[key] = entry
 		}
-		// 批量合并写整体视为一次赋值变更：修订号递增驱动增量闸门失效
+		// 目录条目+扇出整体视为一次赋值变更：修订号递增驱动增量闸门失效
 		sess.AssignRevision++
 		return nil
 	})
@@ -206,9 +231,13 @@ func (m *SessionManager) ApplyDirAssignment(root, dirRelKey string, overlay Sess
 	return sess, len(files), nil
 }
 
-// ClearDirAssignments 清除目录动作：删除 dirRelKey 子树内全部文件的赋值（含
-// 已泛化标记），排自动增量重识别。返回会话与清除数。
+// ClearDirAssignments 清除目录动作（条目化删）：删除该目录条目与其下所有更深
+// 条目（键前缀+尾斜杠判别；上级目录条目不受影响、继续供值——行为细化见方案
+// 帧D），排自动增量重识别。清除计数=子树内**清除前**有效赋值非空的文件数
+// （就近解析判定，含仅由上级目录条目覆盖的文件——与旧「有条目文件数」等值：
+// 旧形态有条目⟺有效赋值非空）。返回会话与清除数。
 func (m *SessionManager) ClearDirAssignments(root, dirRelKey string) (*WorkbenchSession, int, error) {
+	dirRelKey = strings.Trim(filepath.ToSlash(dirRelKey), "/")
 	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
 		return nil, 0, err
@@ -226,11 +255,16 @@ func (m *SessionManager) ClearDirAssignments(root, dirRelKey string) (*Workbench
 	cleared := 0
 	sess, err = m.mutateSession(root, func(sess *WorkbenchSession) error {
 		for _, f := range files {
-			if _, existed := sess.Assignments[f.RelPath]; !existed {
-				continue
+			resolved := resolveFileAssignment(sess.Assignments, f.RelPath)
+			if len(resolved.coveredDimensions()) > 0 {
+				cleared++
 			}
-			delete(sess.Assignments, f.RelPath)
-			cleared++
+		}
+		dirKey := assignmentDirKeyOf(dirRelKey)
+		for key := range sess.Assignments {
+			if key == dirKey || isDeeperAssignmentKey(key, dirKey) {
+				delete(sess.Assignments, key)
+			}
 		}
 		if cleared > 0 {
 			sess.AssignRevision++
@@ -242,6 +276,42 @@ func (m *SessionManager) ClearDirAssignments(root, dirRelKey string) (*Workbench
 	}
 	m.scheduleRecognitionRefresh(root)
 	return sess, cleared, nil
+}
+
+// clearDirSurvivor 清除目录后的上级供值在场判定（帧D-2 通知文案数据源）。
+type clearDirSurvivor struct {
+	// DirKey 仍供值的最近上级目录条目键（含尾斜杠；多级供值时取最近供值层）。
+	DirKey string
+	// Dims 清除后仍在场的维度标签（就近解析非空的全部维度，含更远上级供值者）。
+	Dims []string
+}
+
+// clearDirSurvivorOf 清除范围判定：对清除后的目录就近解析一次（本目录条目已
+// 剥、只剩上级链供值），上级仍有赋值在场时返回最近供值上级的条目键与在场
+// 维度标签；无上级在场返回 nil（维持现文案）。dirRelKey 为原始寻址键（内部
+// 规范化为 '/' 目录键形态）。
+func clearDirSurvivorOf(assigns map[string]SessionAssignment, dirRelKey string) *clearDirSurvivor {
+	dirRelKey = strings.Trim(filepath.ToSlash(dirRelKey), "/")
+	resolved := resolveDirCarrier(assigns, dirRelKey).finalized()
+	dims := resolved.coveredDimensions()
+	if len(dims) == 0 {
+		return nil
+	}
+	for dir := parentDirRelKeyOf(dirRelKey); ; dir = parentDirRelKeyOf(dir) {
+		key := assignmentDirKeyOf(dir)
+		if entry, ok := assigns[key]; ok && len(entry.coveredDimensions()) > 0 {
+			labels := make([]string, 0, len(dims))
+			for _, dim := range []MetadataDimension{DimAuthor, DimTitle, DimTag, DimCollection} {
+				if dims[dim] {
+					labels = append(labels, qnaDimensionLabel(dim))
+				}
+			}
+			return &clearDirSurvivor{DirKey: key, Dims: labels}
+		}
+		if dir == "" {
+			return nil
+		}
+	}
 }
 
 // —— 泛化成规则（入档后赋值保留：双源互证）——
@@ -281,12 +351,11 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 			return nil, err
 		}
 	}
-	assign, ok := sess.Assignments[relPath]
-	if !ok {
-		return nil, fmt.Errorf("文件 %s 无会话赋值，请先完成单次赋值再泛化", relPath)
-	}
+	// 泛化样本=该文件的就近解析值（文件例外或目录条目供值均可——目录赋值
+	// 下无文件键条目也照样可泛化；解析全空=无会话赋值）
+	assign := resolveFileAssignment(sess.Assignments, relPath)
 	if len(assign.coveredDimensions()) == 0 {
-		return nil, fmt.Errorf("文件 %s 的赋值未指定任何维度，无可泛化内容", relPath)
+		return nil, fmt.Errorf("文件 %s 无会话赋值，请先完成单次赋值再泛化", relPath)
 	}
 	if sess.Snapshot == nil {
 		return nil, fmt.Errorf("该会话尚未完成全量识别，缺少泛化所需的文件上下文，请先识别")
@@ -359,25 +428,61 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 	return &GenerationResult{Rule: views[0], Rules: views, VerificationStarted: started}, nil
 }
 
+// supplyingAssignmentKeyOf 文件赋值的供值条目键（泛化标记的落点）：有文件例外
+// 取文件键，否则沿所属目录链自近而远取首个指定了该文件在场维度的目录条目键
+//（最近供值层的标记=子树整片「已参与泛化」的谱系记录）；无任何供值条目返回
+// 空串。
+func supplyingAssignmentKeyOf(assigns map[string]SessionAssignment, relPath string) string {
+	if _, ok := assigns[relPath]; ok {
+		return relPath
+	}
+	resolved := resolveFileAssignment(assigns, relPath)
+	dims := resolved.coveredDimensions()
+	if len(dims) == 0 {
+		return ""
+	}
+	for dir := dirRelKeyOf(relPath); ; dir = parentDirRelKeyOf(dir) {
+		key := assignmentDirKeyOf(dir)
+		if entry, ok := assigns[key]; ok {
+			for dim := range entry.coveredDimensions() {
+				if dims[dim] {
+					return key
+				}
+			}
+		}
+		if dir == "" {
+			return ""
+		}
+	}
+}
+
 // markScopedAssignments 泛化入档后的赋值标记（用户裁决 2026-10-25：废除「泛化
 // 即接管」消费剥离）：作用域内赋值**全量保留**——赋值显式维度覆盖规则求值终选
 // 的合并语义本就存在，赋值（手动知识）与规则声明双源共存互为印证，手动赋值
 // 永不因泛化被自动剥离或删除（用户不再需要时自行清除）；Generalized 标记仅作
-// 「该文件赋值已参与过泛化」的谱系记录（识别与泛化观测面用）。
+// 「已参与泛化」的谱系记录（识别与泛化观测面用），置 Generalized 于**供值条
+// 目**——作用域内每文件：有文件例外则标例外，否则标覆盖它的最近目录条目
+//（目录条目标记=子树整片「已参与泛化」）。
 func (m *SessionManager) markScopedAssignments(root string, scope []*SnapFile) error {
 	if len(scope) == 0 {
 		return nil
 	}
 	now := time.Now().UnixMilli()
 	_, err := m.mutateSession(root, func(sess *WorkbenchSession) error {
+		marked := make(map[string]bool, len(scope))
 		for _, f := range scope {
-			assign, ok := sess.Assignments[f.RelPath]
+			key := supplyingAssignmentKeyOf(sess.Assignments, f.RelPath)
+			if key == "" || marked[key] {
+				continue
+			}
+			marked[key] = true
+			assign, ok := sess.Assignments[key]
 			if !ok || assign.Generalized {
 				continue
 			}
 			assign.Generalized = true
 			assign.UpdatedAtMs = now
-			sess.Assignments[f.RelPath] = assign
+			sess.Assignments[key] = assign
 		}
 		return nil
 	})

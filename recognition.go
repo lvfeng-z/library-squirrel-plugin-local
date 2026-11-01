@@ -199,9 +199,29 @@ func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, l
 	}
 	// 结构群前置对齐每目录只算一次，成员按相对路径登记，各单文件结论取用
 	structuralByRel := precomputeStructuralMembers(files, rules, lib, siblingsByDir)
+	// 会话赋值就近解析预计算（目录粒度表示的读路径）：目录集=求值树全部文件
+	// 的所属目录键，一次 DP 出每目录解析结果（并行区前完成，构造后只读共享）
+	// ——逐文件 O(1) 取用，文件例外条目逐维覆盖。旧形态（全文件键）经同一
+	// 解析器原生正确解读：无目录键=逐维上溯恒落空=与直查逐字节同义。
+	var assignIdx *assignmentDirIndex
+	if len(assigns) > 0 {
+		dirKeys := make(map[string]struct{}, len(treeFiles))
+		for _, file := range treeFiles {
+			dirKeys[dirRelKeyOf(file.RelPath)] = struct{}{}
+		}
+		for _, file := range files {
+			dirKeys[dirRelKeyOf(file.RelPath)] = struct{}{}
+		}
+		dirKeyList := make([]string, 0, len(dirKeys))
+		for dirKey := range dirKeys {
+			dirKeyList = append(dirKeyList, dirKey)
+		}
+		assignIdx = newAssignmentDirIndex(assigns, dirKeyList)
+	}
 	// 并行区2：逐文件结论按文件分块并行——每文件求值输入装配为兄弟表/聚合表
 	// 的只读查找、结论彼此独立，按下标写入预分配切片保输入序。共享输入
-	// （兄弟表/聚合表/结构群成员表/规则序列/谓词索引/会话赋值表）在此只读。
+	// （兄弟表/聚合表/结构群成员表/规则序列/谓词索引/会话赋值预计算表）在此
+	// 只读（零锁纪律）。
 	conclusions := make([]FileConclusion, len(files))
 	evaluateFileAt := func(i int) {
 		file := files[i]
@@ -212,8 +232,12 @@ func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, l
 			AncestorChildDirCounts: ancestorChildDirCounts(file.DirNames, childDirsByParent),
 		}
 		var assign *SessionAssignment
-		if a, ok := assigns[file.RelPath]; ok {
-			assign = &a
+		if assignIdx != nil {
+			// 就近解析取值：解析非空（任一维度有供值条目）才参与合并覆盖，
+			// 与旧直查「有条目即覆盖」等值——空赋值对结论本就是空覆盖
+			if a := assignIdx.resolveFile(file.RelPath); len(a.coveredDimensions()) > 0 {
+				assign = &a
+			}
 		}
 		conclusions[i] = mergedFileConclusionWithStructural(in, rules, lib, assign, structuralByRel[file.RelPath])
 	}
@@ -730,7 +754,8 @@ type aggregateInput struct {
 	// 按游标跳过且无赋值文件、直接复用旧结论的目录键集合。
 	prev        *RecognitionSnapshot
 	prevSkipped map[string]bool
-	// assigns 会话赋值（死路径判定与元素7 标记）。
+	// assigns 会话赋值（目录条目+文件例外共居；求值合并经预计算表、死路径
+	// 判定与元素7 标记经就近解析消费）。
 	assigns map[string]SessionAssignment
 	// profileDigest 本轮档案指纹；assignRevision 本轮会话赋值修订号。
 	profileDigest  string
@@ -815,12 +840,19 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	for _, f := range in.enumRes.AllFiles {
 		allRelPaths[f.RelPath] = true
 	}
+	// 会话赋值就近解析预计算：目录集=快照目录树键（enumRes.Dirs），死路径
+	// 判定与元素7 Assigned 标记共用（聚合阶段串行，构造后只读）
+	snapDirKeys := make([]string, 0, len(in.enumRes.Dirs))
+	for _, dir := range in.enumRes.Dirs {
+		snapDirKeys = append(snapDirKeys, dir.RelKey)
+	}
+	assignIdx := newAssignmentDirIndex(in.assigns, snapDirKeys)
 
 	groups := make(map[string]*SnapGroup)
 	reusedGroups := make(map[string]bool)
 
 	appendConclusion := func(c *FileConclusion) {
-		file := snapFileOf(c, in.lib, in.assigns)
+		file := snapFileOf(c, in.lib, assignIdx)
 		snap.Files = append(snap.Files, file)
 		if len(c.Pending) > 0 {
 			for _, item := range c.Pending {
@@ -952,9 +984,32 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	}
 
 	// —— 死路径赋值（识别时点判定，供清理提示）——
-	for relPath := range in.assigns {
-		if !allRelPaths[relPath] {
-			snap.StaleAssignments = append(snap.StaleAssignments, relPath)
+	// 文件键：不在全量路径集=死路径（原样）；目录键：其目录不在快照目录树
+	// 或子树无文件=死路径（条目供值面对不上任何活文件——空目录赋值与不
+	// 存在目录同样无法生效）。子树有文件判定=逐文件标记祖先链。
+	dirInTree := make(map[string]bool, len(in.enumRes.Dirs))
+	for _, dir := range in.enumRes.Dirs {
+		dirInTree[dir.RelKey] = true
+	}
+	subtreeHasFiles := make(map[string]bool, len(dirInTree))
+	for _, f := range in.enumRes.AllFiles {
+		for dir := dirRelKeyOf(f.RelPath); ; dir = parentDirRelKeyOf(dir) {
+			subtreeHasFiles[dir] = true
+			if dir == "" {
+				break
+			}
+		}
+	}
+	for key := range in.assigns {
+		if isDirAssignmentKey(key) {
+			dir := dirRelKeyOfAssignment(key)
+			if !dirInTree[dir] || !subtreeHasFiles[dir] {
+				snap.StaleAssignments = append(snap.StaleAssignments, key)
+			}
+			continue
+		}
+		if !allRelPaths[key] {
+			snap.StaleAssignments = append(snap.StaleAssignments, key)
 		}
 	}
 	sort.Strings(snap.StaleAssignments)
@@ -982,13 +1037,14 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 
 // snapFileOf 单文件结论 → 快照文件记录（元素2/3/5/7 的文件粒度聚合）。
 // 线索探测仅对未识别文件执行（已识别文件的命中规则与终选声明已足呈现），
-// 探测器全部复用既有机制：谓词原子与内置 pixiv 形态探测器。
-func snapFileOf(c *FileConclusion, lib *LibraryIndex, assigns map[string]SessionAssignment) SnapFile {
+// 探测器全部复用既有机制：谓词原子与内置 pixiv 形态探测器。Assigned 标记
+// =就近解析非空（仅目录条目覆盖也算——与旧展开形态「有条目」等值）。
+func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIndex) SnapFile {
 	file := SnapFile{
 		RelPath: c.RelPath, FileName: c.FileName, DirRelKey: c.DirRelKey,
 		MatchedRuleIDs: c.MatchedRuleIDs,
 	}
-	if _, ok := assigns[c.RelPath]; ok {
+	if resolved := assignIdx.resolveFile(c.RelPath); len(resolved.coveredDimensions()) > 0 {
 		file.Assigned = true
 	}
 	for _, decl := range c.Final {
@@ -1730,12 +1786,14 @@ func buildSnapshotCandidates(snap *RecognitionSnapshot, lib *LibraryIndex, in ag
 	snap.Candidates = kept
 }
 
-// confirmedCollectionOf 已确认候选的确认集名：确认动作对全员写集维度赋值
-// （collection=setName），故取首个携带集维度赋值成员的取值；赋值此后被用户
-// 清除时为空串（confirmed 分仓仍在场，呈现按已确认但集名缺席处理）。
+// confirmedCollectionOf 已确认候选的确认集名：确认动作对成员写集维度赋值
+// （collection=setName，文件例外形态），故取首个携带集维度赋值成员的取值
+// ——成员就近解析取集名（文件例外或目录条目供值均可，首个非空口径保持）；
+// 赋值此后被用户清除时为空串（confirmed 分仓仍在场，呈现按已确认但集名
+// 缺席处理）。
 func confirmedCollectionOf(cand SnapCandidate, assigns map[string]SessionAssignment) string {
 	for _, mem := range cand.Members {
-		if a, ok := assigns[mem.RelPath]; ok && a.Collection != "" {
+		if a := resolveFileAssignment(assigns, mem.RelPath); a.Collection != "" {
 			return a.Collection
 		}
 	}
@@ -2251,10 +2309,27 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		Done: len(enumRes.Files), Total: len(enumRes.AllFiles),
 	})
 
-	// 跳过集修正：含赋值文件的跳过目录强制重算（赋值覆盖维度需重求值）
+	// 跳过集修正：赋值影响面的跳过目录整目录强制重算（赋值覆盖维度需重求
+	// 值）。等值口径（旧形态目录赋值展开为每文件条目=子树每目录都命中）：
+	// 目录 D 复活⟺D 自身或祖先链存在目录条目，或 D 直属文件存在文件例外
+	// ——前者覆盖子树全部目录（与旧展开等值），后者锚定单目录（旧形态下
+	// 该目录的每文件条目至少含此例外）。
 	assignDirs := make(map[string]bool, len(sess.Assignments))
-	for relPath := range sess.Assignments {
-		assignDirs[dirRelKeyOf(relPath)] = true
+	for key := range sess.Assignments {
+		if isDirAssignmentKey(key) {
+			continue // 目录条目经祖先链判定覆盖子树全部目录
+		}
+		assignDirs[dirRelKeyOf(key)] = true
+	}
+	dirAssignmentActive := func(dirKey string) bool {
+		for dir := dirKey; ; dir = parentDirRelKeyOf(dir) {
+			if _, ok := sess.Assignments[assignmentDirKeyOf(dir)]; ok {
+				return true
+			}
+			if dir == "" {
+				return false
+			}
+		}
 	}
 	prevSkipped := make(map[string]bool, len(enumRes.SkippedDirKeys))
 	for _, dirKey := range enumRes.SkippedDirKeys {
@@ -2263,12 +2338,14 @@ func (m *SessionManager) runFullRecognition(root string) error {
 	evalFiles := enumRes.Files
 	for _, f := range enumRes.AllFiles {
 		dirKey := dirRelKeyOf(f.RelPath)
-		if prevSkipped[dirKey] && assignDirs[dirKey] {
+		if prevSkipped[dirKey] && (assignDirs[dirKey] || dirAssignmentActive(dirKey)) {
 			evalFiles = append(evalFiles, f)
 		}
 	}
-	for dirKey := range assignDirs {
-		delete(prevSkipped, dirKey)
+	for dirKey := range prevSkipped {
+		if assignDirs[dirKey] || dirAssignmentActive(dirKey) {
+			delete(prevSkipped, dirKey)
+		}
 	}
 
 	// 库内谓词索引（识别干跑注入求值：谓词规则与名字命中线索都吃它）

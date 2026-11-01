@@ -59,12 +59,31 @@ func seqFormFixture(t *testing.T, root string) (*SessionManager, string) {
 	return m, seq
 }
 
-// seqSuggOf 目录赋值（作品集）→ 目录寻址总结，返回建议卡。
+// assignDirPerFile 阶段2 过渡铺底：目录赋值已条目化（写目录条目+扇出），而
+// 总结器样本寻址/预览求值等读消费点仍逐文件直查（阶段3 才切解析器）——本文件
+// 测试环境按旧展开形态逐文件写例外，读路径所见与写点改造前逐字节等价。
+func assignDirPerFile(t *testing.T, m *SessionManager, root, dirKey string, assign SessionAssignment) {
+	t.Helper()
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	files, ok := dirSubtreeFilesOf(sess.Snapshot, dirKey)
+	if !ok || len(files) == 0 {
+		t.Fatalf("目录 %s 不在识别全景或无文件: %v", dirKey, ok)
+	}
+	for _, f := range files {
+		if _, _, err := m.ApplyAssignment(root, f.RelPath, assign); err != nil {
+			t.Fatalf("写入 %s 赋值失败: %v", f.RelPath, err)
+		}
+	}
+}
+
+// seqSuggOf 目录赋值（作品集，阶段2 过渡铺底见 assignDirPerFile）→ 目录寻址
+// 总结，返回建议卡。
 func seqSuggOf(t *testing.T, m *SessionManager, root, dirKey, collection string) *RuleSuggestion {
 	t.Helper()
-	if _, _, err := m.ApplyDirAssignment(root, dirKey, SessionAssignment{Collection: collection}); err != nil {
-		t.Fatalf("目录赋值失败: %v", err)
-	}
+	assignDirPerFile(t, m, root, dirKey, SessionAssignment{Collection: collection})
 	sugg, err := m.ApplyDirStructSummary(root, dirKey)
 	if err != nil {
 		t.Fatalf("目录总结失败: %v", err)
@@ -283,9 +302,8 @@ func TestSeqFormSuggestionNonGroupSample(t *testing.T) {
 func TestSeqFormGeneralizeEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	m, seq := seqFormFixture(t, root)
-	if _, _, err := m.ApplyDirAssignment(root, seq, SessionAssignment{Collection: seq}); err != nil {
-		t.Fatalf("目录赋值失败: %v", err)
-	}
+	// 阶段2 过渡铺底（assignDirPerFile）：总结器样本寻址仍逐文件直查
+	assignDirPerFile(t, m, root, seq, SessionAssignment{Collection: seq})
 
 	result, err := m.ApplyDirGeneralization(root, seq, generalizeModeStruct)
 	if err != nil {
@@ -343,13 +361,13 @@ func TestSeqFormGeneralizeEndToEnd(t *testing.T) {
 	}
 	for _, n := range []string{"01", "02", "03"} {
 		rel := seq + "/[hakosaku]_[126794866]_" + seq + "_[" + n + "].png"
-		assign, hit := sess.Assignments[rel]
-		if !hit || assign.Collection != seq || !assign.Generalized {
+		assign := resolveFileAssignment(sess.Assignments, rel)
+		if assign.Collection != seq || !assign.Generalized {
 			t.Fatalf("集名赋值应保留并置标记: %s %+v", rel, assign)
 		}
 	}
 
-	// 验证轮已排定（异步增量轮与 ApplyDirAssignment 排定的上一轮存在时序竞
+	// 验证轮已排定（异步增量轮与铺底赋值排定的上一轮存在时序竞
 	// 态，声明来源断言以确定性的全量重识别为准）。
 	if !result.VerificationStarted {
 		t.Fatal("泛化入档后应排定验证轮")

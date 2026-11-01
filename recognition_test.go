@@ -1094,7 +1094,7 @@ func TestGetPanoramaPageByteBound(t *testing.T) {
 	m, ctx := newRecognitionFixture(t, root, nil)
 
 	escapeHeavy := strings.Repeat("<&>", 5667) // ~17KB：实测转义后 ~102KB/字段（×2 字段 ≈ 6 倍低估）
-	huge := strings.Repeat("y", 3<<20)        // 3MB 目录名：单条估算 ≈ 9MB > 页目标
+	huge := strings.Repeat("y", 3<<20)         // 3MB 目录名：单条估算 ≈ 9MB > 页目标
 	snap := &RecognitionSnapshot{
 		SchemaVersion: recognitionSnapshotSchemaVersion,
 		GeneratedAtMs: 1700000000002,
@@ -1210,13 +1210,13 @@ func TestGetPanoramaOverviewPaging(t *testing.T) {
 		},
 		Groups: []SnapGroup{{DirRelKey: "甲", Key: "群A", Size: 2, RuleID: "test-sibling-set",
 			Members: []SnapGroupMember{{RelPath: "甲/a_1.jpg", Seq: 1, SeqText: "1"}}}},
-		Candidates:         []SnapCandidate{{Key: "候选甲", Dir: "甲", Source: candSourceDir, Size: 2, Reason: "目录信号", Members: []SnapCandMember{{RelPath: "甲/a_1.jpg"}}}},
-		IgnoredCandidates:  []SnapCandidate{{Key: "忽略乙", Dir: "乙", Source: candSourceGroup, Size: 1, Members: []SnapCandMember{{RelPath: "乙/b_1.jpg"}}}},
+		Candidates:          []SnapCandidate{{Key: "候选甲", Dir: "甲", Source: candSourceDir, Size: 2, Reason: "目录信号", Members: []SnapCandMember{{RelPath: "甲/a_1.jpg"}}}},
+		IgnoredCandidates:   []SnapCandidate{{Key: "忽略乙", Dir: "乙", Source: candSourceGroup, Size: 1, Members: []SnapCandMember{{RelPath: "乙/b_1.jpg"}}}},
 		ConfirmedCandidates: []SnapCandidate{{Key: "确认丙", Dir: "乙", Source: candSourceDir, Size: 1, ConfirmedSetName: "确认丙", Members: []SnapCandMember{{RelPath: "乙/c_1.jpg"}}}},
 		Pending: []SnapPending{{RelPath: "甲/a_1.jpg", FileName: "a_1.jpg", Dimension: "标题",
 			Reason: "同层冲突", Candidates: []SnapDecl{{Dimension: "标题", Value: "甲", Source: "rule"}}}},
 		RuleStats: []SnapRuleStat{{ID: "test-sibling-set", Description: "测试：下划线前缀+序号成群", Source: string(RuleSourceManual), Enabled: true, HitCount: 2}},
-		Stats:    SnapStats{TotalFiles: 4, GroupCount: 1, PendingFiles: 1},
+		Stats:     SnapStats{TotalFiles: 4, GroupCount: 1, PendingFiles: 1},
 	}
 	diff := &SnapDiff{
 		Changed: []SnapDiffEntry{{RelPath: "乙/b_1.jpg",
@@ -1387,10 +1387,10 @@ func TestGetPanoramaOverviewDecisionsDiffBudget(t *testing.T) {
 				fmt.Sprintf("标签丙丁戊_%06d", i%97), "公共标签占位文段二",
 				fmt.Sprintf("标签己庚辛_%06d", i%31),
 			},
-			Collection:       fmt.Sprintf("集名占位文段甲乙丙_%06d", i%53),
-			AuthorClueRef:    "dirLevelStripped[1]",
+			Collection:        fmt.Sprintf("集名占位文段甲乙丙_%06d", i%53),
+			AuthorClueRef:     "dirLevelStripped[1]",
 			CollectionClueRef: "filenameSeg[0]",
-			UpdatedAtMs:      1700000000000 + int64(i),
+			UpdatedAtMs:       1700000000000 + int64(i),
 		}
 	}
 	m, ctx := newRecognitionFixture(t, root, assigns)
@@ -1597,8 +1597,8 @@ func previewBoundFixture(root string, giantMembers int) (snap *RecognitionSnapsh
 			{RelKey: "巨目录", Name: "巨目录", Depth: 1, FileCount: giantMembers},
 			{RelKey: "落单目录", Name: "落单目录", Depth: 1, FileCount: dirTracksTotal},
 		},
-		Files:  files,
-		Groups: []SnapGroup{{DirRelKey: "巨目录", Key: "公共前缀文段", Size: giantMembers, Members: groupMembers}},
+		Files:               files,
+		Groups:              []SnapGroup{{DirRelKey: "巨目录", Key: "公共前缀文段", Size: giantMembers, Members: groupMembers}},
 		Candidates:          []SnapCandidate{{Key: "公共前缀文段", Dir: "巨目录", Source: candSourceGroup, Size: giantMembers, Reason: "巨群候选", Members: candMembers}},
 		IgnoredCandidates:   []SnapCandidate{{Key: "忽略巨候选", Dir: "巨目录", Source: candSourceDir, Size: giantMembers, Reason: "忽略分仓", Members: candMembers}},
 		ConfirmedCandidates: []SnapCandidate{{Key: "确认巨候选", Dir: "巨目录", Source: candSourceDir, Size: giantMembers, Reason: "确认分仓", Members: candMembers}},
@@ -2967,4 +2967,174 @@ func TestUnconfirmWorkSetCandidate(t *testing.T) {
 	if _, _, err := m.UnconfirmWorkSetCandidate(root, target); err == nil {
 		t.Fatal("目标不在已归集清单时撤销应回可读错误")
 	}
+}
+
+// TestDirEntryOnlySnapshotConsumption 仅目录条目覆盖形态（无任何文件例外）的
+// 快照消费断言（目录粒度表示·阶段3 新增锚）：目录条目供值的子树文件 Assigned
+// 标记=就近解析非空（与旧展开形态「有条目」等值）、终选声明被目录条目维度覆
+// 盖；无供值文件不标记；死路径判定按两类键分别落——文件键不在全量路径集、
+// 目录键=目录不在快照目录树或子树无文件（空目录条目同样判死）；线视图按存储
+// 原样直出目录条目（键带尾斜杠），不为被覆盖文件新造条目。
+func TestDirEntryOnlySnapshotConsumption(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, map[string]SessionAssignment{
+		// 唯一活赋值=目录条目（子树 3 文件全部仅由它覆盖）
+		"画师目录/": {Author: "目录作者", Title: "目录标题", UpdatedAtMs: 5},
+		// 死路径三形态：文件键路径不存在 / 目录键目录不在树 / 目录键子树无文件
+		"不存在目录/旧文件.jpg": {Author: "死文件", UpdatedAtMs: 1},
+		"不存在目录/":        {Author: "死目录", UpdatedAtMs: 2},
+		"空目录/":          {Author: "空目录", UpdatedAtMs: 3},
+	})
+	writeTestFile(t, root+"/画师目录/pic_01.jpg", "a")
+	writeTestFile(t, root+"/画师目录/pic_02.jpg", "b")
+	writeTestFile(t, root+"/画师目录/嵌套/pic_01.jpg", "c")
+	writeTestFile(t, root+"/无赋值/pic_01.jpg", "d")
+	if err := os.MkdirAll(root+"/空目录", 0o755); err != nil {
+		t.Fatalf("创建空目录失败: %v", err)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	snap := sess.Snapshot
+	byPath := make(map[string]SnapFile, len(snap.Files))
+	for _, f := range snap.Files {
+		byPath[f.RelPath] = f
+	}
+	authorOf := func(rel string) []string {
+		var vals []string
+		for _, d := range byPath[rel].Final {
+			if d.Dimension == string(DimAuthor) {
+				vals = append(vals, d.Value)
+			}
+		}
+		return vals
+	}
+	// Assigned/终选声明：仅目录条目覆盖=已赋值（等值口径），author/title 维度
+	// 由目录条目供值进终选
+	for _, rel := range []string{
+		"画师目录/pic_01.jpg", "画师目录/pic_02.jpg", "画师目录/嵌套/pic_01.jpg",
+	} {
+		f := byPath[rel]
+		if !f.Assigned {
+			t.Fatalf("%s 仅目录条目覆盖应带 assigned 标记", rel)
+		}
+		if got := authorOf(rel); len(got) != 1 || got[0] != "目录作者" {
+			t.Fatalf("%s 终选 author = %v，期望仅 [目录作者]（目录条目供值）", rel, got)
+		}
+		var title string
+		for _, d := range f.Final {
+			if d.Dimension == string(DimTitle) {
+				title = d.Value
+			}
+		}
+		if title != "目录标题" {
+			t.Fatalf("%s 终选 title = %q，期望 目录标题", rel, title)
+		}
+	}
+	// 无供值文件：不标记、无作者声明
+	if f := byPath["无赋值/pic_01.jpg"]; f.Assigned {
+		t.Fatal("无供值文件不应带 assigned 标记")
+	} else if got := authorOf("无赋值/pic_01.jpg"); len(got) != 0 {
+		t.Fatalf("无供值文件不应有作者声明: %v", got)
+	}
+	// 死路径：三形态全部判死、活目录条目不判死（稳定序断言）
+	wantStale := []string{"不存在目录/", "不存在目录/旧文件.jpg", "空目录/"}
+	if len(snap.StaleAssignments) != len(wantStale) {
+		t.Fatalf("死路径赋值报告不符: %+v", snap.StaleAssignments)
+	}
+	for i, key := range wantStale {
+		if snap.StaleAssignments[i] != key {
+			t.Fatalf("死路径赋值报告[%d] = %q，期望 %q（全量: %+v）", i, snap.StaleAssignments[i], key, snap.StaleAssignments)
+		}
+	}
+	if snap.Stats.StaleAssignments != len(wantStale) {
+		t.Fatalf("死路径计数 = %d，期望 %d", snap.Stats.StaleAssignments, len(wantStale))
+	}
+	// 线视图：按存储原样直出目录条目（键带尾斜杠），不为被覆盖文件新造条目
+	view := decisionsViewOf(sess)
+	entryByPath := make(map[string]workbenchAssignmentView, len(view.Assignments))
+	for _, v := range view.Assignments {
+		entryByPath[v.RelPath] = v
+	}
+	if entry, ok := entryByPath["画师目录/"]; !ok || entry.Author != "目录作者" {
+		t.Fatalf("线视图应直出目录条目 画师目录/: %+v（在场 %v）", entry, ok)
+	}
+	if _, ok := entryByPath["画师目录/pic_01.jpg"]; ok {
+		t.Fatal("线视图不应为仅目录条目覆盖的文件新造条目")
+	}
+}
+
+// TestIncrementalReviveByAssignmentEntries 增量跳过修正的等值口径（阶段3 新增
+// 锚）：mtime 未变目录被游标跳过后，赋值影响面整目录复活重算——目录条目供值
+// 复活其子树全部目录（旧形态目录赋值展开为每文件条目=子树每目录都命中的等值
+// 口径）、文件例外锚定其直属目录；无赋值影响面的跳过目录继续整目录复用旧结论。
+func TestIncrementalReviveByAssignmentEntries(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	writeTestFile(t, root+"/目录A/f1.jpg", "a")
+	writeTestFile(t, root+"/目录B/f2.jpg", "b")
+	writeTestFile(t, root+"/目录C/f3.jpg", "c")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮全量识别失败: %v", err)
+	}
+	// 原位注入赋值（不经公开写点——不递增修订号，保持增量资格，专测跳过
+	// 集修正通路）：目录A=目录条目、目录B=直属文件例外、目录C=无赋值
+	sess, err := m.loadSession(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	sess.Assignments = map[string]SessionAssignment{
+		"目录A/":       {Author: "目录作者", UpdatedAtMs: 2},
+		"目录B/f2.jpg": {Author: "例外作者", UpdatedAtMs: 3},
+	}
+	if err := m.saveSession(sess); err != nil {
+		t.Fatalf("注入会话赋值失败: %v", err)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("增量识别失败: %v", err)
+	}
+	sess, err = m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	byPath := make(map[string]SnapFile, len(sess.Snapshot.Files))
+	for _, f := range sess.Snapshot.Files {
+		byPath[f.RelPath] = f
+	}
+	assertAuthor := func(rel, want string) {
+		t.Helper()
+		f := byPath[rel]
+		if want == "" {
+			if f.Assigned {
+				t.Fatalf("%s 不应带 assigned 标记", rel)
+			}
+			for _, d := range f.Final {
+				if d.Dimension == string(DimAuthor) {
+					t.Fatalf("%s 不应有作者声明: %+v", rel, f.Final)
+				}
+			}
+			return
+		}
+		if !f.Assigned {
+			t.Fatalf("%s 应带 assigned 标记", rel)
+		}
+		var got []string
+		for _, d := range f.Final {
+			if d.Dimension == string(DimAuthor) {
+				got = append(got, d.Value)
+			}
+		}
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("%s 终选 author = %v，期望 [%s]", rel, got, want)
+		}
+	}
+	// 目录A 经祖先链目录条目复活：终选被目录条目覆盖；目录B 经直属文件例外
+	// 复活；目录C 无赋值影响面：继续整目录复用（无作者声明）
+	assertAuthor("目录A/f1.jpg", "目录作者")
+	assertAuthor("目录B/f2.jpg", "例外作者")
+	assertAuthor("目录C/f3.jpg", "")
 }

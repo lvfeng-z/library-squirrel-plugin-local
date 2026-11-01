@@ -256,7 +256,7 @@ func TestStructSummaryPreviewAndSessionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("赋值失败: %v", err)
 	}
-	if stored, ok := sess.Assignments[rel]; !ok || stored.AuthorClueRef != "dirLevelStripped1" ||
+	if stored := resolveFileAssignment(sess.Assignments, rel); stored.AuthorClueRef != "dirLevelStripped1" ||
 		stored.TitleClueRef != "filenameSeg0" || len(stored.TagClueRefs) != 1 || stored.TagClueRefs[0] != "rootName" {
 		t.Fatalf("赋值出处未入会话存储: %+v", stored)
 	}

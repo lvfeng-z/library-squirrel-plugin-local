@@ -308,8 +308,8 @@ func TestWorkSetRuleAdjustRuleAssembly(t *testing.T) {
 	}
 	// 选段捕获值（BBB）≠ 确认集名（AAA_BBB）→ 成员集维度赋值不被消费（特异
 	// 性赋值压过普适规则，保持在场）。
-	if _, kept := sess.Assignments[member.RelPath]; !kept {
-		t.Fatal("选段改变的捕获不复现确认集名时，成员赋值应保留不被消费")
+	if r := resolveFileAssignment(sess.Assignments, member.RelPath); r.Collection != "AAA_BBB" {
+		t.Fatalf("选段改变的捕获不复现确认集名时，成员集名赋值应保留不被消费: %+v", r)
 	}
 }
 
@@ -462,8 +462,8 @@ func TestWorkSetRuleGeneralizeEndToEnd(t *testing.T) {
 		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[02].png",
 		"Artist[hakosaku]/合集盒/[hakosaku]_[126794866]_AAA_BBB_[03].png",
 	} {
-		assign, kept := sess.Assignments[rel]
-		if !kept || !assign.Generalized {
+		assign := resolveFileAssignment(sess.Assignments, rel)
+		if assign.Collection != "AAA_BBB" || !assign.Generalized {
 			t.Fatalf("成员 %s 的赋值应保留并置已泛化标记: %+v", rel, assign)
 		}
 	}

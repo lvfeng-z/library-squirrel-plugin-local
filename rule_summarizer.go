@@ -792,12 +792,11 @@ func (m *SessionManager) applyStructSummary(root, relPath, dirRelKey string) (*R
 			return nil, err
 		}
 	}
-	assign, ok := sess.Assignments[relPath]
-	if !ok {
-		return nil, fmt.Errorf("文件 %s 无会话赋值，请先完成单次赋值再总结规则", relPath)
-	}
+	// 总结样本=该文件的就近解析值（文件例外或目录条目供值均可——目录赋值
+	// 下无文件键条目也照样可总结；解析全空=无会话赋值）
+	assign := resolveFileAssignment(sess.Assignments, relPath)
 	if len(assign.coveredDimensions()) == 0 {
-		return nil, fmt.Errorf("文件 %s 的赋值未指定任何维度，无可总结内容", relPath)
+		return nil, fmt.Errorf("文件 %s 无会话赋值，请先完成单次赋值再总结规则", relPath)
 	}
 	if sess.Snapshot == nil {
 		return nil, fmt.Errorf("该会话尚未完成全量识别，缺少规则总结所需的文件上下文，请先识别")

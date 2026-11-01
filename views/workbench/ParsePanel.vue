@@ -417,6 +417,11 @@ interface PanelResponse {
   ruleSuggestion?: PanelRuleSuggestion
   // 剧本J4：assignDir/clearDirAssignments 的生效文件计数（子树合并写触及数/清除数）
   affected?: number
+  // 帧D-2：clearDirAssignments 的范围判定增补——清除后上级目录条目仍有赋值在场
+  // 时随答最近供值上级的目录条目键（含尾斜杠）与在场维度标签（中文名，与表单
+  // 维度标签一致）；无上级在场则两字段缺省（前端维持现文案）
+  survivorDirKey?: string
+  survivorDims?: string[]
 }
 
 // 剧本G4 规则建议（后端 RuleSuggestion：人话规则+逐维度映射+命中预览+样例应用）
@@ -457,10 +462,17 @@ const props = defineProps<{
   diff: PanelDiff | null
   recognizing: boolean
   request: (action: string, payload: Record<string, unknown>) => Promise<PanelResponse>
+  // 缺陷①修复（动作通知跨刷新存活）：父组件托管的最近动作通知——动作应答后
+  // emit('refresh') 令全景重载、右栏面板随 snapshot=null 同批卸载，通知若只存
+  // 实例内即随实例消亡（帧D-2 清除通知曾永不进 DOM）；挂载时以此种子回填接力
+  noticeSeed?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'refresh'): void
+  // 缺陷①修复：通知文本随每次变更上浮父组件托管（面板卸载期由 ParseView 存活
+  // 层横幅呈现、回场后经 noticeSeed 回填接力；清空亦同步）
+  (e: 'notice', text: string): void
   // 剧本J7：目录面板「返回文件面板」（清目录选中态，互斥切回文件面板）
   (e: 'exitDir'): void
   // 声明来源规则名直达编辑：路由上下文在父组件，由父组件跳规则管理子页并携规则 ID
@@ -469,6 +481,20 @@ const emit = defineEmits<{
 
 // —— 反馈态 ——
 const notice = ref('')
+// 缺陷①修复：notice 每次变更上浮父组件（托管数据源——面板卸载期存活层呈现、
+// 重挂载时种子回填；含动作起始的清空同步）。
+// 必须 flush:'sync'：动作应答后「置 notice + emit('refresh')」同拍发生，父组件
+// 的重渲染作业（uid 更小）会先于本面板的 pre-flush watch 出队执行——面板同批
+// 卸载即连带废弃尚未出队的 watch 作业，通知上浮永不发生（实机旁录复现：清除/
+// 忽略均 0 命中，而隔拍的保存通知能达）。同步出队确保赋值瞬间完成上浮，不依赖
+// 面板存活到下一次调度冲刷。
+watch(
+  notice,
+  (v) => {
+    emit('notice', v)
+  },
+  { flush: 'sync' }
+)
 const actionError = ref('')
 // 泛化/裁决成功后验证轮在途的乐观标记：与父组件 recognizing 合成忙碌态，
 // recognitionDone（recognizing 转 false）后清除
@@ -507,10 +533,95 @@ defineExpose({
   isFormDirty: (): boolean => formDirty.value
 })
 
+// —— 赋值条目键形态与就近解析（阶段5：线视图条目直出——目录条目键带尾斜杠
+//     （库根="/"）、文件例外键=相对路径原样；判别=键以 / 结尾⟺目录条目） ——
+
+// assignmentByPath 条目索引：键→条目（帧A 文件预填就近解析与帧B 上级供值查找共用）
+const assignmentByPath = computed<Map<string, PanelAssignment>>(() => {
+  const m = new Map<string, PanelAssignment>()
+  for (const a of props.assignments) m.set(a.relPath, a)
+  return m
+})
+
+// parentDirKeyOf 相对路径的父目录寻址键：剥最末一级（一级成员归于库根空串）
+function parentDirKeyOf(p: string): string {
+  const idx = p.lastIndexOf('/')
+  return idx >= 0 ? p.slice(0, idx) : ''
+}
+
+// dirEntryKeyOf 目录寻址键 → 目录条目键：加尾斜杠，库根映射为 "/"
+function dirEntryKeyOf(dirKey: string): string {
+  return dirKey ? dirKey + '/' : '/'
+}
+
+// ancestorDirKeysOf 目录寻址键的祖先目录条目键链（最近者优先、库根 "/" 殿后；
+// 库根自身无上级=空链）
+function ancestorDirKeysOf(relKey: string): string[] {
+  const keys: string[] = []
+  let key = relKey
+  while (key) {
+    key = parentDirKeyOf(key)
+    keys.push(dirEntryKeyOf(key))
+  }
+  return keys
+}
+
+// currentAssignment 文件表单预填源（帧A 就近解析）：先查文件例外精确键，条目未
+// 指定的维度沿祖先目录链（自身目录→…→库根 "/"）取最近指定该维度的目录条目——
+// 逐维合并而非整条就近，口径与后端 resolveFileAssignment 一致（作者维与角色成组
+// 盖入、标签逐位出处随维走、Generalized=任一供值条目带标记即真、UpdatedAtMs=
+// 供值条目最近值）；全链无供值=null（仅目录条目覆盖≠null，已赋值/已泛化标记随
+// 解析结果点亮）。
 const currentAssignment = computed<PanelAssignment | null>(() => {
   const rel = props.file ? props.file.relPath : ''
   if (!rel) return null
-  return props.assignments.find((a) => a.relPath === rel) || null
+  const byPath = assignmentByPath.value
+  const merged: PanelAssignment = { relPath: rel }
+  let generalized = false
+  let updatedAtMs = 0
+  // overlay 一层条目：显式指定的维度整组盖入（值+线索出处），未指定维度保持既有
+  const overlay = (entry: PanelAssignment | undefined): void => {
+    if (!entry) return
+    if (entry.author) {
+      merged.author = entry.author
+      merged.authorRole = entry.authorRole
+      merged.authorClueRef = entry.authorClueRef
+      generalized = generalized || entry.generalized === true
+      updatedAtMs = Math.max(updatedAtMs, entry.updatedAtMs || 0)
+    }
+    if (entry.title) {
+      merged.title = entry.title
+      merged.titleClueRef = entry.titleClueRef
+      generalized = generalized || entry.generalized === true
+      updatedAtMs = Math.max(updatedAtMs, entry.updatedAtMs || 0)
+    }
+    if (entry.tags && entry.tags.length) {
+      merged.tags = entry.tags.slice()
+      merged.tagClueRefs = entry.tagClueRefs ? entry.tagClueRefs.slice() : undefined
+      generalized = generalized || entry.generalized === true
+      updatedAtMs = Math.max(updatedAtMs, entry.updatedAtMs || 0)
+    }
+    if (entry.collection) {
+      merged.collection = entry.collection
+      merged.collectionClueRef = entry.collectionClueRef
+      generalized = generalized || entry.generalized === true
+      updatedAtMs = Math.max(updatedAtMs, entry.updatedAtMs || 0)
+    }
+  }
+  // 祖先目录链远层为底、近层覆盖：链头（库根）先叠、所属目录最后叠，文件例外居末
+  const chain: string[] = []
+  for (let dir = parentDirKeyOf(rel); ; dir = parentDirKeyOf(dir)) {
+    chain.unshift(dirEntryKeyOf(dir))
+    if (dir === '') break
+  }
+  for (const key of chain) overlay(byPath.get(key))
+  overlay(byPath.get(rel))
+  if (!merged.author && !merged.title && !(merged.tags && merged.tags.length) && !merged.collection) {
+    return null
+  }
+  merged.generalized = generalized
+  if (updatedAtMs) merged.updatedAtMs = updatedAtMs
+  return merged
 })
 
 function setForm(a: PanelAssignment | null): void {
@@ -530,32 +641,52 @@ function setForm(a: PanelAssignment | null): void {
   formDirty.value = false
 }
 
-// —— 剧本A 目录表单预填：子树已赋值文件的维度共有值聚合 ——
-// 子树=relKey 前缀（库根空键=全树；非空键带 '/'，防同前缀目录误并）；每维度
-// 三态——全部已赋值文件同值→预填值+小字「子树 N 个文件共有」（N=该维度有赋值
-// 的文件数）；有赋值但不一致→留空+小字「子树内不一致」；无赋值→留空无小字。
-// 用户可改预填值（打字/选线索即清该维度小字）；保存语义不变（子树合并写）。
+// —— 帧B 目录表单预填：条目源三态（线视图条目直出后的口径）——
+// 子树=本目录条目+子树内更深条目（目录条目与文件例外）。每维度三态判定以条目
+// 为源、小字区分值的来源层——子树内供值条目整体同值=预填值+小字「子树整目录
+// 共有」；有供值但相异=留空+小字「子树内不一致」；子树内无供值而最近上级目录
+// 条目供值=预填值+小字「上级目录共有：<目录>」（范围自明：值从哪层来一目了
+// 然）；无供值=留空无小字。用户可改预填值（打字/选线索即清该维度小字）；保存
+// 语义不变（子树合并写，现扇出写）；预填不带线索出处（现约定保持）。
 const dirHints = ref<Record<string, string>>({})
 
 function subtreeAssignmentsOf(): PanelAssignment[] {
   const dir = props.dir
   if (!dir) return []
+  // 前缀=本目录条目键（含尾斜杠），故过滤结果含本目录条目自身与子树内全部更深
+  // 条目；库根空键=全树（含根条目 "/"；非空键带 '/'，防同前缀目录误并）
   const prefix = dir.relKey ? dir.relKey + '/' : ''
   return props.assignments.filter((a) => a.relPath.startsWith(prefix))
 }
 
-// dirCommonOf 子树赋值在某维度取值上的聚合：null=无赋值；'mixed'=有赋值但不
-// 一致；否则 { value, count }（count=该维度有赋值的文件数）。
-function dirCommonOf<R>(
+// dirDimStateOf 帧B 三态判定：子树内条目在该维度上整体同值→{ value }（dirKey
+// 空=值来自本目录/子树条目，小字「子树整目录共有」）；有供值但相异→'mixed'
+//（留空+「子树内不一致」）；子树内无供值→沿祖先目录链取最近供值的目录条目→
+// { value, dirKey }（「上级目录共有：<目录>」，dirKey=该上级条目键含尾斜杠）；
+// 全链无供值→null（留空无小字）。
+// 缺陷②修复（三态过声称）：「子树整目录共有」前提=子树内全部文件该维解析同值
+//——聚合曾直接跳过不供该维的条目，含例外目录（6 文件 {author,title}+1 例外
+// {collection}）对作者维称整目录共有而实际 6/7。现补核逐文件就近口径（条目层
+// 可判）：子树内存在不供该维的文件例外、且其子树内父链（至本目录含）无目录
+// 条目供该维为其补供→该文件该维取值必出子树（或无值），该维降「子树内不一致」
+//（宁可过严不过声称——纵上级恰供同值亦降）。上级分支同理核过：子树内本无
+// 任何供值条目时不供该维的文件例外逐文件就近上溯必经同一上级链（子树内无中
+// 间供值层）取同一值，全文件同值前提结构成立，无需降级。
+function dirDimStateOf<R>(
   pick: (a: PanelAssignment) => R | undefined,
   same: (x: R, y: R) => boolean
-): { value: R; count: number } | 'mixed' | null {
+): { value: R; dirKey: string | null } | 'mixed' | null {
   let first: R | undefined
   let count = 0
   let mixed = false
+  // 不供该维的文件例外键清单（补供核验用；目录条目不供该维不构成文件粒度例外）
+  const unsuppliedFileExcs: string[] = []
   for (const a of subtreeAssignmentsOf()) {
     const v = pick(a)
-    if (v === undefined) continue
+    if (v === undefined) {
+      if (!a.relPath.endsWith('/')) unsuppliedFileExcs.push(a.relPath)
+      continue
+    }
     count++
     if (count === 1) {
       first = v
@@ -563,13 +694,43 @@ function dirCommonOf<R>(
       mixed = true
     }
   }
-  if (count === 0) return null
   if (mixed) return 'mixed'
-  return { value: first as R, count }
+  if (count > 0) {
+    // 缺陷②修复：任一不供该维的文件例外在子树内无目录条目补供（逐文件就近）
+    // →整目录共有即过声称，降「子树内不一致」
+    if (unsuppliedFileExcs.some((rel) => !fileExcDirSuppliedInSubtree(rel, pick))) {
+      return 'mixed'
+    }
+    return { value: first as R, dirKey: null }
+  }
+  for (const ancKey of ancestorDirKeysOf(props.dir ? props.dir.relKey : '')) {
+    const entry = assignmentByPath.value.get(ancKey)
+    if (!entry) continue
+    const v = pick(entry)
+    if (v !== undefined) return { value: v, dirKey: ancKey }
+  }
+  return null
 }
 
-// applyDirPrefill 目录表单预填落位：五维度三态各就各位；预填不带线索出处
-//（出处小字与子树共有小字互斥呈现）。
+// fileExcDirSuppliedInSubtree 文件例外的子树内补供核验（逐文件就近口径）：沿其
+// 父目录链上溯至本目录（含本目录条目）查有无目录条目供该维——供值条目整体
+// 同值前提下有=该文件该维就近解析得共有值；无=取值必出子树（或无值）。
+function fileExcDirSuppliedInSubtree<R>(
+  rel: string,
+  pick: (a: PanelAssignment) => R | undefined
+): boolean {
+  const stop = props.dir ? props.dir.relKey : ''
+  let key = parentDirKeyOf(rel)
+  for (;;) {
+    const entry = assignmentByPath.value.get(dirEntryKeyOf(key))
+    if (entry && pick(entry) !== undefined) return true
+    if (key === stop || key === '') return false
+    key = parentDirKeyOf(key)
+  }
+}
+
+// applyDirPrefill 目录表单预填落位（帧B 三态各就各位）；预填不带线索出处
+//（出处小字与来源层小字互斥呈现）。
 function applyDirPrefill(): void {
   if (!props.dir) return
   formAuthor.value = ''
@@ -580,14 +741,14 @@ function applyDirPrefill(): void {
   const hints: Record<string, string> = {}
   const fill = (
     dim: 'author' | 'authorRole' | 'title' | 'tags' | 'collection',
-    agg: { value: string | string[]; count: number } | 'mixed' | null
+    agg: { value: string | string[]; dirKey: string | null } | 'mixed' | null
   ): void => {
     if (agg === null) return
     if (agg === 'mixed') {
       hints[dim] = '子树内不一致'
       return
     }
-    hints[dim] = `子树 ${agg.count} 个文件共有`
+    hints[dim] = agg.dirKey ? `上级目录共有：${agg.dirKey}` : '子树整目录共有'
     if (dim === 'tags') {
       formTagsText.value = (agg.value as string[]).join('，')
     } else if (dim === 'author') {
@@ -600,11 +761,11 @@ function applyDirPrefill(): void {
       formCollection.value = agg.value as string
     }
   }
-  fill('author', dirCommonOf((a) => (a.author ? a.author : undefined), (x, y) => x === y))
-  fill('authorRole', dirCommonOf((a) => (a.authorRole ? a.authorRole : undefined), (x, y) => x === y))
-  fill('title', dirCommonOf((a) => (a.title ? a.title : undefined), (x, y) => x === y))
-  fill('tags', dirCommonOf((a) => (a.tags && a.tags.length ? a.tags : undefined), (x, y) => x.join('，') === y.join('，')))
-  fill('collection', dirCommonOf((a) => (a.collection ? a.collection : undefined), (x, y) => x === y))
+  fill('author', dirDimStateOf((a) => (a.author ? a.author : undefined), (x, y) => x === y))
+  fill('authorRole', dirDimStateOf((a) => (a.authorRole ? a.authorRole : undefined), (x, y) => x === y))
+  fill('title', dirDimStateOf((a) => (a.title ? a.title : undefined), (x, y) => x === y))
+  fill('tags', dirDimStateOf((a) => (a.tags && a.tags.length ? a.tags : undefined), (x, y) => x.join('，') === y.join('，')))
+  fill('collection', dirDimStateOf((a) => (a.collection ? a.collection : undefined), (x, y) => x === y))
   dirHints.value = hints
   srcAuthor.value = ''
   srcAuthorRole.value = ''
@@ -615,8 +776,8 @@ function applyDirPrefill(): void {
   formDirty.value = false
 }
 
-// dirFieldHint 目录模式三态小字（剧本A：子树共有/不一致）；文件模式恒空（走
-// 线索出处小字）。
+// dirFieldHint 目录模式来源层三态小字（帧B：子树整目录共有/上级目录共有/子树内
+// 不一致）；文件模式恒空（走线索出处小字）。
 function dirFieldHint(dim: 'author' | 'authorRole' | 'title' | 'tags' | 'collection'): string {
   return props.dir ? dirHints.value[dim] || '' : ''
 }
@@ -896,6 +1057,10 @@ watch(
 
 // 初挂载即按现值预填（选中态先于组件挂载就位）
 resetPanelState()
+// 缺陷①修复：回填父组件托管的最近动作通知——本面板随全景刷新（snapshot=null
+// 同批卸载右栏）消亡重建，通知态若只存实例内即丢失；种子仅挂载时消费一次，
+// 后续生命周期仍由本实例动作自治（切换目标时父组件已先行弃管清空种子）
+if (props.noticeSeed) notice.value = props.noticeSeed
 
 // —— 赋值动作（动作协议零改动，经父通道串行调用） ——
 
@@ -1118,8 +1283,33 @@ async function doClearAssign(): Promise<void> {
   notice.value = '已清除赋值（重识别后生效）'
 }
 
-// 剧本J4 清除目录赋值：clearDirAssignments 删子树全部文件赋值（含已泛化标记，
-// affected=清除数）→ 通知+重取全景；后端已排自动重识别，前端不发识别请求
+// subtreeDimLabelsOf 帧D-2 通知数据源：本目录层被清的维度中文名并集（子树内
+// 条目=本目录+更深条目的供值维度；口径同后端 coveredDimensions——作者角色随
+// 作者维成组、非独立供值维度；顺序同后端在场维度序：作者/作品名/标签/作品集）。
+function subtreeDimLabelsOf(): string[] {
+  let hasAuthor = false
+  let hasTitle = false
+  let hasTags = false
+  let hasCollection = false
+  for (const a of subtreeAssignmentsOf()) {
+    if (a.author) hasAuthor = true
+    if (a.title) hasTitle = true
+    if (a.tags && a.tags.length) hasTags = true
+    if (a.collection) hasCollection = true
+  }
+  const labels: string[] = []
+  if (hasAuthor) labels.push('作者')
+  if (hasTitle) labels.push('作品名')
+  if (hasTags) labels.push('标签')
+  if (hasCollection) labels.push('作品集')
+  return labels
+}
+
+// 帧D 清除目录赋值：clearDirAssignments 剥本目录条目及子树内更深条目（行为
+// 细化：上级目录条目继续供值）、affected=清除计数 → 通知+重取全景；后端已排
+// 自动重识别，前端不发识别请求。通知两变体（帧D-2）：应答带 survivor（上级
+// 仍有赋值在场）=范围显式形态——什么被清（本层维度+文件数）、什么仍在（上级
+// 目录+维度）逐项明示；无 survivor=现文案不变（子树整体回到未赋值、无歧义）。
 async function doClearDirAssign(): Promise<void> {
   const dir = props.dir
   if (!props.root || !dir) return
@@ -1127,6 +1317,8 @@ async function doClearDirAssign(): Promise<void> {
   notice.value = ''
   actionError.value = ''
   halfState.value = null
+  // 本目录层被清维度取清除前条目快照（应答后 emit refresh，条目随即被剥）
+  const clearedDims = subtreeDimLabelsOf()
   const resp = await props.request('clearDirAssignments', {
     root: props.root,
     dirRelKey: dir.relKey
@@ -1141,7 +1333,13 @@ async function doClearDirAssign(): Promise<void> {
   lastCondition.value = ''
   lastGenRules.value = []
   suggestion.value = null
-  notice.value = `已清除目录下 ${resp.affected || 0} 个文件的赋值（重识别后生效）`
+  const clearedCount = resp.affected || 0
+  if (resp.survivorDirKey) {
+    const dimsPart = clearedDims.length ? `${clearedDims.join('、')}，` : ''
+    notice.value = `已清除 ${dir.name}/ 本目录层赋值（${dimsPart}${clearedCount} 个文件）；上级 ${resp.survivorDirKey} 的赋值仍在：${(resp.survivorDims || []).join('、')}`
+  } else {
+    notice.value = `已清除目录下 ${clearedCount} 个文件的赋值（重识别后生效）`
+  }
   emit('refresh')
 }
 

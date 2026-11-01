@@ -1117,9 +1117,11 @@ func buildChildResponses(items []batchFileItem, assigns map[string]SessionAssign
 			fp.SiteKey = af.attr.SiteKey
 			fp.SiteWorkId = af.attr.PageWorkID
 		}
-		// 任务级赋值快照：所选文件依赖的会话赋值固化进任务载荷（执行期重算优先
-		// 消费，任务自包含——会话删除不影响在途任务）
-		if assign, ok := assigns[af.entry.RelPath]; ok {
+		// 任务级赋值快照：所选文件依赖的会话赋值就近解析（文件例外+目录条目
+		// 供值，与识别求值同口径）后固化进任务载荷（执行期重算优先消费，任务
+		// 自包含——会话删除不影响在途任务）；解析非空才固化（空赋值对合并
+		// 覆盖本就是空操作）
+		if assign := resolveFileAssignment(assigns, af.entry.RelPath); len(assign.coveredDimensions()) > 0 {
 			snapshot := assign
 			fp.Assignment = &snapshot
 		}

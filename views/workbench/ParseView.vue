@@ -70,6 +70,18 @@
       show-icon
       :title="recognError"
     />
+    <!-- 缺陷①修复（动作通知存活层）：解析面板动作通知在面板不在场期由此横幅呈现
+         ——动作应答后 emit('refresh') 触发 loadPanorama 同步 snapshot=null，右栏
+         v-if 同批卸载面板，通知随实例消亡曾永不进 DOM（帧D-2）；面板回场（快照
+         就绪）后交还面板内 alert 呈现（noticeSeed 回填），本横幅即隐去不双呈 -->
+    <el-alert
+      v-if="session && panelNotice && !(snapshot && !rightCollapsed)"
+      class="li-ws-banner"
+      type="success"
+      :closable="false"
+      show-icon
+      :title="panelNotice"
+    />
 
     <!-- 空会话态 -->
     <el-empty
@@ -595,6 +607,8 @@
                 :diff="diff"
                 :recognizing="recognizing"
                 :request="request"
+                :notice-seed="panelNotice"
+                @notice="onPanelNotice"
                 @refresh="onPanelRefresh"
                 @exit-dir="exitDirPanel"
                 @open-rule="openRuleEdit"
@@ -651,6 +665,8 @@
                   :diff="diff"
                   :recognizing="recognizing"
                   :request="request"
+                  :notice-seed="panelNotice"
+                  @notice="onPanelNotice"
                   @refresh="onPanelRefresh"
                   @open-rule="openRuleEdit"
                 />
@@ -1040,6 +1056,20 @@ const progress = ref({ phase: '', done: 0, total: 0 })
 // —— 双栏布局态（会话内记忆，不持久化） ——
 // 右栏收起态：默认展开；收起后左卡独占整行宽度
 const rightCollapsed = ref(false)
+
+// —— 缺陷①修复（动作通知跨刷新存活）——
+// 解析面板动作通知的父组件托管态：动作应答后 emit('refresh') → loadPanorama
+// 同步 snapshot=null → 右栏 v-if 同批卸载面板，通知随实例消亡（MutationObserver
+// 全程旁录 0 命中已证）。改为 ParsePanel notice 每次变更上浮此处托管：面板不在
+// 场（全景刷新载入期/右栏收起）由页头存活层横幅呈现，面板回场后经 noticeSeed
+// 回填交还面板内呈现。切换面板目标（换文件/换目录/文件↔目录互斥切）即弃管旧
+// 通知——新目标不该复活旧动作的反馈；刷新周期内的卸载-重挂不属切换（选中键
+// 与目录键均不变、不触发本守卫，通知得以跨刷新续读）。
+const panelNotice = ref('')
+
+function onPanelNotice(text: string): void {
+  panelNotice.value = text
+}
 
 // —— 待裁决·决策态融合弹窗（头部「重新识别」右侧入口；只读总览 + 待裁决文件定位清单行） ——
 const fusionDialogVisible = ref(false)
@@ -2489,6 +2519,16 @@ function exitDirPanel(): void {
   }
   selectedDirKey.value = null
 }
+
+// 缺陷①修复配套守卫：切换面板目标（换文件/换目录/文件↔目录互斥切）即弃管
+// 托管的动作通知——新目标不该复活旧动作的反馈；全景刷新周期内的卸载-重挂
+// 不属切换（选中文件键与目录键均不变、不触发本守卫），通知得以跨刷新续读。
+watch(
+  [() => selectedRelPath.value, () => selectedDirKey.value],
+  () => {
+    panelNotice.value = ''
+  }
+)
 
 // 剧本J 目录模式上下文（与 ParsePanel PanelDirContext 同构；ParsePanel 目录模式消费）
 interface DirPanelContext {
