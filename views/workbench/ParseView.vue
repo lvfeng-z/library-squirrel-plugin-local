@@ -2477,8 +2477,10 @@ const dirRoots = computed<TreeDirNode[]>(() => {
   const roots: TreeDirNode[] = []
   for (const node of nodeByRel.values()) {
     node.files = filesByDir.get(node.relKey) || []
+    // 一级目录（键不含 '/'）的父节点=库根（relKey 空串行，快照目录清单恒含）；
+    // 库根自身无父、挂树根
     const cut = node.relKey.lastIndexOf('/')
-    const parent = cut >= 0 ? nodeByRel.get(node.relKey.slice(0, cut)) : undefined
+    const parent = node.relKey === '' ? undefined : nodeByRel.get(cut >= 0 ? node.relKey.slice(0, cut) : '')
     if (parent) parent.children.push(node)
     else roots.push(node)
   }
@@ -2510,18 +2512,22 @@ function toggleTreeDir(relKey: string): void {
 // 库根直挂文件（dirRelKey 为空）：置顶平铺，避免树外丢失
 const rootLevelFiles = computed<SnapFile[]>(() => filteredFiles.value.filter((f) => !f.dirRelKey))
 
-// 树可见行序列：展开目录的内容行（子目录在前、文件在后）；全量渲染不虚拟化（246 行级数据量）
+// 树可见行序列：展开目录的内容行（子目录在前、文件在后）；全量渲染不虚拟化（246 行级数据量）。
+// 库根节点（relKey 空串）为隐式容器：不出目录行、子目录恒可见（树入口即一级目录行），
+// 其直挂文件已由置顶平铺承载、不再随展开重复出
 const treeRows = computed<TreeRow[]>(() => {
   const rows: TreeRow[] = []
   for (const f of rootLevelFiles.value) rows.push({ kind: 'file', key: `f:${f.relPath}`, depth: 0, file: f })
-  const emit = (node: TreeDirNode): void => {
-    rows.push({ kind: 'dir', key: `d:${node.relKey}`, depth: node.depth, dir: node })
-    if (treeExpanded.value.has(node.relKey)) {
-      for (const child of node.children) emit(child)
-      for (const f of node.files) rows.push({ kind: 'file', key: `f:${f.relPath}`, depth: node.depth + 1, file: f })
+  const emit = (node: TreeDirNode, implicitRoot: boolean): void => {
+    if (!implicitRoot) rows.push({ kind: 'dir', key: `d:${node.relKey}`, depth: node.depth, dir: node })
+    if (implicitRoot || treeExpanded.value.has(node.relKey)) {
+      for (const child of node.children) emit(child, false)
+      if (!implicitRoot) {
+        for (const f of node.files) rows.push({ kind: 'file', key: `f:${f.relPath}`, depth: node.depth + 1, file: f })
+      }
     }
   }
-  for (const root of dirRoots.value) emit(root)
+  for (const root of dirRoots.value) emit(root, root.relKey === '')
   return rows
 })
 
@@ -3554,6 +3560,10 @@ onUnmounted(() => {
 
 .li-ws-tree :deep(.el-scrollbar__view) {
   padding: 4px 0;
+  /* 行宽随最宽行展开：超宽行由横向滚动承载查看；窄内容时行背景仍铺满可视宽 */
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
 }
 
 .li-ws-tree-dir,
@@ -3640,18 +3650,17 @@ onUnmounted(() => {
   color: var(--app-text-secondary);
 }
 
+/* 含义胶囊与文件行声明胶囊同款（同为识别元数据提示，统一中性形）；
+   未覆盖=该层无结论的缺席态，降为次要文字、不占胶囊形 */
 .li-ws-dir-meaning {
   padding: 1px 6px;
   border-radius: var(--app-radius-sm);
-  background: var(--app-tag-success-bg);
-  color: var(--app-tag-success-text);
+  background: var(--app-tag-neutral-bg);
+  color: var(--app-text-regular);
 }
 
 .li-ws-dir-uncovered {
-  padding: 1px 6px;
-  border-radius: var(--app-radius-sm);
-  background: var(--app-tag-neutral-bg);
-  color: var(--app-tag-neutral-text);
+  color: var(--app-text-secondary);
 }
 
 /* 区6 序列群样式已退役（剧本v2：折叠区并入「疑似作品集」第三标签候选卡墙，见下节） */
