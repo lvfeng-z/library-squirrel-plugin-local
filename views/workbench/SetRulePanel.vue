@@ -102,7 +102,7 @@
         </label>
         <!-- 命中预览：全库口径（含本集成员），样例偏好跨目录 -->
         <p class="li-sr-hint">
-          命中预览：将命中全库 {{ suggestion.hitCount }} 个文件（全库共 {{ suggestion.hitTotal }} 个）
+          命中预览：还将命中全库 {{ suggestion.hitCount }} 个文件（全库共 {{ suggestion.hitTotal }} 个）
         </p>
         <div v-if="suggestion.samples && suggestion.samples.length" class="li-sr-samples">
           <div v-for="(s, i) in suggestion.samples" :key="i" class="li-sr-sample">

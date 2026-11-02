@@ -237,7 +237,7 @@
       <p v-for="(n, ni) in suggestion.notes || []" :key="`sugg-note-${ni}`" class="li-pp-hint">{{ n }}</p>
       <!-- 命中预览（文件与目录两路共用）：全库口径；样例行带目录键时文件名前呈目录键 -->
       <p class="li-pp-hint">
-        命中预览：将命中全库 {{ suggestion.hitCount }} 个文件（全库共 {{ suggestion.hitTotal }} 个）<template v-if="suggestion.dropsTailCode">；样例尾部码将被丢弃</template>
+        命中预览：还将命中全库 {{ suggestion.hitCount }} 个文件（全库共 {{ suggestion.hitTotal }} 个）<template v-if="suggestion.dropsTailCode">；样例尾部码将被丢弃</template>
       </p>
       <div v-if="suggestion.samples && suggestion.samples.length" class="li-pp-sugg-samples">
         <div v-for="(s, i) in suggestion.samples" :key="i" class="li-pp-sugg-sample">
