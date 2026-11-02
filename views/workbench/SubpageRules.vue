@@ -709,9 +709,16 @@ onMounted(() => {
 // rule 参数对账（保活契约4，与解析视图 root 对账同构）：保活后携 rule 参数再进入
 // 不再重挂载，activated 取走参数并按 ID 打开该规则编辑（规则档案已在实例内直接
 // 打开；首挂后的 activated 参数已被 mounted 取走，自然空转，幂等）
+// 列表重拉（保活契约6，解析视图契约4 轻对账在本页的列表面变体）：保活期后台档案
+// 可能已变更（如解析视图泛化入档），本页 Events.On 仅做请求-应答配对、无档案变更
+// 推送，再激活时重拉列表对齐；首激活跳过——keep-alive 首插 activated 紧随 mounted
+// 触发，mounted 异步流（restoreSession → loadRules）已在途并负责首载，再拉即双拉
+let hasActivatedOnce = false
 onActivated(() => {
   const ruleParam = consumeRuleParam()
   if (ruleParam) openRuleById(ruleParam)
+  if (hasActivatedOnce) void loadRules()
+  hasActivatedOnce = true
 })
 
 onUnmounted(() => {
