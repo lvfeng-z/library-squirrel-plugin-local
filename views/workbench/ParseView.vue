@@ -608,7 +608,9 @@
                 :recognizing="recognizing"
                 :request="request"
                 :notice-seed="panelNotice"
+                :suggestion-seed="panelSuggestion"
                 @notice="onPanelNotice"
+                @suggestion="onPanelSuggestion"
                 @refresh="onPanelRefresh"
                 @exit-dir="exitDirPanel"
                 @open-rule="openRuleEdit"
@@ -1069,6 +1071,38 @@ const panelNotice = ref('')
 
 function onPanelNotice(text: string): void {
   panelNotice.value = text
+}
+
+// —— 缺陷②修复（建议卡跨刷新存活）——
+// 解析面板规则建议的父组件托管态：目录保存（doSaveDir）在摘要应答后仍
+// emit('refresh') → loadPanorama 置 snapshot=null → dirPanelContext 失值、
+// 目录 ParsePanel 同批卸载，重挂后建议若只存实例内即随实例消亡（建议卡
+// 永不渲染，实机 DOM 标记已证重挂）。改为 ParsePanel suggestion 每次变更
+// 上浮此处托管，重挂后经 suggestionSeed 回填交还面板呈现。切换面板目标即
+// 弃管旧建议（同 panelNotice 守卫）。类型与 ParsePanel 的
+// PanelRuleSuggestion/PanelRule 同构（SFC 间类型不互导，先例 DirPanelContext）
+interface PanelSuggestionRule {
+  id: string
+  description: string
+  pattern?: string
+  condition?: string
+}
+interface PanelSuggestionSeed {
+  relPath: string
+  summary: string
+  mappings?: { dimension: string; from: string; clueRef?: string }[]
+  manualDims?: string[]
+  notes?: string[]
+  rules?: PanelSuggestionRule[]
+  hitCount: number
+  hitTotal: number
+  samples?: { fileName: string; dirRelKey?: string; result: string }[]
+  dropsTailCode?: boolean
+}
+const panelSuggestion = ref<PanelSuggestionSeed | null>(null)
+
+function onPanelSuggestion(s: PanelSuggestionSeed | null): void {
+  panelSuggestion.value = s
 }
 
 // —— 待裁决·决策态融合弹窗（头部「重新识别」右侧入口；只读总览 + 待裁决文件定位清单行） ——
@@ -2520,13 +2554,15 @@ function exitDirPanel(): void {
   selectedDirKey.value = null
 }
 
-// 缺陷①修复配套守卫：切换面板目标（换文件/换目录/文件↔目录互斥切）即弃管
-// 托管的动作通知——新目标不该复活旧动作的反馈；全景刷新周期内的卸载-重挂
-// 不属切换（选中文件键与目录键均不变、不触发本守卫），通知得以跨刷新续读。
+// 缺陷①②修复配套守卫：切换面板目标（换文件/换目录/文件↔目录互斥切）即弃管
+// 托管的动作通知与规则建议——新目标不该复活旧动作的反馈；全景刷新周期内的
+// 卸载-重挂不属切换（选中文件键与目录键均不变、不触发本守卫），通知/建议
+// 得以跨刷新续读。
 watch(
   [() => selectedRelPath.value, () => selectedDirKey.value],
   () => {
     panelNotice.value = ''
+    panelSuggestion.value = null
   }
 )
 

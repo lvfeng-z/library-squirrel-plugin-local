@@ -241,7 +241,7 @@ export function condxVocabOf(word: string): { word: string; group: string; digit
 // 卡片与 title 用同一常量）。
 export const CONDX_TARGETS: { value: 'file' | 'dir' | 'seq'; label: string; note: string }[] = [
   { value: 'file', label: '文件', note: '按格式匹配文件名(不含扩展名)命中的满足格式的每个文件' },
-  { value: 'dir', label: '目录', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)' },
+  { value: 'dir', label: '目录', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)；可用「位于第 N 级」限定层级（自识别根数起）' },
   { value: 'seq', label: '序列', note: '文件名按模板成套—非序号部分为{公共段}；公共段相同≥2才算、落单不算、不跨目录' }
 ]
 
@@ -263,7 +263,8 @@ export const CONDX_ATTACH_OPTIONS: Record<string, { value: string; label: string
     { value: 'childDirCount', label: '子目录数 ≥N', needs: ['count'] },
     { value: 'childTypeIs', label: '子女类型是', needs: ['types'] },
     { value: 'parentFormat', label: '父目录名按模板', needs: ['tpl'] },
-    { value: 'parentContains', label: '父目录名含词', needs: ['word'] }
+    { value: 'parentContains', label: '父目录名含词', needs: ['word'] },
+    { value: 'dirLevel', label: '位于第 N 级', needs: ['count'] }
   ],
   seq: [
     { value: 'seqMinLength', label: '序列长度 ≥N', needs: ['count'] },
@@ -414,6 +415,15 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
       if (need === 'count' && !(a.minCount && a.minCount > 0)) return `附加条件的数量门槛须 ≥1`
       if (need === 'types' && !(a.types || []).length) return `附加条件须选择至少一个类型`
       if (need === 'value' && !(a.value || '').trim()) return `附加条件的扩展名为空`
+    }
+  }
+  // 「位于第 1 级」与父目录谓词互斥（N≥2 合法共存）：第 1 级目录的上面是
+  // 识别根（库根）本身，没有可匹配的父目录名——行内提示与保存闸门同函数拦。
+  if (target === 'dir') {
+    const level1 = (condx.attach || []).some((a) => a.kind === 'dirLevel' && a.minCount === 1)
+    const hasParent = (condx.attach || []).some((a) => a.kind === 'parentFormat' || a.kind === 'parentContains')
+    if (level1 && hasParent) {
+      return '「位于第 1 级」与父目录条件不能同用：第 1 级目录的上面是库根本身，没有可匹配的父目录名'
     }
   }
   for (const b of condx.badges || []) {
@@ -583,22 +593,39 @@ export function condxComboSentence(members: CondxComboMember[]): string {
 }
 
 // 条件行的目标类别并集与形态数：label=按首次出现序去重并列（如「目录+文件」），
-// count=条件行数（括号子组递归计行，与占位词寻址的行号口径一致）。
+// count=条件行数（括号子组递归计行，与占位词寻址的行号口径一致）；
+// levelNote=目录行层级锚（附加条件 dirLevel，N 走 count 字段）的小字并列
+// （如「第 1 级」，多行锚按行序以「 · 」连接），供各摘要面缀于「N 形态」后。
 export interface CondxShapeSummary {
   label: string
   count: number
+  levelNote: string
+}
+
+// 单行的层级锚小字：目录行附加条件含 dirLevel 时按 N 值生成「第 N 级」，
+// 一行多条锚按附加条件序以「 · 」并列；非目录行或无锚返回空串。
+export function condxDirLevelNote(condx: CondxForm): string {
+  if (!condx || condx.target !== 'dir') return ''
+  const notes: string[] = []
+  for (const a of condx.attach || []) {
+    if (a.kind === 'dirLevel' && a.minCount && a.minCount > 0) notes.push(`第 ${a.minCount} 级`)
+  }
+  return notes.join(' · ')
 }
 
 export function condxShapeSummary(rows: unknown): CondxShapeSummary {
   const list = Array.isArray(rows) ? (rows as CondxRowForm[]) : []
   const flat = condxFlatRows(list)
   const targets: string[] = []
+  const notes: string[] = []
   for (const f of flat) {
     if (targets.indexOf(f.condx.target) < 0) targets.push(f.condx.target)
+    const note = condxDirLevelNote(f.condx)
+    if (note && notes.indexOf(note) < 0) notes.push(note)
   }
   const names = targets.map((t) => {
     const hit = CONDX_TARGETS.find((c) => c.value === t)
     return hit ? hit.label : t
   })
-  return { label: names.join('+'), count: flat.length }
+  return { label: names.join('+'), count: flat.length, levelNote: notes.join(' · ') }
 }

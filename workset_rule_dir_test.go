@@ -132,6 +132,23 @@ func TestWorkSetDirDraftIselForm(t *testing.T) {
 	if dirRule.Extractions[0].When != nil {
 		t.Fatal("目录格式草稿默认不应带仅序列成员产出 when 原子")
 	}
+	// 层深锚（AE 决策2 经 structDirPlan 同款）：一级目录剥壳条目（draft.rules[0]）
+	// 随附第 1 级锚——同层 Artist 壳照常命中、深层同名壳不再被接管。
+	shellRule := &draft.rules[0]
+	if att := shellRule.Conditions[0].Condition.Attach; len(att) != 1 ||
+		att[0].Kind != CondxAttachDirLevel || att[0].MinCount != 1 {
+		t.Fatalf("一级目录剥壳条目应随附第 1 级层深锚: %+v", att)
+	}
+	if !shellRule.Pattern.Evaluate(&MatchInput{
+		FileName: "表紙.png", DirNames: []string{"Artist[Q]"}, RelPath: "Artist[Q]/表紙.png",
+	}, nil, &ParseContext{}) {
+		t.Fatal("第 1 级 Artist 壳目录应照常命中")
+	}
+	if shellRule.Pattern.Evaluate(&MatchInput{
+		FileName: "表紙.png", DirNames: []string{"外部", "Artist[Q]"}, RelPath: "外部/Artist[Q]/表紙.png",
+	}, nil, &ParseContext{}) {
+		t.Fatal("第 2 级深层同名 Artist 壳目录不应被接管")
+	}
 	// 命中预览：全库同格式目录逐个（本集 2+跨目录 2）；样例偏好跨目录。
 	if sugg.HitTotal != 4 || sugg.HitCount != 4 {
 		t.Fatalf("命中预览应覆盖全库 4 文件: %d/%d", sugg.HitCount, sugg.HitTotal)

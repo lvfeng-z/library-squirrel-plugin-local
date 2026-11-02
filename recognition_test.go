@@ -2669,6 +2669,42 @@ func TestDirCollectionCandidate(t *testing.T) {
 	}
 }
 
+// TestDirCandidateBareBracketKey 风险2 行为变化锚（声明11）：`[集名]` 裸括号
+// 目录的集名候选键由整名改取内名——候选墙呈现变化（属改善）：键=100423502、
+// 与库内集名的互证比对走内名口径（整名口径下 "[100423502]" 不等于集名
+// "100423502"，互证不可能命中）。
+func TestDirCandidateBareBracketKey(t *testing.T) {
+	plainFile := func(relPath, dirKey, name string) SnapFile {
+		return SnapFile{RelPath: relPath, FileName: name, DirRelKey: dirKey, State: snapStatePlain}
+	}
+	snap := &RecognitionSnapshot{
+		RootPath: "G:/inner world/picture",
+		Dirs: []SnapDir{
+			{RelKey: "", Name: "picture", Depth: 0},
+			{RelKey: "[100423502]", Name: "[100423502]", Depth: 1},
+		},
+		Files: []SnapFile{
+			plainFile("[100423502]/无题_01.jpg", "[100423502]", "无题_01.jpg"),
+			plainFile("[100423502]/无题_02.jpg", "[100423502]", "无题_02.jpg"),
+		},
+	}
+	lib := &LibraryIndex{WorkSetNames: map[string]struct{}{"100423502": {}}}
+	cands := buildWorkSetCandidates(snap, lib)
+	if len(cands) != 1 {
+		t.Fatalf("裸括号作品号目录应出 1 卡，实际 %d: %+v", len(cands), cands)
+	}
+	c := cands[0]
+	if c.Source != candSourceDir || c.Dir != "[100423502]" || c.Key != "100423502" || c.Size != 2 {
+		t.Fatalf("候选键应由整名改取内名: %+v", c)
+	}
+	if !c.CrossMatch {
+		t.Fatalf("内名键应与库内集名全等互证: %+v", c)
+	}
+	if target := c.target(); target != "dir\x00[100423502]\x00100423502" {
+		t.Fatalf("目标键不符: %q", target)
+	}
+}
+
 // TestLibSetCandidate A 档库内集识别：候选键与库内集名全等 → 互证；候选键作品
 // 号与集名内作品号唯一相等 → 既有集行 id+集名；零命中/多命中/键无作品号 →
 // 留空；索引缺席零命中；注记经 buildWorkSetCandidates 落卡（群候选成员含区间）。

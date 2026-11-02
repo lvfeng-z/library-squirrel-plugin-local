@@ -6,6 +6,7 @@ package main
 //（会话态+协议透传）、summarizeRule 不写档与 generalize mode=struct 确认入档
 //（单文件与目录寻址）。
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,9 @@ func TestBuildStructMapRulesRealSample(t *testing.T) {
 	dirCond := rules[0].Conditions[0].Condition
 	if dirCond.Target != CondxTargetDir || dirCond.Format.Tpl != "Artist[{作者}]" {
 		t.Fatalf("目录层模板不符: %+v", dirCond)
+	}
+	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 1 {
+		t.Fatalf("目录行应随附第 1 级层深锚（AE 决策2）: %+v", dirCond.Attach)
 	}
 	if len(rules[0].Extractions) != 2 {
 		t.Fatalf("目录条目提取应两维（作者+标签），实际 %d", len(rules[0].Extractions))
@@ -190,6 +194,116 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 	decl, ok = rules[0].Extractions[0].Apply(rules[0].ID, ctxDir)
 	if !ok || decl.Dimension != DimAuthor || decl.Value != "X" {
 		t.Fatalf("同形异值作者剥壳取值不符: %+v", decl)
+	}
+}
+
+// TestStructSummaryDirLevelAnchor 泛化目录条目层深锚（AE 阶段2 决策2）：
+// 产物目录行随附「位于第 N 级」（N=赋值出处层级）——条件 JSON 含
+// attach:[{kind:"dirLevel",minCount:N}]；同层同名照常命中（任意一级名），
+// 深层同名不再被产物接管（「子树同名都接管」收紧为「仅构造层级接管」）。
+func TestStructSummaryDirLevelAnchor(t *testing.T) {
+	rel := "画师甲/合集名/pic_01.png"
+	assign := &SessionAssignment{Tags: []string{"合集名"}, TagClueRefs: []string{"dirLevel2"}}
+	sugg, rules, err := buildStructMapRules("E:/libs/锚库", rel, "pic_01.png", assign)
+	if err != nil {
+		t.Fatalf("结构映射规则构造失败: %v", err)
+	}
+	if len(rules) != 1 || len(sugg.Rules) != 1 {
+		t.Fatalf("应恰一条目录层条目，实际 %d 条", len(rules))
+	}
+	dirCond := rules[0].Conditions[0].Condition
+	if dirCond.Format.Tpl != "合集名" {
+		t.Fatalf("目录层模板应为整名字面: %+v", dirCond.Format)
+	}
+	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 2 {
+		t.Fatalf("目录行应随附第 2 级层深锚: %+v", dirCond.Attach)
+	}
+	// 产物 JSON（与手写条件 JSON 片段同源序列化）：attach 数组含 dirLevel/minCount。
+	data, err := json.Marshal(rules[0].Conditions)
+	if err != nil {
+		t.Fatalf("序列化条件失败: %v", err)
+	}
+	if want := `"attach":[{"kind":"dirLevel","minCount":2}]`; !strings.Contains(string(data), want) {
+		t.Fatalf("目录条目 JSON 应含层深锚 %s:\n%s", want, data)
+	}
+
+	// 同层同名照常命中（一级名不同不影响）；深层同名不再被接管。
+	pattern := rules[0].Pattern
+	sameLevel := &MatchInput{
+		FileName: "pic_02.png", DirNames: []string{"画师乙", "合集名"}, RelPath: "画师乙/合集名/pic_02.png",
+	}
+	if !pattern.Evaluate(sameLevel, nil, &ParseContext{}) {
+		t.Fatal("第 2 级同名目录应照常命中")
+	}
+	deep := &MatchInput{
+		FileName: "pic_03.png", DirNames: []string{"画师甲", "别处", "合集名"}, RelPath: "画师甲/别处/合集名/pic_03.png",
+	}
+	if pattern.Evaluate(deep, nil, &ParseContext{}) {
+		t.Fatal("第 3 级深层同名目录不应被锚定产物命中")
+	}
+}
+
+// TestStructSummaryBareBracketDirAnchor 阶段2×阶段3 联合锚：`[...]` 裸括号
+// 一级目录（阶段3 bareBracket 剥壳表条目）赋 标签=剥壳内名 → 泛化目录条目
+// 壳模板=字面 `[`+{标签}+字面 `]`（前缀字面+占位词+后缀字面，7 壳形态机制
+// 共用），且随附第 1 级层深锚（阶段2 决策2 叠加）；同层异值壳照常命中（捕获
+// 泛化取内名），深层同名 `[...]` 目录被层深锚拒绝。
+func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
+	rel := "[路灯后辈]/pic_01.png"
+	assign := &SessionAssignment{Tags: []string{"路灯后辈"}, TagClueRefs: []string{"dirLevelStripped1"}}
+	sugg, rules, err := buildStructMapRules("G:/inner world/picture", rel, "pic_01.png", assign)
+	if err != nil {
+		t.Fatalf("结构映射规则构造失败: %v", err)
+	}
+	if len(rules) != 1 || len(sugg.Rules) != 1 {
+		t.Fatalf("应恰一条目录层条目，实际 %d 条", len(rules))
+	}
+	dirCond := rules[0].Conditions[0].Condition
+	if dirCond.Format.Tpl != "[{标签}]" {
+		t.Fatalf("裸括号目录模板应为字面 [ + {标签} + 字面 ]: %+v", dirCond.Format)
+	}
+	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 1 {
+		t.Fatalf("目录行应随附第 1 级层深锚（阶段2 带锚叠加阶段3 剥壳表条目）: %+v", dirCond.Attach)
+	}
+	// 产物 JSON（与手写条件 JSON 片段同源序列化）：attach 数组含 dirLevel/minCount=1。
+	data, err := json.Marshal(rules[0].Conditions)
+	if err != nil {
+		t.Fatalf("序列化条件失败: %v", err)
+	}
+	if want := `"attach":[{"kind":"dirLevel","minCount":1}]`; !strings.Contains(string(data), want) {
+		t.Fatalf("目录条目 JSON 应含层深锚 %s:\n%s", want, data)
+	}
+	// 标签提取=目录行 {标签} 位捕获（壳形态语义由捕获天然承载）。
+	tagAct := rules[0].Extractions[0]
+	if tagAct.Dimension != DimTag || tagAct.From != FromCapture ||
+		tagAct.CaptureName != condxVocab["标签"] || tagAct.Row != 1 {
+		t.Fatalf("标签提取应为目录行 {标签} 位捕获: %+v", tagAct)
+	}
+	if piece := "一级目录 [任意]剥壳→标签"; !strings.Contains(sugg.Summary, piece) {
+		t.Fatalf("人话规则缺片段 %q: %q", piece, sugg.Summary)
+	}
+	if len(sugg.Mappings) != 1 || sugg.Mappings[0].From != "一级目录剥壳" {
+		t.Fatalf("映射来源应为一级目录剥壳: %v", sugg.Mappings)
+	}
+
+	// 同层异值壳照常命中且捕获泛化；深层同名 `[...]` 被锚拒绝。
+	pattern := rules[0].Pattern
+	sameLevel := &MatchInput{
+		FileName: "pic_02.png", DirNames: []string{"[X]"}, RelPath: "[X]/pic_02.png",
+	}
+	ctx := &ParseContext{}
+	if !pattern.Evaluate(sameLevel, nil, ctx) {
+		t.Fatal("第 1 级同形异值目录应照常命中")
+	}
+	decl, ok := tagAct.Apply(rules[0].ID, ctx)
+	if !ok || decl.Value != "X" {
+		t.Fatalf("同形异值标签捕获应为壳内名: %+v", decl)
+	}
+	deep := &MatchInput{
+		FileName: "pic_03.png", DirNames: []string{"别处", "更深", "[路灯后辈]"}, RelPath: "别处/更深/[路灯后辈]/pic_03.png",
+	}
+	if pattern.Evaluate(deep, nil, &ParseContext{}) {
+		t.Fatal("第 3 级深层同名 [..] 目录不应被锚定产物命中")
 	}
 }
 

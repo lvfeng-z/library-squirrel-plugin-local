@@ -136,6 +136,39 @@ func TestValidateCondx(t *testing.T) {
 			c:       Condx{Target: CondxTargetSeq, Format: condxTpl("{键}_{序号}"), Attach: []CondxAttach{{Kind: CondxAttachSeqMemberType, Types: []string{"audio"}}}},
 			wantErr: "类型无效",
 		},
+		{
+			name: "第1级与父目录模板互斥",
+			c: Condx{Target: CondxTargetDir, Format: condxTpl("{标签}"), Attach: []CondxAttach{
+				{Kind: CondxAttachDirLevel, MinCount: 1},
+				{Kind: CondxAttachParentFormat, Tpl: "monster girl"},
+			}},
+			wantErr: "「位于第 1 级」与父目录条件不能同用：第 1 级目录的上面是库根本身，没有可匹配的父目录名",
+		},
+		{
+			name: "第1级与父目录包含词互斥",
+			c: Condx{Target: CondxTargetDir, Format: condxTpl("{标签}"), Attach: []CondxAttach{
+				{Kind: CondxAttachDirLevel, MinCount: 1},
+				{Kind: CondxAttachParentContains, Word: "pixiv"},
+			}},
+			wantErr: "与父目录条件不能同用：第 1 级目录的上面是库根本身",
+		},
+		{
+			name: "第2级与父目录模板合法共存",
+			c: Condx{Target: CondxTargetDir, Format: condxTpl("[{标签}]"), Attach: []CondxAttach{
+				{Kind: CondxAttachDirLevel, MinCount: 2},
+				{Kind: CondxAttachParentFormat, Tpl: "monster girl"},
+			}},
+		},
+		{
+			name:    "dirLevel 缺数量",
+			c:       Condx{Target: CondxTargetDir, Format: condxTpl("{标签}"), Attach: []CondxAttach{{Kind: CondxAttachDirLevel}}},
+			wantErr: "数量门槛",
+		},
+		{
+			name:    "dirLevel 用于文件目标",
+			c:       Condx{Target: CondxTargetFile, Format: condxTpl("{作者}"), Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: 1}}},
+			wantErr: "不适用于目标",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -503,6 +536,96 @@ func TestDirSubjectParentAssert(t *testing.T) {
 	in.DirNames[1] = "misc"
 	if p.Evaluate(in, nil, &ParseContext{}) {
 		t.Fatalf("父不是作者壳不应命中")
+	}
+}
+
+// TestDirSubjectDirLevelAssert 层级锚定谓词「位于第 N 级」（自识别根数起，
+// 根直下=第 1 级）：全通配模板不再被更深层吞掉——仅第 N 级层可命中绑定
+// （DirHit 记于 N 级层）；N 超深度（祖先链上无第 N 级）整行不中（严格不回退）；
+// N≥2 与父目录谓词合取（决策4 场景丁的组合形态）。
+func TestDirSubjectDirLevelAssert(t *testing.T) {
+	c := &Condx{
+		Target: CondxTargetDir,
+		Format: condxTpl("{标签}"),
+		Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: 1}},
+	}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	in := &MatchInput{FileName: "01.jpg", DirNames: []string{"monster girl", "album"}}
+	ctx := &ParseContext{}
+	if !p.Evaluate(in, nil, ctx) {
+		t.Fatalf("锚定第 1 级应命中")
+	}
+	tag, _ := ctx.Capture("r1.tag")
+	if tag != "monster girl" {
+		t.Fatalf("应只绑第 1 级目录名（不被更深层吞掉）: tag=%q", tag)
+	}
+	if len(ctx.DirHits) != 1 || ctx.DirHits[0].Name != "monster girl" || ctx.DirHits[0].Depth != 0 {
+		t.Fatalf("DirHit 应记于第 1 级层: %+v", ctx.DirHits)
+	}
+	// N 超深度：两层夹具上要第 3 级——祖先链上无第 N 级，整行不中。
+	over, err := compileCondx(&Condx{Target: CondxTargetDir, Format: condxTpl("{标签}"),
+		Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: 3}}}, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	if over.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("N 超深度应整行不中（严格不回退）")
+	}
+	// dirLevel2 + parentFormat 合取（场景丁）：[{标签}] 目录位于第 2 级且父名整条匹配。
+	dk, err := compileCondx(&Condx{Target: CondxTargetDir, Format: condxTpl("[{标签}]"),
+		Attach: []CondxAttach{
+			{Kind: CondxAttachDirLevel, MinCount: 2},
+			{Kind: CondxAttachParentFormat, Tpl: "monster girl"},
+		}}, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	dctx := &ParseContext{}
+	if !dk.Evaluate(&MatchInput{FileName: "01.jpg", DirNames: []string{"monster girl", "[cool]"}}, nil, dctx) {
+		t.Fatalf("第 2 级且父为 monster girl 应命中")
+	}
+	if tag, _ := dctx.Capture("r1.tag"); tag != "cool" {
+		t.Fatalf("第 2 级目录捕获不符: tag=%q", tag)
+	}
+	if len(dctx.DirHits) != 1 || dctx.DirHits[0].Depth != 1 {
+		t.Fatalf("DirHit 应记于第 2 级层: %+v", dctx.DirHits)
+	}
+	if dk.Evaluate(&MatchInput{FileName: "01.jpg", DirNames: []string{"misc", "[cool]"}}, nil, &ParseContext{}) {
+		t.Fatalf("父名不符时合取不应命中")
+	}
+}
+
+// TestRowSubjectDirLevelHitMerge 行包装并回通道（声明5 第 1 路，AE 阶段5 核验）：
+// 行内主体在私有子上下文求值后，DirHits 随行号前缀捕获一并并回主上下文——
+// 并回是原值搬运、不改写深度：层级锚规则只在 N 级层记录 DirHit，深层同名形态
+// 不产生第二命中；两行规则的捕获（r1/r2 前缀）同时在场。
+func TestRowSubjectDirLevelHitMerge(t *testing.T) {
+	rows := []CondxRow{
+		{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{标签}"),
+			Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: 1}}}},
+		{Connector: "and", Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{标题}")}},
+	}
+	p, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	ctx := &ParseContext{}
+	in := &MatchInput{FileName: "落日.jpg", DirNames: []string{"Top", "Inner"}}
+	if !p.Evaluate(in, nil, ctx) {
+		t.Fatalf("第 1 级目录行 + 文件行应命中（深层同名不吞锚定层）")
+	}
+	// 并回后的 DirHits 仅有第 1 级一条：锚定层=命中层口径在并回环节不被改写。
+	if len(ctx.DirHits) != 1 || ctx.DirHits[0].Depth != 0 || ctx.DirHits[0].Name != "Top" {
+		t.Fatalf("并回的 DirHits 应仅第 1 级一条: %+v", ctx.DirHits)
+	}
+	if tag, _ := ctx.Capture("r1.tag"); tag != "Top" {
+		t.Fatalf("第 1 行捕获应绑第 1 级层: %q", tag)
+	}
+	if title, _ := ctx.Capture("r2.title"); title != "落日" {
+		t.Fatalf("第 2 行捕获应并回主上下文: %q", title)
 	}
 }
 

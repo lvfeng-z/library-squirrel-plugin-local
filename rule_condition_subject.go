@@ -92,7 +92,7 @@ func fileTypeClassOf(fileName string) string {
 // DirAssert 为目录主体上的终结谓词实例（编译自 CondxAttach，目标=dir）。
 type DirAssert struct {
 	// Kind 为谓词类别（childrenAllFormat / childrenAtLeastN / childDirCount /
-	// childTypeIs / parentFormat / parentContains）。
+	// childTypeIs / dirLevel / parentFormat / parentContains）。
 	Kind string `json:"kind"`
 	// re 为迷你格式推导正则（childrenAllFormat / childrenAtLeastN 匹配子女
 	// 去扩展名基名；parentFormat 匹配父目录名）。终结格式不再捕获（R5）。
@@ -163,6 +163,12 @@ func (a DirAssert) check(in *MatchInput, depth int) bool {
 			return false
 		}
 		return strings.Contains(in.DirNames[depth-1], a.Word)
+	case CondxAttachDirLevel:
+		// 位于第 N 级（MinCount 承载 N）：depth 0 起、根直下=第 1 级，恰为第
+		// N 级即过、否则该层不中——深→浅扫描循环不动，非 N 级层被本谓词跳过、
+		// 自然落到 N 级层命中绑定（DirHit 记于 N 级层）；N 超深度（祖先链上无
+		// 第 N 级）整行不中（严格不回退）。
+		return depth+1 == a.MinCount
 	default:
 		return false
 	}

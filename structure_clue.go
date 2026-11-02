@@ -49,10 +49,12 @@ type shellStrip struct {
 	Suffix string
 }
 
-// shellStripTable 内置剥壳集（表驱动，可扩展）：Artist[...]→内名、Artist␣...→后名。
+// shellStripTable 内置剥壳集（表驱动，可扩展）：Artist[...]→内名、Artist␣...→后名、
+// [...]→内名（裸括号兜底；剥壳命中顺序=表序在前者优先——Artist[...] 先配，无冲突）。
 var shellStripTable = []shellStrip{
 	{Name: "artistBracket", Prefix: "Artist[", Suffix: "]"},
 	{Name: "artistSpace", Prefix: "Artist ", Suffix: ""},
+	{Name: "bareBracket", Prefix: "[", Suffix: "]"},
 }
 
 // stripShell 对名字试剥壳：返回首个命中的剥壳条目与内名；未命中返回假。

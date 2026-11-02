@@ -583,6 +583,7 @@ import {
   condxNormalizeRows,
   condxComboSentence,
   condxShapeSummary,
+  condxDirLevelNote,
   type CondxRowForm,
   type CondxForm,
   type CondxBadgeForm,
@@ -975,7 +976,8 @@ function isGroupingMember(member: RuleArchiveItem): boolean {
 
 // 成员条件行只读平铺（F）：按行序列出「第N行 目标「模板」」（行号与占位词
 // 寻址同口径——括号子组递归计行）；括号子组行显示「括号子组（N 行）」；模板
-// 文本经旧词归一显示（{键} 显示为 {公共段}）。
+// 文本经旧词归一显示（{键} 显示为 {公共段}）；目录行带层级锚（dirLevel）时
+// 行尾追加「 · 第 N 级」。
 function memberFlatLines(rows: unknown): string[] {
   const list = Array.isArray(rows) ? (rows as CondxRowForm[]) : []
   const out: string[] = []
@@ -993,7 +995,8 @@ function memberFlatLines(rows: unknown): string[] {
       const fmt = r.condition.format.mode === 'contains'
         ? `含「${r.condition.format.word || '?'}」`
         : condxNormalizeTpl(r.condition.format.tpl || '?')
-      out.push(`第${n}行 ${target ? target.label : r.condition.target}「${fmt}」`)
+      const levelNote = condxDirLevelNote(r.condition)
+      out.push(`第${n}行 ${target ? target.label : r.condition.target}「${fmt}」${levelNote ? ` · ${levelNote}` : ''}`)
     }
   }
   walk(list)
@@ -1007,7 +1010,9 @@ const refRowViews = computed<RefRowView[]>(() =>
     const label = refRuleLabel(r.ruleId)
     if (!member) return { desc: label, flatLines: [], alert: '', notice: '' }
     const shape = condxShapeSummary(member.conditions)
-    const desc = shape.count > 0 ? `${label} · ${shape.label} · ${shape.count} 形态` : label
+    const desc = shape.count > 0
+      ? `${label} · ${shape.label} · ${shape.count} 形态${shape.levelNote ? ` · ${shape.levelNote}` : ''}`
+      : label
     return {
       desc,
       flatLines: memberFlatLines(member.conditions),
@@ -1085,7 +1090,8 @@ const condxSummary = computed((): string => {
     const fmt = c.format.mode === 'contains' ? `含「${c.format.word || '?'}」` : condxNormalizeTpl(c.format.tpl || '?')
     const badges = (c.badges || []).length ? ` ·${(c.badges || []).length} 枚小标` : ''
     const attach = (c.attach || []).length ? ` ·${(c.attach || []).length} 条附加` : ''
-    return `第${f.row}行 ${target ? target.label : c.target}「${fmt}」${badges}${attach}`
+    const levelNote = condxDirLevelNote(c)
+    return `第${f.row}行 ${target ? target.label : c.target}「${fmt}」${badges}${attach}${levelNote ? ` · ${levelNote}` : ''}`
   })
   return `${refPrefix}${parts.join('；')}`
 })

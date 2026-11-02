@@ -297,10 +297,11 @@ type structDirPlan struct {
 // build 构造目录层规则条目并自检（锚定样例目录层、逐槽提取值=赋值值）。
 // build 目录层条目构造（v4）：壳形态（前缀+内名+后缀）→ 目录模板
 // 前缀字面+{占位词}+后缀字面（占位词盖内名，剥壳语义由捕获天然承载——
-// StripPrefix/Suffix 随之废止）；无壳 → 目录名整名字面。任意祖先层同名
-// 命中=子树包含语义（目录名通常整树唯一，层深漂移可忽略）。自检：样例
-// 文件上命中且各槽提取值复现赋值值；构造失配（花括号/词法）返回假由
-// 调用方降级手工。
+// StripPrefix/Suffix 随之废止）；无壳 → 目录名整名字面。目录行随附
+// 「位于第 N 级」层深锚（AE 决策2：N=赋值出处层级，忠实取证——同名
+// 目录异层不再被子树接管，仅构造层级接管；不欲锚定可在编辑弹窗删锚
+// 放开为任意层）。自检：样例文件上命中且各槽提取值复现赋值值；构造
+// 失配（花括号/词法）返回假由调用方降级手工。
 func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 	pool := newCondxWordPool()
 	var tpl string
@@ -323,9 +324,12 @@ func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 		}
 		tpl = p.name
 	}
+	// 层深锚（AE 决策2）：目录行随附「位于第 N 级」——N=赋值出处层级
+	//（level），深层同名目录不再被产物接管。
 	rows := []CondxRow{{Condition: &Condx{
 		Target: CondxTargetDir,
 		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+		Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: p.level}},
 	}}}
 	pattern, err := CompileRuleConditions(rows)
 	if err != nil {

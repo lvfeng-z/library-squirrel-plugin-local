@@ -80,3 +80,73 @@ func TestRuleStatsCountGroupingRuleMembers(t *testing.T) {
 	}
 	t.Fatalf("规则统计缺 seq-group-rule: %+v", snap.RuleStats)
 }
+
+// TestRuleStatsDirLevelAnchor 命中计数通道（声明5 第 5 路，AE 阶段5 核验）：
+// 元素6 按 MatchedRuleIDs 逐文件累计，条目命中与否已在求值侧按锚定层判定——
+// 计数天然为「锚定层形态命中的文件数」：第 1 级 [路灯后辈] 及其子树文件计入
+// （子树经第 1 级锚定命中）；更深层的同名形态目录（Art/[路灯后辈]）不入命中
+// 面，命中数不虚增。
+func TestRuleStatsDirLevelAnchor(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "[路灯后辈]", "a.jpg"), "a")
+	writeTestFile(t, filepath.Join(root, "[路灯后辈]", "子", "b.jpg"), "b")
+	writeTestFile(t, filepath.Join(root, "Art", "[路灯后辈]", "c.jpg"), "c")
+
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "[{标签}]"},
+		Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: 1}},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("编译层级锚规则失败: %v", err)
+	}
+	store := newFakeSessionStore()
+	ctx := &workbenchTestCtx{store: store}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{{
+		ID: "level1-bracket", Description: "测试：第 1 级括号目录 → 标签",
+		Source: RuleSourceManual, Enabled: true, Conditions: rows, Pattern: pattern,
+		Extractions: []ExtractionAction{{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1}},
+	}}}
+	if err := SaveProfile(store, profile); err != nil {
+		t.Fatalf("写入测试规则档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	snap := sess.Snapshot
+	if snap == nil {
+		t.Fatal("识别完成后快照不在场")
+	}
+	// 命中面：第 1 级目录子树（a、b）命中；更深层同名形态目录（c）不命中。
+	wantHit := map[string]bool{"[路灯后辈]/a.jpg": true, "[路灯后辈]/子/b.jpg": true}
+	for i := range snap.Files {
+		hit := false
+		for _, id := range snap.Files[i].MatchedRuleIDs {
+			if id == "level1-bracket" {
+				hit = true
+				break
+			}
+		}
+		if hit != wantHit[snap.Files[i].RelPath] {
+			t.Fatalf("%s 命中=%v，期望 %v（锚定第 1 级）", snap.Files[i].RelPath, hit, wantHit[snap.Files[i].RelPath])
+		}
+	}
+	for _, stat := range snap.RuleStats {
+		if stat.ID == "level1-bracket" {
+			if stat.HitCount != 2 {
+				t.Fatalf("层级锚规则命中数 = %d，期望 2（仅第 1 级形态子树）", stat.HitCount)
+			}
+			return
+		}
+	}
+	t.Fatalf("规则统计缺 level1-bracket: %+v", snap.RuleStats)
+}

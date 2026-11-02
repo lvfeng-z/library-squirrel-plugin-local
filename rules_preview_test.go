@@ -434,3 +434,84 @@ func mustMarshalPreview(t *testing.T, samples []rulesPreviewSample) string {
 	t.Helper()
 	return mustMarshal(t, samples)
 }
+
+// TestPreviewRuleDirLevelAnchor 命中预览通道（声明5 第 6 路，AE 阶段5 核验）：
+// 预览求值走与保存后重识别同一合并求值入口，故带层级锚的草稿其命中数/样例即
+// 「锚定层形态命中的文件」——第 1 级 [路灯后辈] 子树两文件计入、样例「在
+// 目录/」为锚定层下实际位置；更深层同名形态目录（Art/[路灯后辈]）不命中。
+// 组合规则直译句（前端）只按成员目标类别成段、不含层级断言，锚定成员的呈现
+// 由成员自身摘要的层级小字承载（ruleFormModel.ts:577/616），本通道无需改动。
+func TestPreviewRuleDirLevelAnchor(t *testing.T) {
+	root := t.TempDir()
+	store := newFakeSessionStore()
+	ctx := &workbenchTestCtx{store: store}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	if err := SaveProfile(store, &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{}}); err != nil {
+		t.Fatalf("写入空规则档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	writeTestFile(t, root+"/[路灯后辈]/a.jpg", "a")
+	writeTestFile(t, root+"/[路灯后辈]/子/b.jpg", "b")
+	writeTestFile(t, root+"/Art/[路灯后辈]/c.jpg", "c")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+
+	draft := []byte(`{"id":"preview-level","description":"预览草稿：第 1 级括号目录→标签","source":"manual","enabled":true,` +
+		`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"[{标签}]"},` +
+		`"attach":[{"kind":"dirLevel","minCount":1}]}}],` +
+		`"extractions":[{"dimension":"tag","from":"capture","captureName":"tag","row":1}],"synthesis":{}}`)
+	preview, err := m.PreviewRule(root, draft)
+	if err != nil {
+		t.Fatalf("命中预览失败: %v", err)
+	}
+	if preview.HitTotal != 3 {
+		t.Fatalf("求值面总数 = %d，期望 3", preview.HitTotal)
+	}
+	if preview.HitCount != 2 {
+		t.Fatalf("命中数 = %d，期望 2（仅第 1 级括号目录子树）", preview.HitCount)
+	}
+	if len(preview.Samples) != 2 {
+		t.Fatalf("样例 = %d 条，期望 2（两命中分属不同目录）: %+v", len(preview.Samples), preview.Samples)
+	}
+	wantDirs := map[string]bool{"[路灯后辈]": true, "[路灯后辈]/子": true}
+	for _, s := range preview.Samples {
+		if !wantDirs[s.DirRelKey] || s.Result != "标签=路灯后辈" {
+			t.Fatalf("样例不符（锚定层下实际位置/内名声明）: %+v", s)
+		}
+	}
+
+	// 预览即保存后：入档并全量重识别，命中集与预览一致（a、b 命中，c 不命中）。
+	conclusions, entry, err := m.previewRuleConclusions(root, draft)
+	if err != nil {
+		t.Fatalf("预览求值失败: %v", err)
+	}
+	previewHits := previewConclusionsHitSet(conclusions, entry.ID)
+	if _, err := m.ApplySaveRule(draft); err != nil {
+		t.Fatalf("草稿入档失败: %v", err)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量重识别失败: %v", err)
+	}
+	sess, err := m.loadSession(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	afterHits := map[string]bool{}
+	for i := range sess.Snapshot.Files {
+		for _, id := range sess.Snapshot.Files[i].MatchedRuleIDs {
+			if id == "preview-level" {
+				afterHits[sess.Snapshot.Files[i].RelPath] = true
+			}
+		}
+	}
+	want := map[string]bool{"[路灯后辈]/a.jpg": true, "[路灯后辈]/子/b.jpg": true}
+	if !relPathSetsEqual(afterHits, want) {
+		t.Fatalf("保存后重识别命中集不符: %v（期望 %v）", afterHits, want)
+	}
+	if !relPathSetsEqual(previewHits, afterHits) {
+		t.Fatalf("预览命中集与保存后重识别不一致: 预览=%v 重识别=%v", previewHits, afterHits)
+	}
+}

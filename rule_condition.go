@@ -96,6 +96,8 @@ const (
 	CondxAttachChildDirCount = "childDirCount"
 	// 目录：子女类型是指定类型之一。
 	CondxAttachChildTypeIs = "childTypeIs"
+	// 目录：位于第 N 级（自识别根数起，根直下=第 1 级；N 复用 count 字段承载）。
+	CondxAttachDirLevel = "dirLevel"
 	// 目录/文件/序列：父目录名整条按迷你模板（上级断言，1 级）。
 	CondxAttachParentFormat = "parentFormat"
 	// 目录/文件/序列：父目录名含某词（上级断言，1 级）。
@@ -119,6 +121,7 @@ var attachAllowed = map[CondxTargetKind]map[string]bool{
 	CondxTargetDir: {
 		CondxAttachChildrenAllFormat: true, CondxAttachChildrenAtLeastN: true,
 		CondxAttachChildDirCount: true, CondxAttachChildTypeIs: true,
+		CondxAttachDirLevel: true,
 		CondxAttachParentFormat: true, CondxAttachParentContains: true,
 	},
 	CondxTargetSeq: {
@@ -135,6 +138,7 @@ var attachNeedsWord = map[string]bool{CondxAttachParentContains: true}
 var attachNeedsCount = map[string]bool{
 	CondxAttachChildrenAllFormat: true, CondxAttachChildrenAtLeastN: true,
 	CondxAttachChildDirCount: true, CondxAttachFileSizeMin: true, CondxAttachSeqMinLength: true,
+	CondxAttachDirLevel: true,
 }
 
 // CondxAnchor 为主体锚：v4 仅接受 nil（「基于其他条件」为二期能力，R8——
@@ -408,6 +412,22 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 					return fmt.Errorf("附加条件 %q 的类型无效: %q（image / video / document / archive）", a.Kind, t)
 				}
 			}
+		}
+	}
+	// 「位于第 1 级」与父目录谓词互斥（N≥2 合法共存）：第 1 级目录的上面是
+	// 识别根（库根）本身，没有可匹配的父目录名——校验期即拦。
+	if c.Target == CondxTargetDir {
+		level1, hasParent := false, false
+		for _, a := range c.Attach {
+			if a.Kind == CondxAttachDirLevel && a.MinCount == 1 {
+				level1 = true
+			}
+			if a.Kind == CondxAttachParentFormat || a.Kind == CondxAttachParentContains {
+				hasParent = true
+			}
+		}
+		if level1 && hasParent {
+			return fmt.Errorf("「位于第 1 级」与父目录条件不能同用：第 1 级目录的上面是库根本身，没有可匹配的父目录名")
 		}
 	}
 	_ = ownOrdinal

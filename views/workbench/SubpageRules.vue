@@ -67,7 +67,7 @@
                   <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
                   <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
                   <div v-else-if="comboRefCount(r.id) > 0" class="li-rules-row-refnote">被 {{ comboRefCount(r.id) }} 条组合引用</div>
-                  <!-- 范围小字（B2）：组合行=直译句（与编辑弹窗同函数）；普通行=「类别 · N 形态」 -->
+                  <!-- 范围小字（B2）：组合行=直译句（与编辑弹窗同函数）；普通行=「类别 · N 形态」（目录行带层级锚时尾缀「· 第 N 级」） -->
                   <div v-if="isComboRule(r) && comboSentenceOf(r)" class="li-rules-row-shape">{{ comboSentenceOf(r) }}</div>
                   <div v-else-if="!isComboRule(r) && shapeSummaryOf(r)" class="li-rules-row-shape">{{ shapeSummaryOf(r) }}</div>
                   <div v-if="isComboRule(r) && hasDisabledMember(r)" class="li-rules-row-combo-off">成员已停用——本组合不产出</div>
@@ -607,10 +607,12 @@ function comboSentenceOf(rule: RuleEntryView): string {
 }
 
 // 普通行=「目标类别 · N 形态」（类别=条件行目标并集去重、多类别以 + 并列；
-// 条件行缺失的坏档行不显示）
+// 目录行带层级锚〔dirLevel〕时尾缀「 · 第 N 级」；条件行缺失的坏档行不显示）
 function shapeSummaryOf(rule: RuleEntryView): string {
   const shape = condxShapeSummary(rule.conditions)
-  return shape.count > 0 ? `${shape.label} · ${shape.count} 形态` : ''
+  return shape.count > 0
+    ? `${shape.label} · ${shape.count} 形态${shape.levelNote ? ` · ${shape.levelNote}` : ''}`
+    : ''
 }
 
 // 新建：空载荷入弹窗（v4 缺省样例〔【{作者}】{标题} 行 + 作者/标题提取行〕

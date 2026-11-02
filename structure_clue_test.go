@@ -150,6 +150,78 @@ func TestStructCluesShellVariants(t *testing.T) {
 	}
 }
 
+// TestStructCluesBareBracketDir 剧本3 帧1 断言锚：`[...]` 裸括号目录产剥壳
+// 线索——目录线索集（工作台目录面板）含「一级目录 [路灯后辈]」与「一级目录
+// 剥壳 路灯后辈」（文案逐字）；文件级线索集同款剥壳变体在场；无括号目录名
+// 不产剥壳变体（反例保持）。
+func TestStructCluesBareBracketDir(t *testing.T) {
+	dirClues := DirStructCluesOf("G:/inner world/picture", "[路灯后辈]")
+	if len(dirClues) != 3 {
+		t.Fatalf("目录线索数 = %d（%v），期望 3（库根名1+目录层1+剥壳1）", len(dirClues), dirClues)
+	}
+	want := map[string]struct{ Label, Value string }{
+		"rootName":          {"库根名", "picture"},
+		"dirLevel1":         {"一级目录", "[路灯后辈]"},
+		"dirLevelStripped1": {"一级目录剥壳", "路灯后辈"},
+	}
+	for ref, w := range want {
+		c, ok := clueByRef(dirClues, ref)
+		if !ok || c.Label != w.Label || c.Value != w.Value {
+			t.Fatalf("线索 %s 不符: %+v（期望 %q %q）", ref, c, w.Label, w.Value)
+		}
+	}
+	// 文件级线索集同款剥壳变体
+	fileClues := StructCluesOf("G:/inner world/picture", "[路灯后辈]/a.png", "a.png")
+	if c, ok := clueByRef(fileClues, "dirLevelStripped1"); !ok || c.Label != "一级目录剥壳" || c.Value != "路灯后辈" {
+		t.Fatalf("文件级线索集应含裸括号剥壳变体: %+v（全集 %v）", c, fileClues)
+	}
+	// 反例保持：无括号目录名不产剥壳变体
+	for _, c := range DirStructCluesOf("G:/inner world/picture", "big belly") {
+		if c.Kind == structClueDirLevelStripped {
+			t.Fatalf("无括号目录名不应产剥壳变体: %+v", c)
+		}
+	}
+}
+
+// TestStructCluesBareBracketFilenameRegression 风险1 回归锚（真实例）：`[...]`
+// 内名进入已知名提示集后文件名分段不劣化——[路灯后辈]/[136715041]_无题_[01].png
+// 仍恰三段（括号组原子段，内名不在正文出现、零保持区间）；内名在正文出现的
+// 形态跨 `__` 边界保持整段（与 Artist[...] 剥壳内名同口径）。
+func TestStructCluesBareBracketFilenameRegression(t *testing.T) {
+	file := "[136715041]_无题_[01].png"
+	clues := StructCluesOf("G:/inner world/picture", "[路灯后辈]/"+file, file)
+	for ref, want := range map[string]string{
+		"filenameSeg0": "136715041",
+		"filenameSeg1": "无题",
+		"filenameSeg2": "01",
+	} {
+		if c, ok := clueByRef(clues, ref); !ok || c.Value != want {
+			t.Fatalf("线索 %s 应为 %q，实际 %+v（全集 %v）", ref, want, c, clues)
+		}
+	}
+	if _, ok := clueByRef(clues, "filenameSeg3"); ok {
+		t.Fatalf("分段应恰三段: %v", clues)
+	}
+	if _, ok := clueByRef(clues, "tailCode"); ok {
+		t.Fatalf("末段 01 不应判尾部码: %v", clues)
+	}
+
+	// 内名作为已知名参与保持：正文中的 jake__jaccobus 跨 `__` 边界整段保持。
+	keep := "atago__commission__by_jake__jaccobus_delithw.png"
+	keepClues := StructCluesOf("G:/libs/root", "[jake--jaccobus]/"+keep, keep)
+	for ref, want := range map[string]string{
+		"filenameSeg0": "atago",
+		"filenameSeg1": "commission",
+		"filenameSeg2": "by",
+		"filenameSeg3": "jake__jaccobus",
+		"tailCode":     "delithw",
+	} {
+		if c, ok := clueByRef(keepClues, ref); !ok || c.Value != want {
+			t.Fatalf("保持样例线索 %s 应为 %q，实际 %+v（全集 %v）", ref, want, c, keepClues)
+		}
+	}
+}
+
 // TestStructCluesTailCodeConservative 尾部码判别保守性：无数字且无三连辅音的
 // 常词末段（picture/commission）不标尾部码；含数字或三连辅音（de1qt6f/
 // delithw/dhecdru）标注。含 `_` 的末段（无已知名拆分时）不标——判别保守。
@@ -177,6 +249,16 @@ func TestStripShellTable(t *testing.T) {
 	}
 	if _, inner, ok := stripShell("Artist Jake--Jaccobus"); !ok || inner != "Jake--Jaccobus" {
 		t.Fatalf("空格剥壳不符: %q %v", inner, ok)
+	}
+	if shell, inner, ok := stripShell("[路灯后辈]"); !ok || inner != "路灯后辈" || shell.Name != "bareBracket" {
+		t.Fatalf("裸括号剥壳不符: %+v %q %v", shell, inner, ok)
+	}
+	// 表序在前者优先：Artist[...] 命中表首条目，裸括号兜底条目不夺。
+	if shell, _, ok := stripShell("Artist[Isel]"); !ok || shell.Name != "artistBracket" {
+		t.Fatalf("Artist[...] 应命中表首 artistBracket: %+v %v", shell, ok)
+	}
+	if _, _, ok := stripShell("[]"); ok {
+		t.Fatal("空内名不应命中剥壳")
 	}
 	if _, _, ok := stripShell("Artist[]"); ok {
 		t.Fatal("空内名不应命中剥壳")

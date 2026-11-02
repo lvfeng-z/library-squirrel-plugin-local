@@ -1163,7 +1163,8 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 		rules = append(rules, sibling)
 	}
 
-	// ② 目录层维度条目（同层合一条，复用 structDirPlan；锚定名取实际目录名）。
+	// ② 目录层维度条目（同层合一条，复用 structDirPlan；锚定名取实际目录名、
+	// 行随层深锚——与总结器产物同款，AE 决策2）。
 	dirPlans := make(map[string]*structDirPlan)
 	var dirOrder []string
 	for _, d := range dims {
@@ -1436,7 +1437,8 @@ func segValueAtOrdinal(els []SnapEl, ordinal int) string {
 // condxTplFromEls 底座——集名组合区间 {集名} 一位占位（区间原文含边界括号
 // 一并入位）、维度指派段占该维度词（剥壳段括号留字面）、其余元素泛化消费
 // （语义元素同名词、序号 {序号}、普通位 {任意}）。目录锚定线索 → 行 1 目录
-// 字面/壳形模板（{任意} 盖内名），文件行随其后（提取 Row 按实际行序引用）。
+// 字面/壳形模板（{任意} 盖内名，行随「位于第 N 级」层深锚——AE 决策5），
+// 文件行随其后（提取 Row 按实际行序引用）。
 // MemberOnly 勾选时集名提取附「仅序列成员产出」when 原子。自检由调用方的
 // 全员校验完成。
 func buildWorkSetFilenameRule(ws *workSetContext, rep *SnapCandMember, repFile *SnapFile, plan *workSetSegPlan, spanIdx []int, captureByEl map[int]string, anchor *SetRuleClue, in setRuleAdjustInput) (RuleEntry, error) {
@@ -1468,21 +1470,34 @@ func buildWorkSetFilenameRule(ws *workSetContext, rep *SnapCandMember, repFile *
 	fileOrdinal := 1
 	desc := ""
 	if anchor != nil {
-		anchorTpl, aerr := workSetAnchorTemplate(rep.RelPath, anchor)
+		anchorTpl, anchorLevel, aerr := workSetAnchorTemplate(rep.RelPath, anchor)
 		if aerr != nil {
 			return RuleEntry{}, aerr
 		}
+		// 层深锚（AE 决策5）：锚定行随附「位于第 N 级」——同名目录异层不再
+		// 跨层接管，回退=编辑弹窗删锚。
 		rows = append(rows, CondxRow{Condition: &Condx{
 			Target: CondxTargetDir,
 			Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: anchorTpl},
+			Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: anchorLevel}},
 		}})
 		fileOrdinal = 2
 		desc = "；目录锚定「" + anchor.Value + "」"
 	}
-	rows = append(rows, CondxRow{Condition: &Condx{
-		Target: CondxTargetFile,
-		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
-	}})
+	// 锚定行在场时文件行为第 2 行，须带行前连接词（And 合取——首行为空串、
+	// 后续行 and/or；曾缺连接词致锚定路径构造恒败，AE 阶段2 首个正例锚定
+	// 测试暴露）。
+	fileConnector := ""
+	if len(rows) > 0 {
+		fileConnector = "and"
+	}
+	rows = append(rows, CondxRow{
+		Connector: fileConnector,
+		Condition: &Condx{
+			Target: CondxTargetFile,
+			Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+		},
+	})
 	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
 		return RuleEntry{}, fmt.Errorf("构造集规则文件名条件失败: %w", err)
@@ -1739,30 +1754,36 @@ func writeSeqElementCapture(b *strings.Builder, els []SnapEl, i int, captureByEl
 	writeSeqElementConsumption(b, els, i)
 }
 
-// workSetAnchorTemplate 目录锚定线索 → v4 目录行模板（structDirPlan 同款形
-// 态：剥壳变体=壳形模板前缀字面+{任意}+后缀字面（不引用，纯锚定）、原文名=
-// 整名字面；锚定名取成员实际所在目录名，线索值与目录不符时回可读错误）。
-func workSetAnchorTemplate(repRelPath string, anchor *SetRuleClue) (string, error) {
+// workSetAnchorTemplate 目录锚定线索 → v4 目录行模板与层深（structDirPlan
+// 同款形态：剥壳变体=壳形模板前缀字面+{任意}+后缀字面（不引用，纯锚定）、
+// 原文名=整名字面）。返回层深供调用方随行附「位于第 N 级」层深锚——AE 决策5
+// ：锚定行为构造时取证（名+层）的忠实表达，同名目录异层不再跨层接管，回退=
+// 编辑弹窗删锚。锚定名取成员实际所在目录名，线索值与目录不符时回可读错误。
+func workSetAnchorTemplate(repRelPath string, anchor *SetRuleClue) (string, int, error) {
 	n := structClueLevelOf(anchor.Ref)
 	if n <= 0 {
-		return "", fmt.Errorf("目录锚定线索 %q 的层级无法解析", anchor.Ref)
+		return "", 0, fmt.Errorf("目录锚定线索 %q 的层级无法解析", anchor.Ref)
 	}
 	dirName := dirNameAtLevel(repRelPath, n)
 	if dirName == "" {
-		return "", fmt.Errorf("成员路径上无第 %d 层目录，目录锚定 %q 无法指派", n, anchor.Ref)
+		return "", 0, fmt.Errorf("成员路径上无第 %d 层目录，目录锚定 %q 无法指派", n, anchor.Ref)
 	}
 	tpl := dirName
+	literalOK := condxTemplateBraceOK(dirName)
 	if anchor.Kind == structClueDirLevelStripped {
 		shell, inner, ok := stripShell(dirName)
 		if !ok || inner != anchor.Value {
-			return "", fmt.Errorf("目录锚定的剥壳线索 %q 与成员所在目录 %q 不符", anchor.Ref, dirName)
+			return "", 0, fmt.Errorf("目录锚定的剥壳线索 %q 与成员所在目录 %q 不符", anchor.Ref, dirName)
 		}
 		tpl = shell.Prefix + "{任意}" + shell.Suffix
+		// 花括号守卫只对字面段（structDirPlan 同款）：{任意} 为合法占位词，
+		// 曾误查整条模板致剥壳锚定恒败（AE 阶段2 首个正例锚定测试暴露）。
+		literalOK = condxTemplateBraceOK(shell.Prefix) && condxTemplateBraceOK(shell.Suffix)
 	}
-	if !condxTemplateBraceOK(tpl) {
-		return "", fmt.Errorf("目录锚定名 %q 含花括号，与格式模板词法冲突", dirName)
+	if !literalOK {
+		return "", 0, fmt.Errorf("目录锚定名 %q 含花括号，与格式模板词法冲突", dirName)
 	}
-	return tpl, nil
+	return tpl, n, nil
 }
 
 // previewWorkSetRules 集规则命中预览（全库求值，与 previewSequenceFormRules

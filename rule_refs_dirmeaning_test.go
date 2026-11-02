@@ -117,6 +117,55 @@ func TestDirMeaningReplayRefGateMatrix(t *testing.T) {
 	}
 }
 
+// TestDirMeaningReplayDirLevelAnchor 目录含义回放通道（声明5 第 4 路，AE 阶段5
+// 核验）：回放要求命中落点恰为目标层（path_rule.go:240 的 hit.Depth/hit.Name
+// 对照），与层级锚天然同向——锚定规则只在 N 级层记录 DirHit，故仅当目标目录
+// 正是第 N 级时回放含义；目标在更深层时锚定祖先层的命中不算覆盖（严格不回退），
+// 该层零含义、零首个覆盖规则。
+func TestDirMeaningReplayDirLevelAnchor(t *testing.T) {
+	mustRule := func(id string, level int) RuleEntry {
+		t.Helper()
+		rows := []CondxRow{{Condition: &Condx{
+			Target: CondxTargetDir, Format: condxTpl("{标签}"),
+			Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: level}},
+		}}}
+		p, err := CompileRuleConditions(rows)
+		if err != nil {
+			t.Fatalf("编译失败（%s）: %v", id, err)
+		}
+		return RuleEntry{
+			ID: id, Description: "测试：" + id, Source: RuleSourceManual, Enabled: true,
+			Conditions: rows, Pattern: p,
+			Extractions: []ExtractionAction{{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1}},
+		}
+	}
+	level1 := []RuleEntry{mustRule("level1-tag", 1)}
+	// 目标=第 1 级：回放标签含义，首个覆盖规则即该规则。
+	meanings, firstID := dirMeaningReplay(level1, []string{"[路灯后辈]"}, nil)
+	if !meaningContains(meanings, string(PathTypeLocalTag), "[路灯后辈]") {
+		t.Fatalf("第 1 级目标应回放标签含义: %+v", meanings)
+	}
+	if firstID != "level1-tag" {
+		t.Fatalf("首个覆盖规则应为 level1-tag，实际 %q", firstID)
+	}
+	// 目标=第 2 级：规则在锚定祖先层（第 1 级）命中不算覆盖本层 → 零含义零覆盖。
+	meanings, firstID = dirMeaningReplay(level1, []string{"[路灯后辈]", "子目录"}, nil)
+	if len(meanings) != 0 || firstID != "" {
+		t.Fatalf("目标在更深层时锚定祖先层命中不应回放覆盖: %+v firstID=%q", meanings, firstID)
+	}
+
+	// 第 2 级锚规则：两级链的目标层命中 → 回放；单级链不存在第 2 级 → 零。
+	level2 := []RuleEntry{mustRule("level2-tag", 2)}
+	meanings, firstID = dirMeaningReplay(level2, []string{"monster girl", "[cool]"}, nil)
+	if !meaningContains(meanings, string(PathTypeLocalTag), "[cool]") || firstID != "level2-tag" {
+		t.Fatalf("第 2 级目标应回放第 2 级标签含义: %+v firstID=%q", meanings, firstID)
+	}
+	meanings, firstID = dirMeaningReplay(level2, []string{"[cool]"}, nil)
+	if len(meanings) != 0 || firstID != "" {
+		t.Fatalf("祖先链无第 2 级时不应回放: %+v firstID=%q", meanings, firstID)
+	}
+}
+
 // meaningContains 判断含义序列是否含（类型, 名字）对。
 func meaningContains(meanings []PathMeaning, typ, name string) bool {
 	for _, m := range meanings {

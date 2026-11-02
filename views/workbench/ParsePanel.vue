@@ -466,6 +466,10 @@ const props = defineProps<{
   // emit('refresh') 令全景重载、右栏面板随 snapshot=null 同批卸载，通知若只存
   // 实例内即随实例消亡（帧D-2 清除通知曾永不进 DOM）；挂载时以此种子回填接力
   noticeSeed?: string
+  // 缺陷②修复（建议卡跨刷新存活）：父组件托管的最近规则建议——目录保存链路
+  // 同样经 emit('refresh') 卸载重建本面板，summarizeRule 应答若落在卸载后即随
+  // 实例消亡（建议卡/失败通知永不渲染）；挂载时以此种子回填接力（同 notice 模式）
+  suggestionSeed?: PanelRuleSuggestion | null
 }>()
 
 const emit = defineEmits<{
@@ -473,6 +477,9 @@ const emit = defineEmits<{
   // 缺陷①修复：通知文本随每次变更上浮父组件托管（面板卸载期由 ParseView 存活
   // 层横幅呈现、回场后经 noticeSeed 回填接力；清空亦同步）
   (e: 'notice', text: string): void
+  // 缺陷②修复：规则建议随每次变更上浮父组件托管（面板卸载期由 ParseView 存活、
+  // 重挂后经 suggestionSeed 回填接力；清除/复位亦同步）
+  (e: 'suggestion', s: PanelRuleSuggestion | null): void
   // 剧本J7：目录面板「返回文件面板」（清目录选中态，互斥切回文件面板）
   (e: 'exitDir'): void
   // 声明来源规则名直达编辑：路由上下文在父组件，由父组件跳规则管理子页并携规则 ID
@@ -952,6 +959,17 @@ function applyClueToDim(dim: string): void {
 const generalizing = ref(false)
 // 建议卡（summarizeRule 产物；保存赋值后出现，双路按钮=泛化成规则/仅保留本次赋值）
 const suggestion = ref<PanelRuleSuggestion | null>(null)
+// 缺陷②修复：suggestion 每次变更上浮父组件托管（同 notice 的 sync watch 模式）。
+// 必须 flush:'sync'：目录保存链路里「赋 suggestion + emit('refresh')」相邻发生，
+// refresh 令本面板同批卸载，pre-flush watch 出队前已连带废弃；同步出队确保
+// 赋值瞬间完成上浮，重挂后父层托管值经 suggestionSeed 回填、建议卡得以呈现
+watch(
+  suggestion,
+  (s) => {
+    emit('suggestion', s)
+  },
+  { flush: 'sync' }
+)
 const summarizing = ref(false)
 // 结构映射确认入档的组合规则序列（generalize mode=struct 应答 Rules）
 const lastGenRules = ref<PanelRule[]>([])
@@ -1061,6 +1079,11 @@ resetPanelState()
 // 同批卸载右栏）消亡重建，通知态若只存实例内即丢失；种子仅挂载时消费一次，
 // 后续生命周期仍由本实例动作自治（切换目标时父组件已先行弃管清空种子）
 if (props.noticeSeed) notice.value = props.noticeSeed
+// 缺陷②修复：回填父组件托管的最近规则建议（resetPanelState 已置 null，种子
+// 在其后消费）——目录保存后本面板随全景刷新卸载重建，建议态若只存实例内即
+// 丢失；种子仅挂载时消费一次，后续生命周期仍由本实例动作自治（切换目标时
+// 父组件已先行弃管清空种子）
+if (props.suggestionSeed) suggestion.value = props.suggestionSeed
 
 // —— 赋值动作（动作协议零改动，经父通道串行调用） ——
 
@@ -1140,7 +1163,8 @@ async function doSave(): Promise<void> {
 
 // 剧本J4 保存（目录）：assignDir 子树合并写（非空维度覆盖、空维度不动）→
 // 成功通知用 affected（生效文件数）→ summarizeRule 目录寻址（relPath 缺省+
-// dirRelKey 在场，样本=子树首个有赋值文件）出建议卡；后端已排自动增量重识别，
+// dirRelKey 在场，样本=子树首个有赋值文件）出建议卡 → 全景重取（缺陷②：refresh
+// 必须排在摘要应答之后，先行会卸载面板吞掉应答）。后端已排自动增量重识别，
 // 前端仅重取全景（不发识别请求——与 assign 同约定）。失败时动作 error 上浮
 // actionError，表单内容保留。
 async function doSaveDir(): Promise<void> {
@@ -1191,7 +1215,11 @@ async function doSaveDir(): Promise<void> {
   formDirty.value = false
   const affected = resp.affected || 0
   notice.value = `已对 ${affected} 个文件保存赋值（重识别后生效）`
-  emit('refresh')
+  // 缺陷②修复：refresh（全景重取）延后到摘要应答之后——onPanelRefresh →
+  // loadPanorama 首行即置 snapshot=null，dirPanelContext 随之失值、本面板同批
+  // 卸载重建，refresh 先行会让 summarizeRule 应答落在已卸载实例上（建议卡
+  // 永不渲染、失败分支通知亦不上浮）；先摘要后刷新，建议/通知先落存活实例并
+  // 经 sync watch 上浮父层托管，重挂后经种子回填续现
   suggestion.value = null
   summarizing.value = true
   actionError.value = ''
@@ -1202,9 +1230,10 @@ async function doSaveDir(): Promise<void> {
   summarizing.value = false
   if (!sresp.ok || !sresp.ruleSuggestion) {
     notice.value = `已对 ${affected} 个文件保存赋值；未产生规则建议（${sresp.error || '无可泛化内容'}）`
-    return
+  } else {
+    suggestion.value = sresp.ruleSuggestion
   }
-  suggestion.value = sresp.ruleSuggestion
+  emit('refresh')
 }
 
 // 剧本G6 仅保留本次赋值：卡收起，现状单次赋值语义（不泛化=不发请求）

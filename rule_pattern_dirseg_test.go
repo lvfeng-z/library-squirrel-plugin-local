@@ -307,3 +307,64 @@ func TestExtractionStageIsolatesCapturesPerRule(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractionAncestorDirRespectsDirLevelAnchor 提取动作「目录名（锚定命中
+// 层）」通道（声明5 第 2 路，AE 阶段5 核验）：FromAncestorDir 读规则私有作用域
+// 的 LastDirHit，「取最深」被层级锚钉在 N 级——深层同名形态目录不抢值；锚定
+// 级在祖先链上不存在时整行不中、零声明（严格不回退）。对照：同模板去锚的
+// 最深命中为更深的同名形态层。
+func TestExtractionAncestorDirRespectsDirLevelAnchor(t *testing.T) {
+	mustRule := func(id string, level int) RuleEntry {
+		t.Helper()
+		cond := &Condx{Target: CondxTargetDir, Format: condxTpl("[{标签}]")}
+		if level > 0 {
+			cond.Attach = []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: level}}
+		}
+		rows := []CondxRow{{Condition: cond}}
+		p, err := CompileRuleConditions(rows)
+		if err != nil {
+			t.Fatalf("编译失败（%s）: %v", id, err)
+		}
+		return RuleEntry{
+			ID: id, Description: "测试：" + id, Source: RuleSourceManual, Enabled: true,
+			Conditions: rows, Pattern: p,
+			Extractions: []ExtractionAction{
+				{Dimension: DimTag, From: FromAncestorDir, StripPrefix: "[", StripSuffix: "]"},
+			},
+		}
+	}
+	run := func(rules []RuleEntry, dirNames []string) []MetadataDeclaration {
+		t.Helper()
+		in := &MatchInput{FileName: "x.png", DirNames: dirNames, RelPath: "x.png"}
+		decision := &FileDecision{RelPath: in.RelPath, FileName: in.FileName}
+		ctx := &ParseContext{DirNames: dirNames, Depth: len(dirNames)}
+		runExtractionStage(decision, rules, in, nil, ctx)
+		return decision.Declarations
+	}
+	tagOf := func(decls []MetadataDeclaration, ruleID string) (string, bool) {
+		t.Helper()
+		for i := range decls {
+			if decls[i].RuleID == ruleID && decls[i].Dimension == DimTag {
+				return decls[i].Value, true
+			}
+		}
+		return "", false
+	}
+
+	deep := []string{"[外层]", "[内层]", "[更深]"}
+	// 锚定第 2 级：命中层=第 2 级 [内层]，更深的 [更深] 不抢值。
+	decls := run([]RuleEntry{mustRule("anchored-l2", 2)}, deep)
+	if v, ok := tagOf(decls, "anchored-l2"); !ok || v != "内层" {
+		t.Fatalf("锚定第 2 级的 FromAncestorDir 应取 [内层]（不取更深层）: %q ok=%v decls=%+v", v, ok, decls)
+	}
+	// 对照：同模板去锚 → 取最深同名形态层 [更深]。
+	decls = run([]RuleEntry{mustRule("unanchored", 0)}, deep)
+	if v, ok := tagOf(decls, "unanchored"); !ok || v != "更深" {
+		t.Fatalf("去锚同模板应取最深命中层 [更深]: %q ok=%v decls=%+v", v, ok, decls)
+	}
+	// 锚定第 3 级在两级链上不存在 → 整行不中 → 零声明（严格不回退）。
+	decls = run([]RuleEntry{mustRule("anchored-l3", 3)}, []string{"[外层]", "[内层]"})
+	if len(decls) != 0 {
+		t.Fatalf("锚定级不存在应整行不中、零声明: %+v", decls)
+	}
+}

@@ -474,6 +474,49 @@ func TestRefGateAnchorStrictBelow(t *testing.T) {
 	}
 }
 
+// TestRefGateMemberDirLevelAnchor 组合门段通道（声明5 第 3 路，AE 阶段5 核验）：
+// 门段登记成员的 dirHitDepths 时读成员私有作用域的 DirHits——成员目录行带
+// 「位于第 N 级」锚则集合只含 N 级层（按锚定层记录，「之下不含其身」判定本身
+// 不变）：成员锚在更浅层即不再与组合自身更深锚定层重合，组合照常产出；对照
+// 去锚成员取最深命中层，与自身锚重合 → 组合零产出；成员锚定级不存在则门失败
+// → 组合零产出。
+func TestRefGateMemberDirLevelAnchor(t *testing.T) {
+	memberRows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir, Format: condxTpl("[{标签}]"),
+		Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: 2}},
+	}}}
+	member := refRowsRule(t, "member-anchored", memberRows, nil, nil)
+	combo := refComboRule(t, "combo-set", []string{"member-anchored"},
+		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}}},
+		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
+	in := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"[外层]", "[内层]", "[更深]"},
+		RelPath: "[外层]/[内层]/[更深]/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	decision := runRefEval(t, []RuleEntry{member, combo}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-anchored", "combo-set")
+	// 自身行 {集名} 最深命中层=第 3 级 [更深]；成员锚在第 2 级 [内层]，不重合。
+	if v, ok := declOf(decision, "combo-set", DimCollection); !ok || v != "[更深]" {
+		t.Fatalf("成员锚在更浅层时组合应照常产出集名 [更深]: %q %v", v, ok)
+	}
+
+	// 对照：同一成员去锚 → 最深命中层=[更深]（第 3 级）与自身锚重合 → 之下
+	// 不含其身 → 组合零产出。
+	unanchored := refDirRowRule(t, "member-any", "[{标签}]")
+	decision = runRefEval(t, []RuleEntry{unanchored, combo}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-any")
+
+	// 成员锚定第 2 级在单层链上不存在 → 门失败 → 组合零产出。
+	short := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"[外层]"},
+		RelPath: "[外层]/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	decision = runRefEval(t, []RuleEntry{member, combo}, short, nil)
+	if len(decision.MatchedRuleIDs) != 0 {
+		t.Fatalf("成员锚定级不存在时门应失败、组合零产出: %v", decision.MatchedRuleIDs)
+	}
+}
+
 // refIDsContain 判断命中 ID 序列是否含目标值。
 func refIDsContain(values []string, target string) bool {
 	for _, v := range values {
