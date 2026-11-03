@@ -39,10 +39,34 @@ func TestDeriveCondxTemplate(t *testing.T) {
 			caps: []string{"author"},
 		},
 		{
-			name: "目录模板·括号制式",
+			name: "目录模板·括号制式（括号感知捕获类）",
 			tpl:  "[{作者}][{作品号}][{标题}]",
-			expr: `^\[(?P<author>.+)\]\[(?P<workid>[0-9]+)\]\[(?P<title>.+)\]$`,
+			expr: `^\[(?P<author>[^]]+)\]\[(?P<workid>[0-9]+)\]\[(?P<title>[^]]+)\]$`,
 			caps: []string{"author", "workid", "title"},
+		},
+		{
+			name: "前字面非开括号收尾·维持贪婪",
+			tpl:  "[x{标签}]",
+			expr: `^\[x(?P<tag>.+)\]$`,
+			caps: []string{"tag"},
+		},
+		{
+			name: "数字类词前开括号收尾·维持数字类",
+			tpl:  "[{作品号}]",
+			expr: `^\[(?P<workid>[0-9]+)\]$`,
+			caps: []string{"workid"},
+		},
+		{
+			name: "末位 {任意} 可空",
+			tpl:  "[{标签}]{任意}",
+			expr: `^\[(?P<tag>[^]]+)\](?:.*)$`,
+			caps: []string{"tag"},
+		},
+		{
+			name: "中位 {任意} 保持非空",
+			tpl:  "{任意}[{标签}]",
+			expr: `^(?:.+)\[(?P<tag>[^]]+)\]$`,
+			caps: []string{"tag"},
 		},
 		{
 			name: "序列成员模板·键含下划线可匹配",
@@ -88,6 +112,34 @@ func TestDeriveCondxTemplate(t *testing.T) {
 	}
 }
 
+// TestDeriveCondxTemplateBracketPairs 组界六对括号的捕获类配对：前字面段以
+// 开括号收尾 → 排除各自配对闭括号的非空类（括号感知捕获类的括号词表与组界
+// 扫描共用同一六对词汇）。
+func TestDeriveCondxTemplateBracketPairs(t *testing.T) {
+	cases := []struct{ name, tpl, expr string }{
+		{"半角方括号", "[{标签}]", `^\[(?P<tag>[^]]+)\]$`},
+		{"黑头方括号", "【{标签}】", `^【(?P<tag>[^】]+)】$`},
+		{"全角圆括号", "（{标签}）", `^（(?P<tag>[^）]+)）$`},
+		{"半角圆括号", "({标签})", `^\((?P<tag>[^)]+)\)$`},
+		{"单直角引号", "「{标签}」", `^「(?P<tag>[^」]+)」$`},
+		{"双直角引号", "『{标签}』", `^『(?P<tag>[^』]+)』$`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, caps, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
+			if err != nil {
+				t.Fatalf("推导失败: %v", err)
+			}
+			if expr != tc.expr {
+				t.Fatalf("表达式不符:\n得到 %q\n期望 %q", expr, tc.expr)
+			}
+			if !reflect.DeepEqual(caps, []string{"tag"}) {
+				t.Fatalf("捕获组不符: 得到 %v", caps)
+			}
+		})
+	}
+}
+
 // TestCondxVocabDualWord 换词后的双词映射与提示清单：{公共段} 为书写侧新词、
 // 与旧词 {键} 同组同义（旧档零迁移）；词表报错提示只列新词。
 func TestCondxVocabDualWord(t *testing.T) {
@@ -96,6 +148,75 @@ func TestCondxVocabDualWord(t *testing.T) {
 	}
 	if strings.Contains(condxVocabHint, "键") || !strings.Contains(condxVocabHint, "公共段") {
 		t.Fatalf("词表提示应只列新词「公共段」: %q", condxVocabHint)
+	}
+}
+
+// TestCondxBracketAwareCorpus 断句统一验收语料上的模板行为（括号感知捕获类
+// + 末位 {任意} 可空的联合效果）：多组名上 [{标签}] 宁缺不命中、
+// [{标签}]{任意} 取首组内名；单组整名（尾空）与中缀单组（Artist[Isel]）
+// 行为不变；同对嵌套按首闭截断（已知词法边界）。
+func TestCondxBracketAwareCorpus(t *testing.T) {
+	const multi = "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
+	dirHit := func(tpl, dir string) (*ParseContext, bool) {
+		p, err := compileCondx(&Condx{Target: CondxTargetDir, Format: condxTpl(tpl)}, 1)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		ctx := &ParseContext{}
+		ok := p.Evaluate(&MatchInput{FileName: "01.jpg", DirNames: []string{dir}}, nil, ctx)
+		return ctx, ok
+	}
+	// 多组名：[{标签}] 不命中（捕获类排除闭括号后无法跨界吞并后续组）。
+	if _, ok := dirHit("[{标签}]", multi); ok {
+		t.Fatalf("[{标签}] 对多组名应不命中")
+	}
+	// 多组名：[{标签}]{任意} 命中且捕获首组内名。
+	ctx, ok := dirHit("[{标签}]{任意}", multi)
+	if !ok {
+		t.Fatalf("[{标签}]{任意} 对多组名应命中")
+	}
+	if tag, _ := ctx.Capture("r1.tag"); tag != "七尾ゆきじ" {
+		t.Fatalf("首组内名捕获不符: %q", tag)
+	}
+	// 单组整名：尾空命中。
+	ctx, ok = dirHit("[{标签}]{任意}", "[路灯后辈]")
+	if !ok {
+		t.Fatalf("[{标签}]{任意} 对单组整名应命中（尾空）")
+	}
+	if tag, _ := ctx.Capture("r1.tag"); tag != "路灯后辈" {
+		t.Fatalf("单组整名捕获不符: %q", tag)
+	}
+	// 中缀单组：Artist[{作者}] 行为不变。
+	ctx, ok = dirHit("Artist[{作者}]", "Artist[Isel]")
+	if !ok {
+		t.Fatalf("Artist[{作者}] 对 Artist[Isel] 应命中")
+	}
+	if author, _ := ctx.Capture("r1.author"); author != "Isel" {
+		t.Fatalf("中缀单组捕获不符: %q", author)
+	}
+	// 同对嵌套：首闭截断（[{标签}]{任意} 捕获 a[b——组界扫描语义为最外层
+	// 内名 a[b]，正则无计数能力，属已知词法边界）。
+	ctx, ok = dirHit("[{标签}]{任意}", "[a[b]]")
+	if !ok {
+		t.Fatalf("[{标签}]{任意} 对同对嵌套应命中")
+	}
+	if tag, _ := ctx.Capture("r1.tag"); tag != "a[b" {
+		t.Fatalf("同对嵌套应按首闭截断捕获 a[b: %q", tag)
+	}
+	if _, ok := dirHit("[{标签}]", "[a[b]]"); ok {
+		t.Fatalf("[{标签}] 对同对嵌套（末闭括号后有残留）应不命中")
+	}
+	// 尾空模板新命中：{标题}_{任意} 对 a_ 捕获空尾。
+	fp, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl("{标题}_{任意}")}, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	fctx := &ParseContext{}
+	if !fp.Evaluate(&MatchInput{FileName: "a_"}, nil, fctx) {
+		t.Fatalf("{标题}_{任意} 对 a_ 应命中（尾空）")
+	}
+	if title, _ := fctx.Capture("r1.title"); title != "a" {
+		t.Fatalf("尾空命中标题捕获不符: %q", title)
 	}
 }
 

@@ -54,6 +54,14 @@ func exampleTemplates() []exampleTemplate {
 				"剥壳惯例（前缀[内名]）由字面括号 + 模板词表达",
 		},
 		{
+			Name:     "首组内名",
+			Template: "[{标签}]{任意}",
+			Target:   "dirname",
+			Description: "目录主体行：目录名带括号壳时取首组内名（[{标签}]{任意}）——" +
+				"多组名（如 [七尾ゆきじ] 酔いが…）取首组内名、尾段由 {任意} 吞掉；" +
+				"单组整名（[路灯后辈]）尾段为空亦命中",
+		},
+		{
 			Name:     "任意段吞位",
 			Template: "{标题}_{任意}",
 			Target:   "filename",

@@ -8,7 +8,8 @@ package main
 // 线索引用（SnapStructClue.Ref）词汇：
 //   - rootName            库根基名（无下标）
 //   - dirLevel[n]         第 n 级目录名（n 从 1 起，如 dirLevel1）
-//   - dirLevelStripped[n] 第 n 级目录的剥壳变体（命中剥壳集时才有）
+//   - dirLevelStripped[n] 第 n 级目录的剥壳变体（组界派生：目录名含括号组时
+//                         为首组内名，或 `Artist␣` 前缀形态的后名）
 //   - filenameSeg[i]      文件名分隔段（i 从 0 起；括号组内名与 __/_ 自适应
 //                         分段，见 splitFilenameSegments）
 //   - tailCode            尾部随机码（至多一条，末段且似随机时标注）
@@ -39,42 +40,43 @@ type SnapStructClue struct {
 	Value string `json:"value"`
 }
 
-// shellStrip 剥壳表条目：目录名（或文件名段）的包裹形态 → 内名。
+// shellStrip 剥壳形态：剥壳变体（内名）在名字中的包裹描述。
 type shellStrip struct {
-	// Name 形态标识（呈现与日志用）。
+	// Name 形态标识（呈现与日志用）：括号组形态 = "bracket"+括号对字面（如
+	// "bracket[]"）；空格前缀形态 = "artistSpace"。
 	Name string
-	// Prefix 包裹前缀（如 "Artist["）；必非空。
+	// Prefix 内名前的全部原文：括号组形态含开括号（如 "Artist["）；空格前缀
+	// 形态为 "Artist "。
 	Prefix string
-	// Suffix 包裹后缀（如 "]"）；可为空（纯前缀形态如 "Artist "）。
+	// Suffix 内名后的全部原文：括号组形态含闭括号与尾随文本（如 "]"）；空格
+	// 前缀形态为空。
 	Suffix string
 }
 
-// shellStripTable 内置剥壳集（表驱动，可扩展）：Artist[...]→内名、Artist␣...→后名、
-// [...]→内名（裸括号兜底；剥壳命中顺序=表序在前者优先——Artist[...] 先配，无冲突）。
-var shellStripTable = []shellStrip{
-	{Name: "artistBracket", Prefix: "Artist[", Suffix: "]"},
-	{Name: "artistSpace", Prefix: "Artist ", Suffix: ""},
-	{Name: "bareBracket", Prefix: "[", Suffix: "]"},
-}
-
-// stripShell 对名字试剥壳：返回首个命中的剥壳条目与内名；未命中返回假。
-// 内名为空（如 "Artist[]"）视为未命中。
+// stripShell 对名字试剥壳（组界基座）：
+//   - 名字含括号组（组界扫描 findBracketGroups，六对、同对嵌套按最外层计、
+//     异对不干扰）→ 剥壳变体=首个内名非空组的内名，Prefix/Suffix=该组内名
+//     前后的全部原文（含组外首尾文本）；
+//   - 无括号组名维持空格前缀形态：`Artist␣...`（␣=一个空格）→ 后名。
+//
+// 未命中（无组且无空格前缀、或内名为空）返回假。
 func stripShell(name string) (shellStrip, string, bool) {
-	for _, s := range shellStripTable {
-		if s.Prefix == "" || !strings.HasPrefix(name, s.Prefix) {
-			continue
-		}
-		inner := strings.TrimPrefix(name, s.Prefix)
-		if s.Suffix != "" {
-			if !strings.HasSuffix(inner, s.Suffix) || len(inner) < len(s.Suffix) {
-				continue
-			}
-			inner = strings.TrimSuffix(inner, s.Suffix)
-		}
+	for _, g := range findBracketGroups(name) {
+		inner := name[g.innerStart:g.innerEnd]
 		if inner == "" {
 			continue
 		}
-		return s, inner, true
+		return shellStrip{
+			Name:   "bracket" + name[g.start:g.innerStart] + name[g.innerEnd:g.end],
+			Prefix: name[:g.innerStart],
+			Suffix: name[g.innerEnd:],
+		}, inner, true
+	}
+	const artistSpacePrefix = "Artist "
+	if strings.HasPrefix(name, artistSpacePrefix) {
+		if inner := strings.TrimPrefix(name, artistSpacePrefix); inner != "" {
+			return shellStrip{Name: "artistSpace", Prefix: artistSpacePrefix}, inner, true
+		}
 	}
 	return shellStrip{}, "", false
 }

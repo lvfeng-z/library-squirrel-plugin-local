@@ -24,7 +24,7 @@
 - **消费通道随 DirHit 天然贯穿（风险5 逐通道核验清单，2026-11-02）**：层级锚只在 N 级层记 DirHit，六路消费均「一致」并有锚测试——行包装并回（`rule_condition_eval.go:49`，`TestRowSubjectDirLevelHitMerge`）/ 提取「目录名（锚定命中层）」取最深（`rule_profile.go:339-345`，`TestExtractionAncestorDirRespectsDirLevelAnchor`）/ 组合门段成员命中层集合（`pipeline.go:444-450`，`TestRefGateMemberDirLevelAnchor`）/ 目录含义回放按命中层对照（`path_rule.go:240`，`TestDirMeaningReplayDirLevelAnchor`）/ 命中计数（`recognition.go:963-984`，`TestRuleStatsDirLevelAnchor`）/ 命中预览（`rules_preview.go:70-120`，`TestPreviewRuleDirLevelAnchor`）。组合规则直译句仅按成员目标类别成段、不含层级断言（`views/workbench/ruleFormModel.ts:577`），锚定成员的层级由成员自身摘要小字呈现（`ruleFormModel.ts:616`）——该呈现面无需改动。
 - **旧档兼容**：旧版插件二进制载入含「位于第 N 级」词条的规则条目时，未知词条在档案载入校验被拒（`rule_condition.go:385-389`，与主体锚预留槽「载入即拒绝」同策略）；规则档案随插件二进制走、未上线不背历史债，未来若做规则导入导出须按词条集版本对齐。
 - **泛化收紧的回归面（决策2）**：泛化器产出的目录条目从「子树同名都接管」收紧为「仅构造层级接管」——既有库深层同名目录重识别命中数下降属预期；既有会话已识别结论与新规则求值的差异会在增量识别/差异呈现面出现。
-- **剥壳表现况**：内置剥壳表三条——`Artist[...]`、`Artist␣...`、`[...]` 裸括号（`structure_clue.go:54-58`）；表序在前者优先，`Artist[...]` 先配、裸括号兜底，无冲突。
+- **组界统一（剥壳的唯一组界定义）**：包裹组的组界只有一处定义——六对括号 `[]` / `【】` / `（）` / `()` / `「」` / `『』`（`structure_clue.go:319-321`），同对嵌套按最外层计、异对不干扰配对。剥壳变体（线索 `dirLevelStripped[n]` 等）由此派生：**首组内名**——`Artist[Isel]`→`Isel`、多组名 `[七尾ゆきじ] 酔いが…`→`七尾ゆきじ`（不再跨组取内名）；无括号组的 `Artist␣…` 空格前缀形态沿用原语义，不属组界。**规则侧剥壳语义由字面括号模板承载**：目录行写 `[{标签}]{任意}` 即取首组内名（多组名取首组内名、尾段由 `{任意}` 吞掉；单组整名 `[路灯后辈]` 尾段为空亦命中），编辑器词条表内有同名例子。提取动作上的旧 strip 前后缀已废弃：旧档案载入即迁移——裸单占位词模板 + 配对括号前后缀等价改写为 `开括号{词}闭括号{任意}`，其余组合丢弃剥壳并在规则描述留迁移注记。
 
 ### 基目录刻画三式
 

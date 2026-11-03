@@ -267,7 +267,7 @@
           </template>
         </section>
 
-        <!-- 下半「提取规则」：逐维度行 = 维度 ← 来源 + 剥壳前后缀 + 条件勾选；行可增删 -->
+        <!-- 下半「提取规则」：逐维度行 = 维度 ← 来源 + 条件勾选；行可增删 -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">提取规则<span class="li-red-sec-note">下半 · 命中后取值声明到维度</span></h4>
@@ -368,10 +368,9 @@
                     标签全收，作者/作品集歧义不填
                   </span>
                 </template>
-                <template v-else>
-                  <el-input v-model="row.stripPrefix" size="small" placeholder="剥壳前缀（可空）" class="li-red-ex-strip" />
-                  <el-input v-model="row.stripSuffix" size="small" placeholder="剥壳后缀（可空）" class="li-red-ex-strip" />
-                </template>
+                <span v-if="row.from !== 'scan' && row.from !== 'constant' && row.from !== 'adjudication'" class="li-red-strip-note">
+                  剥壳由字面括号模板承载：首组内名（[{标签}]{任意}）即多组目录名取首组内名、尾段吞掉
+                </span>
                 <el-input v-model="row.roleName" size="small" placeholder="角色名（可空）" class="li-red-ex-role" />
                 <label v-if="row.from !== 'scan'" class="li-red-cond">
                   <input v-model="row.seqOnly" type="checkbox">
@@ -396,7 +395,7 @@
               spellcheck="false"
             />
             <p v-if="extractionsError" class="li-red-error">提取动作 extractions JSON：{{ extractionsError }}</p>
-            <p class="li-red-hint">JSON 数组（dimension / from / captureName / constant / roleName / strip 前后缀 / when 条件表达式）</p>
+            <p class="li-red-hint">JSON 数组（dimension / from / captureName / constant / roleName / when 条件表达式）</p>
           </template>
         </section>
 
@@ -536,8 +535,8 @@
 //   ① rule（SubpageRules「编辑/新建」）：上半=识别规则（一行人话摘要+结构化形态
 //      编辑〔文件名形态/目录锚定/序列群组/组合，RulePatternNode 递归展开〕+捕获组
 //      声明清单+「高级（JSON）」切换双向同步），下半=提取规则（逐维度行=维度←
-//      来源下拉〔捕获组只列上半声明的组/目录名/群组前缀/常量〕+剥壳前后缀+条件
-//      勾选〔仅序列成员产出等，逐行〕；行可增删；行级就地校验）；合成策略随旧
+//      来源下拉〔捕获组只列上半声明的组/目录名/群组前缀/常量〕+条件勾选〔仅序列
+//      成员产出等，逐行〕；行可增删；行级就地校验）；合成策略随旧
 //      表单随迁。保存载荷经 emit 交父组件走既有 saveRule RPC。
 //   ② setAdjust（SetRulePanel「调整规则」）：上半=草稿识别形态（只读呈现），
 //      下半=指派行——剧本E 全部语义随迁：线索三族（序列 seqKey/目录段/文件名段）
@@ -753,8 +752,6 @@ interface ExtractionRow {
   constant: string
   scanScope: string
   roleName: string
-  stripPrefix: string
-  stripSuffix: string
   seqOnly: boolean
   when: unknown
 }
@@ -811,8 +808,6 @@ function actionToRow(action: ExtractionActionJSON): ExtractionRow {
     constant: action.constant || '',
     scanScope: action.scanScope || 'path',
     roleName: action.roleName || '',
-    stripPrefix: action.stripPrefix || '',
-    stripSuffix: action.stripSuffix || '',
     seqOnly: checkRequiredConjunct(when),
     when: when
   }
@@ -839,7 +834,7 @@ function setRowRefCapture(row: ExtractionRow, value: string): void {
 }
 
 // 行模型 → 提取动作 JSON（seqOnly 落到该行 when 的并入/移除；仅携带有值字段；
-// scan 行=范围 + 角色透传，不带 when/剥壳/捕获组/常量——内核校验拒绝面同构）
+// scan 行=范围 + 角色透传，不带 when/捕获组/常量——内核校验拒绝面同构）
 function rowsToActions(): ExtractionActionJSON[] {
   return extractionRows.value.map((row) => {
     if (row.from === 'scan') {
@@ -865,8 +860,6 @@ function rowsToActions(): ExtractionActionJSON[] {
     }
     if (row.from === 'constant' || row.from === 'adjudication') action.constant = row.constant
     if (row.roleName) action.roleName = row.roleName
-    if (row.stripPrefix) action.stripPrefix = row.stripPrefix
-    if (row.stripSuffix) action.stripSuffix = row.stripSuffix
     const when = row.seqOnly ? buildWhenWithSeqAtom(row.when) : buildWhenWithoutSeqAtom(row.when)
     if (when != null) action.when = when
     return action
@@ -1324,8 +1317,6 @@ function addExtractionRow(): void {
     constant: '',
     scanScope: 'path',
     roleName: '',
-    stripPrefix: '',
-    stripSuffix: '',
     seqOnly: false,
     when: null
   })
@@ -1866,7 +1857,7 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   line-height: 1.6;
 }
 
-/* 提取段行：主行（维度←来源）+ 副行（剥壳/角色/条件）+ 行级提示 */
+/* 提取段行：主行（维度←来源）+ 副行（角色/条件/剥壳提示）+ 行级提示 */
 .li-red-ex-row {
   display: flex;
   flex-direction: column;
@@ -1917,8 +1908,9 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   flex-wrap: wrap;
 }
 
-.li-red-ex-strip {
-  width: 130px;
+.li-red-strip-note {
+  font-size: 12px;
+  color: var(--app-text-secondary);
 }
 
 .li-red-ex-scan {

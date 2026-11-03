@@ -46,4 +46,24 @@ func TestExampleTemplatesSanity(t *testing.T) {
 			}
 		}
 	}
+	// 「首组内名」词条在场：模板=字面方括号 + 标签词 + 尾位吞位，目标=目录名，
+	// 说明含组界统一后的取值口径（多组名取首组内名）。
+	var firstInner *exampleTemplate
+	for i := range templates {
+		if templates[i].Template == "[{标签}]{任意}" {
+			firstInner = &templates[i]
+			break
+		}
+	}
+	if firstInner == nil {
+		t.Fatal("例子模板表应含首组内名词条（模板 [{标签}]{任意}）")
+	}
+	if firstInner.Target != string(TargetDirName) {
+		t.Errorf("首组内名词条主体应为目录名，实际 %q", firstInner.Target)
+	}
+	for _, piece := range []string{"首组内名（[{标签}]{任意}）", "尾段"} {
+		if !strings.Contains(firstInner.Description, piece) {
+			t.Errorf("首组内名词条说明缺文案锚 %q: %q", piece, firstInner.Description)
+		}
+	}
 }

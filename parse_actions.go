@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 )
 
 // 泛化维度词汇（generalize 动作的模式分支）。
@@ -430,7 +429,7 @@ func (m *SessionManager) applyGeneralization(root, relPath, dirRelKey, mode stri
 
 // supplyingAssignmentKeyOf 文件赋值的供值条目键（泛化标记的落点）：有文件例外
 // 取文件键，否则沿所属目录链自近而远取首个指定了该文件在场维度的目录条目键
-//（最近供值层的标记=子树整片「已参与泛化」的谱系记录）；无任何供值条目返回
+// （最近供值层的标记=子树整片「已参与泛化」的谱系记录）；无任何供值条目返回
 // 空串。
 func supplyingAssignmentKeyOf(assigns map[string]SessionAssignment, relPath string) string {
 	if _, ok := assigns[relPath]; ok {
@@ -462,7 +461,7 @@ func supplyingAssignmentKeyOf(assigns map[string]SessionAssignment, relPath stri
 // 永不因泛化被自动剥离或删除（用户不再需要时自行清除）；Generalized 标记仅作
 // 「已参与泛化」的谱系记录（识别与泛化观测面用），置 Generalized 于**供值条
 // 目**——作用域内每文件：有文件例外则标例外，否则标覆盖它的最近目录条目
-//（目录条目标记=子树整片「已参与泛化」）。
+// （目录条目标记=子树整片「已参与泛化」）。
 func (m *SessionManager) markScopedAssignments(root string, scope []*SnapFile) error {
 	if len(scope) == 0 {
 		return nil
@@ -623,32 +622,6 @@ func buildFilenameShapeRule(relPath, fileName string, assign *SessionAssignment)
 		Extractions: extractions,
 	}
 	return rule, ArchiveWriteGeneralize, nil
-}
-
-// filenameSlotClass 值位的捕获组形态（最简充分）：值位紧邻右闭分隔符（】」』
-// 》〉）)］]等）时用排除该分隔符的非空类；值位在正文末尾或紧邻普通字符时用
-// 非点起头的非空正文段（与内置惯例的标题段同形，防把纯扩展名段误纳值位）。
-// start/end 为值位在去扩展名正文中的字节区间 [start, end)。
-func filenameSlotClass(base string, start, end int) string {
-	if end < len(base) {
-		if r, size := utf8.DecodeRuneInString(base[end:]); size > 0 {
-			if class, ok := closerExclusionClass(r); ok {
-				return class
-			}
-		}
-	}
-	return `[^.].*?`
-}
-
-// closerExclusionClass 右闭分隔符 → 排除该字符的非空捕获类；非闭分隔符返回假。
-func closerExclusionClass(c rune) (string, bool) {
-	switch c {
-	case ']', '\\', '^':
-		return `[\` + string(c) + `]+`, true
-	case '】', '」', '』', '》', '〉', '）', ')', '］', '”', '"', '’', '\'':
-		return "[^" + string(c) + "]+", true
-	}
-	return "", false
 }
 
 // buildDirLayerRule 按目录层泛化：v4 目录条件行（整名字面模板；任意祖先层

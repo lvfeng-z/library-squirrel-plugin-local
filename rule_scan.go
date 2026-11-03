@@ -20,12 +20,6 @@ const (
 	ScanScopeUncovered = "uncovered"
 )
 
-// scanBracketPairs 为候选分段识别的括号对（内容作为一个候选）；与
-// structure_clue 的 bracketPairs（结构线索拆分）分立，避免语义耦合。
-var scanBracketPairs = [][2]rune{
-	{'[', ']'}, {'(', ')'}, {'【', '】'}, {'（', '）'},
-}
-
 // scanCandidate 为一个候选分段及其在所属分段内的字节区间。
 type scanCandidate struct {
 	value string
@@ -38,8 +32,9 @@ func isScanSeparator(r rune) bool {
 	return r == '_' || r == ' ' || r == '-'
 }
 
-// scanCandidatesOfSegment 生成分段 seg 的候选：整段、括号内容（按位置序）、
-// 分隔符切分词（按位置序）；按值去重保序。
+// scanCandidatesOfSegment 生成分段 seg 的候选：整段、括号组内名（组界扫描
+// findBracketGroups 为唯一组界定义——六对括号、同对嵌套按最外层计、异对不
+// 干扰，各组内名按位置序）、分隔符切分词（按位置序）；按值去重保序。
 func scanCandidatesOfSegment(seg string) []scanCandidate {
 	var out []scanCandidate
 	seen := map[string]bool{}
@@ -51,22 +46,12 @@ func scanCandidatesOfSegment(seg string) []scanCandidate {
 		out = append(out, scanCandidate{value: value, start: start, end: end})
 	}
 	add(seg, 0, len(seg))
-	runes := []rune(seg)
-	// 括号内容：遇开括号找同型闭括号（不嵌套），内容整体为一个候选。
-	for i := 0; i < len(runes); i++ {
-		closeR, opened := bracketCloseOf(runes[i])
-		if !opened {
-			continue
-		}
-		for j := i + 1; j < len(runes); j++ {
-			if runes[j] == closeR {
-				add(string(runes[i+1:j]), len(string(runes[:i+1])), len(string(runes[:j])))
-				i = j
-				break
-			}
-		}
+	// 括号组内名：区间为组界扫描的各最外层组内名区间（字节下标）。
+	for _, g := range findBracketGroups(seg) {
+		add(seg[g.innerStart:g.innerEnd], g.innerStart, g.innerEnd)
 	}
 	// 分隔符切分词。
+	runes := []rune(seg)
 	wordStart := -1
 	for i := 0; i <= len(runes); i++ {
 		if i < len(runes) && !isScanSeparator(runes[i]) {
@@ -81,16 +66,6 @@ func scanCandidatesOfSegment(seg string) []scanCandidate {
 		}
 	}
 	return out
-}
-
-// bracketCloseOf 返回开括号对应的同型闭括号。
-func bracketCloseOf(r rune) (rune, bool) {
-	for _, pair := range scanBracketPairs {
-		if r == pair[0] {
-			return pair[1], true
-		}
-	}
-	return 0, false
 }
 
 // scanSegmentsOf 返回待扫描分段：文件名去扩展名在前，其后各级目录名（浅→深）。

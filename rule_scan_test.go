@@ -179,6 +179,50 @@ func TestScanCaptureSpanBinding(t *testing.T) {
 	}
 }
 
+// TestScanCandidatesOfSegment 候选分段逐条（组界基座语义）：括号内容候选=组界
+// 扫描各组最外层内名——`「」『』` 随之入候选、同对嵌套按最外层计、多组名各组
+// 内名独立成候选；发现序=整段、括号内容（按位置序）、分隔符切分词。
+func TestScanCandidatesOfSegment(t *testing.T) {
+	values := func(seg string) []string {
+		var out []string
+		for _, c := range scanCandidatesOfSegment(seg) {
+			out = append(out, c.value)
+		}
+		return out
+	}
+	// 角括号组入候选（组界六对随组界扫描合一）。
+	if got := values("「黒執事」_番外"); fmt.Sprint(got) != fmt.Sprint([]string{"「黒執事」_番外", "黒執事", "「黒執事」", "番外"}) {
+		t.Fatalf("「」组内名应入候选: %v", got)
+	}
+	if got := values("『別冊』"); fmt.Sprint(got) != fmt.Sprint([]string{"『別冊』", "別冊"}) {
+		t.Fatalf("『』组内名应入候选: %v", got)
+	}
+	// 同对嵌套：最外层组内名整体为一个候选（内层括号留在内名里）。
+	if got := values("[a[b]c]"); fmt.Sprint(got) != fmt.Sprint([]string{"[a[b]c]", "a[b]c"}) {
+		t.Fatalf("同对嵌套应按最外层组取内名: %v", got)
+	}
+	// 多组名：各组内名按位置序独立成候选、首组内名在候选内，跨界内名不出现。
+	multi := "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
+	got := values(multi)
+	want := []string{multi, "七尾ゆきじ", "COMIC 阿吽 2019年2月号", "中国翻訳", "DL版", "[七尾ゆきじ]", "酔いが醒めるその前に", "(COMIC", "阿吽", "2019年2月号)", "[中国翻訳]", "[DL版]"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("多组名候选不符: got %v want %v", got, want)
+	}
+}
+
+// TestScanCandidatesCornerBracketHit 贪婪识别（FromScan）对 `「」` 组内名的
+// 命中：库内已有标签经角括号组候选产出（组界基座——`「」『』` 入候选）。
+func TestScanCandidatesCornerBracketHit(t *testing.T) {
+	rule := scanRuleFromJSON(t, scanRuleJSON(`{"dimension": "tag", "from": "scan", "scanScope": "path"}`))
+	name := "Isel_「黒執事」_01.jpg"
+	in := &MatchInput{FileName: name, DirNames: nil, RelPath: name}
+	lib := &LibraryIndex{TagNames: map[string]struct{}{"黒執事": {}}}
+	decision := runScanRule(t, rule, in, lib)
+	if got := scanValues(decision, DimTag); fmt.Sprint(got) != fmt.Sprint([]string{"黒執事"}) {
+		t.Fatalf("「」组内名应命中库内标签: %v", got)
+	}
+}
+
 // TestScanValidation 构造期校验拒绝面：无库集合维度 / 非法范围 / when /
 // 携带捕获组名。
 func TestScanValidation(t *testing.T) {

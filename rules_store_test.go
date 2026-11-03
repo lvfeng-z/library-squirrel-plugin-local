@@ -405,3 +405,151 @@ func TestContextProfileStoreAdapter(t *testing.T) {
 		t.Fatalf("上下文缺失时写入应报错")
 	}
 }
+
+// —— 旧档案剥壳字段（stripPrefix / stripSuffix）的存量迁移 ——
+
+// legacyStripProfileJSON 构造一条 v4 档案原文：目录行模板 + 捕获动作携带旧
+// 剥壳前后缀，供迁移器断言（以 JSON 原文承载旧形态，不依赖已删除的模型字段）。
+func legacyStripProfileJSON(tpl, prefix, suffix, from string) string {
+	return fmt.Sprintf(`{"schemaVersion":%d,"rules":[{"id":"legacy-strip","description":"旧剥壳规则","source":"manual","enabled":true,`+
+		`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":%q}}}],`+
+		`"extractions":[{"dimension":"tag","from":%q,"captureName":"tag","stripPrefix":%q,"stripSuffix":%q}],`+
+		`"synthesis":{"dimPolicies":[],"roles":[]}}]}`, CurrentSchemaVersion, tpl, from, prefix, suffix)
+}
+
+// TestProfileLegacyStripMigrationOnLoad 载入路径的存量剥壳迁移：裸单占位词模板
+// +配对括号剥壳 → 行模板改写为「开括号{词}闭括号{任意}」并产出首组内名
+//（todo#96 场景）；其余带剥壳组合 → 剥壳丢弃+描述注记；迁移前原文进入一次性
+// 迁移备份键（二次载入不覆写）；载入不回写档案键（下次保存自然落新形态、
+// strip 键不再序列化）。
+func TestProfileLegacyStripMigrationOnLoad(t *testing.T) {
+	t.Run("裸单占位词配对括号改写并产出首组内名", func(t *testing.T) {
+		raw := legacyStripProfileJSON("{标签}", "[", "]", "capture")
+		store := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: raw}}
+		profile, errs := LoadProfile(store)
+		if profile == nil || len(errs) != 0 {
+			t.Fatalf("可等价改写档案应干净载入: %v", errs)
+		}
+		if len(profile.Rules) != 1 {
+			t.Fatalf("应载入 1 条规则，实际 %d", len(profile.Rules))
+		}
+		rule := &profile.Rules[0]
+		if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != "[{标签}]{任意}" {
+			t.Fatalf("行模板应改写为括号模板 [{标签}]{任意}，实际 %q", tpl)
+		}
+		if a := rule.Extractions[0]; a.legacyStripPrefix != "" || a.legacyStripSuffix != "" {
+			t.Fatalf("改写后剥壳暂存应清零: %+v", a)
+		}
+		if !strings.Contains(rule.Description, "剥壳已迁移为字面括号模板") {
+			t.Fatalf("描述应含迁移注记，实际 %q", rule.Description)
+		}
+		if cur, _ := store.GetValue(RuleProfileKVKey); cur == nil || cur.Value != raw {
+			t.Fatalf("载入不应回写档案键（原文待下次保存落新形态）: %s", cur.Value)
+		}
+		backup, _ := store.GetValue(RuleProfileMigrationBackupKVKey)
+		if backup == nil || backup.Value != raw {
+			t.Fatalf("迁移前档案原文应进入一次性迁移备份键，实际 %+v", backup)
+		}
+		// 迁移产物求值：多组名目录产出首组内名（七尾ゆきじ）。
+		dirName := "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
+		in := &MatchInput{FileName: "x.jpg", DirNames: []string{dirName}, RelPath: dirName + "/x.jpg"}
+		decision := runRefEval(t, []RuleEntry{*rule}, in, nil)
+		if v, ok := declOf(decision, rule.ID, DimTag); !ok || v != "七尾ゆきじ" {
+			t.Fatalf("迁移后规则应产出首组内名 七尾ゆきじ: %q %v", v, ok)
+		}
+	})
+
+	t.Run("不可等价改写组合剥壳丢弃", func(t *testing.T) {
+		cases := []struct {
+			name, tpl, prefix, suffix, from string
+		}{
+			{name: "模板带字面", tpl: "[{标签}]", prefix: "[", suffix: "]", from: "capture"},
+			{name: "剥壳非配对括号", tpl: "{标签}", prefix: "【", suffix: "]", from: "capture"},
+			{name: "单侧剥壳", tpl: "{标签}", prefix: "[", suffix: "", from: "capture"},
+			{name: "非捕获来源", tpl: "{标签}", prefix: "[", suffix: "]", from: "ancestorDir"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := legacyStripProfileJSON(tc.tpl, tc.prefix, tc.suffix, tc.from)
+				store := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: raw}}
+				profile, errs := LoadProfile(store)
+				if profile == nil || len(errs) != 0 {
+					t.Fatalf("丢弃路径档案应干净载入: %v", errs)
+				}
+				rule := &profile.Rules[0]
+				if tpl := rule.Conditions[0].Condition.Format.Tpl; tpl != tc.tpl {
+					t.Fatalf("不可等价改写时行模板应保持原样 %q，实际 %q", tc.tpl, tpl)
+				}
+				if a := rule.Extractions[0]; a.legacyStripPrefix != "" || a.legacyStripSuffix != "" {
+					t.Fatalf("丢弃后剥壳暂存应清零: %+v", a)
+				}
+				if !strings.Contains(rule.Description, "剥壳配置已移除，请改用字面括号模板") {
+					t.Fatalf("描述应含丢弃注记，实际 %q", rule.Description)
+				}
+				if strings.Contains(rule.Description, "剥壳已迁移为字面括号模板") {
+					t.Fatalf("丢弃路径不应携带改写注记: %q", rule.Description)
+				}
+				if backup, _ := store.GetValue(RuleProfileMigrationBackupKVKey); backup == nil || backup.Value != raw {
+					t.Fatalf("丢弃路径同样属迁移处置，原文应进迁移备份键，实际 %+v", backup)
+				}
+			})
+		}
+	})
+
+	t.Run("一次性迁移备份不覆写", func(t *testing.T) {
+		raw := legacyStripProfileJSON("{标签}", "[", "]", "capture")
+		store := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: raw}}
+		if _, errs := LoadProfile(store); len(errs) != 0 {
+			t.Fatalf("首次载入应干净: %v", errs)
+		}
+		// 备份键已有内容（上一轮迁移写入）时，二次载入不得覆写。
+		store.values[RuleProfileMigrationBackupKVKey] = "哨兵：更早的迁移备份"
+		if _, errs := LoadProfile(store); len(errs) != 0 {
+			t.Fatalf("二次载入应干净: %v", errs)
+		}
+		if got := store.values[RuleProfileMigrationBackupKVKey]; got != "哨兵：更早的迁移备份" {
+			t.Fatalf("一次性迁移备份键不得覆写，实际 %q", got)
+		}
+	})
+
+	t.Run("迁移后保存不再落 strip 键", func(t *testing.T) {
+		raw := legacyStripProfileJSON("{标签}", "[", "]", "capture")
+		src := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: raw}}
+		profile, errs := LoadProfile(src)
+		if profile == nil || len(errs) != 0 {
+			t.Fatalf("载入失败: %v", errs)
+		}
+		dst := newFakeProfileStore()
+		if err := SaveProfile(dst, profile); err != nil {
+			t.Fatalf("保存迁移后档案失败: %v", err)
+		}
+		saved := dst.values[RuleProfileKVKey]
+		if strings.Contains(saved, `"stripPrefix"`) || strings.Contains(saved, `"stripSuffix"`) {
+			t.Fatalf("迁移后档案不应再序列化 strip 键: %s", saved)
+		}
+		if !strings.Contains(saved, "[{标签}]{任意}") {
+			t.Fatalf("保存产物应携带改写后的括号模板: %s", saved)
+		}
+		if !strings.Contains(saved, "剥壳已迁移为字面括号模板") {
+			t.Fatalf("保存产物应携带迁移注记: %s", saved)
+		}
+	})
+}
+
+// TestProfileNoStripNoMigrationBackup 无旧剥壳字段的档案不触发迁移：不写迁移
+// 备份键、描述零变化（直接绿：现状载入路径本就不产生该键，锚定防回归）。
+func TestProfileNoStripNoMigrationBackup(t *testing.T) {
+	rule := testRule(t, "clean-rule", true)
+	profileJSON := marshalForCompare(t, &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{rule}})
+	store := &fakeProfileStore{values: map[string]string{RuleProfileKVKey: profileJSON}}
+	loaded, errs := LoadProfile(store)
+	if len(errs) != 0 {
+		t.Fatalf("干净档案载入不应报错: %v", errs)
+	}
+	if got, want := marshalForCompare(t, loaded), profileJSON; got != want {
+		t.Fatalf("干净档案应零迁移、往返等价\n取回: %s\n原始: %s", got, want)
+	}
+	if v, ok := store.values[RuleProfileMigrationBackupKVKey]; ok && v != "" {
+		t.Fatalf("无剥壳档案不应写迁移备份键，实际 %q", v)
+	}
+}

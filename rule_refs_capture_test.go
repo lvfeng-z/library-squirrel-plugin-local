@@ -1,6 +1,7 @@
 // 规则组合引用的提取与规范名（规则组合引用方案阶段3）：Apply 的 refCapture
-// 取值分支（限定键命中、#canon 同序回退、Row≤0 第 1 行兜底、剥壳适用、成员
-// 多行多同名组的行限定、未绑定零产出、pattern 形态成员裸绑定终备）与 when
+// 取值分支（限定键命中、#canon 同序回退、Row≤0 第 1 行兜底、剥壳由成员模板
+// 字面括号承载、成员多行多同名组的行限定、未绑定零产出、pattern 形态成员
+// 裸绑定终备）与 when
 // 条件操作数的限定名解析（求值侧 conditionOperandValue 与构造校验侧
 // validateExpr 成对——限定键形按 refs 放行、非限定名照旧走自有捕获），以及
 // 发现6 回归锚（跨规则捕获仍隔离、限定键为唯一通道、非组合规则零变化）。
@@ -183,18 +184,18 @@ func TestRefCaptureRowDiscrimination(t *testing.T) {
 	}
 }
 
-// TestRefCaptureStrip 剥壳变换适用：StripPrefix/StripSuffix 对 refCapture 取得
-// 的成员捕获值照既有变换逻辑剥离（逐侧独立 Trim，值不具该侧时无操作）。
-func TestRefCaptureStrip(t *testing.T) {
-	member := refFileRowRule(t, "member-a", "{作者}_{标题}", nil, nil)
+// TestRefCaptureShellByTemplate 剥壳语义由成员行模板的字面括号承载：捕获类
+// 括号感知（占位词前字面以开括号收尾时排除配对闭括号），成员捕获天然取得
+// 括号内名，组合规则 refCapture 原样取值——提取动作不再有独立的剥壳变换。
+func TestRefCaptureShellByTemplate(t *testing.T) {
+	member := refFileRowRule(t, "member-a", "【{作者}】_{标题}", nil, nil)
 	combo := refComboRule(t, "combo-1", []string{"member-a"}, nil, []ExtractionAction{
-		{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-a", CaptureName: "author", Row: 1,
-			StripPrefix: "【", StripSuffix: "】"},
+		{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-a", CaptureName: "author", Row: 1},
 	})
 	in := &MatchInput{FileName: "【甲】_乙.jpg", RelPath: "【甲】_乙.jpg"}
 	decision := runRefEval(t, []RuleEntry{member, combo}, in, nil)
 	if v, ok := declOf(decision, "combo-1", DimAuthor); !ok || v != "甲" {
-		t.Fatalf("剥壳后取值不符: %q %v（期望 甲）", v, ok)
+		t.Fatalf("括号模板捕获应取内名: %q %v（期望 甲）", v, ok)
 	}
 }
 

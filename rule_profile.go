@@ -1,7 +1,9 @@
-// 规则档案模型：含义维度 / 来源 / 提取 / 合成的类型定义，档案的多态 JSON 序列化与载入校验；纯模型，无 IO 与日志。
+// 规则档案模型：含义维度 / 来源 / 提取 / 合成的类型定义，档案的多态 JSON 序列化
+// 与载入校验，以及旧剥壳字段的载入迁移；纯模型，无 IO 与日志。
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -252,11 +254,12 @@ type ExtractionAction struct {
 	ScanScope string `json:"scanScope,omitempty"`
 	// RoleName 为声明级角色绑定，可为空；原样透传到产出声明。
 	RoleName string `json:"roleName"`
-	// StripPrefix / StripSuffix 取值后的剥壳变换（结构映射泛化产物使用）：值
-	// 具有该前缀/后缀时剥离（如 ancestorDir 取得 "Artist[X]" 剥为 "X"）；空=
-	// 不剥。逐侧独立 Trim，值不具该侧时为无操作，旧规则（双空）行为不变。
-	StripPrefix string `json:"stripPrefix,omitempty"`
-	StripSuffix string `json:"stripSuffix,omitempty"`
+	// legacyStripPrefix / legacyStripSuffix 为旧档案剥壳前后缀（stripPrefix /
+	// stripSuffix 键）的载入暂存（迁移检测位）：反序列化镜像读入非空旧键时
+	// 填充，供档案载入路径的迁移器检测与处置（等价改写为字面括号模板或
+	// 丢弃+描述注记）；不参与求值与序列化，处置后清零。
+	legacyStripPrefix string
+	legacyStripSuffix string
 	// When 为可选生效条件（通用条件表达式树）：条件不满足时该动作不产出声明
 	//（规则照常命中计数）。v2 谓词组合形态的 JSON 在载入时映射为等价表达式树
 	//（parseConditionJSON），内存中恒为表达式树单一形态。
@@ -353,12 +356,6 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 		value, source = a.Constant, SourceAdjudication
 	default:
 		return MetadataDeclaration{}, false
-	}
-	if a.StripPrefix != "" {
-		value = strings.TrimPrefix(value, a.StripPrefix)
-	}
-	if a.StripSuffix != "" {
-		value = strings.TrimSuffix(value, a.StripSuffix)
 	}
 	return MetadataDeclaration{
 		Dimension: a.Dimension,
@@ -737,7 +734,9 @@ func condExprFromJSON(in *conditionJSON) (*CondExpr, error) {
 
 // UnmarshalJSON 从 JSON 载入提取动作：条件字段经 parseConditionJSON 兼容
 // v3 表达式树与 v2 谓词组合两形态（内存中恒为表达式树），其余字段直读；
-// 序列化方向直接按结构体标签展开，无自定义 MarshalJSON。
+// 已废止的旧剥壳键（stripPrefix / stripSuffix）仍读入载入暂存（迁移检测位，
+// 供档案载入路径的迁移器处置），不进求值面；序列化方向直接按结构体标签
+// 展开，无自定义 MarshalJSON（旧键随之不再落档）。
 func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 	type extractionJSON struct {
 		Dimension   MetadataDimension `json:"dimension"`
@@ -769,10 +768,10 @@ func (a *ExtractionAction) UnmarshalJSON(data []byte) error {
 		Constant:    in.Constant,
 		ScanScope:   in.ScanScope,
 		RoleName:    in.RoleName,
-		StripPrefix: in.StripPrefix,
-		StripSuffix: in.StripSuffix,
 		When:        cond,
 	}
+	a.legacyStripPrefix = in.StripPrefix
+	a.legacyStripSuffix = in.StripSuffix
 	return nil
 }
 
@@ -1214,6 +1213,10 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 	profile := &RuleProfile{
 		SchemaVersion: CurrentSchemaVersion, Rules: make([]RuleEntry, 0, len(in.Rules)),
 	}
+	// 存量剥壳字段迁移（反序列化后、规则构造校验前逐条过）：可等价改写者
+	// 行模板改写为字面括号形态，其余丢弃并留描述注记——改写产物随正常
+	// 管线编译校验。
+	migrateLegacyStripRules(in.Rules)
 	// 第一遍：逐规则构造（模式/条件行编译 + 提取动作校验，含 refCapture 的
 	// refRule∈refs、captureName 必填）。失败条目跳过并告警。
 	constructed := make([]RuleEntry, 0, len(in.Rules))
@@ -1253,6 +1256,134 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 		profile.Rules = append(profile.Rules, *rule)
 	}
 	return profile, errs
+}
+
+// migrateLegacyStripRules 存量档案剥壳字段（stripPrefix / stripSuffix，反序列
+// 化暂存于动作的 legacyStrip*）的载入迁移，逐规则过：可等价改写者（From 为
+// capture、动作引用的条件行模板为裸单占位词 {词}、剥壳前后缀恰为同对括号
+// 的开/闭字面）行模板改写为「开括号{词}闭括号{任意}」——剥壳语义由模板字面
+// 括号与括号感知捕获类承载，产出从跨界捕获收敛为首组内名；其余带剥壳组合
+// 不可等价改写，剥壳丢弃（求值不再剥壳，产出退回原始捕获值）。两类处置都
+// 在规则描述追加迁移注记（查重防重复）。先于规则构造校验执行，改写产物按
+// 正常管线编译。
+func migrateLegacyStripRules(rules []ruleEntryJSON) {
+	for i := range rules {
+		migrateLegacyStripRule(&rules[i])
+	}
+}
+
+// migrateLegacyStripRule 迁移单条规则的剥壳动作；无剥壳暂存的规则零变化。
+func migrateLegacyStripRule(rj *ruleEntryJSON) {
+	rewritten, dropped := false, false
+	for i := range rj.Extractions {
+		action := &rj.Extractions[i]
+		if action.legacyStripPrefix == "" && action.legacyStripSuffix == "" {
+			continue
+		}
+		if rewriteStripCaptureAction(rj, action) {
+			rewritten = true
+		} else {
+			dropped = true
+		}
+		action.legacyStripPrefix, action.legacyStripSuffix = "", ""
+	}
+	if rewritten {
+		rj.Description = appendMigrationNote(rj.Description, "剥壳已迁移为字面括号模板")
+	}
+	if dropped {
+		rj.Description = appendMigrationNote(rj.Description, "剥壳配置已移除，请改用字面括号模板")
+	}
+}
+
+// rewriteStripCaptureAction 尝试把动作的剥壳配置等价改写进其引用的条件行
+// 模板：动作取值来源为 capture、引用行（Row 缺省按第 1 行兜底）格式为模板
+// 且恰为裸单占位词 {词}（词与动作捕获组名对应）、剥壳前后缀恰为同对括号的
+// 开/闭字面时，模板改写为「开括号{词}闭括号{任意}」并返回 true；任一条件
+// 不满足（不可等价改写）返回 false，模板不动。
+func rewriteStripCaptureAction(rj *ruleEntryJSON, action *ExtractionAction) bool {
+	if action.From != FromCapture {
+		return false
+	}
+	open := []rune(action.legacyStripPrefix)
+	closing := []rune(action.legacyStripSuffix)
+	if len(open) != 1 || len(closing) != 1 || condxOpenBrackets[open[0]] != closing[0] {
+		return false
+	}
+	row := action.Row
+	if row <= 0 {
+		row = 1
+	}
+	cond := condxRowAt(rj.Conditions, row)
+	if cond == nil || cond.Format.Mode == CondxFormatContains {
+		return false
+	}
+	word, ok := barePlaceholderOf(cond.Format.Tpl)
+	if !ok {
+		return false
+	}
+	// 吞位词与序列键词不作引用位：不可能构成合法的裸引用行，按不可等价
+	// 改写处置。
+	if word == "任意" || word == "键" || word == "公共段" {
+		return false
+	}
+	if condxVocab[word] != action.CaptureName {
+		return false
+	}
+	cond.Format.Tpl = string(open[0]) + "{" + word + "}" + string(closing[0]) + "{任意}"
+	return true
+}
+
+// barePlaceholderOf 判定模板是否为裸单占位词形态（恰一个占位词、无任何字面
+// 段，如 "{标签}"）；是则返回占位词的词表原文，否则返回 false。
+func barePlaceholderOf(tpl string) (string, bool) {
+	tokens, err := tokenizeCondx(tpl)
+	if err != nil || len(tokens) != 1 || tokens[0].placeholder == "" {
+		return "", false
+	}
+	return tokens[0].placeholder, true
+}
+
+// condxRowAt 返回条件行列表先序展平的第 n 个（1 起）条件行的行内条件；行号
+// 计数与编译及捕获收集同口径（Condition 行计 1、Group 子组按 countCondxRows
+// 计入）；越界返回 nil。
+func condxRowAt(rows []CondxRow, n int) *Condx {
+	prefix := 0
+	for i := range rows {
+		row := &rows[i]
+		if row.Condition != nil {
+			if prefix+1 == n {
+				return row.Condition
+			}
+			prefix++
+		}
+		if len(row.Group) > 0 {
+			if c := condxRowAt(row.Group, n-prefix); c != nil {
+				return c
+			}
+			prefix += countCondxRows(row.Group)
+		}
+	}
+	return nil
+}
+
+// appendMigrationNote 把迁移注记追加到规则描述（描述已含同文注记时不重复
+// 追加）。
+func appendMigrationNote(desc, note string) string {
+	if strings.Contains(desc, note) {
+		return desc
+	}
+	if desc == "" {
+		return note
+	}
+	return desc + "\n" + note
+}
+
+// profileDataHasLegacyStrip 判断档案原文是否携带旧剥壳键（stripPrefix /
+// stripSuffix）：文本子串级宽松检测——误报（键名作为字符串值出现）只导致
+// 多写一次迁移备份（内容仍为原文，无损）；供载入路径在迁移改写前完成一次
+// 性备份编排。
+func profileDataHasLegacyStrip(data []byte) bool {
+	return bytes.Contains(data, []byte(`"stripPrefix"`)) || bytes.Contains(data, []byte(`"stripSuffix"`))
 }
 
 // validateRuleRefs 校验组合规则的 refs 引用（构造期跨规则静态校验）：自引用、

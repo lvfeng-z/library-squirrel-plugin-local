@@ -15,8 +15,6 @@ export interface ExtractionActionJSON {
   constant?: string
   scanScope?: string
   roleName?: string
-  stripPrefix?: string
-  stripSuffix?: string
   when?: unknown
 }
 
@@ -293,6 +291,7 @@ export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 
   { name: 'pixiv 页级', template: '{作品号}_p{序号}', target: 'file', description: '作品号数字类 + _p 页号' },
   { name: '序列成套', template: '{公共段}_{序号}', target: 'seq', description: '{公共段}相同 ≥2 件成套归入同一作品集' },
   { name: '目录层作者', template: 'Artist[{作者}]', target: 'dir', description: '剥壳惯例：字面括号 + 作者词' },
+  { name: '首组内名', template: '[{标签}]{任意}', target: 'dir', description: '多组括号目录名取首组内名、尾段吞掉（单组整名同样命中）' },
   { name: '任意段吞位', template: '{标题}_{任意}', target: 'file', description: '{任意} 吞掉标题之后的一切' }
 ]
 

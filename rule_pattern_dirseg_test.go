@@ -246,7 +246,7 @@ func TestExtractionStageIsolatesCapturesPerRule(t *testing.T) {
 		ID: "shell-l1", Description: "测试：族B 壳形作者（锚 L1）", Source: RuleSourceManual, Enabled: true,
 		Pattern: shellLoc,
 		Extractions: []ExtractionAction{
-			{Dimension: DimAuthor, From: FromAncestorDir, StripPrefix: "Artist[", StripSuffix: "]"},
+			{Dimension: DimAuthor, From: FromAncestorDir},
 		},
 	}
 	in3 := &MatchInput{
@@ -262,8 +262,8 @@ func TestExtractionStageIsolatesCapturesPerRule(t *testing.T) {
 				author = decls[i].Value
 			}
 		}
-		if author != "Isel" {
-			t.Fatalf("族B 作者应为自身第 1 层锚定的剥壳值 Isel（读到他目录命中即垃圾值污染）：got %q", author)
+		if author != "Artist[Isel]" {
+			t.Fatalf("族B 作者应为自身第 1 层锚定的目录全名 Artist[Isel]（读到他目录命中即垃圾值污染）：got %q", author)
 		}
 		if v, ok := collectionOf(decls, "setdir-l2"); !ok || v != "瞬間的に絡み合う" {
 			t.Fatalf("族A 集名应为自身第 2 层捕获：got %q ok=%v", v, ok)
@@ -329,7 +329,7 @@ func TestExtractionAncestorDirRespectsDirLevelAnchor(t *testing.T) {
 			ID: id, Description: "测试：" + id, Source: RuleSourceManual, Enabled: true,
 			Conditions: rows, Pattern: p,
 			Extractions: []ExtractionAction{
-				{Dimension: DimTag, From: FromAncestorDir, StripPrefix: "[", StripSuffix: "]"},
+				{Dimension: DimTag, From: FromAncestorDir},
 			},
 		}
 	}
@@ -354,12 +354,12 @@ func TestExtractionAncestorDirRespectsDirLevelAnchor(t *testing.T) {
 	deep := []string{"[外层]", "[内层]", "[更深]"}
 	// 锚定第 2 级：命中层=第 2 级 [内层]，更深的 [更深] 不抢值。
 	decls := run([]RuleEntry{mustRule("anchored-l2", 2)}, deep)
-	if v, ok := tagOf(decls, "anchored-l2"); !ok || v != "内层" {
+	if v, ok := tagOf(decls, "anchored-l2"); !ok || v != "[内层]" {
 		t.Fatalf("锚定第 2 级的 FromAncestorDir 应取 [内层]（不取更深层）: %q ok=%v decls=%+v", v, ok, decls)
 	}
 	// 对照：同模板去锚 → 取最深同名形态层 [更深]。
 	decls = run([]RuleEntry{mustRule("unanchored", 0)}, deep)
-	if v, ok := tagOf(decls, "unanchored"); !ok || v != "更深" {
+	if v, ok := tagOf(decls, "unanchored"); !ok || v != "[更深]" {
 		t.Fatalf("去锚同模板应取最深命中层 [更深]: %q ok=%v decls=%+v", v, ok, decls)
 	}
 	// 锚定第 3 级在两级链上不存在 → 整行不中 → 零声明（严格不回退）。

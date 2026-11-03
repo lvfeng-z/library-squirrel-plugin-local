@@ -242,20 +242,36 @@ func TestStructCluesTailCodeConservative(t *testing.T) {
 	}
 }
 
-// TestStripShellTable 剥壳表逐条：命中/内名/未命中形态。
+// TestStripShellTable 剥壳逐条（组界基座语义）：名字含括号组 → 剥壳变体=首个
+// 内名非空组的内名（六对括号、同对嵌套按最外层计）；无组名维持空格前缀形态
+// （`Artist␣...`→后名）；空内名与非包裹名不命中。
 func TestStripShellTable(t *testing.T) {
-	if _, inner, ok := stripShell("Artist[Jake--Jaccobus]"); !ok || inner != "Jake--Jaccobus" {
-		t.Fatalf("括号剥壳不符: %q %v", inner, ok)
+	if shell, inner, ok := stripShell("Artist[Jake--Jaccobus]"); !ok || inner != "Jake--Jaccobus" ||
+		shell.Prefix != "Artist[" || shell.Suffix != "]" {
+		t.Fatalf("括号剥壳不符: %+v %q %v", shell, inner, ok)
+	}
+	if _, inner, ok := stripShell("Artist[Isel]"); !ok || inner != "Isel" {
+		t.Fatalf("中缀单组剥壳应为 Isel: %q %v", inner, ok)
 	}
 	if _, inner, ok := stripShell("Artist Jake--Jaccobus"); !ok || inner != "Jake--Jaccobus" {
 		t.Fatalf("空格剥壳不符: %q %v", inner, ok)
 	}
-	if shell, inner, ok := stripShell("[路灯后辈]"); !ok || inner != "路灯后辈" || shell.Name != "bareBracket" {
+	if shell, inner, ok := stripShell("[路灯后辈]"); !ok || inner != "路灯后辈" || shell.Name != "bracket[]" {
 		t.Fatalf("裸括号剥壳不符: %+v %q %v", shell, inner, ok)
 	}
-	// 表序在前者优先：Artist[...] 命中表首条目，裸括号兜底条目不夺。
-	if shell, _, ok := stripShell("Artist[Isel]"); !ok || shell.Name != "artistBracket" {
-		t.Fatalf("Artist[...] 应命中表首 artistBracket: %+v %v", shell, ok)
+	// 多组名（组界基座）：剥壳变体=首组内名，不再产出跨界内名。
+	multi := "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
+	if _, inner, ok := stripShell(multi); !ok || inner != "七尾ゆきじ" {
+		t.Fatalf("多组名剥壳应为首组内名 七尾ゆきじ: %q %v", inner, ok)
+	}
+	// 同对嵌套按最外层计：内层括号留在内名里。
+	if _, inner, ok := stripShell("[a[b]c]"); !ok || inner != "a[b]c" {
+		t.Fatalf("同对嵌套应按最外层组剥壳: %q %v", inner, ok)
+	}
+	// 组界基座覆盖全部六对括号：圆括号包裹形态同样剥壳（旧壳表未收录，属
+	// 行为变化面——统一后由组界派生）。
+	if _, inner, ok := stripShell("Circle(X)"); !ok || inner != "X" {
+		t.Fatalf("圆括号包裹形态应按组界剥壳: %q %v", inner, ok)
 	}
 	if _, _, ok := stripShell("[]"); ok {
 		t.Fatal("空内名不应命中剥壳")
@@ -263,11 +279,35 @@ func TestStripShellTable(t *testing.T) {
 	if _, _, ok := stripShell("Artist[]"); ok {
 		t.Fatal("空内名不应命中剥壳")
 	}
-	if _, _, ok := stripShell("Circle(X)"); ok {
-		t.Fatal("未入表的包裹形态不应命中")
-	}
 	if _, _, ok := stripShell("普通目录"); ok {
 		t.Fatal("普通目录名不应命中剥壳")
+	}
+}
+
+// TestStructCluesMultiGroupShell 多组名目录的剥壳变体线索（组界基座语义）：
+// dirLevelStripped1=首组内名「七尾ゆきじ」，同层恰一条剥壳线索（不再产出
+// 跨界内名）。
+func TestStructCluesMultiGroupShell(t *testing.T) {
+	name := "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
+	dirClues := DirStructCluesOf("E:/libs/图库", name)
+	stripped := 0
+	for _, c := range dirClues {
+		if c.Kind != structClueDirLevelStripped {
+			continue
+		}
+		stripped++
+		if c.Ref != "dirLevelStripped1" || c.Value != "七尾ゆきじ" || c.Label != "一级目录剥壳" {
+			t.Fatalf("多组名剥壳线索应为首组内名: %+v（全集 %v）", c, dirClues)
+		}
+	}
+	if stripped != 1 {
+		t.Fatalf("剥壳线索应恰一条: %v", dirClues)
+	}
+	// 文件级线索集同款剥壳变体。
+	file := "page_001.png"
+	fileClues := StructCluesOf("E:/libs/图库", name+"/"+file, file)
+	if c, ok := clueByRef(fileClues, "dirLevelStripped1"); !ok || c.Value != "七尾ゆきじ" {
+		t.Fatalf("文件级线索集多组名剥壳应为首组内名: %+v（全集 %v）", c, fileClues)
 	}
 }
 

@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // structMappingSlot 赋值单维度值与其线索出处决策。
@@ -188,7 +190,7 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 		for _, s := range plan.slots {
 			phrases = append(phrases, structDirPhrase(s, relPath))
 			mappings = append(mappings, RuleSuggestionMapping{
-				Dimension: string(s.dim), From: structFromLabel(s), ClueRef: s.clue.Ref,
+				Dimension: string(s.dim), From: structFromLabel(s, relPath), ClueRef: s.clue.Ref,
 			})
 		}
 	}
@@ -200,7 +202,7 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 			for _, s := range fileSlots {
 				phrases = append(phrases, structFilePhrase(s))
 				mappings = append(mappings, RuleSuggestionMapping{
-					Dimension: string(s.dim), From: structFromLabel(s), ClueRef: s.clue.Ref,
+					Dimension: string(s.dim), From: structFromLabel(s, relPath), ClueRef: s.clue.Ref,
 				})
 			}
 		} else {
@@ -296,10 +298,13 @@ type structDirPlan struct {
 
 // build 构造目录层规则条目并自检（锚定样例目录层、逐槽提取值=赋值值）。
 // build 目录层条目构造（v4）：壳形态（前缀+内名+后缀）→ 目录模板
-// 前缀字面+{占位词}+后缀字面（占位词盖内名，剥壳语义由捕获天然承载——
-// StripPrefix/Suffix 随之废止）；无壳 → 目录名整名字面。目录行随附
-// 「位于第 N 级」层深锚（AE 决策2：N=赋值出处层级，忠实取证——同名
-// 目录异层不再被子树接管，仅构造层级接管；不欲锚定可在编辑弹窗删锚
+// 前缀字面+{占位词}+尾段（占位词盖内名，剥壳语义由捕获天然承载——
+// StripPrefix/Suffix 随之废止）；单组收尾（组即目录名末尾）的尾段=后缀
+// 字面（Artist[{作者}]/[{作者}]）；多组名（首组闭括号后另有正文）的尾段
+// =闭括号+首组后间隙字面+{任意}（如 [{标签}] {任意}——首组内名由括号
+// 感知捕获类承载，首组后正文全部由吞位段承接）；无壳 → 目录名整名字面。
+// 目录行随附「位于第 N 级」层深锚（AE 决策2：N=赋值出处层级，忠实取证——
+// 同名目录异层不再被子树接管，仅构造层级接管；不欲锚定可在编辑弹窗删锚
 // 放开为任意层）。自检：样例文件上命中且各槽提取值复现赋值值；构造
 // 失配（花括号/词法）返回假由调用方降级手工。
 func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
@@ -308,14 +313,18 @@ func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 	spanCapture := false
 	var spanWord string
 	if p.shell != nil {
-		if !condxTemplateBraceOK(p.shell.Prefix) || !condxTemplateBraceOK(p.shell.Suffix) {
-			return RuleEntry{}, false
-		}
 		word, ok := condxWordOfSlot(p.slots[0].dim, p.slots[0].tagIndex)
 		if !ok || !pool.Take(word) {
 			return RuleEntry{}, false
 		}
-		tpl = p.shell.Prefix + "{" + word + "}" + p.shell.Suffix
+		tailLit, swallowTail := structShellTail(p.name)
+		if !condxTemplateBraceOK(p.shell.Prefix) || !condxTemplateBraceOK(tailLit) {
+			return RuleEntry{}, false
+		}
+		tpl = p.shell.Prefix + "{" + word + "}" + tailLit
+		if swallowTail {
+			tpl += "{任意}"
+		}
 		spanCapture = true
 		spanWord = word
 	} else {
@@ -368,6 +377,33 @@ func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 		}
 	}
 	return rule, true
+}
+
+// structShellTail 壳形态内名之后的尾段分解（组界基座）：首个内名非空组即
+// 剥壳组（与 stripShell 同序）。多组名（首组闭括号后另有正文）时 lit=闭括号
+// +首组后间隙（闭括号后紧随的空白串）且 swallow=true——首组后正文不入字面，
+// 由末位 {任意} 吞位段承接；单组收尾（组即名字末尾）时 lit=闭括号字面且
+// swallow=false；无括号组（空格前缀形态）lit 为空。
+func structShellTail(name string) (lit string, swallow bool) {
+	for _, g := range findBracketGroups(name) {
+		if name[g.innerStart:g.innerEnd] == "" {
+			continue
+		}
+		trailing := name[g.end:]
+		if trailing == "" {
+			return name[g.innerEnd:], false
+		}
+		gapLen := 0
+		for gapLen < len(trailing) {
+			r, size := utf8.DecodeRuneInString(trailing[gapLen:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			gapLen += size
+		}
+		return name[g.innerEnd:g.end] + trailing[:gapLen], true
+	}
+	return "", false
 }
 
 // structFilenamePlan 样例文件名的分段形态走查（buildStructFilenameRule v2 的
@@ -564,43 +600,6 @@ var (
 	structCloseChars = structBracketClassChars(false)
 )
 
-// writeStructSegForm 写入单段正则形态：段间隔字面 + 括号段的开括号字面 + 捕获
-// （group 非空）或消费段类 + 闭括号字面。_ 模式段类排除活跃分隔符 _（括号段
-// 连闭括号一并排除），普通段以可选括号包裹容纳同形异值的装饰差异；__ 模式
-// 普通段维持 `[^_].*?` 既有形态、括号段仅排除闭括号（内名可含 _ / __，以闭
-// 括号收界）。
-func writeStructSegForm(b *strings.Builder, f structSegForm, group string, underscore bool) {
-	b.WriteString(regexp.QuoteMeta(f.gap))
-	if f.bracket == nil {
-		if underscore {
-			b.WriteString("(?:[" + structOpenChars + "])?")
-			if group == "" {
-				b.WriteString("[^" + structOpenChars + structCloseChars + "_]*")
-			} else {
-				b.WriteString("(?P<" + group + ">[^" + structOpenChars + structCloseChars + "_]+?)")
-			}
-			b.WriteString("(?:[" + structCloseChars + "])?")
-			return
-		}
-		if group == "" {
-			b.WriteString("(?:[^_].*?)")
-		} else {
-			b.WriteString("(?P<" + group + ">[^_].*?)")
-		}
-		return
-	}
-	excl := regexp.QuoteMeta(f.bracket.close)
-	if underscore {
-		excl += "_"
-	}
-	if group == "" {
-		b.WriteString(regexp.QuoteMeta(f.bracket.open) + "[^" + excl + "]*")
-	} else {
-		b.WriteString(regexp.QuoteMeta(f.bracket.open) + "(?P<" + group + ">[^" + excl + "]+?)")
-	}
-	b.WriteString(regexp.QuoteMeta(f.bracket.close))
-}
-
 // —— 纯辅助 ——
 
 // structSampleInput 样例文件的匹配输入（DirNames 由相对路径重建）。
@@ -711,14 +710,19 @@ func structDirPhrase(s *structMappingSlot, relPath string) string {
 	return fmt.Sprintf("%s「%s」→%s", dirLevelLabel(n), s.clue.Value, label)
 }
 
-// structWrapDesc 剥壳映射的包裹形态描述（如 "Artist[任意]"；取样例目录名的
-// 剥壳表前/后缀 +「任意」内名）。
+// structWrapDesc 剥壳映射的包裹形态描述（如 "Artist[任意]"）：单组收尾取
+// 剥壳前/后缀+「任意」内名；多组名（剥壳变体=首组内名）首组后正文收敛为
+// 省略号（如 "[任意] …"）。
 func structWrapDesc(relPath string, n int) string {
 	name := dirNameAtLevel(relPath, n)
-	if shell, _, ok := stripShell(name); ok {
-		return shell.Prefix + "任意" + shell.Suffix
+	shell, _, ok := stripShell(name)
+	if !ok {
+		return ""
 	}
-	return ""
+	if tailLit, swallow := structShellTail(name); swallow {
+		return shell.Prefix + "任意" + tailLit + "…"
+	}
+	return shell.Prefix + "任意" + shell.Suffix
 }
 
 // structFilePhrase 文件名段映射的人话（首段/第 N 段）。
@@ -729,11 +733,17 @@ func structFilePhrase(s *structMappingSlot) string {
 	return fmt.Sprintf("文件名第%d段→%s", s.segIndex+1, qnaDimensionLabel(s.dim))
 }
 
-// structFromLabel 映射说明的来源标签。
-func structFromLabel(s *structMappingSlot) string {
+// structFromLabel 映射说明的来源标签（多组名剥壳注明取首组内名）。
+func structFromLabel(s *structMappingSlot, relPath string) string {
 	switch s.clue.Kind {
 	case structClueDirLevelStripped:
-		return dirLevelLabel(structClueLevelOf(s.clue.Ref)) + "剥壳"
+		n := structClueLevelOf(s.clue.Ref)
+		if name := dirNameAtLevel(relPath, n); name != "" {
+			if _, swallow := structShellTail(name); swallow {
+				return dirLevelLabel(n) + "剥壳（首组内名）"
+			}
+		}
+		return dirLevelLabel(n) + "剥壳"
 	case structClueDirLevel:
 		return dirLevelLabel(structClueLevelOf(s.clue.Ref))
 	case structClueRootName:

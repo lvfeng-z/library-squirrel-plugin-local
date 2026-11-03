@@ -181,8 +181,8 @@ type CondxRow struct {
 
 // condxVocab 为占位词词表（中文词 → 捕获组英文名，RE2 不支持 CJK 组名）。
 // {键} 仅用于序列成员模板（标记跨成员恒同部分，产出走群组键）；
-// {任意} 为非引用吞位词（派生非捕获 (?:.+)、可重复出现、不可被提取引用）
-// ——泛化消费位（尾部码丢弃、未引用段等）专用，不与引用位争抢词表。
+// {任意} 为非引用吞位词（派生非捕获吞位段、末位可空、可重复出现、不可被
+// 提取引用）——泛化消费位（尾部码丢弃、未引用段等）专用，不与引用位争抢词表。
 var condxVocab = map[string]string{
 	"作者": "author", "集名": "setname", "序号": "seq", "标题": "title",
 	"标签": "tag", "作品号": "workid", "日期": "date",
@@ -191,6 +191,22 @@ var condxVocab = map[string]string{
 
 // condxDigits 为数字类占位词（推导为 [0-9]+）。
 var condxDigits = map[string]bool{"序号": true, "作品号": true, "日期": true}
+
+// condxOpenBrackets 为组界六对同型括号的开→闭映射（与组界扫描共用同一括号
+// 词汇）：占位词前字面段收尾的开括号决定捕获类要排除的配对闭括号。
+var condxOpenBrackets = map[rune]rune{
+	'[': ']', '【': '】', '（': '）', '(': ')', '「': '」', '『': '』',
+}
+
+// tailClosingBracket 返回字面段收尾开括号的配对闭括号（字面段为空或收尾
+// 不是开括号时返回 0）。
+func tailClosingBracket(literal string) rune {
+	r := []rune(literal)
+	if len(r) == 0 {
+		return 0
+	}
+	return condxOpenBrackets[r[len(r)-1]]
+}
 
 // condxVocabHint 为报错提示用的词表清单（稳定顺序）；旧词「键」合法但不再
 // 鼓励书写，不入提示。
@@ -230,9 +246,10 @@ func tokenizeCondx(tpl string) ([]condxToken, error) {
 }
 
 // deriveCondxTemplate 把占位词模板推导为锚定正则：字面段转义；数字类占位词
-// （序号/作品号/日期）取 [0-9]+；其余占位词一律取贪婪段 .+（回溯由锚定边界与
-// 相邻字面段约束，见函数体内注释）。返回表达式原文与捕获组名列表；词表外/
-// 重复/相邻占位词返回中文错误。
+// （序号/作品号/日期）取 [0-9]+；前字面段以开括号收尾的占位词取排除配对
+// 闭括号的非空类；其余占位词取贪婪段 .+（回溯由锚定边界与相邻字面段约束，
+// 见函数体内注释）；末位 {任意} 取可空吞位段。返回表达式原文与捕获组名
+// 列表；词表外/重复/相邻占位词返回中文错误。
 func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) {
 	if strings.TrimSpace(tpl) == "" {
 		return "", nil, fmt.Errorf("格式模板不能为空")
@@ -247,10 +264,12 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) 
 	sb.WriteString("^")
 	hasSeq := false
 	prevPlaceholder := false
-	for _, tok := range tokens {
+	pendingCloser := rune(0)
+	for i, tok := range tokens {
 		if tok.literal != "" {
 			sb.WriteString(regexp.QuoteMeta(tok.literal))
 			prevPlaceholder = false
+			pendingCloser = tailClosingBracket(tok.literal)
 			continue
 		}
 		if prevPlaceholder {
@@ -266,9 +285,15 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) 
 			return "", nil, fmt.Errorf("模板占位词 {公共段} 仅适用于序列成员格式")
 		}
 		if word == "任意" {
-			// 非引用吞位词：非捕获贪婪段、可重复、不进捕获组清单（提取
+			// 非引用吞位词：非捕获吞位段、可重复、不进捕获组清单（提取
 			// 引用 any 会被未声明捕获名校验拒绝——词法天然保证只作消费）。
-			sb.WriteString("(?:.+)")
+			// 末位吞位段可空——[{词}]{任意} 一类模板须同时命中「首组+尾」
+			// 与「单组整名（尾空）」两类形态；中位吞位段保持非空。
+			if i == len(tokens)-1 {
+				sb.WriteString("(?:.*)")
+			} else {
+				sb.WriteString("(?:.+)")
+			}
 			continue
 		}
 		if seen[en] {
@@ -280,13 +305,20 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) 
 			hasSeq = true
 		}
 		sb.WriteString("(?P<" + en + ">")
-		if condxDigits[word] {
+		switch {
+		case condxDigits[word]:
 			sb.WriteString("[0-9]+")
-		} else {
+		case pendingCloser != 0:
+			// 括号感知捕获类：前字面段以开括号收尾时排除配对闭括号——括号内
+			// 名不跨界吞并后续括号组，多组名对 [{词}] 宁缺不命中，首组表达
+			// 由末位 {任意} 吞尾承载（[{词}]{任意}）。字符级排除无计数能力：
+			// 同对嵌套（如 [a[b]]）在首个闭括号处截断、捕获 a[b，与组界扫描
+			// 的最外层组界分歧，属已知词法边界。
+			sb.WriteString("[^" + string(pendingCloser) + "]+")
+		default:
 			// 贪婪段 .+：锚定边界与相邻字面段经回溯决定切分——值可含下划线等
 			// 分隔符（如 kpop_dancer_wg）；贪婪取最长、尾随数字类取最短，恰好
-			// 落在「键吞尽、序号取尾」的期望切分上。不采用首段排除启发式——
-			// 排除类会误杀含分隔符的值，且回溯已保证字面段完整。
+			// 落在「键吞尽、序号取尾」的期望切分上。
 			sb.WriteString(".+")
 		}
 		sb.WriteString(")")

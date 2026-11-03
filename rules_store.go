@@ -1,6 +1,6 @@
-// 规则档案的存取层：KV 最小接口与插件上下文适配器、档案载入（坏规则逐条跳过）、
-// 档案保存（多态 JSON 落库 + 写前单代备份与回退），以及用户规则与内置规则
-// （含内置禁用清单）的求值顺序合并。
+// 规则档案的存取层：KV 最小接口与插件上下文适配器、档案载入（坏规则逐条跳过、
+// 旧剥壳字段的一次性迁移备份）、档案保存（多态 JSON 落库 + 写前单代备份与
+// 回退），以及用户规则与内置规则（含内置禁用清单）的求值顺序合并。
 package main
 
 import (
@@ -15,6 +15,12 @@ const RuleProfileKVKey = "rule-profile"
 // RuleProfileBackupKVKey 为档案单代备份键：每次覆写档案前，现行档案原文先存入
 // 本键（写前备份），误删或覆写中断可回退一代（RollbackProfile）。
 const RuleProfileBackupKVKey = "rule-profile.backup"
+
+// RuleProfileMigrationBackupKVKey 为存量档案剥壳迁移的一次性备份键：载入
+// 检测到含旧剥壳字段（stripPrefix / stripSuffix）的档案、且本键尚无内容时，
+// 把迁移前档案原文整体写入本键；此后任何保存与载入都不再覆写——迁移改写
+// 若有错可凭本键整体还原旧档（单代写前备份会随保存滚动丢失，故另设）。
+const RuleProfileMigrationBackupKVKey = "rule-profile.migration-backup"
 
 // ProfileStore 为规则档案读写所需的最小存储方法集；签名与 SDK 的
 // dto.KVStore 同名方法一致，按需收窄依赖以避免触碰无关能力。
@@ -59,11 +65,14 @@ func emptyProfile() *RuleProfile {
 }
 
 // LoadProfile 从 KV 读取规则档案：键不存在（存储值为 nil 或明文为空）时返回空
-// 档案且无错误；数据不可解析或结构版本为旧版（v1..v3）时**自动重置**——原文
-// 备份进单代备份键、覆写为空 v4 档案、返回空档案与一条知会警告（拒载死锁收
-// 口：旧档用户无重置入口、保存/裁决/泛化全被「档案不可载入」阻断）；个别
-// 规则构造校验失败时经 ParseProfile 跳过该规则，并返回带规则 ID 的错误，
-// 其余规则照常载入，不阻塞整体。
+// 档案且无错误；携带旧剥壳字段（stripPrefix / stripSuffix）的档案在解析前
+// 先把原文一次性写入迁移备份键（已有内容不覆写），再经 ParseProfile 的载入
+// 迁移把剥壳配置等价改写为字面括号模板或丢弃留描述注记——载入不回写档案
+// 键，迁移结果在下次保存时自然落新形态；数据不可解析或结构版本为旧版
+//（v1..v3）时**自动重置**——原文备份进单代备份键、覆写为空 v4 档案、返回
+// 空档案与一条知会警告（拒载死锁收口：旧档用户无重置入口、保存/裁决/泛化
+// 全被「档案不可载入」阻断）；个别规则构造校验失败时经 ParseProfile 跳过
+// 该规则，并返回带规则 ID 的错误，其余规则照常载入，不阻塞整体。
 func LoadProfile(store ProfileStore) (*RuleProfile, []error) {
 	if store == nil {
 		return nil, []error{fmt.Errorf("规则档案存储不可用，无法载入档案")}
@@ -74,6 +83,14 @@ func LoadProfile(store ProfileStore) (*RuleProfile, []error) {
 	}
 	if stored == nil || stored.Value == "" {
 		return emptyProfile(), nil
+	}
+	// 存量剥壳字段的迁移前兜底：原文携带旧剥壳键时，先把迁移前原文一次性
+	// 写入迁移备份键（已有内容不覆写）；备份写入失败即中止载入——迁移属
+	// 改写操作，无备份不放行（比照整体重置失败的透传语义）。
+	if profileDataHasLegacyStrip([]byte(stored.Value)) {
+		if err := backupProfileBeforeStripMigration(store, stored.Value); err != nil {
+			return nil, []error{err}
+		}
 	}
 	profile, errs := ParseProfile([]byte(stored.Value))
 	if profile != nil {
@@ -130,6 +147,23 @@ func backupProfileBeforeOverwrite(store ProfileStore) error {
 	}
 	if err := store.SetValue(RuleProfileBackupKVKey, current.Value); err != nil {
 		return fmt.Errorf("写入规则档案备份（键 %q）失败: %w", RuleProfileBackupKVKey, err)
+	}
+	return nil
+}
+
+// backupProfileBeforeStripMigration 迁移前一次性备份：迁移备份键无内容时把
+// 迁移前档案原文写入；已有内容（上一轮迁移写入）不覆写——单代写前备份会随
+// 保存滚动丢失，本键为迁移改写的整体还原兜底。
+func backupProfileBeforeStripMigration(store ProfileStore, raw string) error {
+	backup, err := store.GetValue(RuleProfileMigrationBackupKVKey)
+	if err != nil {
+		return fmt.Errorf("读取规则档案迁移备份（键 %q）失败: %w", RuleProfileMigrationBackupKVKey, err)
+	}
+	if backup != nil && backup.Value != "" {
+		return nil
+	}
+	if err := store.SetValue(RuleProfileMigrationBackupKVKey, raw); err != nil {
+		return fmt.Errorf("写入规则档案迁移备份（键 %q）失败: %w", RuleProfileMigrationBackupKVKey, err)
 	}
 	return nil
 }

@@ -307,6 +307,89 @@ func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
 	}
 }
 
+// TestSummarizeMultiGroupDirFirstGroupTemplate 多组名目录条目泛化收敛：赋
+// 标签=首组内名（显式出处 dirLevelStripped1，剥壳变体=首组内名）→ 目录行
+// 模板=前缀字面+[{标签}]+首组后间隙字面+{任意}（首组后正文全部由吞位段
+// 承接），标签提取=行 1 捕获且自检复现首组内名；人话包裹形态与来源标签随
+// 新语义措辞（首组内名）。单组收尾形态产物零漂移由既有断言锚定
+//（Artist[{作者}]/[{标签}]，见本文件其余壳形用例）。
+func TestSummarizeMultiGroupDirFirstGroupTemplate(t *testing.T) {
+	const dir = "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
+	rel := dir + "/001.png"
+	assign := &SessionAssignment{Tags: []string{"七尾ゆきじ"}, TagClueRefs: []string{"dirLevelStripped1"}}
+	sugg, rules, err := buildStructMapRules("E:/libs/漫画库", rel, "001.png", assign)
+	if err != nil {
+		t.Fatalf("结构映射规则构造失败: %v", err)
+	}
+	if len(rules) != 1 || len(sugg.Rules) != 1 {
+		t.Fatalf("应恰一条目录层条目，实际 %d 条", len(rules))
+	}
+	dirCond := rules[0].Conditions[0].Condition
+	if dirCond.Target != CondxTargetDir || dirCond.Format.Tpl != "[{标签}] {任意}" {
+		t.Fatalf("多组名目录模板应收敛为 前缀+[{标签}]+间隙+{任意}: %+v", dirCond.Format)
+	}
+	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 1 {
+		t.Fatalf("目录行应随附第 1 级层深锚: %+v", dirCond.Attach)
+	}
+	tagAct := rules[0].Extractions[0]
+	if tagAct.Dimension != DimTag || tagAct.From != FromCapture ||
+		tagAct.CaptureName != condxVocab["标签"] || tagAct.Row != 1 {
+		t.Fatalf("标签提取应为目录行 {标签} 位捕获: %+v", tagAct)
+	}
+
+	// 同形异值命中：首组捕获泛化、首组后正文由 {任意} 吞位。
+	pattern := rules[0].Pattern
+	sameShape := &MatchInput{
+		FileName: "002.png",
+		DirNames: []string{"[別の作者] その他の作品 (別冊) [汉化] [DL版]"},
+		RelPath:  "[別の作者] その他の作品 (別冊) [汉化] [DL版]/002.png",
+	}
+	ctx := &ParseContext{}
+	if !pattern.Evaluate(sameShape, nil, ctx) {
+		t.Fatal("同形异值多组名目录应命中")
+	}
+	decl, ok := tagAct.Apply(rules[0].ID, ctx)
+	if !ok || decl.Value != "別の作者" {
+		t.Fatalf("同形异值标签捕获应为首组内名: %+v", decl)
+	}
+
+	// 人话与来源标签：包裹形态收敛为 [任意] …、来源注明首组内名。
+	if piece := "一级目录 [任意] …剥壳→标签"; !strings.Contains(sugg.Summary, piece) {
+		t.Fatalf("人话规则缺片段 %q: %q", piece, sugg.Summary)
+	}
+	if len(sugg.Mappings) != 1 || sugg.Mappings[0].From != "一级目录剥壳（首组内名）" {
+		t.Fatalf("来源标签应注明首组内名: %v", sugg.Mappings)
+	}
+}
+
+// TestSummarizeStrippedAutoMatchPriority 自动匹配优先序（剥壳变体>目录层>
+// 库根名>文件名段）在多组名剥壳值域下的收敛：值=首组内名且同值也在文件名
+// 首段在场 → 仍解析到剥壳变体线索（目录层条目承载、ClueRef=dirLevelStripped1），
+// 产物同多组名收敛形态。
+func TestSummarizeStrippedAutoMatchPriority(t *testing.T) {
+	rel := "[X] 画集/X__01.png"
+	assign := &SessionAssignment{Author: "X"} // 无显式出处 → 自动匹配
+	sugg, rules, err := buildStructMapRules("E:/libs/锚库", rel, "X__01.png", assign)
+	if err != nil {
+		t.Fatalf("结构映射规则构造失败: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("应恰一条目录层条目，实际 %d 条", len(rules))
+	}
+	dirCond := rules[0].Conditions[0].Condition
+	if dirCond.Target != CondxTargetDir || dirCond.Format.Tpl != "[{作者}] {任意}" {
+		t.Fatalf("剥壳变体优先：应产出目录层条目且模板收敛: %+v", dirCond.Format)
+	}
+	authAct := rules[0].Extractions[0]
+	if authAct.Dimension != DimAuthor || authAct.From != FromCapture ||
+		authAct.CaptureName != condxVocab["作者"] || authAct.Row != 1 {
+		t.Fatalf("作者提取应为目录行 {作者} 位捕获: %+v", authAct)
+	}
+	if len(sugg.Mappings) != 1 || sugg.Mappings[0].ClueRef != "dirLevelStripped1" {
+		t.Fatalf("自动匹配应解析到剥壳变体线索: %v", sugg.Mappings)
+	}
+}
+
 // TestBuildStructMapRulesUnderscoreManualDemotion 纯 _ 模式的段值降级：目录名
 // foo_bar 作提示名在段间正文内跨分隔符保持整段，其段值含活跃分隔符 _ → 该维度
 // 手工（ManualDims 收录、不生成捕获）。v4 贪婪词法下本例整体自检不过（作者段
@@ -325,31 +408,9 @@ func TestBuildStructMapRulesUnderscoreManualDemotion(t *testing.T) {
 	}
 }
 
-// TestExtractionActionStripTransform 剥壳变换求值：ancestorDir 全名剥为内名；
-// 旧形态（双空字段）行为不变；值不具包裹时为无操作。
-func TestExtractionActionStripTransform(t *testing.T) {
-	ctx := &ParseContext{DirHits: []DirHit{{Depth: 0, Name: "Artist[Jake--Jaccobus]"}}}
-	decl, ok := ExtractionAction{
-		Dimension: DimAuthor, From: FromAncestorDir, StripPrefix: "Artist[", StripSuffix: "]",
-	}.Apply("r", ctx)
-	if !ok || decl.Value != "Jake--Jaccobus" {
-		t.Fatalf("剥壳取值不符: %+v", decl)
-	}
-	decl, ok = ExtractionAction{Dimension: DimAuthor, From: FromAncestorDir}.Apply("r", ctx)
-	if !ok || decl.Value != "Artist[Jake--Jaccobus]" {
-		t.Fatalf("无剥壳字段应保持全名（旧行为不变）: %+v", decl)
-	}
-	decl, ok = ExtractionAction{
-		Dimension: DimAuthor, From: FromAncestorDir, StripPrefix: "Artist[", StripSuffix: "]",
-	}.Apply("r", &ParseContext{DirHits: []DirHit{{Depth: 0, Name: "普通目录"}}})
-	if !ok || decl.Value != "普通目录" {
-		t.Fatalf("值不具包裹时应无操作: %+v", decl)
-	}
-}
-
 // TestStructSummaryPreviewAndSessionRoundTrip 会话级链路：赋值出处入会话存储并
 // 回透视图、summarizeRule 建议含命中预览与样例且不写档案、getPanorama 透出
-// 结构线索集、generalize mode=struct 确认后组合规则入档（剥壳字段经档案
+// 结构线索集、generalize mode=struct 确认后组合规则入档（条件行模板经档案
 // 序列化往返）。
 func TestStructSummaryPreviewAndSessionRoundTrip(t *testing.T) {
 	root := t.TempDir()
