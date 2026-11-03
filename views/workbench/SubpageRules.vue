@@ -277,7 +277,9 @@ const warnings = ref<string[]>([])
 const backupAvailable = ref(false)
 
 function targetLabel(target: string): string {
-  if (target === 'dir') return '目录'
+  // 例子模板表词条 Target 取后端常量值（filename / dirname / seq）；
+  // 'dir' 为前端规则目标卡同义拼写，一并归「目录」
+  if (target === 'dir' || target === 'dirname') return '目录'
   if (target === 'seq') return '序列'
   return '文件'
 }
