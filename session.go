@@ -248,10 +248,17 @@ type SessionManager struct {
 	confirmMu sync.RWMutex
 	confirm   confirmAnswerHandler
 
-	// recogMu 保护 recogRunning：识别干跑在跑互斥（按库根），干跑不持 mu
-	//（长跑不阻塞会话读写，落库时经 mutateSession 短暂加锁）。
+	// recogMu 保护 recogRunning 与 undercountBlocked：识别干跑在跑互斥（按
+	// 库根），干跑不持 mu（长跑不阻塞会话读写，落库时经 mutateSession 短暂
+	// 加锁）。
 	recogMu      sync.Mutex
 	recogRunning map[string]bool
+	// undercountBlocked 欠计数护栏放行簿记（库根 → 上轮识别被护栏拒绝）：
+	// 仅用户动作入口 StartRecognition 启动时消费（见位即清位、本轮跳过护栏
+	// 强制覆盖——再次点击=确认仪式），自动刷新链入口不消费（护栏照常生效，
+	// 放行不得被自动轮静默绕过）。进程内存态不落会话存储，插件重启即清零
+	//（重启后首个欠计数轮再拦一次、多一次点击，方向保守）。
+	undercountBlocked map[string]bool
 
 	// createCarryMu 保护工作台创建的进程内传值槽（任务名暂存与批次摘要回写；
 	// 语义与用法见 selection.go「创建编排与过滤产出之间的进程内传值」——不落
@@ -1832,6 +1839,13 @@ const (
 	// panoramaPageMaxEntries 单页条数硬上限（字节估算之外的双保险，防小条目
 	// 海量场景单页条数失控）；请求的 PageSizeHint 只能收窄本上限。
 	panoramaPageMaxEntries = 50000
+	// panoramaDiffConclusionHead 差异集条目线上传输投影的结论保全条数（护栏四·
+	// 差异巨表装载瘦身）：每清单（变更/新增/消失各自独立）头 N 条保留前后结论
+	// 摘要，其余仅携带相对路径。N 取两解析面板头 8 条预览上限的 4 倍余量——
+	// 结论对的消费面穷尽检索（2026-11-04）仅此两处且都在 8 条内，标色/过滤/
+	// 计数只消费相对路径。仅约束线上传输投影（wireDiffEntriesOf）：存储态
+	// LastDiff 与 getDiff 动作全量结论保全不动。
+	panoramaDiffConclusionHead = 32
 )
 
 // errPanoramaGenerationStale 世代失效：识别轮次更新（快照 GeneratedAtMs 前移），
@@ -2013,6 +2027,23 @@ func snapDiffEntryWireBytes(e SnapDiffEntry) int {
 	return n
 }
 
+// wireDiffEntriesOf 差异集单清单的线上传输投影副本（护栏四·差异巨表装载
+// 瘦身）：头 panoramaDiffConclusionHead 条原样保留（含前后结论摘要），其余
+// 仅保留相对路径。巨差异轮（事故形态 20.5 万条消失 × 每条数百字节结论）装载
+// 字节与页数数量级下降；估算器 snapDiffEntryWireBytes 按投影后条目（结论置
+// nil 不计）自动反映瘦身。返回副本不动存储态切片——LastDiff 全量结论保全
+//（KV 分片既有），getDiff 动作全量结论同源不动。
+func wireDiffEntriesOf(entries []SnapDiffEntry) []SnapDiffEntry {
+	projected := make([]SnapDiffEntry, len(entries))
+	for i, e := range entries {
+		if i >= panoramaDiffConclusionHead {
+			e.Before, e.After = nil, nil
+		}
+		projected[i] = e
+	}
+	return projected
+}
+
 // panoramaPackEnd 估算首遍打包：从 offset 起按页字节目标与条数上限装页
 //（首条必装保证推进），返回页终点下标；cost 为共用下标空间内单条目的估算
 // 字节。估算只作首遍提示，实测硬门兜底其漂移。
@@ -2161,6 +2192,15 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 			// 空差异占位：三段 0 条（page.diff 恒 nil——LastDiff 缺席不随答差异集）
 			diff = &SnapDiff{}
 		}
+		// 护栏四（差异巨表装载瘦身）：差异三清单各自独立线上传输投影——头
+		// panoramaDiffConclusionHead 条保留前后结论、其余仅相对路径；条数与
+		// 顺序不变（游标空间/回执计数与存储态一致），估算器按投影后条目自动
+		// 反映瘦身。
+		wireDiff := &SnapDiff{
+			Changed: wireDiffEntriesOf(diff.Changed),
+			Added:   wireDiffEntriesOf(diff.Added),
+			Removed: wireDiffEntriesOf(diff.Removed),
+		}
 		page := &panoramaSectionPage{}
 		// 预算装配器：overview 应答的全部重载荷清单注册进同一「世代:下标」游标
 		// 空间——全景六段在前、决策态三清单与差异集三清单在后。决策态为会话
@@ -2177,9 +2217,9 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 			panoramaSegOf(dec.Assignments, assignmentWireBytes, func(v []workbenchAssignmentView) { page.decisions.Assignments = v }),
 			panoramaSegOf(dec.Ignored, stringItemWireBytes, func(v []string) { page.decisions.Ignored = v }),
 			panoramaSegOf(dec.Selection, stringItemWireBytes, func(v []string) { page.decisions.Selection = v }),
-			panoramaSegOf(diff.Changed, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Changed = v }),
-			panoramaSegOf(diff.Added, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Added = v }),
-			panoramaSegOf(diff.Removed, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Removed = v }),
+			panoramaSegOf(wireDiff.Changed, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Changed = v }),
+			panoramaSegOf(wireDiff.Added, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Added = v }),
+			panoramaSegOf(wireDiff.Removed, snapDiffEntryWireBytes, func(v []SnapDiffEntry) { page.diff.Removed = v }),
 		)
 		total := assembler.total()
 		if offset > total {

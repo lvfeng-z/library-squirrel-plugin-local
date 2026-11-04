@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -335,5 +336,81 @@ func TestCrossModeIncremental(t *testing.T) {
 				t.Fatalf("群卡漂移：混合轮后应只增不减（首轮 %d → 轮2 %d）", len(first.Groups), len(second.Groups))
 			}
 		})
+	}
+}
+
+// evalBeat 一次求值进度拍的钩子实参快照。
+type evalBeat struct{ done, total int }
+
+// TestMergedRecognitionEvalProgressBeats 求值相进度节流锚：5 万级内存合成批
+//（500 目录 × 100 无线索文件，磁盘零依赖——规则与结构对齐双不命中，求值走
+// 真实分块循环而结论形态最简）直调求值入口，对可选进度钩子断言两模式
+//（1 工作子/多工作子，经 evalWorkerCount 覆写——两模式同一实现的节流行为
+// 互证）：
+//   - 拍数 ≈ 总数/步长：串行模式块按序完成、无丢弃拍，拍数精确等于步长数；
+//     并行模式乱序完成块时后到的较小累计拍被丢弃，拍数不多于串行、容许少量
+//     丢弃（≥ 八成）；
+//   - 每拍 total 恒为批文件数、done 单调不减且不超过总数；
+//   - 末拍 done=总文件数（批恰为步长整数倍，末步长的跨越值即累计终值）。
+// -race 下复跑即并发锚：拍调用的串行化与块完成计数的原子性由竞态检测器验证。
+func TestMergedRecognitionEvalProgressBeats(t *testing.T) {
+	const (
+		beatDirs   = 500
+		beatPerDir = 100
+	)
+	total := beatDirs * beatPerDir
+	files := make([]ScanFile, 0, total)
+	for d := 0; d < beatDirs; d++ {
+		dir := fmt.Sprintf("节流%03d", d)
+		for i := 0; i < beatPerDir; i++ {
+			name := fmt.Sprintf("散图%c%c.jpg", 'a'+rune(i/26), 'a'+rune(i%26))
+			rel := dir + "/" + name
+			files = append(files, ScanFile{Path: rel, FileName: name, DirNames: []string{dir}, RelPath: rel})
+		}
+	}
+	run := func() []evalBeat {
+		var mu sync.Mutex
+		beats := make([]evalBeat, 0, total/evalProgressStride+1)
+		out := MergedRecognitionWithTree(files, files, perfEvalRules(t), perfLibraryIndex(), nil, func(done, tot int) {
+			mu.Lock()
+			beats = append(beats, evalBeat{done: done, total: tot})
+			mu.Unlock()
+		})
+		if len(out) != total {
+			t.Fatalf("结论数 %d ≠ 批文件数 %d（求值完备性守卫）", len(out), total)
+		}
+		return beats
+	}
+	expected := total / evalProgressStride
+
+	withEvalWorkers(t, 1)
+	serialBeats := run()
+	if len(serialBeats) != expected {
+		t.Fatalf("串行模式拍数 %d ≠ 步长数 %d（beats=%v）", len(serialBeats), expected, serialBeats)
+	}
+
+	withEvalWorkers(t, parallelWorkersMulti)
+	parBeats := run()
+	if len(parBeats) > len(serialBeats) {
+		t.Fatalf("并行模式拍数 %d 超过串行精确拍数 %d（步长跨越总数上限被突破）", len(parBeats), len(serialBeats))
+	}
+
+	for label, beats := range map[string][]evalBeat{"串行": serialBeats, "并行": parBeats} {
+		if len(beats) < expected*4/5 {
+			t.Fatalf("%s模式拍数 %d 远低于步长数 %d（节流拍大量丢弃，beats=%v）", label, len(beats), expected, beats)
+		}
+		lastDone := 0
+		for _, b := range beats {
+			if b.total != total {
+				t.Fatalf("%s模式拍 total=%d ≠ 批文件数 %d（beats=%v）", label, b.total, total, beats)
+			}
+			if b.done <= lastDone || b.done > total {
+				t.Fatalf("%s模式 done 非单调（%d 之后出现 %d，上界 %d）beats=%v", label, lastDone, b.done, total, beats)
+			}
+			lastDone = b.done
+		}
+		if beats[len(beats)-1].done != total {
+			t.Fatalf("%s模式末拍 done=%d ≠ 批文件数 %d（beats=%v）", label, beats[len(beats)-1].done, total, beats)
+		}
 	}
 }

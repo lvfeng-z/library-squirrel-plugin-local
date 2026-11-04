@@ -1907,6 +1907,11 @@ async function startRecognition(): Promise<void> {
     return
   }
   recognizing.value = true
+  // 在途接续态（护栏三/AW）：后端在途去重应答携带 running=true——在途轮已持有
+  // 进度，此处仅置「识别中」、不动 progress（下一拍进度事件自然接续刷新；若上一轮
+  // 恰已收尾则进度保持空态「准备中」，待首拍）。started=true 维持原有「scan 相
+  // 0/0 起步」行为，不因本次意图重来而把在途进度抹回扫描起点。
+  if (resp.running) return
   progress.value = { phase: 'scan', done: 0, total: 0 }
 }
 

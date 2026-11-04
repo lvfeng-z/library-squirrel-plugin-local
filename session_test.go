@@ -4,8 +4,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -772,4 +774,194 @@ func mustJSON(t *testing.T, req workbenchFrontendRequest) []byte {
 		t.Fatalf("序列化请求失败: %v", err)
 	}
 	return data
+}
+
+// TestGetPanoramaDiffConclusionProjection 护栏四·差异巨表装载瘦身：巨差异轮
+//（复用 TestGetPanoramaOverviewDecisionsDiffBudget 的夹具构造形态：变更 5 万 +
+// 新增/消失各 5 千，条目带前后结论）overview 差异分节走线上传输投影——每清单
+// 头 panoramaDiffConclusionHead 条保留前后结论、其余仅相对路径。断言面：
+//   - 投影形态：头 32 条含前后结论（含内容抽查）、其余仅路径；路径序列与
+//     存储态逐条全等，回执 Total/条数不随投影变化；
+//   - 页装配实测：每页整答 json.Marshal ≤ panoramaPageSoftBytes 软界，页数
+//     ≤3 且显著低于全量结论形态推演页数（生产估算器 snapDiffEntryWireBytes +
+//     打包函数 panoramaPackEnd 对未投影条目空间的同预算推演，夹具量级自检
+//     ≥4 页），线上装载字节合计低于全量差异集字节的一半；
+//   - 存储保全：重启读回（新管理器实例走 KV 重载路径）LastDiff 与注入形态
+//     JSON 逐字节全等——投影只动线上传输，不动存储态。
+func TestGetPanoramaDiffConclusionProjection(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+
+	// 快照本体保持小量（六段在场即可），差异集巨量：变更 5 万 + 新增/消失各 5 千
+	const (
+		changedTotal      = 50000
+		addedRemovedTotal = 5000
+	)
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		GeneratedAtMs: 1700000000007,
+		RootPath:      root,
+		Dirs:          []SnapDir{{RelKey: "库根目录甲", Name: "库根目录甲", Depth: 1, FileCount: changedTotal}},
+		Stats:         SnapStats{TotalFiles: changedTotal + 2*addedRemovedTotal},
+	}
+	diff := &SnapDiff{
+		Changed: make([]SnapDiffEntry, 0, changedTotal),
+		Added:   make([]SnapDiffEntry, 0, addedRemovedTotal),
+		Removed: make([]SnapDiffEntry, 0, addedRemovedTotal),
+	}
+	for i := 0; i < changedTotal; i++ {
+		rel := fmt.Sprintf("库根目录甲/子目录乙/作品集丙长名占位段/卷次目录_%03d/变更文件占位文段甲乙丙_%06d.jpg", i%40, i)
+		diff.Changed = append(diff.Changed, SnapDiffEntry{RelPath: rel,
+			Before: &SnapConclusion{State: snapStatePlain, PendingDims: []string{"标题", "作者"},
+				Final: []SnapDecl{{Dimension: "作者", Value: fmt.Sprintf("旧作者占位_%06d", i), Source: "rule", RoleName: "画师"}}},
+			After: &SnapConclusion{State: snapStateIdentified,
+				Final: []SnapDecl{{Dimension: "作者", Value: fmt.Sprintf("新作者占位_%06d", i), Source: "assign", RoleName: "画师"},
+					{Dimension: "标题", Value: fmt.Sprintf("新标题占位_%06d", i), Source: "assign"}}}})
+	}
+	for i := 0; i < addedRemovedTotal; i++ {
+		diff.Added = append(diff.Added, SnapDiffEntry{
+			RelPath: fmt.Sprintf("库根目录甲/子目录乙/新增文件占位文段甲乙丙_%06d.jpg", i),
+			After:   &SnapConclusion{State: snapStatePlain}})
+		diff.Removed = append(diff.Removed, SnapDiffEntry{
+			RelPath: fmt.Sprintf("库根目录甲/子目录乙/消失文件占位文段甲乙丙_%06d.jpg", i),
+			Before:  &SnapConclusion{State: snapStateIdentified}})
+	}
+	if _, err := m.CompleteRecognitionWithDiff(root, snap, diff); err != nil {
+		t.Fatalf("注入快照与差异集失败: %v", err)
+	}
+
+	// 存储保全：重启读回走 KV 重载路径，全量差异集与注入形态 JSON 逐字节全等。
+	rebooted := NewSessionManagerWithStore(ctx, nil, ctx.store)
+	sessStored, err := rebooted.SessionOf(root)
+	if err != nil {
+		t.Fatalf("重启后读会话失败: %v", err)
+	}
+	if sessStored.LastDiff == nil {
+		t.Fatal("差异集应随会话持久化")
+	}
+	storedJSON, err := json.Marshal(sessStored.LastDiff)
+	if err != nil {
+		t.Fatalf("存储差异集序列化失败: %v", err)
+	}
+	injectedJSON, err := json.Marshal(diff)
+	if err != nil {
+		t.Fatalf("注入差异集序列化失败: %v", err)
+	}
+	if !bytes.Equal(storedJSON, injectedJSON) {
+		t.Fatalf("存储 LastDiff 应全量结论保全（读回 %d vs 注入 %d 字节）", len(storedJSON), len(injectedJSON))
+	}
+
+	// overview 默认页大小逐页拉完（页预算/条数上限同生产缺省）
+	total := 1 + changedTotal + 2*addedRemovedTotal // 目录 1 条 + 差异三清单
+	gotDiff := &SnapDiff{Changed: []SnapDiffEntry{}, Added: []SnapDiffEntry{}, Removed: []SnapDiffEntry{}}
+	var wireBytes int
+	pages := 0
+	cursor := ""
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(950 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionOverview, Cursor: cursor,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Panorama == nil || resp.Page == nil || resp.Diff == nil {
+			t.Fatalf("overview 分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("页应答序列化失败: %v", err)
+		}
+		if len(data) > panoramaPageSoftBytes {
+			t.Fatalf("第 %d 页整答实测 %d 字节超软界 %d", page+1, len(data), panoramaPageSoftBytes)
+		}
+		wireBytes += len(data)
+		if resp.Page.Total != total {
+			t.Fatalf("页回执 Total = %d，期望 %d（条数不随投影变化）", resp.Page.Total, total)
+		}
+		gotDiff.Changed = append(gotDiff.Changed, resp.Diff.Changed...)
+		gotDiff.Added = append(gotDiff.Added, resp.Diff.Added...)
+		gotDiff.Removed = append(gotDiff.Removed, resp.Diff.Removed...)
+		pages = page + 1
+		if resp.Page.Done {
+			if resp.Page.NextCursor != "" {
+				t.Fatal("末页不应携带续拉游标")
+			}
+			break
+		}
+		if resp.Page.NextCursor == "" {
+			t.Fatal("非末页缺续拉游标")
+		}
+		cursor = resp.Page.NextCursor
+	}
+
+	// 投影形态：头 32 条按清单本来的结论侧保全、其余仅路径；路径与存储态逐条全等
+	checkProjected := func(name string, got, want []SnapDiffEntry, wantBefore, wantAfter bool) {
+		if len(got) != len(want) {
+			t.Fatalf("%s 拼接条数 = %d，期望 %d", name, len(got), len(want))
+		}
+		for i := range got {
+			if got[i].RelPath != want[i].RelPath {
+				t.Fatalf("%s 第 %d 条路径 %q 与存储态 %q 不符", name, i+1, got[i].RelPath, want[i].RelPath)
+			}
+			if i < panoramaDiffConclusionHead {
+				if wantBefore && got[i].Before == nil {
+					t.Fatalf("%s 头界内第 %d 条缺 Before 结论", name, i+1)
+				}
+				if wantAfter && got[i].After == nil {
+					t.Fatalf("%s 头界内第 %d 条缺 After 结论", name, i+1)
+				}
+				continue
+			}
+			if got[i].Before != nil || got[i].After != nil {
+				t.Fatalf("%s 第 %d 条（超出头 %d 条）应仅携带路径，实际携带结论", name, i+1, panoramaDiffConclusionHead)
+			}
+		}
+	}
+	checkProjected("变更清单", gotDiff.Changed, diff.Changed, true, true)
+	checkProjected("新增清单", gotDiff.Added, diff.Added, false, true)
+	checkProjected("消失清单", gotDiff.Removed, diff.Removed, true, false)
+	// 头界内条目的结论内容保全抽查（头界最后一条：Before plain+两待裁决维度 /
+	// After identified+两条终选声明）
+	if head := gotDiff.Changed[panoramaDiffConclusionHead-1]; head.Before == nil || head.Before.State != snapStatePlain ||
+		len(head.Before.PendingDims) != 2 || head.After == nil || head.After.State != snapStateIdentified || len(head.After.Final) != 2 {
+		t.Fatalf("变更清单头界最后一条应保全前后结论内容: %+v", head)
+	}
+
+	// 页数收益对照：全量结论形态推演——同一条目空间（目录 1 条 + 差异三清单）
+	// 喂生产估算器（未投影条目，结论全在场）与打包函数，共用同一页预算与条数
+	// 上限；页数差异即瘦身的装载收益。
+	fullCost := func(i int) int {
+		if i == 0 {
+			return snapDirWireBytes(snap.Dirs[0])
+		}
+		switch j := i - 1; {
+		case j < changedTotal:
+			return snapDiffEntryWireBytes(diff.Changed[j])
+		case j < changedTotal+addedRemovedTotal:
+			return snapDiffEntryWireBytes(diff.Added[j-changedTotal])
+		default:
+			return snapDiffEntryWireBytes(diff.Removed[j-changedTotal-addedRemovedTotal])
+		}
+	}
+	fullPages := 0
+	for offset := 0; offset < total; fullPages++ {
+		end := panoramaPackEnd(fullCost, offset, total, panoramaPageMaxEntries)
+		if end <= offset {
+			t.Fatal("全量结论形态推演打包未推进")
+		}
+		offset = end
+	}
+	if fullPages < 4 {
+		t.Fatalf("全量结论形态推演页数 %d 应 ≥4（夹具量级自检）", fullPages)
+	}
+	if pages > 3 {
+		t.Fatalf("投影后 5 万变更 + 5 千新增/消失应 ≤3 页装载，实际 %d 页", pages)
+	}
+	if pages >= fullPages {
+		t.Fatalf("投影页数 %d 应显著低于全量结论形态 %d 页", pages, fullPages)
+	}
+	if wireBytes*2 >= len(injectedJSON) {
+		t.Fatalf("线上装载实测 %d 字节应低于全量差异集 %d 字节的一半", wireBytes, len(injectedJSON))
+	}
+	t.Logf("投影装载 %d 页 / 整答合计 %d 字节；全量结论形态推演 %d 页 / 全量差异集 %d 字节",
+		pages, wireBytes, fullPages, len(injectedJSON))
 }

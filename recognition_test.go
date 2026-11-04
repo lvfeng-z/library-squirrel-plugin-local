@@ -1442,8 +1442,10 @@ func countDiffPage(d *SnapDiff) int {
 // 6 万条）。断言面：
 //   - 每页整答 json.Marshal 实测 ≤ panoramaPageSoftBytes 软界（装配器页预算
 //     设计上 64MB 硬门不可达）；
-//   - 跨页拼接与全量决策态/全量差异集逐字节全等（赋值档案/差异清单全量可达，
-//     语义零丢失）；
+//   - 跨页拼接与全量决策态逐字节全等（赋值档案全量可达，语义零丢失）；差异集
+//     与线上传输投影（头 panoramaDiffConclusionHead 条保留结论、其余仅路径——
+//     护栏四瘦身）逐字节全等，存储态全量保全由
+//     TestGetPanoramaDiffConclusionProjection 锚定；
 //   - 回执 offset/count/total 含 decisions/diff 段合计，末页声明收敛。
 func TestGetPanoramaOverviewDecisionsDiffBudget(t *testing.T) {
 	root := t.TempDir()
@@ -1605,8 +1607,8 @@ func TestGetPanoramaOverviewDecisionsDiffBudget(t *testing.T) {
 	if gotDirs != wantDirCount {
 		t.Fatalf("全景六段逐页合计目录条数 = %d，期望 %d", gotDirs, wantDirCount)
 	}
-	// 跨页拼接语义全等锚：与全量决策态/差异集 JSON 逐字节全等（赋值档案/
-	// 差异清单全量可达，语义零丢失）
+	// 跨页拼接语义全等锚：与全量决策态 JSON 逐字节全等（赋值档案全量可达，
+	// 语义零丢失）；差异集与线上传输投影逐字节全等（见下，护栏四瘦身）
 	gotDecJSON, err := json.Marshal(gotDec)
 	if err != nil {
 		t.Fatalf("拼接决策态序列化失败: %v", err)
@@ -1618,12 +1620,20 @@ func TestGetPanoramaOverviewDecisionsDiffBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("拼接差异集序列化失败: %v", err)
 	}
-	wantDiffJSON, err := json.Marshal(sessFull.LastDiff)
+	// 护栏四（差异巨表装载瘦身）：差异集线上传输投影——每清单头
+	// panoramaDiffConclusionHead 条保留前后结论、其余仅路径；拼接与投影形态
+	// 逐字节全等（路径全量可达；存储态全量保全由
+	// TestGetPanoramaDiffConclusionProjection 锚定）。
+	wantDiffJSON, err := json.Marshal(&SnapDiff{
+		Changed: wireDiffEntriesOf(sessFull.LastDiff.Changed),
+		Added:   wireDiffEntriesOf(sessFull.LastDiff.Added),
+		Removed: wireDiffEntriesOf(sessFull.LastDiff.Removed),
+	})
 	if err != nil {
-		t.Fatalf("全量差异集序列化失败: %v", err)
+		t.Fatalf("差异集线上投影序列化失败: %v", err)
 	}
 	if !bytes.Equal(gotDiffJSON, wantDiffJSON) {
-		t.Fatalf("差异集跨页拼接与全量差异集 JSON 不逐字节全等（%d vs %d 字节）", len(gotDiffJSON), len(wantDiffJSON))
+		t.Fatalf("差异集跨页拼接与线上投影 JSON 不逐字节全等（%d vs %d 字节）", len(gotDiffJSON), len(wantDiffJSON))
 	}
 	t.Logf("decisions=%d 字节 diff=%d 字节，%d 页拉完，末页整答 %d 字节",
 		len(wantDecJSON), len(wantDiffJSON), pages, lastMeasured)
@@ -3249,4 +3259,246 @@ func TestIncrementalReviveByAssignmentEntries(t *testing.T) {
 	assertAuthor("目录A/f1.jpg", "目录作者")
 	assertAuthor("目录B/f2.jpg", "例外作者")
 	assertAuthor("目录C/f3.jpg", "")
+}
+
+// —— 欠计数护栏（枚举欠计数拒覆盖）——
+
+// undercountFixtureTree 构造欠计数护栏测试树：根 3 文件 + ArtistB 8 png +
+// ArtistA/SetX 12 jpg 共 23 文件（对齐真机事故合成库形态），返回全部相对路径
+// （'/' 分隔，删除模拟半可见用）。
+func undercountFixtureTree(t *testing.T, root string) []string {
+	t.Helper()
+	rels := make([]string, 0, 23)
+	for i := 1; i <= 3; i++ {
+		rel := fmt.Sprintf("根文件_%02d.jpg", i)
+		writeTestFile(t, root+"/"+rel, "r")
+		rels = append(rels, rel)
+	}
+	for i := 1; i <= 8; i++ {
+		rel := fmt.Sprintf("ArtistB/b_%02d.png", i)
+		writeTestFile(t, root+"/"+rel, "b")
+		rels = append(rels, rel)
+	}
+	for i := 1; i <= 12; i++ {
+		rel := fmt.Sprintf("ArtistA/SetX/a_%03d.jpg", i)
+		writeTestFile(t, root+"/"+rel, "a")
+		rels = append(rels, rel)
+	}
+	return rels
+}
+
+// undercountRemoveExcept 删除 keep 之外的全部测试文件（模拟移动盘半可见：
+// 枚举只能看到幸存者）。
+func undercountRemoveExcept(t *testing.T, root string, rels []string, keep string) {
+	t.Helper()
+	for _, rel := range rels {
+		if rel == keep {
+			continue
+		}
+		if err := os.Remove(root + "/" + rel); err != nil {
+			t.Fatalf("删除文件 %s 失败: %v", rel, err)
+		}
+	}
+}
+
+// waitUndercountRecognitionIdle 等库根识别在跑标记清零（标记在启动入口
+// 返回前同步置位；终态事件先于标记清位发布，清零后事件必已可读）。
+func waitUndercountRecognitionIdle(t *testing.T, m *SessionManager, root string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.recogMu.Lock()
+		idle := !m.recogRunning[root]
+		m.recogMu.Unlock()
+		if idle {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("识别干跑超时未完成")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// lastUndercountDoneEvent 取库根最近一条识别终态事件并解出载荷。
+func lastUndercountDoneEvent(t *testing.T, ctx *workbenchTestCtx, root string) workbenchFrontendEvent {
+	t.Helper()
+	events := ctx.publishedSnapshot()
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].topic != workbenchTopicEvent {
+			continue
+		}
+		var evt workbenchFrontendEvent
+		if err := json.Unmarshal([]byte(events[i].data), &evt); err != nil {
+			t.Fatalf("解析识别事件失败: %v", err)
+		}
+		if evt.Kind == workbenchEventRecognitionDone && evt.Root == root {
+			return evt
+		}
+	}
+	t.Fatalf("库根 %s 没有识别终态事件", root)
+	return workbenchFrontendEvent{}
+}
+
+// undercountBlockedOf 读欠计数护栏放行簿记的当前位。
+func undercountBlockedOf(m *SessionManager, root string) bool {
+	m.recogMu.Lock()
+	defer m.recogMu.Unlock()
+	return m.undercountBlocked[root]
+}
+
+// snapshotTotalOf 读会话快照的文件计数（快照缺席即失败）。
+func snapshotTotalOf(t *testing.T, m *SessionManager, root string) int {
+	t.Helper()
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if sess.Snapshot == nil {
+		t.Fatal("快照缺席")
+	}
+	return sess.Snapshot.Stats.TotalFiles
+}
+
+// TestUndercountGuardRejectsOverwrite 欠计数轮（上轮 23 文件 → 枚举 1）返回
+// 护栏错误且会话快照未被覆盖：拒绝文案含两轮计数与二次点击指引，放行簿记
+// 置位（任何来源的轮命中欠计数条件都拒绝）。
+func TestUndercountGuardRejectsOverwrite(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	rels := undercountFixtureTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮全量识别失败: %v", err)
+	}
+	if got := snapshotTotalOf(t, m, root); got != 23 {
+		t.Fatalf("首轮快照文件数 = %d，期望 23", got)
+	}
+
+	undercountRemoveExcept(t, root, rels, "ArtistA/SetX/a_001.jpg")
+	err := m.runFullRecognition(root)
+	if err == nil || !strings.Contains(err.Error(), "欠计数护栏拒绝覆盖") {
+		t.Fatalf("欠计数轮应返回护栏错误，实际: %v", err)
+	}
+	for _, want := range []string{"23", "1", "再次点击重新识别强制覆盖"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("拒绝文案应含 %q，实际: %v", want, err)
+		}
+	}
+	if got := snapshotTotalOf(t, m, root); got != 23 {
+		t.Fatalf("被拦后快照应保全为 23 文件，实际 %d（会话被覆盖）", got)
+	}
+	if !undercountBlockedOf(m, root) {
+		t.Fatal("护栏拒绝后放行簿记应置位")
+	}
+}
+
+// TestUndercountGuardUserRetryOverrides 用户入口二次触发放行：被拦后再走
+// StartRecognition（用户动作入口）——簿记被消费、护栏跳过、快照照常覆盖，
+// 完成消息附注跳过说明。
+func TestUndercountGuardUserRetryOverrides(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+	rels := undercountFixtureTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮全量识别失败: %v", err)
+	}
+	undercountRemoveExcept(t, root, rels, "ArtistA/SetX/a_001.jpg")
+	if err := m.runFullRecognition(root); err == nil {
+		t.Fatal("欠计数轮应被护栏拒绝")
+	}
+
+	started, running, err := m.StartRecognition(root)
+	if err != nil || !started || running {
+		t.Fatalf("用户入口二次触发应启动新轮: started=%v running=%v err=%v", started, running, err)
+	}
+	waitUndercountRecognitionIdle(t, m, root)
+	done := lastUndercountDoneEvent(t, ctx, root)
+	if !done.Success {
+		t.Fatalf("二次触发轮应放行成功，实际失败: %s", done.Message)
+	}
+	if !strings.Contains(done.Message, "本轮经再次触发跳过欠计数护栏") {
+		t.Fatalf("完成消息应含跳过护栏附注: %s", done.Message)
+	}
+	if got := snapshotTotalOf(t, m, root); got != 1 {
+		t.Fatalf("放行轮快照应按残缺枚举覆盖为 1 文件，实际 %d", got)
+	}
+	if undercountBlockedOf(m, root) {
+		t.Fatal("用户入口消费后放行簿记应清位")
+	}
+}
+
+// TestUndercountGuardAutoRefreshDoesNotConsumeOverride 自动链入口（刷新调度
+// 路径）见簿记不消费、欠计数仍被拦：被拦后 scheduleRecognitionRefresh 启动
+// 的自动轮再次被拦——快照保全、簿记仍在场。
+func TestUndercountGuardAutoRefreshDoesNotConsumeOverride(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+	rels := undercountFixtureTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮全量识别失败: %v", err)
+	}
+	undercountRemoveExcept(t, root, rels, "ArtistA/SetX/a_001.jpg")
+	if err := m.runFullRecognition(root); err == nil {
+		t.Fatal("欠计数轮应被护栏拒绝")
+	}
+
+	if !m.scheduleRecognitionRefresh(root) {
+		t.Fatal("自动刷新轮应已启动")
+	}
+	waitUndercountRecognitionIdle(t, m, root)
+	done := lastUndercountDoneEvent(t, ctx, root)
+	if done.Success {
+		t.Fatalf("自动轮见簿记不消费、欠计数应仍被拦，实际成功: %s", done.Message)
+	}
+	if !strings.Contains(done.Message, "欠计数护栏拒绝覆盖") {
+		t.Fatalf("自动轮失败文案应为护栏拒绝: %s", done.Message)
+	}
+	if got := snapshotTotalOf(t, m, root); got != 23 {
+		t.Fatalf("自动轮被拦后快照应保全为 23 文件，实际 %d", got)
+	}
+	if !undercountBlockedOf(m, root) {
+		t.Fatal("自动轮不消费放行簿记，簿记应仍在场")
+	}
+}
+
+// TestUndercountGuardSkippedWithoutPrevSnapshot prev 为空不设防：首轮识别
+//（无既有结论可保护）即使仅 1 文件也照常完成，簿记不置位。
+func TestUndercountGuardSkippedWithoutPrevSnapshot(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	writeTestFile(t, root+"/仅此一件.jpg", "x")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮识别不应设防: %v", err)
+	}
+	if got := snapshotTotalOf(t, m, root); got != 1 {
+		t.Fatalf("首轮快照文件数 = %d，期望 1", got)
+	}
+	if undercountBlockedOf(m, root) {
+		t.Fatal("无快照可保护的轮不应置放行簿记")
+	}
+}
+
+// TestUndercountGuardModerateShrinkPasses 中等收缩（约 -30%）不拦：23 → 16
+// 文件（绝对损失 7 达下限、但未少过半），照常覆盖、簿记不置位。
+func TestUndercountGuardModerateShrinkPasses(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	rels := undercountFixtureTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮全量识别失败: %v", err)
+	}
+	for _, rel := range rels[:7] { // 根 3 + ArtistB 4，余 16（约 -30%）
+		if err := os.Remove(root + "/" + rel); err != nil {
+			t.Fatalf("删除文件 %s 失败: %v", rel, err)
+		}
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("中等收缩不应被护栏拦截: %v", err)
+	}
+	if got := snapshotTotalOf(t, m, root); got != 16 {
+		t.Fatalf("收缩轮快照文件数 = %d，期望 16", got)
+	}
+	if undercountBlockedOf(m, root) {
+		t.Fatal("中等收缩轮不应置放行簿记")
+	}
 }

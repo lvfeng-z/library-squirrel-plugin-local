@@ -166,12 +166,19 @@ var evalWorkerCount = func() int { return runtime.GOMAXPROCS(0) }
 // 保持，汇流消费方（快照装配与命中预览）按文件序索引取用，语义不变。
 const evalFileChunkSize = 128
 
+// evalProgressStride 求值相进度步长：逐文件结论循环每累计完成这么多文件向
+// 进度钩子发一拍（大库求值分钟级，相内按步长多拍推送）。拍频与工作子数
+// 无关——计数按块完成原子累计，跨步长才发拍。
+const evalProgressStride = 2000
+
 // MergedRecognitionWithTree 带全量聚合视图的合并求值：treeFiles 为目录树全量
 // 文件清单（识别增量批时 evalFiles 仅含新目录文件——跨被跳目录的各层子女/
 // 子目录数必须按全量树聚合，否则目录终结谓词（childrenAllFormat/childDirCount
 // 等）在增量轮少计误判）。同目录兄弟仍按本批聚合：mtime 游标按目录整跳，本批
-// 目录的文件集完整。
-func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, assigns map[string]SessionAssignment) []FileConclusion {
+// 目录的文件集完整。onEvalProgress 为可选求值进度钩子（变参，缺省零进度
+// 拍）：每跨一个步长的累计完成数发一拍，调用串行、done 单调不减、total 恒
+// 为本批文件数——识别干跑以此转发求值相内进度事件，其余调用点缺省直通。
+func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, assigns map[string]SessionAssignment, onEvalProgress ...func(done, total int)) []FileConclusion {
 	// 同目录兄弟全集按「父目录」批量构造（与 RunPipeline 内部同键同序）；单文件
 	// 重算通道（recomputeFileDecision）经磁盘重扫预填兄弟全集后共用同一单文件
 	// 合并实现
@@ -241,6 +248,31 @@ func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, l
 		}
 		conclusions[i] = mergedFileConclusionWithStructural(in, rules, lib, assign, structuralByRel[file.RelPath])
 	}
+	// 进度拍发器（钩子缺省时为空操作）：块完成计数原子累计，每跨一个步长发
+	// 一拍 done=累计完成数（块边界值，非步长整数倍）；拍调用串行且 done 单调
+	// 不减——多工作子乱序完成块时后到的较小累计值直接丢弃（拍是节流采样，
+	// 不承载精确对账）。
+	var onChunkDone func(int)
+	if len(onEvalProgress) > 0 && onEvalProgress[0] != nil {
+		hook := onEvalProgress[0]
+		var doneCount atomic.Int64
+		var beatMu sync.Mutex
+		lastBeat := 0
+		onChunkDone = func(n int) {
+			prev := doneCount.Add(int64(n))
+			if prev/evalProgressStride <= (prev-int64(n))/evalProgressStride {
+				return
+			}
+			beatMu.Lock()
+			if int(prev) > lastBeat {
+				lastBeat = int(prev)
+				hook(int(prev), len(files))
+			}
+			beatMu.Unlock()
+		}
+	} else {
+		onChunkDone = func(int) {}
+	}
 	if chunks := (len(files) + evalFileChunkSize - 1) / evalFileChunkSize; chunks > 1 && evalWorkerCount() > 1 {
 		// 工作子池取块：原子游标取块号，块间下标不重叠（零共享写），单工作子
 		// 或单块时同一求值实现在本 goroutine 内联执行（两模式同一实现）。
@@ -261,14 +293,21 @@ func MergedRecognitionWithTree(files, treeFiles []ScanFile, rules []RuleEntry, l
 					for i := start; i < end; i++ {
 						evaluateFileAt(i)
 					}
+					onChunkDone(end - start)
 				}
 			}()
 		}
 		wg.Wait()
 		return conclusions
 	}
-	for i := range files {
-		evaluateFileAt(i)
+	// 串行内联路径与并行工作子同一节流形态：按块推进并逐块报完成数（拍点与
+	// 并行模式的块边界一致）。
+	for start := 0; start < len(files); start += evalFileChunkSize {
+		end := min(start+evalFileChunkSize, len(files))
+		for i := start; i < end; i++ {
+			evaluateFileAt(i)
+		}
+		onChunkDone(end - start)
 	}
 	return conclusions
 }
@@ -2216,6 +2255,16 @@ const (
 	recogPhaseSave     = "save"     // 快照入会话与状态迁移
 )
 
+// 欠计数护栏判定线（两条件同时满足才拒绝覆盖）：新枚举文件数 × 比例因子 <
+// 上轮快照文件数（少过半）且 绝对损失 ≥ 下限。日常增删文件远低于该线不触发；
+// 合法删除近半库会被拦一次，用户再次触发即强制覆盖。
+const (
+	// UNDERCOUNT_GUARD_RATIO_FACTOR 相对比例因子（2 = 少过半进入判定）。
+	UNDERCOUNT_GUARD_RATIO_FACTOR = 2
+	// UNDERCOUNT_GUARD_MIN_ABS_LOSS 绝对损失下限（个）。
+	UNDERCOUNT_GUARD_MIN_ABS_LOSS = 5
+)
+
 // publishRecognitionEvent 识别事件经工作台事件通道推送前端（上下文不可用时静默，
 // 不影响识别本身）。
 func (m *SessionManager) publishRecognitionEvent(evt *workbenchFrontendEvent) {
@@ -2232,13 +2281,42 @@ func (m *SessionManager) publishRecognitionEvent(evt *workbenchFrontendEvent) {
 	}
 }
 
-// StartRecognition 异步启动全量识别干跑：同库根已在途时不重复启动（返回
-// running=true）；会话不存在时返回错误。干跑完成经 recognitionDone 事件通知，
-// 快照与状态迁移由干跑主体完成。
+// recognitionTrigger 识别干跑的启动意图。欠计数护栏的放行簿记只被用户动作
+// 入口消费：自动刷新链见簿记不消费、护栏照常生效——放行必须是用户的显式点击
+// 确认，自动轮不得静默绕过护栏。
+type recognitionTrigger int
+
+const (
+	// recognitionTriggerUser 用户动作入口（工作台「重新识别」按钮）。
+	recognitionTriggerUser recognitionTrigger = iota
+	// recognitionTriggerAuto 自动刷新链（规则生成/赋值变更的刷新调度与其
+	// 在途结束后的补启动）。
+	recognitionTriggerAuto
+)
+
+// StartRecognition 用户动作入口（工作台「重新识别」按钮）：异步启动全量识别
+// 干跑，同库根已在途时不重复启动（返回 running=true）；会话不存在时返回错误。
+// 与自动入口的差异仅在欠计数护栏放行簿记：本入口启动时见簿记即清位，本轮跳过
+// 护栏强制覆盖。干跑完成经 recognitionDone 事件通知，快照与状态迁移由干跑主体
+// 完成。
 func (m *SessionManager) StartRecognition(root string) (started, running bool, err error) {
+	return m.startRecognition(root, recognitionTriggerUser)
+}
+
+// startRecognitionAuto 自动刷新链入口（识别刷新调度的当轮启动与在途结束后
+// 的补启动）：启动行为与用户入口一致，但不消费欠计数护栏放行簿记——自动轮
+// 命中欠计数条件照常拒绝，错误经 recognitionDone 事件用户可见。
+func (m *SessionManager) startRecognitionAuto(root string) (started, running bool, err error) {
+	return m.startRecognition(root, recognitionTriggerAuto)
+}
+
+// startRecognition 干跑启动主体（两意图入口共用）：在跑互斥置位后干跑进
+// goroutine；意图位仅在放行簿记消费处分岔。
+func (m *SessionManager) startRecognition(root string, trigger recognitionTrigger) (started, running bool, err error) {
 	if _, err := m.cachedSession(root); err != nil { // 只读存在性校验：缓存读路径
 		return false, false, err
 	}
+	skipUndercountGuard := false
 	m.recogMu.Lock()
 	if m.recogRunning == nil {
 		m.recogRunning = make(map[string]bool)
@@ -2246,6 +2324,11 @@ func (m *SessionManager) StartRecognition(root string) (started, running bool, e
 	if m.recogRunning[root] {
 		m.recogMu.Unlock()
 		return false, true, nil
+	}
+	if trigger == recognitionTriggerUser && m.undercountBlocked[root] {
+		// 放行簿记消费（仅用户动作）：上次被拦的库根再次触发即跳过护栏。
+		delete(m.undercountBlocked, root)
+		skipUndercountGuard = true
 	}
 	m.recogRunning[root] = true
 	m.recogMu.Unlock()
@@ -2255,7 +2338,7 @@ func (m *SessionManager) StartRecognition(root string) (started, running bool, e
 			delete(m.recogRunning, root)
 			m.recogMu.Unlock()
 		}()
-		if err := m.runFullRecognition(root); err != nil {
+		if err := m.runFullRecognitionOpt(root, skipUndercountGuard); err != nil {
 			m.warnf("全量识别失败（root=%s）: %v", root, err)
 			m.publishRecognitionEvent(&workbenchFrontendEvent{
 				Kind: workbenchEventRecognitionDone, Root: root,
@@ -2267,12 +2350,52 @@ func (m *SessionManager) StartRecognition(root string) (started, running bool, e
 	return true, false, nil
 }
 
-// runFullRecognition 全量识别干跑主体（零任务产出、零弹问的纯求值）：
+// undercountGuardErr 欠计数护栏判定：上轮快照在场且新枚举全集显著欠收（见
+// UNDERCOUNT_GUARD 判定线——移动盘掉线/半可见、路径权限抖动的典型形态）时
+// 置放行簿记并返回用户可读拒绝错误，调用方以此中止本轮、会话零写入（既有
+// 好快照原样保全）；prev 为空（首轮，无既有结论可保护）或收缩未及判定线时
+// 返回 nil 放行。判定基数 = 枚举全集 AllFiles（含未变目录复用者，与上轮
+// 快照文件计数同口径），增量轮与强制全量轮同判。
+func (m *SessionManager) undercountGuardErr(root string, prev *RecognitionSnapshot, enumCount int) error {
+	if prev == nil {
+		return nil
+	}
+	prevCount := prev.Stats.TotalFiles
+	if enumCount*UNDERCOUNT_GUARD_RATIO_FACTOR >= prevCount || prevCount-enumCount < UNDERCOUNT_GUARD_MIN_ABS_LOSS {
+		return nil
+	}
+	m.markUndercountBlocked(root)
+	loss := prevCount - enumCount
+	return fmt.Errorf("欠计数护栏拒绝覆盖：本轮枚举到 %d 个文件，上轮识别快照为 %d 个（少了 %d 个、约 %.0f%%）——磁盘可能掉线或半可见；若文件确已删除，请再次点击重新识别强制覆盖",
+		enumCount, prevCount, loss, float64(loss)/float64(prevCount)*100)
+}
+
+// markUndercountBlocked 置欠计数护栏放行簿记（库根 → 上次被拦；重复拒绝
+// 重复置位，幂等）。
+func (m *SessionManager) markUndercountBlocked(root string) {
+	m.recogMu.Lock()
+	if m.undercountBlocked == nil {
+		m.undercountBlocked = make(map[string]bool)
+	}
+	m.undercountBlocked[root] = true
+	m.recogMu.Unlock()
+}
+
+// runFullRecognition 全量识别干跑主体（欠计数护栏设防形态）：上轮快照显著
+// 欠收时拒绝覆盖既有识别结论。直接调用方（含自动刷新链启动的轮）一律走本
+// 入口；用户动作二次触发的强制覆盖轮走 runFullRecognitionOpt(root, true)。
+func (m *SessionManager) runFullRecognition(root string) error {
+	return m.runFullRecognitionOpt(root, false)
+}
+
+// runFullRecognitionOpt 干跑主体（零任务产出、零弹问的纯求值）：
 // 轻量枚举（mtime 增量）→ 库内谓词索引构造 → 「档案 ∪ 会话赋值」合并求值 →
 // 七类元素聚合 → 快照入会话与状态迁移（CompleteRecognition，单次写）。
+// skipUndercountGuard=true 跳过欠计数护栏（用户动作二次触发的强制覆盖轮，
+// 完成消息附注说明）。
 // 增量资格：上次快照在场且其档案指纹与当前一致——档案外部变更或首次识别一律
 // 全量重算；赋值文件所在目录即使 mtime 未变也强制重算（赋值按维度覆盖结论）。
-func (m *SessionManager) runFullRecognition(root string) error {
+func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard bool) error {
 	// 变异旁路读：识别主体持有会话跨整轮（分钟级），且聚合阶段对 prev 快照的
 	// 复用群成员有共享底层数组的转置排序与元素终判改写（aggregatePanorama 的
 	// sort.SliceStable/markCommonElements）——必须私有实例，缓存共享实例不得
@@ -2316,6 +2439,14 @@ func (m *SessionManager) runFullRecognition(root string) error {
 	enumRes, err := NewScanner(root).Enumerate(prevMtimes)
 	if err != nil {
 		return err
+	}
+	// 欠计数护栏：枚举成功后、任何会话状态写入之前判定——拒绝即整轮中止，
+	// 会话零写入（好快照原样保全），错误经调用方的 recognitionDone{success:
+	// false} 出口呈给用户。
+	if !skipUndercountGuard {
+		if err := m.undercountGuardErr(root, prev, len(enumRes.AllFiles)); err != nil {
+			return err
+		}
 	}
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseScan,
@@ -2371,7 +2502,21 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		Done: indexSize(lib), Total: indexSize(lib),
 	})
 
-	conclusions := MergedRecognitionWithTree(buildScanFiles(evalFiles), buildScanFiles(enumRes.AllFiles), enabledRules, lib, sess.Assignments)
+	// 求值相进度节流闭包：相首先发一拍 done=0（相位切换即时反馈），求值中每
+	// 跨一个步长由钩子发一拍，相尾全量拍保留在求值返回后。闭包可能被并行
+	// 工作子调用，互斥串行化发布——PublishToFrontend 的并发安全未核验，发布
+	// 串行不依赖调用方纪律。
+	var evalProgressMu sync.Mutex
+	publishEvalProgress := func(done, total int) {
+		evalProgressMu.Lock()
+		m.publishRecognitionEvent(&workbenchFrontendEvent{
+			Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseEvaluate,
+			Done: done, Total: total,
+		})
+		evalProgressMu.Unlock()
+	}
+	publishEvalProgress(0, len(evalFiles))
+	conclusions := MergedRecognitionWithTree(buildScanFiles(evalFiles), buildScanFiles(enumRes.AllFiles), enabledRules, lib, sess.Assignments, publishEvalProgress)
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseEvaluate,
 		Done: len(conclusions), Total: len(evalFiles),
@@ -2412,13 +2557,17 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		Done: snapshot.Stats.TotalFiles, Total: snapshot.Stats.TotalFiles,
 	})
 	changed, added, removed := diffCounts(diff)
+	doneMsg := fmt.Sprintf("识别完成：共 %d 个文件（已识别 %d、有线索 %d、无线索 %d），序列群 %d，待裁决文件 %d；与上次差异：变更 %d、新增 %d、消失 %d",
+		snapshot.Stats.TotalFiles, snapshot.Stats.Identified, snapshot.Stats.Clueful,
+		snapshot.Stats.Plain, snapshot.Stats.GroupCount, snapshot.Stats.PendingFiles,
+		changed, added, removed)
+	if skipUndercountGuard {
+		doneMsg += "；本轮经再次触发跳过欠计数护栏"
+	}
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionDone, Root: root, Success: true,
 		Done: snapshot.Stats.TotalFiles, Total: snapshot.Stats.TotalFiles,
-		Message: fmt.Sprintf("识别完成：共 %d 个文件（已识别 %d、有线索 %d、无线索 %d），序列群 %d，待裁决文件 %d；与上次差异：变更 %d、新增 %d、消失 %d",
-			snapshot.Stats.TotalFiles, snapshot.Stats.Identified, snapshot.Stats.Clueful,
-			snapshot.Stats.Plain, snapshot.Stats.GroupCount, snapshot.Stats.PendingFiles,
-			changed, added, removed),
+		Message: doneMsg,
 	})
 	return nil
 }

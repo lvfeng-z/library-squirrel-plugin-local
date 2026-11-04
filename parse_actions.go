@@ -987,9 +987,10 @@ func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDim
 // 启动一轮重识别；若同库根已有识别在途（其装载的可能是旧档案/旧赋值集），后台
 // 等其在途结束后补启动一轮，保证新规则/新赋值的效果与差异集必然入快照（不阻塞
 // 调用方的应答；在途识别受修订号闸门约束不会用旧赋值复用结论，补启动轮必然
-// 装载最新赋值集）。返回刷新轮是否已启动或已排定。
+// 装载最新赋值集）。两处启动均走自动入口 startRecognitionAuto——不消费欠计数
+// 护栏放行簿记，欠计数轮在此链路上照常被拦。返回刷新轮是否已启动或已排定。
 func (m *SessionManager) scheduleRecognitionRefresh(root string) bool {
-	started, running, err := m.StartRecognition(root)
+	started, running, err := m.startRecognitionAuto(root)
 	if err != nil {
 		m.warnf("识别刷新启动失败（变更已落盘，可手动重新识别）: %v", err)
 		return false
@@ -1004,7 +1005,7 @@ func (m *SessionManager) scheduleRecognitionRefresh(root string) bool {
 			idle := !m.recogRunning[root]
 			m.recogMu.Unlock()
 			if idle {
-				if _, _, err := m.StartRecognition(root); err != nil {
+				if _, _, err := m.startRecognitionAuto(root); err != nil {
 					m.warnf("识别刷新补启动失败: %v", err)
 				}
 				return
