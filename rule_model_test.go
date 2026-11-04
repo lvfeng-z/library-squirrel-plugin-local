@@ -560,3 +560,60 @@ func TestInvalidRegexBlocked(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyDeclarationsCaptureFaces FromCapture 取值面的多绑定形态回归：普通词
+// 一名一绑定——Apply 与 ApplyDeclarations 均单声明且值一致；同名多条（重复段
+// 产出）仅经 ApplyDeclarations 按绑定序扇出，Apply 维持末值单条（既有调用面
+// 零扰动）；#canon 规范名优先且单值；裸名终备（Row 缺省兼容历史无前缀上下文）。
+func TestApplyDeclarationsCaptureFaces(t *testing.T) {
+	act := ExtractionAction{Dimension: DimTag, From: FromCapture, CaptureName: "tag"}
+
+	// 普通词：一名一绑定，双取值面同值单条。
+	single := &ParseContext{Captures: []CaptureBinding{
+		{Name: "r1.tag", Value: "路灯", Segment: "路灯_01", Start: 0, End: 6},
+	}}
+	decl, ok := act.Apply("rule-a", single)
+	if !ok || decl.Value != "路灯" || decl.RuleID != "rule-a" || decl.Source != SourceFilename {
+		t.Fatalf("普通词 Apply 应单声明 路灯: %+v ok=%v", decl, ok)
+	}
+	if got := act.ApplyDeclarations("rule-a", single); len(got) != 1 || got[0].Value != "路灯" {
+		t.Fatalf("普通词扇出面应单声明 路灯: %+v", got)
+	}
+
+	// 同名多条（重复段形态）：扇出面按绑定序产 3 条；Apply 末值单条。
+	multi := &ParseContext{Captures: []CaptureBinding{
+		{Name: "r1.tag", Value: "a", Segment: "[a][b][c]", Start: 1, End: 2},
+		{Name: "r1.tag", Value: "b", Segment: "[a][b][c]", Start: 4, End: 5},
+		{Name: "r1.tag", Value: "c", Segment: "[a][b][c]", Start: 7, End: 8},
+	}}
+	decls := act.ApplyDeclarations("rule-b", multi)
+	if len(decls) != 3 || decls[0].Value != "a" || decls[1].Value != "b" || decls[2].Value != "c" {
+		t.Fatalf("同名三绑定应扇出三条 a/b/c: %+v", decls)
+	}
+	if last, hit := act.Apply("rule-b", multi); !hit || last.Value != "c" {
+		t.Fatalf("Apply 应维持末值单条 c: %+v hit=%v", last, hit)
+	}
+
+	// #canon 回退序：规范名绑定优先且单值，不扇出原始绑定。
+	canon := &ParseContext{Captures: []CaptureBinding{
+		{Name: "r1.tag", Value: "a", Segment: "[a][b]", Start: 1, End: 2},
+		{Name: "r1.tag", Value: "b", Segment: "[a][b]", Start: 4, End: 5},
+		{Name: "r1.tag#canon", Value: "规范甲", Segment: "[a][b]"},
+	}}
+	if got := act.ApplyDeclarations("rule-c", canon); len(got) != 1 || got[0].Value != "规范甲" {
+		t.Fatalf("#canon 应优先单值单声明 规范甲: %+v", got)
+	}
+
+	// 裸名终备：Row 缺省（0）时兼容无行号前缀的历史上下文。
+	bare := &ParseContext{Captures: []CaptureBinding{{Name: "tag", Value: "旧式"}}}
+	if got := act.ApplyDeclarations("rule-d", bare); len(got) != 1 || got[0].Value != "旧式" {
+		t.Fatalf("裸名终备应单声明 旧式: %+v", got)
+	}
+	// 取不到值：零产出零报错（ctx 为 nil 同）。
+	if got := act.ApplyDeclarations("rule-e", &ParseContext{}); len(got) != 0 {
+		t.Fatalf("无绑定应零声明: %+v", got)
+	}
+	if got := act.ApplyDeclarations("rule-e", nil); got != nil {
+		t.Fatalf("nil 上下文应零声明: %+v", got)
+	}
+}

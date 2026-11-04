@@ -584,6 +584,82 @@ func TestRunFullRecognitionIncremental(t *testing.T) {
 	}
 }
 
+// stampEvaluatorBuild 模拟打标构建：在临时目录落一份带 buildId 的插件清单并
+// 把测试桩的插件根指向它（求值器构建标识的读取面走真实清单解析路径）。
+func stampEvaluatorBuild(t *testing.T, ctx *workbenchTestCtx, buildID string) {
+	t.Helper()
+	dir := t.TempDir()
+	manifest := `{"buildId": "` + buildID + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("写入测试插件清单失败: %v", err)
+	}
+	ctx.pluginRootDir = dir
+}
+
+// TestRunFullRecognitionEvaluatorGate 求值器构建标识的增量闸门三态：相等→增量；
+// 当前为空串（未打标构建）→放行；旧快照空串而当前有值（存量库升级到打标
+// 构建）或两值不同（求值器换版）→强制全量。快照铸造同步铸入当前标识。
+func TestRunFullRecognitionEvaluatorGate(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+	recognitionSampleTree(t, root)
+
+	// 打标首轮：全量，快照铸入标识
+	stampEvaluatorBuild(t, ctx, "build-a")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("打标首轮识别失败: %v", err)
+	}
+	first, _ := m.SessionOf(root)
+	if first.Snapshot.EvaluatorBuildID != "build-a" {
+		t.Fatalf("快照应铸入求值器构建标识 build-a，实际 %q", first.Snapshot.EvaluatorBuildID)
+	}
+
+	// 同一求值器且磁盘未变：增量（未变目录按游标跳过）
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("同求值器二轮识别失败: %v", err)
+	}
+	same, _ := m.SessionOf(root)
+	if same.Snapshot.Stats.SkippedDirs == 0 {
+		t.Fatal("求值器标识相等且磁盘未变时应按游标跳过（增量）")
+	}
+
+	// 求值器换版：标识不同 → 全量，快照铸入新标识
+	stampEvaluatorBuild(t, ctx, "build-b")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("换版识别失败: %v", err)
+	}
+	swapped, _ := m.SessionOf(root)
+	if swapped.Snapshot.Stats.SkippedDirs != 0 {
+		t.Fatalf("求值器换版应强制全量，实际跳过 %d 个目录", swapped.Snapshot.Stats.SkippedDirs)
+	}
+	if swapped.Snapshot.EvaluatorBuildID != "build-b" {
+		t.Fatalf("换版后快照应铸入 build-b，实际 %q", swapped.Snapshot.EvaluatorBuildID)
+	}
+
+	// 当前未打标（开发直跑形态）：不参与比对 → 放行（增量），快照铸出空串
+	ctx.pluginRootDir = ""
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("未打标识别失败: %v", err)
+	}
+	untagged, _ := m.SessionOf(root)
+	if untagged.Snapshot.Stats.SkippedDirs == 0 {
+		t.Fatal("当前构建未打标时应放行既有游标（增量）")
+	}
+	if untagged.Snapshot.EvaluatorBuildID != "" {
+		t.Fatalf("未打标构建铸出的快照标识应为空串，实际 %q", untagged.Snapshot.EvaluatorBuildID)
+	}
+
+	// 存量库升级：旧快照空串而当前有值 → 强制全量
+	stampEvaluatorBuild(t, ctx, "build-c")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("升级后识别失败: %v", err)
+	}
+	upgraded, _ := m.SessionOf(root)
+	if upgraded.Snapshot.Stats.SkippedDirs != 0 {
+		t.Fatalf("旧快照空串而当前有值应强制全量，实际跳过 %d 个目录", upgraded.Snapshot.Stats.SkippedDirs)
+	}
+}
+
 // TestRunFullRecognitionIncrementalGroupRestore 全员已识别结构群的增量轮复原：
 // 结构群成员全部已识别时，文件行不落群组键（已识别成员的群组信息只在群卡），
 // 增量轮按目录整组复原群卡，群聚合计数与全量轮一致。

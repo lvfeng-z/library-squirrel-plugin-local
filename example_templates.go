@@ -62,6 +62,20 @@ func exampleTemplates() []exampleTemplate {
 				"单组整名（[路灯后辈]）尾段为空亦命中",
 		},
 		{
+			Name:     "括号标签×N",
+			Template: "[{标签+}]",
+			Target:   "filename",
+			Description: "方括号组连续出现一至多组、每组内名各取一标签（示例 [中国翻訳] [DL版] 两组双值；" +
+				"{标签*} 形态零组亦命中）。每组各取一值用本词条、只取第一组内名其余吞掉用「首组内名」",
+		},
+		{
+			Name:     "连写标签×N（指定分隔）",
+			Template: "{标签+;_}",
+			Target:   "filename",
+			Description: "下划线分隔连写标签各取一值（a_b_c 三值、ab 不拆）。" +
+				"方括号包裹的标签组请用『括号标签×N』词条",
+		},
+		{
 			Name:     "任意段吞位",
 			Template: "{标题}_{任意}",
 			Target:   "filename",

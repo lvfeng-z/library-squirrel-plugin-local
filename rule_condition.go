@@ -245,62 +245,314 @@ func tokenizeCondx(tpl string) ([]condxToken, error) {
 	return tokens, nil
 }
 
+// condxRepeatable 为可带量词（+ / *）的词位集合（重复段表达方案；词法解析
+// 在本文件，正则生成由任务B 接入主流程时实现）。
+var condxRepeatable = map[string]bool{"标签": true, "作者": true, "集名": true}
+
+// condxRepeatableHint 为可带量词词位的报错清单（稳定顺序，供文案点名）。
+const condxRepeatableHint = "标签/作者/集名"
+
+// condxRepeatWordLabels 为重复段词根英文组名到词表中文的映射（三面引用禁区
+// ——生效条件 / 值级小标 / 组合接线——的报错文案统一按词根中文渲染）。
+var condxRepeatWordLabels = map[string]string{"tag": "标签", "author": "作者", "setname": "集名"}
+
+// condxRepeatRefError 为重复段占位词引用禁区的统一中文文案：en 为词根英文
+// 组名（标签→tag 一类），三面共用同一形态，保证文案口径一致。
+func condxRepeatRefError(en string) error {
+	label, ok := condxRepeatWordLabels[en]
+	if !ok {
+		label = en
+	}
+	return fmt.Errorf("「%s」为重复段占位词（多值产出），暂不能用于生效条件/值级小标/组合接线", label)
+}
+
+// condxRepeatEnOfCapture 从行号前缀形态或裸名捕获名取词根英文组名
+// （r1.tag → tag、r1.tag#canon → tag），供引用禁区文案渲染。
+func condxRepeatEnOfCapture(name string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.TrimSuffix(name, "#canon")
+}
+
+// condxVariant 为占位词内部量词变体（如 标签+、标签*、标签+;_）的词法解析
+// 结果；包内可见，供任务B 消费生成正则。
+type condxVariant struct {
+	// En 为词根对应的英文捕获组名（标签→tag、作者→author、集名→setname）。
+	En string
+	// AtLeastOne 为量词档：true=至少一次（+），false=可零次（*）。
+	AtLeastOne bool
+	// SepSpecified 是否显式指定分隔字面（量词后以 ; 引出）。
+	SepSpecified bool
+	// Sep 为分隔字面原文：自首个分号起含分号本身（标签+; → ";"，标签+;_ → ";_"）。
+	Sep string
+}
+
+// hasCondxVariantMark 报告占位词内部是否含变体标记（+、* 或 ;）：含标记才走
+// 变体解析，否则维持既有单词路径，既有行为零扰动。
+func hasCondxVariantMark(word string) bool {
+	return strings.ContainsAny(word, "+*;")
+}
+
+// parseCondxVariant 解析占位词内部的量词变体：词根 + 量词（+ 或 *）+ 可选
+// 分隔字面（; 引出，取首个分号起的全部、含分号本身）。仅 标签/作者/集名
+// 三词位可带量词；仅分隔无量词、量词后残留非分号开头、未知词根与越权词位
+// 均返回中文报错。
+func parseCondxVariant(word string) (condxVariant, error) {
+	var v condxVariant
+	q := strings.IndexAny(word, "+*")
+	semi := strings.Index(word, ";")
+	if q < 0 || (semi >= 0 && semi < q) {
+		// 含 ; 触发了变体解析，但量词缺失（标签;_）或位于分号之后（标签;+）。
+		return v, fmt.Errorf("模板占位词 {%s} 语法错误：分隔字面须跟在量词（+ 或 *）之后", word)
+	}
+	root, rest := word[:q], word[q+1:]
+	if rest != "" && !strings.HasPrefix(rest, ";") {
+		// 量词后残留非分号开头（如 标签++、标签+x）。
+		return v, fmt.Errorf("模板占位词 {%s} 语法错误：量词后只能跟分号引出的分隔字面", word)
+	}
+	en, known := condxVocab[root]
+	if !known {
+		return v, fmt.Errorf("模板占位词 {%s} 的词根 {%s} 不在词表（%s）", word, root, condxVocabHint)
+	}
+	if !condxRepeatable[root] {
+		return v, fmt.Errorf("模板占位词 {%s} 的词根 {%s} 不可重复：仅 %s 可带量词（+ 或 *）", word, root, condxRepeatableHint)
+	}
+	v.En = en
+	v.AtLeastOne = word[q] == '+'
+	if rest != "" {
+		v.SepSpecified = true
+		v.Sep = rest
+	}
+	return v, nil
+}
+
+// condxRepeatDesc 为重复段（{标签+} 一类量词占位词）的推导描述：整段在主正则
+// 中是恰一个位置捕获组（非命名——SubexpNames 该组名为空串，不进推导出的命名
+// 捕获组名清单；声明层由 declaredConditionRepeatCaptures 显式补入并打标，供
+// 三面引用禁区识别）；绑定层（阶段2）按 GroupIndex 取整段匹配文本，再用
+// UnitPattern 再拆出各单元值。
+type condxRepeatDesc struct {
+	// En 为词根英文组名（标签→tag）。仅作描述标识，不进推导命名组清单
+	//（声明层显式补入）。
+	En string
+	// GroupIndex 为整段位置捕获组在模板正则中的序号（1 起，含全部命名组）。
+	GroupIndex int
+	// UnitPattern 为单元子模式原文：含恰一个捕获组圈住单元值（带包裹为
+	// 「开括号(值类)闭括号」，裸词为「(值类)」），供 FindAllStringSubmatchIndex 再拆。
+	UnitPattern string
+	// Exclude 为单元值类排除集原文（未转义）：带包裹=配对闭括号，裸词=分隔
+	// 字面的全部字符（去重、按首现顺序）。
+	Exclude string
+}
+
+// condxDistinctRunes 返回字符串的去重 rune 序列（按首现顺序）。
+func condxDistinctRunes(s string) string {
+	var sb strings.Builder
+	seen := make(map[rune]bool)
+	for _, r := range s {
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		sb.WriteRune(r)
+	}
+	return sb.String()
+}
+
+// condxClassEscape 转义字符在方括号字符类中的特殊字符（\ ] ^ -），使分隔
+// 字面字符可安全并入排除类。
+func condxClassEscape(s string) string {
+	var sb strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(`\]^-`, r) {
+			sb.WriteByte('\\')
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
+}
+
 // deriveCondxTemplate 把占位词模板推导为锚定正则：字面段转义；数字类占位词
 // （序号/作品号/日期）取 [0-9]+；前字面段以开括号收尾的占位词取排除配对
-// 闭括号的非空类；其余占位词取贪婪段 .+（回溯由锚定边界与相邻字面段约束，
-// 见函数体内注释）；末位 {任意} 取可空吞位段。返回表达式原文与捕获组名
-// 列表；词表外/重复/相邻占位词返回中文错误。
-func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) {
+// 闭括号的非空类；其余占位词取惰性段 .+?（2026-11-04 终审拍板：填充段
+// 让位一切占位词——leftmost-first 下惰性段取最短，后邻类词/重复段先取
+// 满足位，见函数体内注释）；末位 {任意} 取可空吞位段，括号包裹的 {任意}
+// 取排除配对闭括号的非空类（2026-11-04 终审修复批：括号字面为锚，通配段
+// 不跨括号组吞并——前邻惰性 span 赖此收界）。量词变体占位词（{标签+} 一类）
+// 推导为重复段：整段为恰一个位置捕获组（非命名、组内全非捕获）、单元值类为
+// 排除类（带包裹排除配对闭括号、裸词排除分隔字面全部字符）、分隔缺省为可选
+// 空白（仅限带包裹）、0+ 档整段含包裹括号外套可缺形态。返回表达式原文、
+// 捕获组名列表与重复段描述列表；词表外/重复/相邻占位词与非法重复段返回
+// 中文错误。
+func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condxRepeatDesc, error) {
 	if strings.TrimSpace(tpl) == "" {
-		return "", nil, fmt.Errorf("格式模板不能为空")
+		return "", nil, nil, fmt.Errorf("格式模板不能为空")
 	}
 	tokens, err := tokenizeCondx(tpl)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	seen := make(map[string]bool)
 	var captures []string
+	var repeats []condxRepeatDesc
 	var sb strings.Builder
 	sb.WriteString("^")
 	hasSeq := false
 	prevPlaceholder := false
 	pendingCloser := rune(0)
+	captureIdx := 0
+	heldOpen := rune(0)
+	skipCloserHead := false
 	for i, tok := range tokens {
 		if tok.literal != "" {
-			sb.WriteString(regexp.QuoteMeta(tok.literal))
+			lit := tok.literal
+			if skipCloserHead {
+				// 0+ 包裹重复段已把后字面段起首的配对闭括号收进可缺形态，去重。
+				lit = string([]rune(lit)[1:])
+				skipCloserHead = false
+			}
+			heldOpen = rune(0)
+			if i+1 < len(tokens) && hasCondxVariantMark(tokens[i+1].placeholder) {
+				// 后邻量词变体：暂扣字面段收尾开括号——0+ 包裹档须把它收进
+				// 可缺形态，其余形态由变体分支原样回放。
+				if rs := []rune(lit); len(rs) > 0 && condxOpenBrackets[rs[len(rs)-1]] != 0 {
+					heldOpen = rs[len(rs)-1]
+					lit = string(rs[:len(rs)-1])
+				}
+			}
+			if lit != "" {
+				sb.WriteString(regexp.QuoteMeta(lit))
+			}
 			prevPlaceholder = false
-			pendingCloser = tailClosingBracket(tok.literal)
+			pendingCloser = tailClosingBracket(lit)
 			continue
 		}
 		if prevPlaceholder {
-			return "", nil, fmt.Errorf("相邻占位词 {%s} 与前一个占位词之间缺少分隔文字", tok.placeholder)
+			return "", nil, nil, fmt.Errorf("相邻占位词 {%s} 与前一个占位词之间缺少分隔文字", tok.placeholder)
 		}
 		prevPlaceholder = true
 		word := tok.placeholder
+		if hasCondxVariantMark(word) {
+			// 重复段表达（任务B）：量词变体占位词不走词表单词路径。整段为恰
+			// 一个位置捕获组（非命名——SubexpNames 该组名为空串，不进推导出的
+			// 命名捕获组名清单；声明层另有显式补入与打标），词根组名只进重复段
+			// 描述、不进命名捕获组名清单。
+			v, verr := parseCondxVariant(word)
+			if verr != nil {
+				return "", nil, nil, verr
+			}
+			if opts.requireSeq {
+				return "", nil, nil, fmt.Errorf("模板占位词 {%s} 不可重复：序列成员格式不支持重复段", word)
+			}
+			if seen[v.En] {
+				return "", nil, nil, fmt.Errorf("模板占位词 {%s} 重复", word)
+			}
+			// 包裹判定：前字面段收尾开括号且后字面段起首为其配对闭括号（六对
+			// 同型括号映射）→ 包裹单元；否则裸词。
+			nextLit := ""
+			if i+1 < len(tokens) {
+				nextLit = tokens[i+1].literal
+			}
+			nextRs := []rune(nextLit)
+			wrapped := heldOpen != 0 && len(nextRs) > 0 && nextRs[0] == condxOpenBrackets[heldOpen]
+			var desc condxRepeatDesc
+			desc.En = v.En
+			if wrapped {
+				openCh, closeCh := heldOpen, condxOpenBrackets[heldOpen]
+				openRe, closeRe := regexp.QuoteMeta(string(openCh)), regexp.QuoteMeta(string(closeCh))
+				valueClass := "[^" + string(closeCh) + "]+"
+				sepRe := `\s*`
+				if v.SepSpecified {
+					sepRe = regexp.QuoteMeta(v.Sep[1:])
+				}
+				captureIdx++
+				desc.GroupIndex = captureIdx
+				desc.UnitPattern = openRe + "(" + valueClass + ")" + closeRe
+				desc.Exclude = string(closeCh)
+				// 单元核：首单元值 +（闭括号+分隔+开括号+后续值）*——中间单元
+				// 括号进组内；1+ 档首开括号由前字面段承载、末闭括号由后字面段
+				// 承载（括号留在组外字面段），0+ 档整段含包裹括号外套可缺形态。
+				group := "(" + valueClass + "(?:" + closeRe + sepRe + openRe + valueClass + ")*)"
+				if v.AtLeastOne {
+					sb.WriteString(openRe + group)
+				} else {
+					sb.WriteString("(?:" + openRe + group + closeRe + ")?")
+					skipCloserHead = true
+				}
+			} else {
+				if heldOpen != 0 {
+					// 暂扣的开括号不属裸词重复段，原样回放。
+					sb.WriteString(regexp.QuoteMeta(string(heldOpen)))
+				}
+				if !v.SepSpecified {
+					return "", nil, nil, fmt.Errorf("模板占位词 {%s} 缺分隔字面：无包裹括号的重复词没有单元边界（贪婪并合），请用分号指定分隔（如 {%s;_}）或改用包裹括号成段（如 [{%s}]）", word, word, word)
+				}
+				sepLit := v.Sep[1:]
+				if sepLit == "" {
+					return "", nil, nil, fmt.Errorf("模板占位词 {%s} 语法错误：分号引出的分隔字面不能为空", word)
+				}
+				sepRe := regexp.QuoteMeta(sepLit)
+				exclude := condxDistinctRunes(sepLit)
+				valueClass := "[^" + condxClassEscape(exclude) + "]+"
+				captureIdx++
+				desc.GroupIndex = captureIdx
+				desc.UnitPattern = "(" + valueClass + ")"
+				desc.Exclude = exclude
+				group := "(" + valueClass + "(?:" + sepRe + valueClass + ")*)"
+				if v.AtLeastOne {
+					sb.WriteString(group)
+				} else {
+					sb.WriteString("(?:" + group + ")?")
+				}
+			}
+			heldOpen = rune(0)
+			seen[v.En] = true
+			repeats = append(repeats, desc)
+			pendingCloser = rune(0)
+			continue
+		}
 		en, known := condxVocab[word]
 		if !known {
-			return "", nil, fmt.Errorf("模板占位词 {%s} 不在词表（%s）", word, condxVocabHint)
+			return "", nil, nil, fmt.Errorf("模板占位词 {%s} 不在词表（%s）", word, condxVocabHint)
 		}
 		if (word == "键" || word == "公共段") && !opts.allowKey {
-			return "", nil, fmt.Errorf("模板占位词 {公共段} 仅适用于序列成员格式")
+			return "", nil, nil, fmt.Errorf("模板占位词 {公共段} 仅适用于序列成员格式")
 		}
 		if word == "任意" {
 			// 非引用吞位词：非捕获吞位段、可重复、不进捕获组清单（提取
 			// 引用 any 会被未声明捕获名校验拒绝——词法天然保证只作消费）。
 			// 末位吞位段可空——[{词}]{任意} 一类模板须同时命中「首组+尾」
 			// 与「单组整名（尾空）」两类形态；中位吞位段保持非空。
+			// 中位吞位段惰性化（2026-11-04 终审拍板）：贪婪版会抢占后邻
+			// 类词/重复段的满足位，与 default 填充段让位原则同源。
+			// 括号包裹的 {任意}（前字面段以开括号收尾且后字面段以其配对
+			// 闭括号起首）编译为排除该闭括号的非空类（2026-11-04 终审
+			// 修复批）：旧通配段可跨括号组吞并，与填充段抢占同族缺陷；
+			// 类化后前邻惰性 span 经回溯扩到预期区间（workset 目录段
+			// 组合「{集名} [{任意}]」形态依赖此锚定收界）。同对嵌套在
+			// 首个闭括号处截断，与括号排除捕获类同口径（已知词法边界）。
+			nextLit := ""
+			if i+1 < len(tokens) {
+				nextLit = tokens[i+1].literal
+			}
+			if pendingCloser != 0 && strings.HasPrefix(nextLit, string(pendingCloser)) {
+				sb.WriteString("(?:[^" + string(pendingCloser) + "]+)")
+				continue
+			}
 			if i == len(tokens)-1 {
 				sb.WriteString("(?:.*)")
 			} else {
-				sb.WriteString("(?:.+)")
+				sb.WriteString("(?:.+?)")
 			}
 			continue
 		}
 		if seen[en] {
-			return "", nil, fmt.Errorf("模板占位词 {%s} 重复", word)
+			return "", nil, nil, fmt.Errorf("模板占位词 {%s} 重复", word)
 		}
 		seen[en] = true
 		captures = append(captures, en)
+		captureIdx++
 		if word == "序号" {
 			hasSeq = true
 		}
@@ -316,18 +568,20 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, error) 
 			// 的最外层组界分歧，属已知词法边界。
 			sb.WriteString("[^" + string(pendingCloser) + "]+")
 		default:
-			// 贪婪段 .+：锚定边界与相邻字面段经回溯决定切分——值可含下划线等
-			// 分隔符（如 kpop_dancer_wg）；贪婪取最长、尾随数字类取最短，恰好
-			// 落在「键吞尽、序号取尾」的期望切分上。
-			sb.WriteString(".+")
+			// 惰性段 .+?（2026-11-04 终审拍板：填充段让位一切占位词）：
+			// leftmost-first 下取最短，后邻字面段/类词/重复段先取满足位——
+			// 值可含下划线等分隔符（如 kpop_dancer_wg），多值并合时由后邻
+			// 结构吞余段；尾随数字类（[0-9]+，类锚定不惰性化）仍经回溯取到
+			// 尾数（{标题}_{序号} 对 A_B_123 → 序号=123）。
+			sb.WriteString(".+?")
 		}
 		sb.WriteString(")")
 	}
 	if opts.requireSeq && !hasSeq {
-		return "", nil, fmt.Errorf("序列成员格式必须包含 {序号}")
+		return "", nil, nil, fmt.Errorf("序列成员格式必须包含 {序号}")
 	}
 	sb.WriteString("$")
-	return sb.String(), captures, nil
+	return sb.String(), captures, repeats, nil
 }
 
 // deriveCondxContains 把包含词推导为锚定正则（含这个词：任意位置字面包含）。
@@ -338,13 +592,14 @@ func deriveCondxContains(word string) (string, error) {
 	return "^.*" + regexp.QuoteMeta(word) + ".*$", nil
 }
 
-// condxCapturesOf 返回条件格式段推导出的捕获组英文名列表。
-func condxCapturesOf(c *Condx) ([]string, error) {
+// condxCapturesOf 返回条件格式段推导出的捕获组英文名列表与重复段描述列表
+// （重复段机械透传给调用方，语义消费在阶段2 绑定层）。
+func condxCapturesOf(c *Condx) ([]string, []condxRepeatDesc, error) {
 	if c.Format.Mode == CondxFormatContains {
-		return nil, nil
+		return nil, nil, nil
 	}
-	_, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{allowKey: c.Target == CondxTargetSeq})
-	return captures, err
+	_, captures, repeats, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{allowKey: c.Target == CondxTargetSeq})
+	return captures, repeats, err
 }
 
 // validateCondx 校验单条条件：目标合法、格式可推导、小标引用存在、终结谓词
@@ -363,7 +618,7 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 	}
 	switch c.Format.Mode {
 	case CondxFormatTemplate:
-		if _, _, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{
+		if _, _, _, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{
 			allowKey:   c.Target == CondxTargetSeq,
 			requireSeq: c.Target == CondxTargetSeq,
 		}); err != nil {
@@ -379,15 +634,24 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 	default:
 		return fmt.Errorf("未知的格式模式: %q（template / contains）", c.Format.Mode)
 	}
-	captures, _ := condxCapturesOf(c)
+	captures, repeats, _ := condxCapturesOf(c)
 	captureSet := make(map[string]bool, len(captures))
 	for _, en := range captures {
 		captureSet[en] = true
+	}
+	repeatSet := make(map[string]bool, len(repeats))
+	for _, rp := range repeats {
+		repeatSet[rp.En] = true
 	}
 	for i, b := range c.Badges {
 		en, known := condxVocab[b.Placeholder]
 		if !known {
 			return fmt.Errorf("第 %d 个值级小标的占位词 {%s} 不在词表（%s）", i+1, b.Placeholder, condxVocabHint)
+		}
+		// 重复段占位词多值产出（单元值序列），值级小标（库名单/相等/常量）
+		// 的单一值断言无定义——三断言的共同构造入口在此统一拒绝。
+		if repeatSet[en] {
+			return fmt.Errorf("第 %d 个值级小标: %w", i+1, condxRepeatRefError(en))
 		}
 		if !captureSet[en] {
 			return fmt.Errorf("值级小标 {%s} 引用的占位词不在本行格式模板内", b.Placeholder)
@@ -420,7 +684,7 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 			return fmt.Errorf("第 %d 个附加条件 %q 不适用于目标 %q", i+1, a.Kind, string(c.Target))
 		}
 		if attachNeedsTpl[a.Kind] {
-			if _, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true}); err != nil {
+			if _, _, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true}); err != nil {
 				return fmt.Errorf("附加条件 %q 的迷你模板无效: %w", a.Kind, err)
 			}
 		}
@@ -653,11 +917,11 @@ func compileCondx(c *Condx, ordinal int) (Pattern, error) {
 // compileFileCondx 编译文件主体：格式模板 + fileExt（并入主体）+ 父目录两式
 // （并列子式）；fileSizeMin 显式拒绝（扫描快照数据缺口）。
 func compileFileCondx(c *Condx) (Pattern, error) {
-	expr, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
+	expr, captures, repeats, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
 	if err != nil {
 		return nil, err
 	}
-	subject, err := newFileSubjectPattern(expr, captures)
+	subject, err := newFileSubjectPattern(expr, captures, repeats)
 	if err != nil {
 		return nil, err
 	}
@@ -671,7 +935,7 @@ func compileFileCondx(c *Condx) (Pattern, error) {
 			}
 			subject.Ext = ext
 		case CondxAttachParentFormat:
-			expr, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
+			expr, _, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
 			if err != nil {
 				return nil, fmt.Errorf("附加条件 parentFormat 的迷你模板无效: %w", err)
 			}
@@ -705,6 +969,7 @@ func compileFileCondx(c *Condx) (Pattern, error) {
 func compileDirCondx(c *Condx) (Pattern, error) {
 	var expr string
 	var captures []string
+	var repeats []condxRepeatDesc
 	var err error
 	if c.Format.Mode == CondxFormatContains {
 		expr, err = deriveCondxContains(c.Format.Word)
@@ -712,12 +977,12 @@ func compileDirCondx(c *Condx) (Pattern, error) {
 			return nil, err
 		}
 	} else {
-		expr, captures, err = deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
+		expr, captures, repeats, err = deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
 		if err != nil {
 			return nil, err
 		}
 	}
-	subject, err := newDirSubjectPattern(expr, captures)
+	subject, err := newDirSubjectPattern(expr, captures, repeats)
 	if err != nil {
 		return nil, err
 	}
@@ -725,7 +990,7 @@ func compileDirCondx(c *Condx) (Pattern, error) {
 		assert := DirAssert{Kind: a.Kind, MinCount: a.MinCount, Types: a.Types, Word: a.Word}
 		switch a.Kind {
 		case CondxAttachChildrenAllFormat, CondxAttachChildrenAtLeastN, CondxAttachParentFormat:
-			mexpr, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
+			mexpr, _, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
 			if err != nil {
 				return nil, fmt.Errorf("附加条件 %s 的迷你模板无效: %w", a.Kind, err)
 			}
@@ -743,11 +1008,11 @@ func compileDirCondx(c *Condx) (Pattern, error) {
 // compileSeqCondx 编译序列主体：成员格式模板 + seqMinLength（并入主体门槛）+
 // seqMemberType（并入成员计数限定）+ 父目录两式（并列子式）。
 func compileSeqCondx(c *Condx) (Pattern, error) {
-	expr, captures, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{allowKey: true, requireSeq: true})
+	expr, captures, repeats, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{allowKey: true, requireSeq: true})
 	if err != nil {
 		return nil, err
 	}
-	subject, err := newSeqSubjectPattern(expr, captures, 2)
+	subject, err := newSeqSubjectPattern(expr, captures, repeats, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -761,7 +1026,7 @@ func compileSeqCondx(c *Condx) (Pattern, error) {
 		case CondxAttachSeqMemberType:
 			subject.MemberTypes = append(subject.MemberTypes, a.Types...)
 		case CondxAttachParentFormat:
-			expr, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
+			expr, _, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})
 			if err != nil {
 				return nil, fmt.Errorf("附加条件 parentFormat 的迷你模板无效: %w", err)
 			}
@@ -796,25 +1061,56 @@ func CompileRuleConditions(rows []CondxRow) (Pattern, error) {
 }
 
 // declaredConditionCaptures 收集条件行列表会绑定进解析上下文的捕获组名
-// （行号前缀形态 rN.组名；库名单小标另产出 rN.组名#canon 规范名绑定），
-// 供提取动作的捕获引用做构造期存在性校验。行号=先序展平，与编译一致。
+// （行号前缀形态 rN.组名；库名单小标另产出 rN.组名#canon 规范名绑定），为
+// **提取引用口径**：含重复段词（rN.tag 一类多值产出词根）——提取动作可引用
+// 重复段词（值由绑定层按单元值展开），故并入。供提取动作的捕获引用做构造期
+// 存在性校验。行号=先序展平，与编译一致。
 func declaredConditionCaptures(rows []CondxRow) map[string]bool {
-	out := map[string]bool{}
-	collectConditionCapturesAt(rows, 0, out)
-	return out
+	all, _, _ := declaredConditionCaptureSets(rows)
+	return all
 }
 
-// collectConditionCapturesAt 在全局行号偏移 base 上递归收集条件捕获名。
-func collectConditionCapturesAt(rows []CondxRow, base int, out map[string]bool) {
+// declaredConditionOnlyCaptures 收集**条件可引用口径**的捕获名：与提取口径
+// 同源但剔除重复段词（多值产出坐标量单一值，生效条件/组合接线暂不允许引用）。
+func declaredConditionOnlyCaptures(rows []CondxRow) map[string]bool {
+	_, cond, _ := declaredConditionCaptureSets(rows)
+	return cond
+}
+
+// declaredConditionRepeatCaptures 收集条件行列表中的重复段词捕获名（行号
+// 前缀形态，来源=condxRepeatDesc.En）：阶段1 的位置组设计使 En 不进捕获组名
+// 清单，此处在声明层显式补入并打标，供三面引用禁区识别。
+func declaredConditionRepeatCaptures(rows []CondxRow) map[string]bool {
+	_, _, repeat := declaredConditionCaptureSets(rows)
+	return repeat
+}
+
+// declaredConditionCaptureSets 单遍收集三口径集合：all=提取可引用（含重复段
+// 词）、cond=条件可引用（剔除重复段词）、repeat=重复段词标记集。
+func declaredConditionCaptureSets(rows []CondxRow) (all, cond, repeat map[string]bool) {
+	all, cond, repeat = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	collectConditionCaptureSetsAt(rows, 0, all, cond, repeat)
+	return all, cond, repeat
+}
+
+// collectConditionCaptureSetsAt 在全局行号偏移 base 上递归收集三口径集合。
+func collectConditionCaptureSetsAt(rows []CondxRow, base int, all, cond, repeat map[string]bool) {
 	prefix := 0
 	for i := range rows {
 		row := &rows[i]
 		if row.Condition != nil {
 			ordinal := base + prefix + 1
-			captures, err := condxCapturesOf(row.Condition)
+			captures, repeats, err := condxCapturesOf(row.Condition)
 			if err == nil {
 				for _, en := range captures {
-					out[rowCaptureName(ordinal, en)] = true
+					name := rowCaptureName(ordinal, en)
+					all[name] = true
+					cond[name] = true
+				}
+				for _, rp := range repeats {
+					name := rowCaptureName(ordinal, rp.En)
+					all[name] = true
+					repeat[name] = true
 				}
 			}
 			for _, b := range row.Condition.Badges {
@@ -822,13 +1118,15 @@ func collectConditionCapturesAt(rows []CondxRow, base int, out map[string]bool) 
 					continue
 				}
 				if en, ok := condxVocab[b.Placeholder]; ok {
-					out[rowCaptureName(ordinal, en)+"#canon"] = true
+					name := rowCaptureName(ordinal, en) + "#canon"
+					all[name] = true
+					cond[name] = true
 				}
 			}
 			prefix++
 		}
 		if len(row.Group) > 0 {
-			collectConditionCapturesAt(row.Group, base+prefix, out)
+			collectConditionCaptureSetsAt(row.Group, base+prefix, all, cond, repeat)
 			prefix += countCondxRows(row.Group)
 		}
 	}

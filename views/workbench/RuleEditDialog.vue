@@ -241,6 +241,7 @@
               <span class="li-red-label">占位词捕获清单</span>
               <div v-for="(c, i) in captureList" :key="`${c.row}/${c.word}/${i}`" class="li-red-cap-row">
                 <span class="li-red-cap-name">第 {{ c.row }} 行 · {{ '{' + c.word + '}' }}</span>
+                <span v-if="c.repeat" class="li-red-cap-multi" title="重复段词（多值产出）：提取段可引用，暂不能用于生效条件/值级小标/组合接线">多值</span>
               </div>
               <p class="li-red-hint">
                 {占位词}＝命名捕获槽：只负责在匹配时捕获文本，本身不识别也不产生元数据——槽名与维度同字只是习惯叫法，无绑定
@@ -898,7 +899,8 @@ function refRuleLabel(ruleId: string): string {
 }
 
 // 成员·占位词分组（帧8）：按引用行顺序分组列出各成员上半声明的「第 N 行 · {词}」；
-// 成员当前档案声明为真源——成员改过模板后旧引用自然不在列（剧本三·帧2）
+// 成员当前档案声明为真源——成员改过模板后旧引用自然不在列（剧本三·帧2）。
+// 重复段词（多值产出）不进本下拉：组合接线禁引，与后端口径一致。
 interface RefCaptureGroup {
   ruleId: string
   label: string
@@ -913,7 +915,7 @@ const refCaptureGroups = computed<RefCaptureGroup[]>(() => {
     const member = refRuleById(r.ruleId)
     if (!member) return
     const rows = Array.isArray(member.conditions) ? (member.conditions as CondxRowForm[]) : []
-    out.push({ ruleId: r.ruleId, label: member.description || member.id, index: i + 1, captures: condxCaptures(rows) })
+    out.push({ ruleId: r.ruleId, label: member.description || member.id, index: i + 1, captures: condxCaptures(rows, { includeRepeat: false }) })
   })
   return out
 })
@@ -1838,6 +1840,17 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   font-size: 12px;
   font-weight: 600;
   color: var(--app-color-primary);
+}
+
+/* 重复段词标注（多值产出）：提取段可引用、三面禁引的清单提示 */
+.li-red-cap-multi {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: var(--app-radius);
+  border: 1px solid var(--app-border-color-light);
+  color: var(--app-text-secondary);
 }
 
 .li-red-cap-expr {

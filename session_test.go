@@ -98,6 +98,11 @@ type workbenchTestCtx struct {
 	// prefs 偏好桩数据（键 → 偏好值；爬坡控制器偏好钉死层注入面）。
 	prefs map[string]*sdkdto.PreferenceValue
 
+	// pluginRootDir GetPluginRoot 桩应答（求值器构建标识模拟面）：空串=根路径
+	// 未配置（未打标语义，识别增量闸门与恢复对账按缺席放行）；非空=指向测试
+	// 预置的插件根目录（内含带 buildId 的 plugin.json，模拟打标构建）。
+	pluginRootDir string
+
 	mu        sync.Mutex
 	published []publishedEvent
 }
@@ -173,6 +178,12 @@ type workbenchEventReader interface {
 // GetWorkDir 库根未配置形态：返回错误（会话管理器按未配置处理，默认库根缺席）。
 func (c *workbenchTestCtx) GetWorkDir() (*sdkdto.GetWorkDirResponse, error) {
 	return nil, errors.New("库根未配置（测试桩）")
+}
+
+// GetPluginRoot 插件根桩：原样回告 pluginRootDir（isRelative 形态不区分——
+// 求值器构建标识读取只走绝对路径取值）。
+func (c *workbenchTestCtx) GetPluginRoot(isRelative bool) string {
+	return c.pluginRootDir
 }
 
 // lastResponse 取最近一条工作台应答并解出载荷。
@@ -531,6 +542,64 @@ func TestProfileReconcileOnActivate(t *testing.T) {
 	}
 	if !reconcile.Changed || !strings.Contains(reconcile.Message, "重新识别") {
 		t.Fatalf("档案被外部变更后恢复会话应提示重新识别，实际: %+v", reconcile)
+	}
+}
+
+// TestEvaluatorReconcileOnActivate 求值器构建标识对账：快照铸于另一构建标识的
+// 求值器（识别内核换版）时恢复会话提示重识别；同一标识不提示；当前未打标
+//（空串）放行；旧快照未带标识（空串）而当前有值（存量库升级）提示。
+func TestEvaluatorReconcileOnActivate(t *testing.T) {
+	store := newFakeSessionStore()
+	mgr, ctx := newTestManager(t, store)
+
+	if _, err := mgr.CreateSession(`D:\库庚`); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	stampEvaluatorBuild(t, ctx, "build-a")
+	if _, err := mgr.CompleteRecognitionWithDiff(`D:\库庚`, &RecognitionSnapshot{EvaluatorBuildID: "build-a"}, nil); err != nil {
+		t.Fatalf("识别落库失败: %v", err)
+	}
+
+	// 同一标识：无提示
+	_, reconcile, err := mgr.ActivateSession(`D:\库庚`)
+	if err != nil {
+		t.Fatalf("恢复会话失败: %v", err)
+	}
+	if reconcile.Changed {
+		t.Fatalf("求值器标识一致时不应提示重新识别，实际: %+v", reconcile)
+	}
+
+	// 求值器换版：提示重识别
+	stampEvaluatorBuild(t, ctx, "build-b")
+	_, reconcile, err = mgr.ActivateSession(`D:\库庚`)
+	if err != nil {
+		t.Fatalf("恢复会话失败: %v", err)
+	}
+	if !reconcile.Changed || !strings.Contains(reconcile.Message, "重新识别") {
+		t.Fatalf("求值器换版后恢复会话应提示重新识别，实际: %+v", reconcile)
+	}
+
+	// 当前未打标（空串）：缺席放行，不提示
+	ctx.pluginRootDir = ""
+	_, reconcile, err = mgr.ActivateSession(`D:\库庚`)
+	if err != nil {
+		t.Fatalf("恢复会话失败: %v", err)
+	}
+	if reconcile.Changed {
+		t.Fatalf("当前构建未打标时应放行不提示，实际: %+v", reconcile)
+	}
+
+	// 存量库升级：旧快照未带标识（空串）而当前有值 → 提示
+	stampEvaluatorBuild(t, ctx, "build-c")
+	if _, err := mgr.CompleteRecognitionWithDiff(`D:\库庚`, &RecognitionSnapshot{EvaluatorBuildID: ""}, nil); err != nil {
+		t.Fatalf("识别落库失败: %v", err)
+	}
+	_, reconcile, err = mgr.ActivateSession(`D:\库庚`)
+	if err != nil {
+		t.Fatalf("恢复会话失败: %v", err)
+	}
+	if !reconcile.Changed || !strings.Contains(reconcile.Message, "重新识别") {
+		t.Fatalf("旧快照空串而当前有值应提示重新识别，实际: %+v", reconcile)
 	}
 }
 

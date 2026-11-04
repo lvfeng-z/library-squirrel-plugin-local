@@ -558,3 +558,162 @@ func TestCondExprProfileRoundTrip(t *testing.T) {
 		t.Fatalf("往返两次 JSON 字节不等价:\n首次: %s\n二次: %s", data1, data2)
 	}
 }
+
+// —— 阶段2 重复段绑定扇出与提取多值 ——
+
+// TestBindRepeatFanoutChain 重复段端到端扇出链路：命中 → 同名 N 绑定 → N 条声明
+//（ApplyDeclarations）。包裹 1+ 三标签名三声明（区间含整段偏移复原）；0+ 段
+// 零组零绑定→零声明零报错；显式分隔按分隔拆、无分隔不拆；普通词一名一绑定
+// 单声明、Apply 末值语义回归。
+func TestBindRepeatFanoutChain(t *testing.T) {
+	run := func(tpl, fileName string) (*ParseContext, bool) {
+		t.Helper()
+		p, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl(tpl)}, 1)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		ctx := &ParseContext{}
+		ok := p.Evaluate(&MatchInput{FileName: fileName}, nil, ctx)
+		return ctx, ok
+	}
+	tagValues := func(ctx *ParseContext) []CaptureBinding {
+		t.Helper()
+		return ctx.CaptureAll("r1.tag")
+	}
+	tagAct := ExtractionAction{Dimension: DimTag, From: FromCapture, CaptureName: "tag"}
+
+	// 包裹 1+·三标签名：[a][b][c] → r1.tag 三绑定（a/b/c，区间平移回全文本）→
+	// 标签三声明。
+	ctx, ok := run("[{标签+}]", "[a][b][c].png")
+	if !ok {
+		t.Fatalf("[{标签+}] 对 [a][b][c].png 应命中")
+	}
+	bindings := tagValues(ctx)
+	if len(bindings) != 3 || bindings[0].Value != "a" || bindings[1].Value != "b" || bindings[2].Value != "c" {
+		t.Fatalf("三标签名应产 3 条 r1.tag 绑定 a/b/c: %+v", bindings)
+	}
+	if b := bindings[1]; b.Segment != "[a][b][c]" || b.Start != 4 || b.End != 5 {
+		t.Fatalf("中位单元区间应为全文本内 [4,5): %+v", b)
+	}
+	decls := tagAct.ApplyDeclarations("rule-x", ctx)
+	if len(decls) != 3 || decls[0].Value != "a" || decls[1].Value != "b" || decls[2].Value != "c" {
+		t.Fatalf("三标签名应扇出 3 条标签声明 a/b/c: %+v", decls)
+	}
+	for _, d := range decls {
+		if d.RuleID != "rule-x" || d.Dimension != DimTag || d.Source != SourceFilename {
+			t.Fatalf("扇出声明形不符: %+v", d)
+		}
+	}
+	// Apply 单返回面维持末值（既有调用面零扰动）。
+	if last, hit := tagAct.Apply("rule-x", ctx); !hit || last.Value != "c" {
+		t.Fatalf("Apply 应维持末值单条 c: %+v hit=%v", last, hit)
+	}
+
+	// 包裹 0+·零组：甲_ → 零绑定零声明零报错。
+	ctx0, ok0 := run("{标题}_[{标签*}]", "甲_.png")
+	if !ok0 {
+		t.Fatalf("{标题}_[{标签*}] 对 甲_ 应命中（0+ 段缺席）")
+	}
+	if got := tagValues(ctx0); len(got) != 0 {
+		t.Fatalf("0+ 段缺席应零绑定: %+v", got)
+	}
+	if got := tagAct.ApplyDeclarations("rule-x", ctx0); len(got) != 0 {
+		t.Fatalf("0+ 段缺席应零声明零报错: %+v", got)
+	}
+	// 包裹 0+·在场单单元：甲_[x] → 1 绑定 x。
+	ctx1, ok1 := run("{标题}_[{标签*}]", "甲_[x].png")
+	if !ok1 {
+		t.Fatalf("{标题}_[{标签*}] 对 甲_[x] 应命中")
+	}
+	if got := tagValues(ctx1); len(got) != 1 || got[0].Value != "x" {
+		t.Fatalf("0+ 段在场单单元应 1 绑定 x: %+v", got)
+	}
+
+	// 裸词 1+·显式分隔：a_b_c 三值；ab 一值不拆。
+	ctxSep, okSep := run("{标题}={标签+;_}", "标题甲=a_b_c.png")
+	if !okSep {
+		t.Fatalf("{标题}={标签+;_} 对 标题甲=a_b_c 应命中")
+	}
+	if got := tagValues(ctxSep); len(got) != 3 || got[0].Value != "a" || got[1].Value != "b" || got[2].Value != "c" {
+		t.Fatalf("显式分隔应拆三值 a/b/c: %+v", got)
+	}
+	ctxOne, okOne := run("{标题}={标签+;_}", "标题甲=ab.png")
+	if !okOne {
+		t.Fatalf("{标题}={标签+;_} 对 标题甲=ab 应命中")
+	}
+	if got := tagValues(ctxOne); len(got) != 1 || got[0].Value != "ab" {
+		t.Fatalf("无分隔不拆应单值 ab: %+v", got)
+	}
+
+	// 普通词回归：{标题}_{作者} 一名一绑定，扇出面单声明。
+	ctxN, okN := run("{标题}_{作者}", "甲_乙.png")
+	if !okN {
+		t.Fatalf("{标题}_{作者} 对 甲_乙 应命中")
+	}
+	authorAct := ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: "author"}
+	if got := ctxN.CaptureAll("r1.author"); len(got) != 1 || got[0].Value != "乙" {
+		t.Fatalf("普通词应一名一绑定: %+v", got)
+	}
+	if got := authorAct.ApplyDeclarations("rule-y", ctxN); len(got) != 1 || got[0].Value != "乙" {
+		t.Fatalf("普通词扇出面应单声明 乙: %+v", got)
+	}
+}
+
+// TestExtractRepeatFanoutPipeline 管线层扇出锚定：重复段模板经真实提取段
+//（runExtractionStage，含门段）产 N 条声明——[{标签+}] 对 [a][b][c].png 三条
+// 标签声明 a/b/c 且命中登记单次；普通词模板同管线各维单声明回归（扇出面恒
+// 单条=管线行为不变）。
+func TestExtractRepeatFanoutPipeline(t *testing.T) {
+	rowRule := func(id, tpl string, actions ...ExtractionAction) RuleEntry {
+		t.Helper()
+		rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl(tpl)}}}
+		pattern, err := CompileRuleConditions(rows)
+		if err != nil {
+			t.Fatalf("规则 %s 模板 %q 编译失败: %v", id, tpl, err)
+		}
+		return RuleEntry{
+			ID: id, Description: "测试规则 " + id, Source: RuleSourceManual, Enabled: true,
+			Conditions: rows, Pattern: pattern, Extractions: actions,
+		}
+	}
+	run := func(rules []RuleEntry, fileName string) *FileDecision {
+		t.Helper()
+		in := &MatchInput{FileName: fileName, RelPath: fileName, Siblings: []string{fileName}}
+		decision := &FileDecision{RelPath: in.RelPath, FileName: in.FileName}
+		runExtractionStage(decision, rules, in, nil, &ParseContext{Depth: 0})
+		return decision
+	}
+
+	// 重复段：[{标签+}] 对 [a][b][c].png → 3 条标签声明（值序=绑定序）。
+	repeat := rowRule("rule-rp", "[{标签+}]",
+		ExtractionAction{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1})
+	decision := run([]RuleEntry{repeat}, "[a][b][c].png")
+	if len(decision.MatchedRuleIDs) != 1 || decision.MatchedRuleIDs[0] != "rule-rp" {
+		t.Fatalf("重复段规则应单次命中登记: %+v", decision.MatchedRuleIDs)
+	}
+	if len(decision.Declarations) != 3 ||
+		decision.Declarations[0].Value != "a" ||
+		decision.Declarations[1].Value != "b" ||
+		decision.Declarations[2].Value != "c" {
+		t.Fatalf("重复段应经管线产 3 条标签声明 a/b/c: %+v", decision.Declarations)
+	}
+	for _, d := range decision.Declarations {
+		if d.RuleID != "rule-rp" || d.Dimension != DimTag || d.Source != SourceFilename {
+			t.Fatalf("扇出声明形不符: %+v", d)
+		}
+	}
+
+	// 普通词回归：{标题}_{作者} 同管线各维单声明（扇出面恒单条）。
+	normal := rowRule("rule-nm", "{标题}_{作者}",
+		ExtractionAction{Dimension: DimTitle, From: FromCapture, CaptureName: "title", Row: 1},
+		ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 1})
+	decision2 := run([]RuleEntry{normal}, "甲_乙.png")
+	if len(decision2.MatchedRuleIDs) != 1 || decision2.MatchedRuleIDs[0] != "rule-nm" {
+		t.Fatalf("普通词规则应单次命中登记: %+v", decision2.MatchedRuleIDs)
+	}
+	if len(decision2.Declarations) != 2 ||
+		decision2.Declarations[0].Dimension != DimTitle || decision2.Declarations[0].Value != "甲" ||
+		decision2.Declarations[1].Dimension != DimAuthor || decision2.Declarations[1].Value != "乙" {
+		t.Fatalf("普通词应经管线产标题甲+作者乙两条: %+v", decision2.Declarations)
+	}
+}

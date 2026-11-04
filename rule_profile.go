@@ -277,33 +277,13 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 	var source SourceKind
 	switch a.From {
 	case FromCapture:
-		name := a.CaptureName
-		captured, ok := "", false
-		if a.Row > 0 {
-			// 行引用优先取库名单小标的规范名绑定（形变归一命中时产出——
-			// T1 的作者产出即库内规范名）；无小标时回落原始绑定。
-			captured, ok = ctx.Capture(rowCaptureName(a.Row, a.CaptureName) + "#canon")
-			if !ok {
-				captured, ok = ctx.Capture(rowCaptureName(a.Row, a.CaptureName))
-			}
-		} else {
-			// Row 缺省（0/负）按第 1 行兜底取绑定——与 validateExtractions
-			// 的 rowPrefixed 口径一致（前端编辑面第 1 行捕获引用合法省略
-			// row 字段；v4 求值上下文的捕获键恒为 rN. 前缀形态，裸名直取
-			// 恒落空曾令编辑保存后的规则「命中但零声明」）。裸名终备兼容
-			// 历史无前缀上下文。
-			captured, ok = ctx.Capture(rowCaptureName(1, a.CaptureName) + "#canon")
-			if !ok {
-				captured, ok = ctx.Capture(rowCaptureName(1, a.CaptureName))
-			}
-			if !ok {
-				captured, ok = ctx.Capture(name)
-			}
-		}
-		if !ok {
+		// 按名取全部绑定（重复段同名多条=扇出面），Apply 单返回签名维持末值
+		// 语义（既有调用面零扰动）；逐条产声明由 ApplyDeclarations 承载。
+		values := a.captureValues(ctx)
+		if len(values) == 0 {
 			return MetadataDeclaration{}, false
 		}
-		value, source = captured, SourceFilename
+		value, source = values[len(values)-1], SourceFilename
 	case FromRefCapture:
 		// 被引规则捕获（组合规则专用）：取值序对齐 FromCapture——先库名单
 		// 小标的规范名限定键（成员ID.rN.组名#canon）后原始限定键；Row 缺省
@@ -364,6 +344,64 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 		RoleName:  a.RoleName,
 		RuleID:    ruleID,
 	}, true
+}
+
+// captureValues 解析 FromCapture 的候选取值面（#canon 回退序维持）：行号兜底
+// 口径与既有 Apply 分支一致——Row>0 用该行前缀、Row 缺省（0/负）按第 1 行
+// 兜底、裸名终备兼容历史无前缀上下文。库名单小标的规范名绑定（#canon，形变
+// 归一命中时产出）优先且单值；无 #canon 时按名取全部原始绑定（重复段同名
+// 多条=扇出面，按绑定序）。零绑定=来源缺失。
+func (a ExtractionAction) captureValues(ctx *ParseContext) []string {
+	row := a.Row
+	if row <= 0 {
+		row = 1
+	}
+	if v, ok := ctx.Capture(rowCaptureName(row, a.CaptureName) + "#canon"); ok {
+		return []string{v}
+	}
+	var values []string
+	for _, binding := range ctx.CaptureAll(rowCaptureName(row, a.CaptureName)) {
+		values = append(values, binding.Value)
+	}
+	if len(values) == 0 && a.Row <= 0 {
+		for _, binding := range ctx.CaptureAll(a.CaptureName) {
+			values = append(values, binding.Value)
+		}
+	}
+	return values
+}
+
+// ApplyDeclarations 执行提取动作并返回全部产出声明（Apply 的多值扇出面）：
+// FromCapture 来源按 captureValues 逐条产声明——普通词词法保证一名一绑定、
+// 恒单声明零扰动；重复段同名 N 绑定 → N 条声明（值序=绑定序）。#canon 命中
+// 时单值单声明（规范名不扇出）。其余来源语义与 Apply 完全一致（单声明），
+// 来源缺失/ctx 为 nil 返回 nil 零报错。既有单返回调用面继续用 Apply（维持
+// 末值语义），扇出消费面（提取段逐动作产多声明）用本方法。
+func (a ExtractionAction) ApplyDeclarations(ruleID string, ctx *ParseContext) []MetadataDeclaration {
+	if ctx == nil {
+		return nil
+	}
+	if a.From != FromCapture {
+		if decl, ok := a.Apply(ruleID, ctx); ok {
+			return []MetadataDeclaration{decl}
+		}
+		return nil
+	}
+	values := a.captureValues(ctx)
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]MetadataDeclaration, 0, len(values))
+	for _, v := range values {
+		out = append(out, MetadataDeclaration{
+			Dimension: a.Dimension,
+			Value:     v,
+			Source:    SourceFilename,
+			RoleName:  a.RoleName,
+			RuleID:    ruleID,
+		})
+	}
+	return out
 }
 
 // DimPolicy 为单个含义维度的合成策略。
@@ -849,7 +887,8 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("规则 %q 的条件行非法: %w", rj.ID, err)
 		}
-		if err := validateExtractions(rj.ID, rj.Refs, pat, rj.Extractions, declaredConditionCaptures(rj.Conditions), true); err != nil {
+		if err := validateExtractionsCore(rj.ID, rj.Refs, pat, rj.Extractions,
+			declaredConditionCaptures(rj.Conditions), declaredConditionRepeatCaptures(rj.Conditions), true); err != nil {
 			return nil, err
 		}
 		return &RuleEntry{
@@ -907,6 +946,26 @@ var knownDimensions = map[MetadataDimension]bool{
 // 规则为空），declaredCaptures 为该规则形态（条件行或模式树）声明的捕获组
 // 名集合（v4 为行号前缀形态，rowPrefixed=true）。
 func validateExtractions(ruleID string, refs []string, pattern Pattern, actions []ExtractionAction, declaredCaptures map[string]bool, rowPrefixed bool) error {
+	return validateExtractionsCore(ruleID, refs, pattern, actions, declaredCaptures, nil, rowPrefixed)
+}
+
+// validateExtractionsCore 同 validateExtractions，另收 repeatCaptures（本条规则
+// 自身条件行的重复段词捕获名集合，来源 declaredConditionRepeatCaptures）：提取
+// 动作引用重复段词照常放行（提取口径含重复段词），但生效条件（when）引用时按
+// 三面引用禁区的统一文案拒绝——条件口径=提取口径剔除重复段词。nil 视作无重复
+// 段词（v3 模式树等形态）。
+func validateExtractionsCore(ruleID string, refs []string, pattern Pattern, actions []ExtractionAction, declaredCaptures, repeatCaptures map[string]bool, rowPrefixed bool) error {
+	// 条件可引用口径：提取口径剔除重复段词（when 的声明存在性校验用）。
+	conditionCaptures := declaredCaptures
+	if len(repeatCaptures) > 0 {
+		conditionCaptures = make(map[string]bool, len(declaredCaptures))
+		for name := range declaredCaptures {
+			if !repeatCaptures[name] {
+				conditionCaptures[name] = true
+			}
+		}
+	}
+
 	for i := range actions {
 		action := &actions[i]
 		if action.From == FromRefCapture {
@@ -967,7 +1026,7 @@ func validateExtractions(ruleID string, refs []string, pattern Pattern, actions 
 		if action.When == nil {
 			continue
 		}
-		if _, err := validateExpr(ruleID, action.When, declaredCaptures, refs); err != nil {
+		if _, err := validateExpr(ruleID, action.When, conditionCaptures, repeatCaptures, refs); err != nil {
 			return fmt.Errorf("规则 %q 的第 %d 条提取动作条件非法: %w", ruleID, i+1, err)
 		}
 	}
@@ -987,14 +1046,17 @@ const (
 // 操作数引用不存在（谓词的来源/维度、捕获组名不在规则模式声明的捕获组名
 // 集合内）、运算符对操作数类型不匹配（如对字符串字面量做数值区间比较、
 // 逻辑组合接非布尔子式、相等比较两侧类型不一致）时返回中文错误。
-// declaredCaptures 为规则模式声明的捕获组名集合；refs 为本条规则的被引成员
-// ID 列表（组合规则）——限定键形捕获操作数「成员ID.rN.组名」（显式限定形，
-// 可带 #canon 后缀）按其放行为字符串操作数（求值侧 conditionOperandValue 从
-// 注入区取值，两侧共用 parseRefCaptureName 解析、口径一致），被引成员不在
-// refs 内即拒绝。行/组在被引成员声明中的存在性不做核验——成员声明在本管线
-// 时点不可得（逐规则构造先于跨规则汇集），求值侧未绑定即取值不可用、含该
-// 操作数的比较为假（保守取向，与 refCapture 提取动作的形核口径一致）。
-func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool, refs []string) (exprValueType, error) {
+// declaredCaptures 为条件可引用口径的捕获组名集合（提取口径剔除重复段词）；
+// repeatCaptures 为重复段词捕获名标记集（其值多值产出、暂不能用于生效条件）；
+// refs 为本条规则的被引成员 ID 列表（组合规则）——限定键形捕获操作数
+// 「成员ID.rN.组名」（显式限定形，可带 #canon 后缀）按其放行为字符串操作数
+// （求值侧 conditionOperandValue 从注入区取值，两侧共用 parseRefCaptureName
+// 解析、口径一致），被引成员不在 refs 内即拒绝。行/组在被引成员声明中的
+// 存在性不做核验——成员声明在本管线时点不可得（逐规则构造先于跨规则汇集），
+// 求值侧未绑定即取值不可用、含该操作数的比较为假（保守取向，与 refCapture
+// 提取动作的形核口径一致）；被引成员侧的重复段词引用由跨规则校验
+// （validateRuleRefs）在第二遍拒绝。
+func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures map[string]bool, refs []string) (exprValueType, error) {
 	if e == nil {
 		return "", fmt.Errorf("规则 %q 的条件表达式不能为空", ruleID)
 	}
@@ -1010,6 +1072,12 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool, 
 	case ExprCapture:
 		if e.CaptureName == "" {
 			return "", fmt.Errorf("规则 %q 的条件表达式引用捕获组但缺少捕获组名（captureName）", ruleID)
+		}
+		if repeatCaptures[e.CaptureName] {
+			// 重复段占位词多值产出（单元值序列），生效条件只认单值坐标：
+			// 三面引用禁区之一（统一文案，见 condxRepeatRefError）。
+			return "", fmt.Errorf("规则 %q 的条件表达式: %w", ruleID,
+				condxRepeatRefError(condxRepeatEnOfCapture(e.CaptureName)))
 		}
 		if memberID, _, ok := parseRefCaptureName(e.CaptureName); ok {
 			// 限定键形操作数（组合规则 when 引用成员捕获，显式形）：成员在
@@ -1035,11 +1103,11 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool, 
 		if e.Left == nil || e.Right == nil {
 			return "", fmt.Errorf("规则 %q 的比较表达式（%s）缺少左侧（left）或右侧（right）操作数", ruleID, e.Kind)
 		}
-		leftType, err := validateExpr(ruleID, e.Left, declaredCaptures, refs)
+		leftType, err := validateExpr(ruleID, e.Left, declaredCaptures, repeatCaptures, refs)
 		if err != nil {
 			return "", err
 		}
-		rightType, err := validateExpr(ruleID, e.Right, declaredCaptures, refs)
+		rightType, err := validateExpr(ruleID, e.Right, declaredCaptures, repeatCaptures, refs)
 		if err != nil {
 			return "", err
 		}
@@ -1054,7 +1122,7 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool, 
 		if e.Operand == nil {
 			return "", fmt.Errorf("规则 %q 的数值区间比较缺少操作数（operand）", ruleID)
 		}
-		operandType, err := validateExpr(ruleID, e.Operand, declaredCaptures, refs)
+		operandType, err := validateExpr(ruleID, e.Operand, declaredCaptures, repeatCaptures, refs)
 		if err != nil {
 			return "", err
 		}
@@ -1073,7 +1141,7 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool, 
 			return "", fmt.Errorf("规则 %q 的逻辑组合（%s）至少需要一个子表达式（subs）", ruleID, e.Kind)
 		}
 		for _, sub := range e.Subs {
-			subType, err := validateExpr(ruleID, sub, declaredCaptures, refs)
+			subType, err := validateExpr(ruleID, sub, declaredCaptures, repeatCaptures, refs)
 			if err != nil {
 				return "", err
 			}
@@ -1086,7 +1154,7 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures map[string]bool, 
 		if e.Inner == nil {
 			return "", fmt.Errorf("规则 %q 的逻辑非表达式缺少内层表达式（inner）", ruleID)
 		}
-		innerType, err := validateExpr(ruleID, e.Inner, declaredCaptures, refs)
+		innerType, err := validateExpr(ruleID, e.Inner, declaredCaptures, repeatCaptures, refs)
 		if err != nil {
 			return "", err
 		}
@@ -1388,9 +1456,10 @@ func profileDataHasLegacyStrip(data []byte) bool {
 
 // validateRuleRefs 校验组合规则的 refs 引用（构造期跨规则静态校验）：自引用、
 // 悬空引用（被引成员 ID 不在本档案已构造规则集内）、嵌套组合引用（被引成员
-// 自身携带 refs，一期禁止组合引用组合）三者任一违规即返回中文错误，调用方
-// 跳过该条并告警。byID 为已构造规则 ID 到 all 下标的索引（重复 ID 取先出现
-// 者）；all 供查看被引规则自身是否携带 refs。
+// 自身携带 refs，一期禁止组合引用组合）、组合接线引用被引成员的重复段词
+// （多值产出）四者任一违规即返回中文错误，调用方跳过该条并告警。byID 为已构造
+// 规则 ID 到 all 下标的索引（重复 ID 取先出现者）；all 供查看被引规则自身是否
+// 携带 refs、以及其条件行的重复段词声明（组合接线引用禁区）。
 func validateRuleRefs(rule *RuleEntry, byID map[string]int, all []RuleEntry) error {
 	for _, ref := range rule.Refs {
 		if ref == rule.ID {
@@ -1402,6 +1471,69 @@ func validateRuleRefs(rule *RuleEntry, byID map[string]int, all []RuleEntry) err
 		}
 		if len(all[idx].Refs) > 0 {
 			return fmt.Errorf("引用的成员规则 %q 自身为组合规则（一期禁止嵌套组合引用）", ref)
+		}
+		if err := validateRefRepeatWiring(rule, &all[idx], ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateRefRepeatWiring 校验组合接线引用被引成员的捕获不落在重复段词上
+// （三面引用禁区的组合接线面）：refCapture 提取动作（Row 缺省按第 1 行兜底，
+// 与 validateExtractions 同口径）与 when 表达式内限定名操作数「成员ID.rN.组名」
+// 两路都查；成员无条件行重复段词时零工作。取值面（refCaptureValue 从注入区取
+// 单值）不动——契约要求构造期即拒，不留运行期空值。
+func validateRefRepeatWiring(rule *RuleEntry, member *RuleEntry, ref string) error {
+	repeatNames := declaredConditionRepeatCaptures(member.Conditions)
+	if len(repeatNames) == 0 {
+		return nil
+	}
+	for i := range rule.Extractions {
+		action := &rule.Extractions[i]
+		if err := validateExprRefRepeat(action.When, ref, repeatNames); err != nil {
+			return fmt.Errorf("第 %d 条提取动作的生效条件: %w", i+1, err)
+		}
+		if action.From != FromRefCapture || action.RefRule != ref || action.CaptureName == "" {
+			continue
+		}
+		row := action.Row
+		if row <= 0 {
+			row = 1
+		}
+		name := rowCaptureName(row, action.CaptureName)
+		if !repeatNames[name] {
+			continue
+		}
+		return fmt.Errorf("第 %d 条提取动作引用的成员规则 %q 的捕获 %q: %w",
+			i+1, ref, name, condxRepeatRefError(condxRepeatEnOfCapture(name)))
+	}
+	return nil
+}
+
+// validateExprRefRepeat 递归检查条件表达式树中「成员ID.rN.组名」限定名操作数
+// 是否落在被引成员的重复段词上（组合接线的 when 通道）。非限定名操作数不走本
+// 校验（自有捕获的重复段词引用由 validateExpr 的 repeatCaptures 分支拒绝）。
+func validateExprRefRepeat(e *CondExpr, ref string, repeatNames map[string]bool) error {
+	if e == nil {
+		return nil
+	}
+	if e.Kind == ExprCapture {
+		if memberID, bindingName, ok := parseRefCaptureName(e.CaptureName); ok && memberID == ref {
+			if repeatNames[bindingName] {
+				return fmt.Errorf("引用的成员规则 %q 的捕获 %q: %w",
+					ref, bindingName, condxRepeatRefError(condxRepeatEnOfCapture(bindingName)))
+			}
+		}
+	}
+	for _, sub := range e.Subs {
+		if err := validateExprRefRepeat(sub, ref, repeatNames); err != nil {
+			return err
+		}
+	}
+	for _, sub := range []*CondExpr{e.Left, e.Right, e.Operand, e.Inner} {
+		if err := validateExprRefRepeat(sub, ref, repeatNames); err != nil {
+			return err
 		}
 	}
 	return nil

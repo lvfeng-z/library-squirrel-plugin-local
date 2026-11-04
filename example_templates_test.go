@@ -41,7 +41,15 @@ func TestExampleTemplatesSanity(t *testing.T) {
 			t.Errorf("词条 %q 的模板 %q 无法编译: %v", tpl.Name, tpl.Template, err)
 		}
 		for word := range condxVocab {
-			if strings.Contains(tpl.Template, word) && !strings.Contains(tpl.Template, "{"+word+"}") {
+			if !strings.Contains(tpl.Template, word) {
+				continue
+			}
+			// 占位写法：{词} 整位，或重复段量词变体 {词+} / {词*} / {词+;分隔}
+			//（词根出现且紧跟量词即该词位的合法占位写法）。
+			okForm := strings.Contains(tpl.Template, "{"+word+"}") ||
+				strings.Contains(tpl.Template, "{"+word+"+") ||
+				strings.Contains(tpl.Template, "{"+word+"*")
+			if !okForm {
 				t.Errorf("词条 %q 的模板 %q 内词 %q 未按 {%s} 占位写法出现", tpl.Name, tpl.Template, word, word)
 			}
 		}

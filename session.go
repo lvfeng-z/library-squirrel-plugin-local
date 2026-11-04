@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -347,6 +348,34 @@ func (m *SessionManager) currentProfileDigest() string {
 		return ""
 	}
 	return digest
+}
+
+// evaluatorBuildID 识别求值器构建标识：读自身插件根下清单（plugin.json）的
+// buildId 字段（构建管线打标注入，主程序亦按它判定插件升级）。取不到（上下文
+// 缺席、根路径为空、清单缺失/损坏/无 buildId——开发直跑 go test 均在此列）
+// 返回空串——空串=未打标语义，不参与增量闸门与恢复对账（镜像档案指纹缺席
+// 语义：不打标不阻断）。
+func (m *SessionManager) evaluatorBuildID() string {
+	if m.ctx == nil {
+		return ""
+	}
+	root := m.ctx.GetPluginRoot(false)
+	if root == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(root, "plugin.json"))
+	if err != nil {
+		m.warnf("读取插件清单失败（求值器构建标识按未打标处理）: %v", err)
+		return ""
+	}
+	var manifest struct {
+		BuildID string `json:"buildId"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		m.warnf("解析插件清单失败（求值器构建标识按未打标处理）: %v", err)
+		return ""
+	}
+	return manifest.BuildID
 }
 
 // saveSession 轻保存（调用方须持 mu）：只写 meta 信封 + 索引——载荷簿记字段
@@ -881,9 +910,12 @@ type ProfileReconcile struct {
 	Message string
 }
 
-// ActivateSession 恢复会话并做档案对账：识别结论依赖「档案 ∪ 会话赋值」双源，
-// 档案被外部变更（停库直写等）时既有识别快照失真，提示重新识别。指纹缺席
-// （档案不可载入）不视为变更。
+// ActivateSession 恢复会话并做档案与求值器对账：识别结论依赖「档案 ∪ 会话
+// 赋值」双源与识别求值器本身——档案被外部变更（停库直写等）、或快照铸于
+// 另一构建的求值器（识别内核换版）时既有识别快照失真，提示重新识别。缺席
+// 不视为变更：档案指纹缺席（不可载入）、当前构建未打标（求值器标识空串，
+// 开发直跑）均放行；旧快照未带标识（空串）而当前有值视为不一致——存量库
+// 升级到打标构建后每库根一次的全量重算是预期成本。
 func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, ProfileReconcile, error) {
 	sess, err := m.SessionOf(root)
 	if err != nil {
@@ -894,6 +926,11 @@ func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, Profil
 	if current != "" && sess.ProfileDigest != "" && current != sess.ProfileDigest {
 		reconcile.Changed = true
 		reconcile.Message = "规则档案在会话外被变更，既有识别结论可能与最新规则不一致，建议重新识别"
+	}
+	if evalID := m.evaluatorBuildID(); evalID != "" && sess.Snapshot != nil &&
+		sess.Snapshot.EvaluatorBuildID != evalID {
+		reconcile.Changed = true
+		reconcile.Message = "识别求值器已更新，既有识别结论可能与当前版本不一致，建议重新识别"
 	}
 	return sess, reconcile, nil
 }

@@ -578,9 +578,12 @@ type RecognitionSnapshot struct {
 	// ProfileDigest 生成本快照所依据的规则档案指纹（重识别的增量资格判定）；
 	// AssignmentRevision 求值依据的会话赋值修订号——赋值被清除后其目录不再由
 	// 赋值集锚定，修订号闸门保证旧结论不被 mtime 游标复用（赋值变更一律全量
-	// 重算）。
+	// 重算）；EvaluatorBuildID 铸本快照的识别求值器构建标识（自身插件清单的
+	// buildId，空串=未打标构建）：识别内核随构建产物演进，求值器身份不一致
+	// 的旧结论失去 mtime 游标复用资格（增量闸门与恢复对账按等值判定）。
 	ProfileDigest      string `json:"profileDigest"`
 	AssignmentRevision int64  `json:"assignmentRevision"`
+	EvaluatorBuildID   string `json:"evaluatorBuildId"`
 
 	// Dirs 目录结构（元素1）：层含义覆盖状态随目录树节点呈现。
 	Dirs []SnapDir `json:"dirs"`
@@ -757,9 +760,11 @@ type aggregateInput struct {
 	// assigns 会话赋值（目录条目+文件例外共居；求值合并经预计算表、死路径
 	// 判定与元素7 标记经就近解析消费）。
 	assigns map[string]SessionAssignment
-	// profileDigest 本轮档案指纹；assignRevision 本轮会话赋值修订号。
-	profileDigest  string
-	assignRevision int64
+	// profileDigest 本轮档案指纹；assignRevision 本轮会话赋值修订号；
+	// evaluatorBuildID 本轮求值器构建标识（铸入快照，增量与恢复对账的凭据）。
+	profileDigest    string
+	assignRevision   int64
+	evaluatorBuildID string
 	// ignoredTargets / confirmedTargets 候选分仓判据（会话态目标键集合，元素8）；
 	// confirmedSetIDs 确认集名 → 既有集行 id 的会话旁路（confirmed 分仓的
 	// 既有 id 呈现数据源）。
@@ -786,10 +791,12 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		GeneratedAtMs: time.Now().UnixMilli(),
 		RootPath:      in.root,
 		ProfileDigest: in.profileDigest, AssignmentRevision: in.assignRevision,
+		EvaluatorBuildID: in.evaluatorBuildID,
 		DirMtimes: in.enumRes.DirMtimes,
 		// 序列化契约：快照经 JSON 落会话 KV 并直接驱动前端渲染，切片字段
 		// 一律非 nil（nil 序列化为 null，前端 .length 即崩）；Pending 与
-		// StaleAssignments 带 omitempty（缺席由前端守卫兜底）。
+		// StaleAssignments 带 omitempty（缺席由前端守卫兜底）；标量字符串
+		//（如 EvaluatorBuildID）恒序列化（空串即未打标语义），无 null 风险。
 		Dirs:       make([]SnapDir, 0, len(in.enumRes.Dirs)),
 		Files:      make([]SnapFile, 0, len(in.enumRes.AllFiles)),
 		Groups:     make([]SnapGroup, 0),
@@ -2291,10 +2298,16 @@ func (m *SessionManager) runFullRecognition(root string) error {
 
 	// 增量资格：上次快照的档案指纹与当前一致、且会话赋值修订号未变（赋值
 	// 新增/修改/清除都会改修订号——赋值清除后其目录不再由赋值集锚定，靠修订号
-	// 闸门防止旧结论被 mtime 游标复用）才可按目录 mtime 游标跳过
+	// 闸门防止旧结论被 mtime 游标复用）、且快照铸于同一识别求值器构建
+	//（EvaluatorBuildID 等值）才可按目录 mtime 游标跳过。当前构建标识为空串
+	//（未打标构建，如开发直跑 go test）不参与比对；旧快照空串而当前有值
+	//（存量库升级到打标构建）或两值不同（求值器换版）均强制全量——每库根
+	// 一次的首轮全量重算是升级后的预期成本。
+	evalBuildID := m.evaluatorBuildID()
 	prev := sess.Snapshot
 	incremental := prev != nil && prev.ProfileDigest == digest && digest != "" &&
-		prev.AssignmentRevision == sess.AssignRevision
+		prev.AssignmentRevision == sess.AssignRevision &&
+		(evalBuildID == "" || prev.EvaluatorBuildID == evalBuildID)
 	prevMtimes := map[string]int64(nil)
 	if incremental {
 		prevMtimes = prev.DirMtimes
@@ -2379,6 +2392,7 @@ func (m *SessionManager) runFullRecognition(root string) error {
 		enabledRules: enabledRules, allRules: allRules, lib: lib,
 		conclusions: conclusions, prev: prev, prevSkipped: prevSkipped,
 		assigns: sess.Assignments, profileDigest: digest, assignRevision: sess.AssignRevision,
+		evaluatorBuildID: evalBuildID,
 		ignoredTargets: ignoredTargets, confirmedTargets: confirmedTargets,
 		confirmedSetIDs: sess.ConfirmedSetIDs,
 	})

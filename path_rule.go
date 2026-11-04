@@ -255,19 +255,19 @@ func dirMeaningReplay(rules []RuleEntry, dirNames []string, lib *LibraryIndex) (
 			if !action.When.Holds(ctx, decls) {
 				continue
 			}
-			decl, ok := action.Apply(rule.ID, ctx)
-			if !ok {
-				continue
-			}
-			decls = append(decls, decl)
-			answer, ok := qnaAnswerOf[decl.Dimension]
-			if !ok {
-				continue
-			}
-			meaning := PathMeaning{Type: string(answer), Name: decl.Value}
-			if !seen[meaning] {
-				seen[meaning] = true
-				meanings = append(meanings, meaning)
+			// ApplyDeclarations 多值扇出面（与提取段同语义）：重复段 N 绑定
+			// 逐条产声明并转含义，普通词恒单条零差异。
+			for _, decl := range action.ApplyDeclarations(rule.ID, ctx) {
+				decls = append(decls, decl)
+				answer, ok := qnaAnswerOf[decl.Dimension]
+				if !ok {
+					continue
+				}
+				meaning := PathMeaning{Type: string(answer), Name: decl.Value}
+				if !seen[meaning] {
+					seen[meaning] = true
+					meanings = append(meanings, meaning)
+				}
 			}
 		}
 	}

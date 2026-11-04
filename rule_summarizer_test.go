@@ -392,9 +392,10 @@ func TestSummarizeStrippedAutoMatchPriority(t *testing.T) {
 
 // TestBuildStructMapRulesUnderscoreManualDemotion 纯 _ 模式的段值降级：目录名
 // foo_bar 作提示名在段间正文内跨分隔符保持整段，其段值含活跃分隔符 _ → 该维度
-// 手工（ManualDims 收录、不生成捕获）。v4 贪婪词法下本例整体自检不过（作者段
-// 与相邻未引用段的分隔多解切歧义——自检捕获值 x_foo≠x，防错切降级）→ 构造
-// 返回错误（无任何可产条目）；该行为即 v4 对切歧义形态的诚实拒绝。
+// 手工（ManualDims 收录、不生成捕获）。2026-11-04 终审拍板（惰性化）翻新：
+// 填充段让位后作者段止于首 _（恰=段值 x），旧贪婪「作者段与相邻未引用段的
+// 分隔多解切歧义」消解——自检通过、构造成功产出文件行规则；含 _ 的作品名段
+// 仍诚实降级手工（活跃分隔符不可入捕获边界）。
 func TestBuildStructMapRulesUnderscoreManualDemotion(t *testing.T) {
 	rel := "foo_bar/[a]_x_foo_bar_y_[01].png"
 	file := "[a]_x_foo_bar_y_[01].png"
@@ -402,9 +403,22 @@ func TestBuildStructMapRulesUnderscoreManualDemotion(t *testing.T) {
 		Author: "x", AuthorClueRef: "filenameSeg1",
 		Title: "foo_bar", TitleClueRef: "filenameSeg2",
 	}
-	_, _, err := buildStructMapRules("E:/libs/下划线库", rel, file, assign)
-	if err == nil || !strings.Contains(err.Error(), "无法总结结构映射规则") {
-		t.Fatalf("切歧义形态应诚实拒绝（整体降级无条目）: %v", err)
+	sugg, rules, err := buildStructMapRules("E:/libs/下划线库", rel, file, assign)
+	if err != nil {
+		t.Fatalf("惰性化后切歧义消解，应构造成功: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("应恰一条文件行规则，实际 %d 条", len(rules))
+	}
+	if tpl := rules[0].Conditions[0].Condition.Format.Tpl; tpl != "[{任意}]_{作者}_{任意}_{任意}_[{任意}]" {
+		t.Fatalf("作者段模板不符: %q", tpl)
+	}
+	authAct := rules[0].Extractions[0]
+	if authAct.Dimension != DimAuthor || authAct.From != FromCapture || authAct.CaptureName != condxVocab["作者"] {
+		t.Fatalf("作者提取应为 {作者} 位捕获: %+v", authAct)
+	}
+	if len(sugg.ManualDims) != 1 || !strings.Contains(sugg.ManualDims[0], "作品名=foo_bar") {
+		t.Fatalf("含活跃分隔符的作品名应保持手工降级: %v", sugg.ManualDims)
 	}
 }
 

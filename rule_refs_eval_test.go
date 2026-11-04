@@ -223,7 +223,8 @@ func TestRefCaptureSnapshotQualifiedKeys(t *testing.T) {
 	}, nil)
 	combo := refComboRule(t, "combo-1", []string{"member-a"}, nil, nil)
 	lib := &LibraryIndex{AuthorNames: map[string]struct{}{"Jake_Jaccobus": {}}}
-	in := &MatchInput{FileName: "jake__jaccobus_乙.jpg", RelPath: "jake__jaccobus_乙.jpg"}
+	// 2026-11-04 终审拍板（惰性化）：载体名由双下划线形变换为空格形变。
+	in := &MatchInput{FileName: "jake jaccobus_乙.jpg", RelPath: "jake jaccobus_乙.jpg"}
 	ctx := &ParseContext{Depth: 0}
 
 	gate := runRefGateStage([]RuleEntry{memberA, combo}, in, lib, ctx)
@@ -238,7 +239,7 @@ func TestRefCaptureSnapshotQualifiedKeys(t *testing.T) {
 	// 限定键全量断言：行捕获（author/title——文件主体对去扩展名基名匹配，
 	// title 为 "乙"）+ 库名单小标的 #canon 规范名变体，一并冠以成员 ID 前缀快照。
 	wantBindings := map[string]string{
-		"member-a.r1.author":       "jake__jaccobus",
+		"member-a.r1.author":       "jake jaccobus",
 		"member-a.r1.title":        "乙",
 		"member-a.r1.author#canon": "Jake_Jaccobus",
 	}
@@ -260,7 +261,7 @@ func TestRefCaptureSnapshotQualifiedKeys(t *testing.T) {
 	if v, ok := ruleCtx.refCaptureValue("member-a", "r1.author#canon"); !ok || v != "Jake_Jaccobus" {
 		t.Fatalf("#canon 限定键取值不符: %q %v", v, ok)
 	}
-	if v, ok := ruleCtx.refCaptureValue("member-a", "r1.author"); !ok || v != "jake__jaccobus" {
+	if v, ok := ruleCtx.refCaptureValue("member-a", "r1.author"); !ok || v != "jake jaccobus" {
 		t.Fatalf("原始限定键取值不符: %q %v", v, ok)
 	}
 	if _, ok := ruleCtx.refCaptureValue("member-a", "r2.author"); ok {

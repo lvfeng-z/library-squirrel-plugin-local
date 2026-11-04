@@ -422,3 +422,104 @@ func TestLoadProfileSurfacesRefViolations(t *testing.T) {
 		t.Fatalf("应返回带规则 ID 的单条告警，实际: %v", errs)
 	}
 }
+
+// refsRepeatMember 构造带重复段词条件行的规则：模板 {标题}_{标签+;_}，模式由
+// CompileRuleConditions 编译（rowPrefixed v4 形态；重复段词声明 r1.tag 供
+// 引用禁区用例消费）。
+func refsRepeatMember(t *testing.T, id string) RuleEntry {
+	t.Helper()
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{标题}_{标签+;_}")}}}
+	pat, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("重复段词条件行应可编译: %v", err)
+	}
+	return RuleEntry{
+		ID: id, Description: "测试规则 " + id, Source: RuleSourceManual, Enabled: true,
+		Conditions: rows, Pattern: pat,
+	}
+}
+
+// refsRepeatErrWants 断言重复段占位词引用禁区的统一文案关键词（三面同形：
+// 生效条件 / 值级小标 / 组合接线）。
+func refsRepeatErrWants(t *testing.T, errs []error) string {
+	t.Helper()
+	if len(errs) != 1 {
+		t.Fatalf("应返回单条告警，实际 %d 条: %v", len(errs), errs)
+	}
+	msg := refsErrText(errs)
+	for _, want := range []string{"重复段占位词", "多值产出"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("告警应含 %q，实际: %s", want, msg)
+		}
+	}
+	return msg
+}
+
+// TestRefsRepeatWordReferenceForbidden 三面引用禁区的 when 面与组合接线面：
+// 生效条件引用自有重复段词、组合接线引用成员重复段词（refCapture 动作与
+// when 限定名两路）一律拒载并带统一文案；提取段与普通词引用照常放行。
+func TestRefsRepeatWordReferenceForbidden(t *testing.T) {
+	t.Run("when引用自有重复段词拒载", func(t *testing.T) {
+		rule := refsRepeatMember(t, "repeat-when")
+		rule.Extractions = []ExtractionAction{{
+			Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1,
+			When: &CondExpr{Kind: ExprEqual,
+				Left:  &CondExpr{Kind: ExprCapture, CaptureName: "r1.tag"},
+				Right: &CondExpr{Kind: ExprString, Str: "x"}},
+		}}
+		profile, errs := ParseProfile(refsTestProfileJSON(t, rule))
+		msg := refsRepeatErrWants(t, errs)
+		if !strings.Contains(msg, "repeat-when") {
+			t.Fatalf("告警应点名规则 ID，实际: %s", msg)
+		}
+		if profile == nil || len(profile.Rules) != 0 {
+			t.Fatalf("违规规则应被跳过，实际载入 %d 条", len(profile.Rules))
+		}
+	})
+
+	t.Run("组合接线refCapture引用成员重复段词拒载", func(t *testing.T) {
+		member := refsRepeatMember(t, "member-repeat")
+		combo := refsTestRule(t, "combo-repeat-ref", []string{"member-repeat"}, []ExtractionAction{
+			{Dimension: DimTag, From: FromRefCapture, RefRule: "member-repeat", CaptureName: "tag", Row: 1},
+		})
+		profile, errs := ParseProfile(refsTestProfileJSON(t, member, combo))
+		msg := refsRepeatErrWants(t, errs)
+		if !strings.Contains(msg, "combo-repeat-ref") || !strings.Contains(msg, "member-repeat") {
+			t.Fatalf("告警应点名组合规则与被引成员，实际: %s", msg)
+		}
+		assertRefsLoadedIDs(t, profile, "member-repeat")
+	})
+
+	t.Run("组合接线when限定名引用成员重复段词拒载", func(t *testing.T) {
+		member := refsRepeatMember(t, "member-repeat")
+		combo := refsTestRule(t, "combo-repeat-when", []string{"member-repeat"}, []ExtractionAction{{
+			Dimension: DimTitle, From: FromParentDir,
+			When: &CondExpr{Kind: ExprEqual,
+				Left:  &CondExpr{Kind: ExprCapture, CaptureName: "member-repeat.r1.tag"},
+				Right: &CondExpr{Kind: ExprString, Str: "x"}},
+		}})
+		profile, errs := ParseProfile(refsTestProfileJSON(t, member, combo))
+		msg := refsRepeatErrWants(t, errs)
+		if !strings.Contains(msg, "combo-repeat-when") || !strings.Contains(msg, "member-repeat") {
+			t.Fatalf("告警应点名组合规则与被引成员，实际: %s", msg)
+		}
+		assertRefsLoadedIDs(t, profile, "member-repeat")
+	})
+
+	t.Run("普通词三面引用照常放行", func(t *testing.T) {
+		// 成员与组合均为普通占位词：refCapture 与 when 限定名引用照常载入。
+		member := refsTestRule(t, "member-plain", nil, nil)
+		combo := refsTestRule(t, "combo-plain", []string{"member-plain"}, []ExtractionAction{
+			{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-plain", CaptureName: "author", Row: 1},
+			{Dimension: DimTitle, From: FromParentDir,
+				When: &CondExpr{Kind: ExprEqual,
+					Left:  &CondExpr{Kind: ExprCapture, CaptureName: "member-plain.r1.author"},
+					Right: &CondExpr{Kind: ExprString, Str: "x"}}},
+		})
+		profile, errs := ParseProfile(refsTestProfileJSON(t, member, combo))
+		if len(errs) != 0 {
+			t.Fatalf("普通词引用不应报错，实际: %v", errs)
+		}
+		assertRefsLoadedIDs(t, profile, "member-plain", "combo-plain")
+	})
+}

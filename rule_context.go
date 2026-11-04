@@ -142,6 +142,19 @@ func (c *ParseContext) Capture(name string) (string, bool) {
 	return value, found
 }
 
+// CaptureAll 返回组名为 name 的全部绑定，按命中顺序；不存在时返回 nil。
+// Capture 的末值语义（when/小标门/接线取值面）不变；重复段同名多条绑定的
+// 扇出消费（提取多值）用本助手取全量。
+func (c *ParseContext) CaptureAll(name string) []CaptureBinding {
+	var out []CaptureBinding
+	for _, binding := range c.Captures {
+		if binding.Name == name {
+			out = append(out, binding)
+		}
+	}
+	return out
+}
+
 // LastDirHit 返回 Depth 最大的一条目录命中（Depth 相同时取最后一条）；无记录时返回零值与 false。
 func (c *ParseContext) LastDirHit() (DirHit, bool) {
 	var best DirHit

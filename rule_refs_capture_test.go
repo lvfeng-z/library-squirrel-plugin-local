@@ -109,29 +109,34 @@ func TestRefCaptureCanonFallback(t *testing.T) {
 	}
 
 	t.Run("规范名优先", func(t *testing.T) {
+		// 2026-11-04 终审拍板（惰性化）：作者段取最短（首 _ 前），载体名由
+		// 双下划线形变换为空格形变（fold 仍命中 Jake_Jaccobus）。
 		badge := refFileRowRule(t, "member-a", "{作者}_{标题}", []CondxBadge{
 			{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true},
 		}, nil)
-		decision := run(badge, "jake__jaccobus_乙.jpg")
+		decision := run(badge, "jake jaccobus_乙.jpg")
 		if v, ok := declOf(decision, "combo-1", DimAuthor); !ok || v != "Jake_Jaccobus" {
 			t.Fatalf("库名单命中时应优先取规范名: %q %v（期望 Jake_Jaccobus）", v, ok)
 		}
 	})
 	t.Run("无小标回落原始捕获", func(t *testing.T) {
+		// 2026-11-04 终审拍板（惰性化）：原始捕获=首 _ 前最短段。
 		plain := refFileRowRule(t, "member-a", "{作者}_{标题}", nil, nil)
-		decision := run(plain, "jake__jaccobus_乙.jpg")
-		if v, ok := declOf(decision, "combo-1", DimAuthor); !ok || v != "jake__jaccobus" {
-			t.Fatalf("无小标应回落原始捕获: %q %v（期望 jake__jaccobus）", v, ok)
+		decision := run(plain, "jake jaccobus_乙.jpg")
+		if v, ok := declOf(decision, "combo-1", DimAuthor); !ok || v != "jake jaccobus" {
+			t.Fatalf("无小标应回落原始捕获: %q %v（期望 jake jaccobus）", v, ok)
 		}
 	})
 	t.Run("小标无规范名绑定回落原始值", func(t *testing.T) {
 		// fold=false 的精确命中小标：行命中但只记谓词命中、不另存 #canon
 		// 规范名绑定（规范名绑定仅形变归一 fold 命中产出）——refCapture
 		// 无规范名可取，回落原始捕获值。
-		badge := refFileRowRule(t, "member-a", "{作者}_{标题}", []CondxBadge{
+		// 2026-11-04 终审拍板（惰性化）：分隔改空格字面——含 _ 的库名在
+		// _ 分隔模板下已不可整名捕获（作者段止于首 _）。
+		badge := refFileRowRule(t, "member-a", "{作者} {标题}", []CondxBadge{
 			{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author"},
 		}, nil)
-		decision := run(badge, "Jake_Jaccobus_乙.jpg")
+		decision := run(badge, "Jake_Jaccobus 乙.jpg")
 		if v, ok := declOf(decision, "combo-1", DimAuthor); !ok || v != "Jake_Jaccobus" {
 			t.Fatalf("无规范名绑定时应回落原始捕获: %q %v（期望 Jake_Jaccobus）", v, ok)
 		}
@@ -230,6 +235,7 @@ func TestRefCaptureWhenQualified(t *testing.T) {
 	})
 
 	t.Run("canon书写名与不等比较", func(t *testing.T) {
+		// 2026-11-04 终审拍板（惰性化）：载体名由双下划线形变换为空格形变。
 		badge := refFileRowRule(t, "member-c", "{作者}_{标题}", []CondxBadge{
 			{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true},
 		}, nil)
@@ -240,7 +246,7 @@ func TestRefCaptureWhenQualified(t *testing.T) {
 				When: refNeExpr("member-c.r1.author", "someone_else")},
 		})
 		lib := &LibraryIndex{AuthorNames: map[string]struct{}{"Jake_Jaccobus": {}}}
-		in := &MatchInput{FileName: "jake__jaccobus_乙.jpg", RelPath: "jake__jaccobus_乙.jpg"}
+		in := &MatchInput{FileName: "jake jaccobus_乙.jpg", RelPath: "jake jaccobus_乙.jpg"}
 		decision := runRefEval(t, []RuleEntry{badge, combo}, in, lib)
 		if v, ok := declOf(decision, "combo-2", DimTitle); !ok || v != "canon相等产出" {
 			t.Fatalf("canon 书写名应直接命中: %q %v", v, ok)

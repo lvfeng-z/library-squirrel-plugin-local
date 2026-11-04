@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // FileSubjectPattern 文件主体模式：格式模板匹配**去扩展名的文件名**（扩展名
@@ -18,6 +19,9 @@ type FileSubjectPattern struct {
 	Expr string `json:"expr"`
 	// Captures 为需要绑定的命名捕获组名列表。
 	Captures []string `json:"captures"`
+	// Repeats 为重复段描述列表（量词占位词推导；机械透传存字段，语义消费
+	// 在阶段2 绑定层）。
+	Repeats []condxRepeatDesc `json:"repeats,omitempty"`
 	// Ext 为 fileExt 终结谓词的扩展名（已归一为小写带点形，如 ".jpg"）；
 	// 空串 = 无该谓词。
 	Ext string `json:"ext,omitempty"`
@@ -26,12 +30,12 @@ type FileSubjectPattern struct {
 }
 
 // newFileSubjectPattern 构造文件主体模式：正则编译失败返回中文错误。
-func newFileSubjectPattern(expr string, captures []string) (*FileSubjectPattern, error) {
+func newFileSubjectPattern(expr string, captures []string, repeats []condxRepeatDesc) (*FileSubjectPattern, error) {
 	re, err := regexp.Compile(expr)
 	if err != nil {
 		return nil, fmt.Errorf("文件格式正则 %q 编译失败: %w", expr, err)
 	}
-	return &FileSubjectPattern{Expr: expr, Captures: captures, re: re}, nil
+	return &FileSubjectPattern{Expr: expr, Captures: captures, Repeats: repeats, re: re}, nil
 }
 
 // patternMarker 实现 Pattern 接口标记。
@@ -47,7 +51,7 @@ func (p *FileSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Pa
 		return false
 	}
 	name := BaseNameWithoutExt(in.FileName)
-	return bindCondxCaptures(p.re, name, p.Captures, ctx)
+	return bindCondxCaptures(p.re, name, p.Captures, p.Repeats, ctx)
 }
 
 // extMatches 判断文件名扩展名是否等于 want（want 已归一小写带点形）。
@@ -187,6 +191,9 @@ type DirSubjectPattern struct {
 	Expr string `json:"expr"`
 	// Captures 为需要绑定的命名捕获组名列表（contains 问法为空）。
 	Captures []string `json:"captures"`
+	// Repeats 为重复段描述列表（量词占位词推导；机械透传存字段，语义消费
+	// 在阶段2 绑定层；contains 问法为空）。
+	Repeats []condxRepeatDesc `json:"repeats,omitempty"`
 	// Asserts 为随主体的终结谓词实例列表。
 	Asserts []DirAssert `json:"asserts,omitempty"`
 	// re 为编译缓存，不参与序列化。
@@ -194,12 +201,12 @@ type DirSubjectPattern struct {
 }
 
 // newDirSubjectPattern 构造目录主体模式：正则编译失败返回中文错误。
-func newDirSubjectPattern(expr string, captures []string) (*DirSubjectPattern, error) {
+func newDirSubjectPattern(expr string, captures []string, repeats []condxRepeatDesc) (*DirSubjectPattern, error) {
 	re, err := regexp.Compile(expr)
 	if err != nil {
 		return nil, fmt.Errorf("目录格式正则 %q 编译失败: %w", expr, err)
 	}
-	return &DirSubjectPattern{Expr: expr, Captures: captures, re: re}, nil
+	return &DirSubjectPattern{Expr: expr, Captures: captures, Repeats: repeats, re: re}, nil
 }
 
 // patternMarker 实现 Pattern 接口标记。
@@ -228,7 +235,7 @@ func (p *DirSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 		if !ok {
 			continue
 		}
-		bindCondxCaptures(p.re, name, p.Captures, ctx)
+		bindCondxCaptures(p.re, name, p.Captures, p.Repeats, ctx)
 		ctx.DirHits = append(ctx.DirHits, DirHit{Depth: depth, Name: name})
 		return true
 	}
@@ -250,6 +257,9 @@ type SeqSubjectPattern struct {
 	Expr string `json:"expr"`
 	// Captures 为需要绑定的命名捕获组名列表（含 seq 与键/其他占位词）。
 	Captures []string `json:"captures"`
+	// Repeats 为重复段描述列表（量词占位词推导；机械透传存字段，语义消费
+	// 在阶段2 绑定层；seq 主体行已禁重复词，通常为空）。
+	Repeats []condxRepeatDesc `json:"repeats,omitempty"`
 	// SeqName 为序号捕获组名（恒为 "seq"）。
 	SeqName string `json:"seqName"`
 	// KeyParts 为键段捕获组名列表（模板中除 {序号} 外的全部占位词，按模板顺序）。
@@ -264,7 +274,7 @@ type SeqSubjectPattern struct {
 
 // newSeqSubjectPattern 构造序列主体模式：正则编译失败或模板无 {序号} 捕获组
 // 返回中文错误。
-func newSeqSubjectPattern(expr string, captures []string, minSize int) (*SeqSubjectPattern, error) {
+func newSeqSubjectPattern(expr string, captures []string, repeats []condxRepeatDesc, minSize int) (*SeqSubjectPattern, error) {
 	re, err := regexp.Compile(expr)
 	if err != nil {
 		return nil, fmt.Errorf("序列成员正则 %q 编译失败: %w", expr, err)
@@ -284,7 +294,7 @@ func newSeqSubjectPattern(expr string, captures []string, minSize int) (*SeqSubj
 	if minSize < 2 {
 		minSize = 2
 	}
-	return &SeqSubjectPattern{Expr: expr, Captures: captures, SeqName: "seq", KeyParts: keyParts, MinSize: minSize, re: re}, nil
+	return &SeqSubjectPattern{Expr: expr, Captures: captures, Repeats: repeats, SeqName: "seq", KeyParts: keyParts, MinSize: minSize, re: re}, nil
 }
 
 // patternMarker 实现 Pattern 接口标记。
@@ -360,7 +370,7 @@ func (p *SeqSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 	if size < p.MinSize {
 		return false
 	}
-	bindCondxCaptures(p.re, selfName, p.Captures, ctx)
+	bindCondxCaptures(p.re, selfName, p.Captures, p.Repeats, ctx)
 	seq, _ := strconv.Atoi(seqText)
 	ctx.Group = &GroupAnalysis{Key: key, Prefix: key, Seq: seq, Size: size}
 	return true
@@ -397,10 +407,12 @@ func (p *ParentNamePattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 }
 
 // bindCondxCaptures 对 text 求一次子匹配并绑定命名捕获组：命中时把 Captures
-// 列出的组按本次命中值追加为绑定（不存在的组名绑定空串），返回 true；不命中
-// 返回 false 且不绑定。绑定语义与 RegexPattern.matchWithCaptures 一致（区间
-// 供贪婪识别「未覆盖片段」复用；v4 主体捕获沿用同一绑定空间）。
-func bindCondxCaptures(re *regexp.Regexp, text string, names []string, ctx *ParseContext) bool {
+// 列出的组按本次命中值追加为绑定（不存在的组名绑定空串），再对 Repeats 各
+// 重复段按整段位置组拆出全部单元值、逐条追加同名绑定（{标签+} 一名 N 绑定，
+// 阶段2 扇出根基），返回 true；不命中返回 false 且不绑定。绑定语义与
+// RegexPattern.matchWithCaptures 一致（区间供贪婪识别「未覆盖片段」复用；v4
+// 主体捕获沿用同一绑定空间）。
+func bindCondxCaptures(re *regexp.Regexp, text string, names []string, repeats []condxRepeatDesc, ctx *ParseContext) bool {
 	idx := re.FindStringSubmatchIndex(text)
 	if idx == nil {
 		return false
@@ -420,5 +432,79 @@ func bindCondxCaptures(re *regexp.Regexp, text string, names []string, ctx *Pars
 		}
 		ctx.Captures = append(ctx.Captures, binding)
 	}
+	for _, desc := range repeats {
+		bindRepeatUnits(text, idx, desc, ctx)
+	}
 	return true
+}
+
+// bindRepeatUnits 对单个重复段拆单元并逐条绑定：整段位置组（GroupIndex）本次
+// 匹配区间 [lo,hi) 内的子串跑单元子模式再拆（恰一个捕获组圈住单元值），每单元
+// 追加一条 Name=En 的绑定（区间=单元值在全文本中的区间，已含整段偏移）。0+ 段
+// 未参与（区间为 -1）时零绑定零报错——「取不到值零产出」语义直接成立。
+//
+// 包裹形态（[{标签+}]）的整段不含首开括号与末闭括号（1+ 档由组外字面段承载），
+// 裸拆覆盖不完备（首末单元缺括号无法终匹配）——先检裸拆覆盖（首起于 0 且末
+// 止于段尾），不完备时以整段前后相邻字符复原包裹后重拆，取命中更多的一组；
+// 裸词形态（{标签+;_}）整段天然首尾皆值，覆盖恒完备、不经复原。区间按复原
+// 偏移平移回全文本坐标（Segment 恒记全文本）。
+func bindRepeatUnits(text string, idx []int, desc condxRepeatDesc, ctx *ParseContext) {
+	if desc.GroupIndex <= 0 || 2*desc.GroupIndex+1 >= len(idx) {
+		return
+	}
+	lo, hi := idx[2*desc.GroupIndex], idx[2*desc.GroupIndex+1]
+	if lo < 0 || hi < 0 {
+		return
+	}
+	unitRe, err := regexp.Compile(desc.UnitPattern)
+	if err != nil {
+		// 推导管线保证单元子模式可编译；异常保守零绑定不报错。
+		return
+	}
+	seg, base := text[lo:hi], lo
+	runs := unitRe.FindAllStringSubmatchIndex(seg, -1)
+	if len(runs) == 0 || runs[0][0] != 0 || runs[len(runs)-1][1] != len(seg) {
+		if open, ok := runeTailAt(text, lo); ok {
+			if closeCh, ok2 := runeHeadAt(text, hi); ok2 {
+				wrapped := open + seg + closeCh
+				if wRuns := unitRe.FindAllStringSubmatchIndex(wrapped, -1); len(wRuns) > len(runs) {
+					seg, base, runs = wrapped, lo-len(open), wRuns
+				}
+			}
+		}
+	}
+	for _, r := range runs {
+		if len(r) < 4 || r[2] < 0 || r[3] < 0 {
+			continue
+		}
+		ctx.Captures = append(ctx.Captures, CaptureBinding{
+			Name: desc.En, Value: seg[r[2]:r[3]], Segment: text,
+			Start: base + r[2], End: base + r[3],
+		})
+	}
+}
+
+// runeTailAt 返回 s[:pos] 的末个 rune 原文（pos 为字节边界）；pos 越界或解码
+// 失败返回 false。
+func runeTailAt(s string, pos int) (string, bool) {
+	if pos <= 0 || pos > len(s) {
+		return "", false
+	}
+	r, size := utf8.DecodeLastRuneInString(s[:pos])
+	if r == utf8.RuneError && size <= 1 {
+		return "", false
+	}
+	return string(r), true
+}
+
+// runeHeadAt 返回 s[pos:] 的首个 rune 原文；pos 越界或解码失败返回 false。
+func runeHeadAt(s string, pos int) (string, bool) {
+	if pos < 0 || pos >= len(s) {
+		return "", false
+	}
+	r, size := utf8.DecodeRuneInString(s[pos:])
+	if r == utf8.RuneError && size <= 1 {
+		return "", false
+	}
+	return string(r), true
 }

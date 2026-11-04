@@ -208,11 +208,15 @@ export interface CondxRowForm {
 // refable=false 仅 {任意}（吞位词：非捕获、可重复、不可被提取引用）；
 // note 为词条说明（chips 提示）。{公共段}=序列成套成员模板的公共相同部分
 // （英文组名 key，与旧词 {键} 同组同义）。
+// 量词变体（重复段，与内核 parseCondxVariant 同口径）：标签/作者/集名 三词位
+// 可带量词——{词+}=至少一组、{词*}=可零组；分隔记号写作「;分隔」紧跟量词
+// （如 {标签+;_}，分隔字面=首个分号起的全部、含分号本身）。变体词为多值产出，
+// 仅提取段可引用，生效条件/值级小标/组合接线三面禁引。
 export const CONDX_VOCAB: { word: string; group: string; digit: boolean; refable: boolean; note: string }[] = [
-  { word: '作者', group: 'author', digit: false, refable: true, note: '贪婪取词（.+），相邻须有分隔文字' },
-  { word: '集名', group: 'setname', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合' },
+  { word: '作者', group: 'author', digit: false, refable: true, note: '贪婪取词（.+），相邻须有分隔文字；可带量词 +/*（{作者+} 一类重复段）' },
+  { word: '集名', group: 'setname', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合；可带量词 +/*（{集名*} 一类重复段）' },
   { word: '标题', group: 'title', digit: false, refable: true, note: '贪婪取词' },
-  { word: '标签', group: 'tag', digit: false, refable: true, note: '贪婪取词' },
+  { word: '标签', group: 'tag', digit: false, refable: true, note: '贪婪取词；可带量词 +/*（{标签+} 一类重复段）' },
   { word: '序号', group: 'seq', digit: true, refable: true, note: '数字类（[0-9]+）' },
   { word: '作品号', group: 'workid', digit: true, refable: true, note: '数字类（pixiv 作品号等）' },
   { word: '日期', group: 'date', digit: true, refable: true, note: '数字类（YYYYMMDD 等）' },
@@ -287,11 +291,13 @@ export const CONDX_BADGE_DIMS = ['author', 'tag', 'collection']
 // 点击预填当前行目标与模板）。
 export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 'dir' | 'seq'; description: string }[] = [
   { name: '【作者】标题', template: '【{作者}】{标题}', target: 'file', description: '方括号命名惯例' },
-  { name: '作者 - 标题', template: '{作者} - {标题}', target: 'file', description: '连字符分隔（贪婪取最后分隔位）' },
+  { name: '作者 - 标题', template: '{作者} - {标题}', target: 'file', description: '连字符分隔（惰性取首个分隔位）' },
   { name: 'pixiv 页级', template: '{作品号}_p{序号}', target: 'file', description: '作品号数字类 + _p 页号' },
   { name: '序列成套', template: '{公共段}_{序号}', target: 'seq', description: '{公共段}相同 ≥2 件成套归入同一作品集' },
   { name: '目录层作者', template: 'Artist[{作者}]', target: 'dir', description: '剥壳惯例：字面括号 + 作者词' },
   { name: '首组内名', template: '[{标签}]{任意}', target: 'dir', description: '多组括号目录名取首组内名、尾段吞掉（单组整名同样命中）' },
+  { name: '括号标签×N', template: '[{标签+}]', target: 'file', description: '方括号组连续出现一至多组、每组内名各取一标签（示例 [中国翻訳] [DL版] 两组双值；{标签*} 形态零组亦命中）。每组各取一值用本词条、只取第一组内名其余吞掉用「首组内名」' },
+  { name: '连写标签×N（指定分隔）', template: '{标签+;_}', target: 'file', description: '下划线分隔连写标签各取一值（a_b_c 三值、ab 不拆）。方括号包裹的标签组请用『括号标签×N』词条' },
   { name: '任意段吞位', template: '{标题}_{任意}', target: 'file', description: '{任意} 吞掉标题之后的一切' }
 ]
 
@@ -345,37 +351,131 @@ export function condxFlatRows(rows: CondxRowForm[]): { row: number; condx: Condx
   return out
 }
 
-// 一行的可引用占位词（模板中出现且 refable）：提取段「行N·{词}」下拉与
-// 小标占位词下拉的数据源；顺序=模板内出现序（引用词不可重复，天然唯一）。
-// 返回现行词——旧词 {键} 书写的模板归一为 {公共段}（组名同 key，寻址不受
-// 影响，显示不出旧词）。
-export function condxRowPlaceholders(condx: CondxForm): string[] {
+// —— 重复段词（占位词内部量词变体）前端轻量镜像（与内核 parseCondxVariant 同口径） ——
+
+// 可带量词的词位（与内核 condxRepeatable 同源：仅 标签/作者/集名 三词位）。
+export const CONDX_REPEAT_ROOTS = ['标签', '作者', '集名']
+
+// 组界六对同型括号的开→闭映射（包裹单元判定用；与内核 condxOpenBrackets 同源）。
+const CONDX_OPEN_BRACKETS: Record<string, string> = {
+  '[': ']', '【': '】', '（': '）', '(': ')', '「': '」', '『': '』'
+}
+
+// 重复段量词变体：root=词根、group=词根英文组名、atLeastOne=量词档（+=true、
+// *=false）、sepSpecified/sep=分隔字面（自首个分号起、含分号本身）。
+export interface CondxRepeatVariant {
+  word: string
+  root: string
+  group: string
+  atLeastOne: boolean
+  sepSpecified: boolean
+  sep: string
+}
+
+// 占位词内部是否含量词变体标记（+、* 或 ;）：与内核 hasCondxVariantMark 同口径。
+export function condxHasVariantMark(word: string): boolean {
+  return /[+*;]/.test(word)
+}
+
+// 解析量词变体：返回 {variant} 或 {error}（中文文案与后端同口径）；非变体词
+// 返回空对象（走既有单词路径，既有行为零扰动）。
+export function condxVariantOfWord(word: string): { variant?: CondxRepeatVariant; error?: string } {
+  if (!condxHasVariantMark(word)) return {}
+  const q = word.search(/[+*]/)
+  const semi = word.indexOf(';')
+  if (q < 0 || (semi >= 0 && semi < q)) {
+    return { error: `模板占位词 {${word}} 语法错误：分隔字面须跟在量词（+ 或 *）之后` }
+  }
+  const root = word.slice(0, q)
+  const rest = word.slice(q + 1)
+  if (rest !== '' && rest[0] !== ';') {
+    return { error: `模板占位词 {${word}} 语法错误：量词后只能跟分号引出的分隔字面` }
+  }
+  const v = condxVocabOf(root)
+  if (!v) {
+    return { error: `模板占位词 {${word}} 的词根 {${root}} 不在词表（作者/集名/序号/标题/标签/作品号/日期/公共段/任意）` }
+  }
+  if (CONDX_REPEAT_ROOTS.indexOf(root) < 0) {
+    return { error: `模板占位词 {${word}} 的词根 {${root}} 不可重复：仅 标签/作者/集名 可带量词（+ 或 *）` }
+  }
+  return { variant: { word, root, group: v.group, atLeastOne: word[q] === '+', sepSpecified: rest !== '', sep: rest } }
+}
+
+// 一行的全部可引用占位词（含重复段词——多值产出，仅提取段可引用）：word=
+// 模板书写原文（重复段词带量词/分隔，如 标签+），group=英文组名寻址口径。
+export function condxRowAllPlaceholders(condx: CondxForm): { word: string; group: string; repeat: boolean }[] {
   if (!condx || condx.format.mode !== 'template') return []
   const parsed = condxTemplateChips(condx.format.tpl || '')
   if (!parsed.chips) return []
-  const out: string[] = []
+  const out: { word: string; group: string; repeat: boolean }[] = []
+  const seen = new Set<string>()
   for (const c of parsed.chips) {
     if (!c.ph) continue
+    const pv = condxVariantOfWord(c.text)
+    if (pv.variant) {
+      if (seen.has(pv.variant.group)) continue
+      seen.add(pv.variant.group)
+      out.push({ word: c.text, group: pv.variant.group, repeat: true })
+      continue
+    }
     const v = condxVocabOf(c.text)
-    if (v && v.refable && out.indexOf(v.word) < 0) out.push(v.word)
+    if (v && v.refable && !seen.has(v.group)) {
+      seen.add(v.group)
+      out.push({ word: v.word, group: v.group, repeat: false })
+    }
   }
   return out
 }
 
-// 模板轻校验（与内核 deriveCondxRules 主要拒绝面同口径，构造期校验兜底真源）：
-// 词表外词（旧词别名合法）/ 引用词重复（按英文组名判重——{键} 与 {公共段}
-// 同组，同模板并用即重复）/ 相邻占位词无分隔。返回中文错误（空串=通过）。
-export function condxTemplateError(tpl: string): string {
+// 一行的可引用占位词（模板中出现且 refable，剔除重复段词）：生效条件/值级小标/
+// 组合接线三面禁引的镜像——这些下拉里选择不到多值产出的重复段词。顺序=模板内
+// 出现序。返回现行词——旧词 {键} 书写的模板归一为 {公共段}（组名同 key，寻址
+// 不受影响，显示不出旧词）。
+export function condxRowPlaceholders(condx: CondxForm): string[] {
+  return condxRowAllPlaceholders(condx).filter((p) => !p.repeat).map((p) => p.word)
+}
+
+// 模板轻校验（与内核 deriveCondxTemplate 主要拒绝面同口径，构造期校验兜底
+// 真源）：词表外词（旧词别名合法）/ 引用词重复（按英文组名判重——{键} 与
+// {公共段} 同组，同模板并用即重复）/ 相邻占位词无分隔 / 重复段词（量词变体）
+// 语法与形态（越权词位带量词、裸词无分隔、序列成员不支持重复段）。target 传入
+// 时按主体镜像序列成员禁区。返回中文错误（空串=通过）。
+export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq'): string {
   const parsed = condxTemplateChips(tpl)
   if (parsed.error) return parsed.error
   const chips = parsed.chips || []
   const seen = new Set<string>()
-  for (const c of chips) {
+  for (let ci = 0; ci < chips.length; ci++) {
+    const c = chips[ci]
     if (!c.ph) continue
+    const pv = condxVariantOfWord(c.text)
+    if (pv.error) return pv.error
+    if (pv.variant) {
+      const v = pv.variant
+      if (target === 'seq') return `模板占位词 {${c.text}} 不可重复：序列成员格式不支持重复段`
+      if (seen.has(v.group)) return `模板占位词 {${c.text}} 重复`
+      // 包裹判定：前字面段收尾开括号且后字面段起首为其配对闭括号（六对同型
+      // 括号映射）→ 包裹单元；否则裸词（裸词必须指定分隔字面）。
+      const prev = chips[ci - 1]
+      const next = chips[ci + 1]
+      const open = prev && !prev.ph ? prev.text.slice(-1) : ''
+      const close = next && !next.ph ? next.text.slice(0, 1) : ''
+      const wrapped = !!open && !!close && CONDX_OPEN_BRACKETS[open] === close
+      if (!wrapped) {
+        if (!v.sepSpecified) {
+          return `模板占位词 {${c.text}} 缺分隔字面：无包裹括号的重复词没有单元边界（贪婪并合），请用分号指定分隔（如 {${c.text};_}）或改用包裹括号成段（如 [{${c.text}}]）`
+        }
+        if (v.sep === ';') return `模板占位词 {${c.text}} 语法错误：分号引出的分隔字面不能为空`
+      }
+      seen.add(v.group)
+      continue
+    }
     const v = condxVocabOf(c.text)
     if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品号/日期/公共段/任意）`
     if (!v.refable) continue
-    if (seen.has(v.group)) return `占位词「${c.text}」在同一模板内重复（引用词不可重复；吞位用 {任意}）`
+    if (seen.has(v.group)) {
+      return `占位词「${c.text}」在同一模板内重复（引用词不可重复；同一词根重复取值请用重复段记号 {${v.word}+}，吞位用 {任意}）`
+    }
     seen.add(v.group)
   }
   for (let i = 1; i < chips.length; i++) {
@@ -396,7 +496,7 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
     if (!(condx.format.word || '').trim()) return '包含词为空'
     if (condxTemplateChips(condx.format.word || '').chips) return '包含词须为纯文字（不含占位词）'
   } else {
-    const err = condxTemplateError(condx.format.tpl || '')
+    const err = condxTemplateError(condx.format.tpl || '', target)
     if (err) return err
     if (target === 'seq') {
       const chips = condxTemplateChips(condx.format.tpl || '').chips || []
@@ -468,20 +568,24 @@ export function condxRowsError(rows: CondxRowForm[]): string {
 }
 
 // 捕获声明清单（v4：行号+占位词+英文组名）：提取段「行N·{词}」选项与清单
-// 呈现用 word（现行词——旧词 {键} 书写归一显示为 {公共段}）；captureName 落
-// JSON 用 group（内核寻址口径=英文组名）。
+// 呈现用 word（现行词——旧词 {键} 书写归一显示为 {公共段}；重复段词为模板
+// 书写原文如 标签+）；captureName 落 JSON 用 group（内核寻址口径=英文组名）。
+// repeat=true 为重复段词（多值产出）：提取段可引用，三面（生效条件/值级小标/
+// 组合接线）禁引——opts.includeRepeat=false 时剔除（组合接线的成员下拉口径）。
 export interface CondxCaptureDecl {
   row: number
   word: string
   group: string
+  repeat?: boolean
 }
 
-export function condxCaptures(rows: CondxRowForm[]): CondxCaptureDecl[] {
+export function condxCaptures(rows: CondxRowForm[], opts?: { includeRepeat?: boolean }): CondxCaptureDecl[] {
+  const includeRepeat = !opts || opts.includeRepeat !== false
   const out: CondxCaptureDecl[] = []
   for (const f of condxFlatRows(rows)) {
-    for (const word of condxRowPlaceholders(f.condx)) {
-      const v = condxVocabOf(word)
-      out.push({ row: f.row, word, group: v ? v.group : word })
+    for (const p of condxRowAllPlaceholders(f.condx)) {
+      if (p.repeat && !includeRepeat) continue
+      out.push({ row: f.row, word: p.word, group: p.group, repeat: p.repeat })
     }
   }
   return out

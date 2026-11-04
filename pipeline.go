@@ -309,9 +309,9 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 			if action.When != nil || action.From == FromScan {
 				continue
 			}
-			if decl, ok := action.Apply(rule.ID, ruleCtx); ok {
-				decision.Declarations = append(decision.Declarations, decl)
-			}
+			// ApplyDeclarations 多值扇出面：重复段同名 N 绑定产 N 条声明，
+			// 普通词一名一绑定恒单条（与既有 Apply 单返回零差异）。
+			decision.Declarations = append(decision.Declarations, action.ApplyDeclarations(rule.ID, ruleCtx)...)
 		}
 	}
 	for _, match := range conditional {
@@ -322,9 +322,8 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 			if !action.When.Holds(match.context, decision.Declarations) {
 				continue
 			}
-			if decl, ok := action.Apply(match.rule.ID, match.context); ok {
-				decision.Declarations = append(decision.Declarations, decl)
-			}
+			// 扇出面与第一遍一致（条件动作同样可重复段多值）。
+			decision.Declarations = append(decision.Declarations, action.ApplyDeclarations(match.rule.ID, match.context)...)
 		}
 	}
 	// 第三遍：贪婪识别（scan）动作——显式行（无条件+条件）先产出，scan 只补

@@ -3,6 +3,7 @@ package main
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -21,21 +22,23 @@ func TestDeriveCondxTemplate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "文件模板·中位贪婪回溯",
+			// 2026-11-04 终审拍板（惰性化）：填充段让位一切占位词——无类
+			// 锚定的贪婪段 .+ 全量改编译为惰性 .+?，下列期望表达式随之翻新。
+			name: "文件模板·中位惰性让位",
 			tpl:  "Isel_{集名}_{序号}_[中文翻譯][高清]",
-			expr: `^Isel_(?P<setname>.+)_(?P<seq>[0-9]+)_\[中文翻譯\]\[高清\]$`,
+			expr: `^Isel_(?P<setname>.+?)_(?P<seq>[0-9]+)_\[中文翻譯\]\[高清\]$`,
 			caps: []string{"setname", "seq"},
 		},
 		{
 			name: "首位数字占位词",
 			tpl:  "Tumblr{日期}[pixiv_{作品号}_{作者}]_{序号}",
-			expr: `^Tumblr(?P<date>[0-9]+)\[pixiv_(?P<workid>[0-9]+)_(?P<author>.+)\]_(?P<seq>[0-9]+)$`,
+			expr: `^Tumblr(?P<date>[0-9]+)\[pixiv_(?P<workid>[0-9]+)_(?P<author>.+?)\]_(?P<seq>[0-9]+)$`,
 			caps: []string{"date", "workid", "author", "seq"},
 		},
 		{
-			name: "单独占位词·贪婪段",
+			name: "单独占位词·惰性段",
 			tpl:  "{作者}",
-			expr: `^(?P<author>.+)$`,
+			expr: `^(?P<author>.+?)$`,
 			caps: []string{"author"},
 		},
 		{
@@ -45,9 +48,9 @@ func TestDeriveCondxTemplate(t *testing.T) {
 			caps: []string{"author", "workid", "title"},
 		},
 		{
-			name: "前字面非开括号收尾·维持贪婪",
+			name: "前字面非开括号收尾·惰性段",
 			tpl:  "[x{标签}]",
-			expr: `^\[x(?P<tag>.+)\]$`,
+			expr: `^\[x(?P<tag>.+?)\]$`,
 			caps: []string{"tag"},
 		},
 		{
@@ -63,23 +66,31 @@ func TestDeriveCondxTemplate(t *testing.T) {
 			caps: []string{"tag"},
 		},
 		{
-			name: "中位 {任意} 保持非空",
+			name: "中位 {任意} 保持非空·惰性",
 			tpl:  "{任意}[{标签}]",
-			expr: `^(?:.+)\[(?P<tag>[^]]+)\]$`,
+			expr: `^(?:.+?)\[(?P<tag>[^]]+)\]$`,
 			caps: []string{"tag"},
+		},
+		{
+			// 2026-11-04 终审修复批：括号包裹的 {任意} 编译为排除配对
+			// 闭括号的非空类（通配段不跨括号组吞并）。
+			name: "括号包裹 {任意} 排除闭括号类",
+			tpl:  "{集名} [{任意}]",
+			expr: `^(?P<setname>.+?) \[(?:[^]]+)\]$`,
+			caps: []string{"setname"},
 		},
 		{
 			name: "序列成员模板·键含下划线可匹配",
 			tpl:  "{键}_{序号}",
 			opts: deriveOpts{allowKey: true, requireSeq: true},
-			expr: `^(?P<key>.+)_(?P<seq>[0-9]+)$`,
+			expr: `^(?P<key>.+?)_(?P<seq>[0-9]+)$`,
 			caps: []string{"key", "seq"},
 		},
 		{
 			name: "序列成员模板·新词公共段与旧词同组同义",
 			tpl:  "{公共段}_{序号}",
 			opts: deriveOpts{allowKey: true, requireSeq: true},
-			expr: `^(?P<key>.+)_(?P<seq>[0-9]+)$`,
+			expr: `^(?P<key>.+?)_(?P<seq>[0-9]+)$`,
 			caps: []string{"key", "seq"},
 		},
 		{name: "空模板", tpl: " ", wantErr: "格式模板不能为空"},
@@ -92,7 +103,7 @@ func TestDeriveCondxTemplate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expr, caps, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			expr, caps, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
@@ -126,7 +137,7 @@ func TestDeriveCondxTemplateBracketPairs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expr, caps, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
+			expr, caps, _, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
 			if err != nil {
 				t.Fatalf("推导失败: %v", err)
 			}
@@ -217,6 +228,92 @@ func TestCondxBracketAwareCorpus(t *testing.T) {
 	}
 	if title, _ := fctx.Capture("r1.title"); title != "a" {
 		t.Fatalf("尾空命中标题捕获不符: %q", title)
+	}
+}
+
+// TestCondxLazyYieldAnchors 填充段让位锚定验收（2026-11-04 终审拍板：乙档
+// 全面惰性化——无类锚定贪婪段 .+ 一律编译为惰性 .+?，填充段让位一切占位词）：
+// a) 终审实例——[{作者}]{集名} {标签*; } 对多组名目录，旧贪婪下 {集名} 吞到
+//    「追悔の滓 [中国翻訳] [無修正]」、重复段只盖 [DL版] 末段；惰性化后
+//    {集名} 止于首个满足位（前导空格=模板书写责任，不剪），重复段取满
+//    [中国翻訳]/[無修正]/[DL版] 三段（含括号=裸词字面语义裁决——单元值类
+//    只排除分隔空格）；b) 写对模板 [{作者}] {集名} [{标签*}]：集名干净、
+//    包裹重复段剥括号三标签；c) 填充让位：{标题}_{作者} 对 A_B_C → 标题=A、
+//    作者吞尾余段 B_C；d) 类词钉界：{标题}_{序号} 对 A_B_123 → 序号=123
+//    （尾随数字类类锚定收界，不被惰性化扰动）。a/b 为 dir 目标、c/d 为
+//    file 目标——同一推导函数 deriveCondxTemplate 服务双 target，各抽一例即覆盖。
+func TestCondxLazyYieldAnchors(t *testing.T) {
+	const dir = "[南方ヒトガクシキ (仲村レグラ)] 追悔の滓 [中国翻訳] [無修正] [DL版]"
+	dirHit := func(tpl string) (*ParseContext, bool) {
+		p, err := compileCondx(&Condx{Target: CondxTargetDir, Format: condxTpl(tpl)}, 1)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		ctx := &ParseContext{}
+		ok := p.Evaluate(&MatchInput{FileName: "01.jpg", DirNames: []string{dir}}, nil, ctx)
+		return ctx, ok
+	}
+	fileHit := func(tpl, fileName string) (*ParseContext, bool) {
+		p, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl(tpl)}, 1)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		ctx := &ParseContext{}
+		ok := p.Evaluate(&MatchInput{FileName: fileName}, nil, ctx)
+		return ctx, ok
+	}
+
+	// a) 终审实例（dir）：3 标签绑定（含括号）+ 集名带前导空格。
+	ctx, ok := dirHit("[{作者}]{集名} {标签*; }")
+	if !ok {
+		t.Fatalf("终审实例模板应命中")
+	}
+	if author, _ := ctx.Capture("r1.author"); author != "南方ヒトガクシキ (仲村レグラ)" {
+		t.Fatalf("作者捕获不符: %q", author)
+	}
+	if setname, _ := ctx.Capture("r1.setname"); setname != " 追悔の滓" {
+		t.Fatalf("集名应止于首个满足位（前导空格=模板书写责任，不剪）: %q", setname)
+	}
+	tags := ctx.CaptureAll("r1.tag")
+	if len(tags) != 3 || tags[0].Value != "[中国翻訳]" || tags[1].Value != "[無修正]" || tags[2].Value != "[DL版]" {
+		t.Fatalf("应 3 标签绑定（含括号=裸词字面语义）: %+v", tags)
+	}
+
+	// b) 写对模板（dir）：集名干净、包裹重复段剥括号三标签。
+	ctx, ok = dirHit("[{作者}] {集名} [{标签*}]")
+	if !ok {
+		t.Fatalf("写对模板应命中")
+	}
+	if setname, _ := ctx.Capture("r1.setname"); setname != "追悔の滓" {
+		t.Fatalf("集名应干净（无前导空格）: %q", setname)
+	}
+	tags = ctx.CaptureAll("r1.tag")
+	if len(tags) != 3 || tags[0].Value != "中国翻訳" || tags[1].Value != "無修正" || tags[2].Value != "DL版" {
+		t.Fatalf("包裹重复段应剥括号 3 标签: %+v", tags)
+	}
+
+	// c) 填充让位（file）：标题让位，作者吞尾余段。
+	ctx, ok = fileHit("{标题}_{作者}", "A_B_C")
+	if !ok {
+		t.Fatalf("{标题}_{作者} 对 A_B_C 应命中")
+	}
+	if title, _ := ctx.Capture("r1.title"); title != "A" {
+		t.Fatalf("标题应让位取最短: %q", title)
+	}
+	if author, _ := ctx.Capture("r1.author"); author != "B_C" {
+		t.Fatalf("作者应吞尾余段: %q", author)
+	}
+
+	// d) 类词钉界（file）：尾随数字类收界不被惰性化扰动。
+	ctx, ok = fileHit("{标题}_{序号}", "A_B_123")
+	if !ok {
+		t.Fatalf("{标题}_{序号} 对 A_B_123 应命中")
+	}
+	if seq, _ := ctx.Capture("r1.seq"); seq != "123" {
+		t.Fatalf("序号应类锚定取尾: %q", seq)
+	}
+	if title, _ := ctx.Capture("r1.title"); title != "A_B" {
+		t.Fatalf("标题应回溯扩到数字类界前: %q", title)
 	}
 }
 
@@ -817,7 +914,9 @@ func TestBadgeGates(t *testing.T) {
 		t.Fatalf("编译失败: %v", err)
 	}
 	ctx := &ParseContext{}
-	if !p.Evaluate(&MatchInput{FileName: "jake__jaccobus_sunset.jpg"}, lib, ctx) {
+	// 2026-11-04 终审拍板（惰性化）：作者段取最短（首 _ 前），载体名由双
+	// 下划线形变换为空格形变（fold 仍唯一命中 Jake_Jaccobus）。
+	if !p.Evaluate(&MatchInput{FileName: "jake jaccobus_sunset.jpg"}, lib, ctx) {
 		t.Fatalf("折叠唯一应命中")
 	}
 	if v, ok := ctx.Capture("r1.author#canon"); !ok || v != "Jake_Jaccobus" {
@@ -830,13 +929,15 @@ func TestBadgeGates(t *testing.T) {
 		t.Fatalf("折叠零命中应不命中")
 	}
 	// library 精确（不折叠）：值须逐字在名单。
-	c2 := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{标题}"),
+	// 2026-11-04 终审拍板（惰性化）：分隔改空格字面——含 _ 的库名在 _
+	// 分隔模板下已不可整名捕获（作者段止于首 _）。
+	c2 := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者} {标题}"),
 		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author"}}}
 	p2, _ := compileCondx(c2, 1)
-	if !p2.Evaluate(&MatchInput{FileName: "Jake_Jaccobus_sunset.jpg"}, lib, &ParseContext{}) {
+	if !p2.Evaluate(&MatchInput{FileName: "Jake_Jaccobus sunset.jpg"}, lib, &ParseContext{}) {
 		t.Fatalf("精确名单应命中")
 	}
-	if p2.Evaluate(&MatchInput{FileName: "jake__jaccobus_sunset.jpg"}, lib, &ParseContext{}) {
+	if p2.Evaluate(&MatchInput{FileName: "jake jaccobus sunset.jpg"}, lib, &ParseContext{}) {
 		t.Fatalf("形变名在精确模式不应命中")
 	}
 	// constant。
@@ -929,5 +1030,188 @@ func TestAncestorAggregation(t *testing.T) {
 	}
 	if !p.Evaluate(in, nil, &ParseContext{}) {
 		t.Fatalf("W1 全序号子女应命中")
+	}
+}
+
+// 占位词量词变体词法解析（任务A）：只测 parseCondxVariant 与触发标记判定，
+// 不接入 deriveCondxTemplate 主流程（接入归任务B）。
+func TestCondxVariantParse(t *testing.T) {
+	green := []struct {
+		name string
+		word string
+		want condxVariant
+	}{
+		{name: "标签·至少一次", word: "标签+", want: condxVariant{En: "tag", AtLeastOne: true}},
+		{name: "标签·可零次", word: "标签*", want: condxVariant{En: "tag"}},
+		{name: "标签·显式分隔带字面", word: "标签+;_", want: condxVariant{En: "tag", AtLeastOne: true, SepSpecified: true, Sep: ";_"}},
+		{name: "标签·分隔仅为分号", word: "标签+;", want: condxVariant{En: "tag", AtLeastOne: true, SepSpecified: true, Sep: ";"}},
+		{name: "作者·可零次", word: "作者*", want: condxVariant{En: "author"}},
+		{name: "集名·至少一次", word: "集名+", want: condxVariant{En: "setname", AtLeastOne: true}},
+	}
+	for _, tc := range green {
+		got, err := parseCondxVariant(tc.word)
+		if err != nil {
+			t.Fatalf("%s：期望解析成功，得到错误 %v", tc.name, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s：期望 %+v，得到 %+v", tc.name, tc.want, got)
+		}
+	}
+	red := []struct {
+		name    string
+		word    string
+		wantErr string
+	}{
+		{name: "非可重复词位带量词", word: "标题+", wantErr: "仅 标签/作者/集名 可带量词"},
+		{name: "吞位词带量词", word: "任意+", wantErr: "不可重复"},
+		{name: "量词后残留非分号开头", word: "标签++", wantErr: "语法错误"},
+		{name: "仅分隔无量词", word: "标签;_", wantErr: "语法错误"},
+	}
+	for _, tc := range red {
+		if _, err := parseCondxVariant(tc.word); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s：期望错误含 %q，得到 %v", tc.name, tc.wantErr, err)
+		}
+	}
+	if hasCondxVariantMark("标签") || !hasCondxVariantMark("标签+") || !hasCondxVariantMark("标签;_") {
+		t.Fatalf("变体标记触发判定错误：不含标记的词不应触发，含 +/*/; 的词应触发")
+	}
+}
+
+// TestDeriveCondxTemplateRepeat 重复段表达（任务B）：量词变体占位词接入
+// deriveCondxTemplate——整段恰一个位置捕获组（非命名，SubexpNames 组名为
+// 空串、不进声明收集，即引用禁区词法根基）、单元值类为排除类、描述四字段
+// （词根组名/位置组序号/单元子模式/排除集）；裸词无分隔、seq 主体行、
+// 同词根重复段返回中文错误。
+func TestDeriveCondxTemplateRepeat(t *testing.T) {
+	type matchCase struct {
+		input string
+		want  []string // 各重复段整段位置组的期望匹配文本（按描述序），“<无>”=组未参与
+	}
+	green := []struct {
+		name    string
+		tpl     string
+		opts    deriveOpts
+		expr    string
+		caps    []string
+		reps    []condxRepeatDesc
+		matches []matchCase
+	}{
+		{
+			name:    "包裹1+·缺省分隔",
+			tpl:     "[{标签+}]",
+			expr:    `^\[([^]]+(?:\]\s*\[[^]]+)*)\]$`,
+			reps:    []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{{input: "[a] [b] [c]", want: []string{"a] [b] [c"}}, {input: "[x]", want: []string{"x"}}},
+		},
+		{
+			name:    "包裹0+·整段含括号外套可缺形态",
+			tpl:     "[{标签*}]",
+			expr:    `^(?:\[([^]]+(?:\]\s*\[[^]]+)*)\])?$`,
+			reps:    []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{{input: "[a] [b]", want: []string{"a] [b"}}, {input: "", want: []string{"<无>"}}},
+		},
+		{
+			name:    "包裹1+·显式分隔",
+			tpl:     "[{标签+;_}]",
+			expr:    `^\[([^]]+(?:\]_\[[^]]+)*)\]$`,
+			reps:    []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{{input: "[a]_[b]", want: []string{"a]_[b"}}},
+		},
+		{
+			name:    "裸词1+·排除分隔字面全部字符",
+			tpl:     "{标题}={标签+;_}",
+			// 2026-11-04 终审拍板（惰性化）：标题段 .+ 翻新为 .+?（重复段位置组类内最大不变）。
+			expr:    `^(?P<title>.+?)=([^_]+(?:_[^_]+)*)$`,
+			caps:    []string{"title"},
+			reps:    []condxRepeatDesc{{En: "tag", GroupIndex: 2, UnitPattern: `([^_]+)`, Exclude: "_"}},
+			matches: []matchCase{{input: "标题甲=tag1_tag2", want: []string{"tag1_tag2"}}},
+		},
+		{
+			name:    "裸词1+·前开括号不成包裹则原样回放",
+			tpl:     "[{标签+;_} 第2卷]",
+			expr:    `^\[([^_]+(?:_[^_]+)*) 第2卷\]$`,
+			reps:    []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `([^_]+)`, Exclude: "_"}},
+			matches: []matchCase{{input: "[a_b 第2卷]", want: []string{"a_b"}}},
+		},
+		{
+			name: "不同词根多重复段并存",
+			tpl:  "[{标签+}]_[{作者*}]",
+			expr: `^\[([^]]+(?:\]\s*\[[^]]+)*)\]_(?:\[([^]]+(?:\]\s*\[[^]]+)*)\])?$`,
+			reps: []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}, {En: "author", GroupIndex: 2, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{
+				{input: "[a] [b]_[c] [d]", want: []string{"a] [b", "c] [d"}},
+				{input: "[a]_", want: []string{"a", "<无>"}},
+			},
+		},
+	}
+	for _, tc := range green {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, caps, reps, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			if err != nil {
+				t.Fatalf("推导失败: %v", err)
+			}
+			if expr != tc.expr {
+				t.Fatalf("表达式不符:\n得到 %q\n期望 %q", expr, tc.expr)
+			}
+			if !reflect.DeepEqual(caps, tc.caps) {
+				t.Fatalf("捕获组不符: 得到 %v 期望 %v", caps, tc.caps)
+			}
+			if !reflect.DeepEqual(reps, tc.reps) {
+				t.Fatalf("重复段描述不符:\n得到 %+v\n期望 %+v", reps, tc.reps)
+			}
+			re := regexp.MustCompile(expr)
+			for _, m := range tc.matches {
+				idx := re.FindStringSubmatchIndex(m.input)
+				if idx == nil {
+					t.Fatalf("%q 应命中 %q", m.input, expr)
+				}
+				for gi, want := range m.want {
+					pos := reps[gi].GroupIndex
+					lo, hi := idx[2*pos], idx[2*pos+1]
+					got := "<无>"
+					if lo >= 0 {
+						got = m.input[lo:hi]
+					}
+					if got != want {
+						t.Fatalf("%q 位置组 %d 不符: 得到 %q 期望 %q", m.input, pos, got, want)
+					}
+				}
+			}
+			// 引用禁区词法根基：整段为位置捕获组（非命名），组名为空串。
+			for _, d := range reps {
+				if re.SubexpNames()[d.GroupIndex] != "" {
+					t.Fatalf("重复段整段应为位置捕获组（非命名），组 %d 得到名 %q", d.GroupIndex, re.SubexpNames()[d.GroupIndex])
+				}
+			}
+		})
+	}
+	// 语义底线抽查：单元子模式对整段匹配文本可再拆（阶段2 绑定层再拆口径）。
+	expr, _, reps, _ := deriveCondxTemplate("{标题}={标签+;_}", deriveOpts{})
+	re := regexp.MustCompile(expr)
+	m := re.FindStringSubmatchIndex("标题甲=tag1_tag2")
+	lo, hi := m[2*reps[0].GroupIndex], m[2*reps[0].GroupIndex+1]
+	units := regexp.MustCompile(reps[0].UnitPattern).FindAllStringSubmatch("标题甲=tag1_tag2"[lo:hi], -1)
+	if len(units) != 2 || units[0][1] != "tag1" || units[1][1] != "tag2" {
+		t.Fatalf("单元子模式再拆不符: %v", units)
+	}
+	red := []struct {
+		name    string
+		tpl     string
+		opts    deriveOpts
+		wantErr string
+	}{
+		{name: "裸词无分隔", tpl: "{标题}={标签+}", wantErr: "缺分隔字面"},
+		{name: "seq主体行用重复词", tpl: "{公共段}_{标签+}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "序列成员格式不支持重复段"},
+		{name: "同词根重复段并用", tpl: "[{标签+}]_[{标签*}]", wantErr: "重复"},
+		{name: "重复词与单词同词根并用", tpl: "{标签}_[{标签+}]", wantErr: "重复"},
+		{name: "裸词分隔字面为空", tpl: "{标题}={标签+;}", wantErr: "分隔字面不能为空"},
+	}
+	for _, tc := range red {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
+			}
+		})
 	}
 }
