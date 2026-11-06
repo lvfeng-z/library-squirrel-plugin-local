@@ -18,7 +18,7 @@
           @click="openCreateDialog"
         >创建任务</el-button>
         <el-button
-          v-else-if="!recognizing && !panoLoading && !panoLoadFailed"
+          v-else-if="!sessionRestoring && !recognizing && !panoLoading && !panoLoadFailed"
           type="primary"
           size="small"
           :loading="starting"
@@ -85,13 +85,13 @@
 
     <!-- 空会话态 -->
     <el-empty
-      v-if="!session && !loadError"
+      v-if="!session && !loadError && !sessionRestoring"
       description="未找到进行中的解析会话：请从工作台新建或恢复会话"
     >
       <a class="li-ws-back" :href="`${ROUTE_BASE}workbench`">返回本地导入工作台</a>
     </el-empty>
 
-    <template v-if="session">
+    <template v-if="session || sessionRestoring">
       <!-- 重识别差异行（单行小字，验证轮提示语并入同行，不占独立卡片） -->
       <p v-if="snapshot && diff && diffTotal > 0" class="li-ws-diffline">
         重识别差异（生成规则后的验证轮）：
@@ -542,6 +542,13 @@
                   @click="resumePanoLoad"
                 >从断点继续</el-button>
               </template>
+            </div>
+            <!-- 会话恢复中（2026-11-06 BA / 样式修订）：占位落在资源清单卡内——与随后
+                 panoLoading 载入态同卡、同位置、同底色，恢复完成时只换文案与进度条，
+                 不再从「无卡页面」跳到「白底卡」造成观感跳变 -->
+            <div v-else-if="sessionRestoring" class="li-ws-pano-load">
+              <p class="li-ws-pano-load-title">正在载入解析会话…</p>
+              <p class="li-ws-pano-load-count">正在读取会话与识别快照</p>
             </div>
             <!-- 边界：未识别会话（无快照）→ 引导说明 + 空态占位（干跑 = 纯求值，零任务产出、零弹问） -->
             <div v-else-if="!recognizing" class="li-ws-nosnap">
@@ -1074,6 +1081,11 @@ function decodePayload<T>(raw: unknown): T | null {
 }
 
 const session = ref<SessionSummary | null>(null)
+// 会话恢复中初态（2026-11-06 BA）：activateSession 对大会话做全载荷解码（session.go
+// SessionOf「全会话解码、秒级」），此前页面无「恢复中」态——页头按 snapshot 为空
+// 直显「开始全量识别」、主体直显「未找到进行中的解析会话」/「尚未生成识别全景」，
+// 大库约 1s 的窗口会诱导用户点击全量识别。恢复完成（成功或失败）即置 false。
+const sessionRestoring = ref(true)
 const snapshot = ref<PanoramaSnapshot | null>(null)
 const decisions = ref<DecisionsView | null>(null)
 const diff = ref<SnapDiff | null>(null)
@@ -3091,6 +3103,9 @@ onMounted(async () => {
   bindDocumentListeners()
   try {
     const root = await restoreSession()
+    // 恢复落定即撤「恢复中」初态（成功→按态装载全景/空态；失败→loadError 横幅），
+    // 避免占位与后续 panoLoading 载入态重叠
+    sessionRestoring.value = false
     if (root && session.value) {
       if (session.value.state === 'recognized') {
         await loadPanorama(root)
@@ -3099,6 +3114,7 @@ onMounted(async () => {
       bindViewportRO()
     }
   } finally {
+    sessionRestoring.value = false
     initialRestoreSettled = true
   }
 })
@@ -3270,6 +3286,8 @@ onUnmounted(() => {
   font-size: 14px;
   font-weight: 600;
   color: var(--app-text-primary);
+  /* 2026-11-07 用户反馈：载入态文案在卡内水平居中（垂直居中由容器 justify-content 承担） */
+  text-align: center;
 }
 
 .li-ws-pano-load-title.is-failed {
@@ -3284,6 +3302,7 @@ onUnmounted(() => {
   align-items: baseline;
   gap: 14px;
   flex-wrap: wrap;
+  justify-content: center;
 }
 
 /* —— 创建异步横幅（剧本1·帧1/帧2/帧3→帧4）：卡底双行双计数+速率/ETA+取消入口 —— */
