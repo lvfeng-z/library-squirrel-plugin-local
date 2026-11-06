@@ -3502,3 +3502,57 @@ func TestUndercountGuardModerateShrinkPasses(t *testing.T) {
 		t.Fatal("中等收缩轮不应置放行簿记")
 	}
 }
+
+// TestApplyAssignmentToConclusionDropsAlsoRuleIDs 覆盖赋值覆盖对附属来源的
+// 整体丢弃：显式维度清场替换后该维度只余赋值声明（无附属规则清单），
+// 未覆盖维度的声明连同附属清单原样保留。
+func TestApplyAssignmentToConclusionDropsAlsoRuleIDs(t *testing.T) {
+	final := []MetadataDeclaration{
+		{Dimension: DimAuthor, Value: "作者甲", Source: SourceDir, RuleID: "r1", AlsoRuleIDs: []string{"r2", "r3"}},
+		{Dimension: DimTag, Value: "标签甲", Source: SourceFilename, RuleID: "r4", AlsoRuleIDs: []string{"r5"}},
+	}
+	got, _ := applyAssignmentToConclusion(final, nil, &SessionAssignment{Author: "修正作者"})
+	var authorDecls, tagDecls []MetadataDeclaration
+	for _, d := range got {
+		switch d.Dimension {
+		case DimAuthor:
+			authorDecls = append(authorDecls, d)
+		case DimTag:
+			tagDecls = append(tagDecls, d)
+		}
+	}
+	if len(authorDecls) != 1 || authorDecls[0].Source != SourceAssignment || authorDecls[0].Value != "修正作者" || len(authorDecls[0].AlsoRuleIDs) != 0 {
+		t.Errorf("author 维应为无附属清单的赋值声明，实际 %+v", authorDecls)
+	}
+	if len(tagDecls) != 1 || tagDecls[0].Value != "标签甲" || len(tagDecls[0].AlsoRuleIDs) != 1 || tagDecls[0].AlsoRuleIDs[0] != "r5" {
+		t.Errorf("未覆盖维应连同附属清单原样保留，实际 %+v", tagDecls)
+	}
+}
+
+// TestConclusionKeyInsensitiveToAlsoRuleIDs 覆盖结论比较键口径：附属规则清单
+// 不参与差异比较键，仅附属清单不同的两条结论键相等（差异轮零噪音）。
+func TestConclusionKeyInsensitiveToAlsoRuleIDs(t *testing.T) {
+	base := SnapConclusion{State: snapStateIdentified, Final: []SnapDecl{{
+		Dimension: "author", Value: "作者甲", Source: "rule", RuleID: "r1",
+	}}}
+	withAlso := SnapConclusion{State: snapStateIdentified, Final: []SnapDecl{{
+		Dimension: "author", Value: "作者甲", Source: "rule", RuleID: "r1",
+		AlsoRuleIDs: []string{"r2", "r3"},
+	}}}
+	if conclusionKey(&base) != conclusionKey(&withAlso) {
+		t.Errorf("仅附属规则清单不同的结论比较键应相等")
+	}
+}
+
+// TestSnapDeclOfPassesAlsoRuleIDs 覆盖快照投影透传：声明的附属规则清单
+// 原样进入紧凑形态。
+func TestSnapDeclOfPassesAlsoRuleIDs(t *testing.T) {
+	decl := MetadataDeclaration{
+		Dimension: DimAuthor, Value: "作者甲", Source: SourceDir, RuleID: "r1",
+		AlsoRuleIDs: []string{"r2"},
+	}
+	got := snapDeclOf(decl)
+	if !reflect.DeepEqual(got.AlsoRuleIDs, []string{"r2"}) {
+		t.Errorf("附属规则清单未透传，实际 %+v", got)
+	}
+}

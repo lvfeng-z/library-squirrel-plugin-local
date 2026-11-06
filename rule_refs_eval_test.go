@@ -9,6 +9,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -305,7 +306,7 @@ func TestRefGateNonComboZeroChange(t *testing.T) {
 		t.Fatalf("组合在场不应改变既有声明集: %v vs %v", declKey(baseline), declKey(withCombo))
 	}
 	for i := range baseline.Declarations {
-		if baseline.Declarations[i] != withCombo.Declarations[i] {
+		if !reflect.DeepEqual(baseline.Declarations[i], withCombo.Declarations[i]) {
 			t.Fatalf("声明 %d 因组合在场而变化: %+v vs %+v", i, baseline.Declarations[i], withCombo.Declarations[i])
 		}
 	}

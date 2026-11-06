@@ -46,7 +46,7 @@
             @click="pickByDim[p.dimension] = j"
           >
             <span class="li-pp-cand-value">{{ dimLabel(c.dimension) }}={{ c.value }}</span>
-            <span class="li-pp-cand-src">{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <span class="li-pp-rule-link" title="跳规则管理子页并打开该规则编辑" @click.stop="emit('openRule', c.ruleId)">{{ c.ruleId }}</span></template></span>
+            <span class="li-pp-cand-src">{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <span class="li-pp-rule-link" title="跳规则管理子页并打开该规则编辑" @click.stop="emit('openRule', c.ruleId)">{{ ruleNameOf(c.ruleId) }}</span></template></span>
           </button>
         </div>
         <div class="li-pp-row">
@@ -259,12 +259,12 @@
         <span class="li-pp-sec-note">变更 {{ diffChangedCount }} · 新增 {{ diffAddedCount }} · 消失 {{ diffRemovedCount }}</span>
       </h4>
       <div v-if="lastGenRule" class="li-pp-gen">
-        <p class="li-pp-gen-line"><span class="li-pp-gen-id">{{ lastGenRule.id }}</span>{{ lastGenRule.description }}</p>
+        <p class="li-pp-gen-line li-pp-gen-name">{{ lastGenRule.description || lastGenRule.id }}</p>
         <p v-if="lastGenRule.pattern" class="li-pp-gen-pattern">{{ lastGenRule.pattern }}</p>
       </div>
       <!-- 剧本G5：结构映射确认入档的组合规则序列（generalize mode=struct 的 Rules） -->
       <div v-for="r in lastGenRules" :key="r.id" class="li-pp-gen">
-        <p class="li-pp-gen-line"><span class="li-pp-gen-id">{{ r.id }}</span>{{ r.description }}</p>
+        <p class="li-pp-gen-line li-pp-gen-name">{{ r.description || r.id }}</p>
         <p v-if="r.pattern" class="li-pp-gen-pattern">{{ r.pattern }}</p>
       </div>
       <div v-if="lastCondition" class="li-pp-condjson">
@@ -458,6 +458,9 @@ const props = defineProps<{
   dir?: PanelDirContext | null
   assignments: PanelAssignment[]
   ignored: boolean
+  // 规则名称映射（ParseView 注入快照 ruleStats 的 id→description）：呈现面按
+  // 规则名称渲染，名称空（无名称规则）或未命中（规则已删）回退规则编码
+  ruleNames?: Record<string, string>
   pendingItems: PanelPending[]
   diff: PanelDiff | null
   recognizing: boolean
@@ -485,6 +488,10 @@ const emit = defineEmits<{
   // 声明来源规则名直达编辑：路由上下文在父组件，由父组件跳规则管理子页并携规则 ID
   (e: 'openRule', ruleId: string): void
 }>()
+
+// 规则名称渲染（映射经 prop 注入）：名称空或未命中回退规则编码
+const ruleNameOf = (ruleId: string): string =>
+  (props.ruleNames ? props.ruleNames[ruleId] : '') || ruleId
 
 // —— 反馈态 ——
 const notice = ref('')
@@ -1278,8 +1285,8 @@ async function runGeneralize(mode: string): Promise<void> {
   lastGenRule.value = null
   lastCondition.value = ''
   suggestion.value = null
-  const ids = rules.map((r) => r.id).join('、')
-  notice.value = `已生成规则 ${ids}；验证轮重识别已启动，差异见下方`
+  const names = rules.map((r) => r.description || r.id).join('、')
+  notice.value = `已生成规则 ${names}；验证轮重识别已启动，差异见下方`
   verifyStarted.value = true
 }
 
@@ -1498,7 +1505,7 @@ const dirMeaningText = computed(() => {
   const list = d.meanings || []
   if (!list.length) return '未覆盖'
   let text = list.map(meaningLabel).join('、')
-  if (d.meaningRuleId) text += `（来源规则 ${d.meaningRuleId}）`
+  if (d.meaningRuleId) text += `（来源规则 ${ruleNameOf(d.meaningRuleId)}）`
   return text
 })
 
@@ -2008,7 +2015,8 @@ const conclusionSummary = (c?: PanelDiffConclusion | null): string => {
   word-break: break-all;
 }
 
-.li-pp-gen-id {
+/* 生成规则名称主渲染（名称空回退规则编码） */
+.li-pp-gen-name {
   font-weight: 600;
   color: var(--app-color-primary);
 }

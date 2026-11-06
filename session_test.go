@@ -965,3 +965,29 @@ func TestGetPanoramaDiffConclusionProjection(t *testing.T) {
 	t.Logf("投影装载 %d 页 / 整答合计 %d 字节；全量结论形态推演 %d 页 / 全量差异集 %d 字节",
 		pages, wireBytes, fullPages, len(injectedJSON))
 }
+
+// TestWireBytesCountAlsoRuleIDs 覆盖页界估算器对附属规则清单的补计：文件
+// 条目与结论摘要的字节估算均按逐条口径计入附属规则 ID，差值与清单估算
+// helper 一致。
+func TestWireBytesCountAlsoRuleIDs(t *testing.T) {
+	decl := SnapDecl{Dimension: "author", Value: "作者甲", RuleID: "r1", AlsoRuleIDs: []string{"r2", "r3"}}
+	plain := decl
+	plain.AlsoRuleIDs = nil
+	delta := alsoRuleIDsWireBytes([]string{"r2", "r3"})
+	if delta <= 0 {
+		t.Fatalf("非空附属清单估算应计正字节，实际 %d", delta)
+	}
+	fileWith := SnapFile{RelPath: "a.jpg", State: "identified", Final: []SnapDecl{decl}}
+	filePlain := SnapFile{RelPath: "a.jpg", State: "identified", Final: []SnapDecl{plain}}
+	if got := snapFileWireBytes(fileWith) - snapFileWireBytes(filePlain); got != delta {
+		t.Errorf("文件条目估算附属清单增量 = %d，期望 %d", got, delta)
+	}
+	conWith := SnapConclusion{State: "identified", Final: []SnapDecl{decl}}
+	conPlain := SnapConclusion{State: "identified", Final: []SnapDecl{plain}}
+	if got := snapConclusionWireBytes(conWith) - snapConclusionWireBytes(conPlain); got != delta {
+		t.Errorf("结论摘要估算附属清单增量 = %d，期望 %d", got, delta)
+	}
+	if got := alsoRuleIDsWireBytes(nil); got != 0 {
+		t.Errorf("空附属清单应记零，实际 %d", got)
+	}
+}

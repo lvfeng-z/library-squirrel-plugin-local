@@ -114,6 +114,9 @@ type MetadataDeclaration struct {
 	RoleName string `json:"roleName"`
 	// RuleID 为产出该声明的规则 ID。
 	RuleID string `json:"ruleId"`
+	// AlsoRuleIDs 为与本声明同值并入的其他规则 ID（按并入先后保序；
+	// 并入只补记出处，本声明的维度、值、来源与角色不受影响）。
+	AlsoRuleIDs []string `json:"alsoRuleIds,omitempty"`
 }
 
 // DeclPredicate 声明谓词：某来源载体在某含义维度上的声明是否在场

@@ -170,7 +170,7 @@ func TestRunPipelineExampleTemplateDeclarations(t *testing.T) {
 		for _, want := range wantDecls {
 			found := false
 			for _, got := range decision.Declarations {
-				if got == want {
+				if reflect.DeepEqual(got, want) {
 					found = true
 					break
 				}

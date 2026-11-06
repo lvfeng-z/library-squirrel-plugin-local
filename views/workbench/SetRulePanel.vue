@@ -47,9 +47,9 @@
           生成规则与差异
           <span class="li-sr-sec-note">变更 {{ diffChangedCount }} · 新增 {{ diffAddedCount }} · 消失 {{ diffRemovedCount }}</span>
         </h4>
-        <p class="li-sr-hint">已生成规则 {{ firstGenId }}；验证轮重识别已启动</p>
+        <p class="li-sr-hint">已生成规则 {{ firstGenName }}；验证轮重识别已启动</p>
         <div v-for="r in genRules" :key="r.id" class="li-sr-gen">
-          <p class="li-sr-gen-line"><span class="li-sr-gen-id">{{ r.id }}</span>{{ r.description }}</p>
+          <p class="li-sr-gen-line li-sr-gen-name">{{ r.description || r.id }}</p>
           <p v-if="r.pattern" class="li-sr-gen-pattern">{{ r.pattern }}</p>
         </div>
         <p v-if="diffTotal" class="li-sr-hint">生成规则后自动增量重识别——过窄＝差异里仍有未覆盖，过泛＝差异里出现错套，请核对</p>
@@ -92,7 +92,7 @@
         </div>
         <div v-if="suggestion.rules && suggestion.rules.length" class="li-sr-exprs">
           <p v-for="r in suggestion.rules" :key="r.id" class="li-sr-expr">
-            <span class="li-sr-expr-id">{{ r.id }}</span>
+            <span class="li-sr-expr-name">{{ r.description || r.id }}</span>
             <span class="li-sr-expr-pattern">{{ r.pattern }}</span>
           </p>
         </div>
@@ -301,9 +301,10 @@ const genRules = computed<SetRuleGenRule[]>(() => {
   if (r.rules && r.rules.length) return r.rules
   return r.rule ? [r.rule] : []
 })
-const firstGenId = computed<string>(() => {
+// 首条生成规则呈现名（规则对象直取 description，名称空回退规则编码）
+const firstGenName = computed<string>(() => {
   const first = genRules.value[0]
-  return first ? first.id : ''
+  return first ? (first.description || first.id) : ''
 })
 
 // —— 调整面指派态（步4）：线索 ref → 指派目的地 ——
@@ -649,7 +650,7 @@ onMounted(() => {
   font-size: 12px;
 }
 
-.li-sr-expr-id {
+.li-sr-expr-name {
   color: var(--app-color-primary);
   word-break: break-all;
 }
@@ -747,9 +748,8 @@ onMounted(() => {
   color: var(--app-text-regular);
 }
 
-.li-sr-gen-id {
+.li-sr-gen-name {
   color: var(--app-color-primary);
-  margin-right: 6px;
   word-break: break-all;
 }
 

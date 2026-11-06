@@ -699,11 +699,12 @@ type SnapFile struct {
 
 // SnapDecl 声明的紧凑形态（终选与待裁决候选共用）。
 type SnapDecl struct {
-	Dimension string `json:"dimension"`
-	Value     string `json:"value"`
-	Source    string `json:"source"`
-	RoleName  string `json:"roleName,omitempty"`
-	RuleID    string `json:"ruleId,omitempty"`
+	Dimension   string   `json:"dimension"`
+	Value       string   `json:"value"`
+	Source      string   `json:"source"`
+	RoleName    string   `json:"roleName,omitempty"`
+	RuleID      string   `json:"ruleId,omitempty"`
+	AlsoRuleIDs []string `json:"alsoRuleIds,omitempty"`
 }
 
 // SnapClue 疑似线索：类别 + 摘要（如命中的库内名字、pixiv ID、群组前缀）。
@@ -1122,7 +1123,7 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIn
 func snapDeclOf(decl MetadataDeclaration) SnapDecl {
 	return SnapDecl{
 		Dimension: string(decl.Dimension), Value: decl.Value, Source: string(decl.Source),
-		RoleName: decl.RoleName, RuleID: decl.RuleID,
+		RoleName: decl.RoleName, RuleID: decl.RuleID, AlsoRuleIDs: decl.AlsoRuleIDs,
 	}
 }
 

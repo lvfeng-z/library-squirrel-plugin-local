@@ -166,7 +166,7 @@
                 <button class="li-ws-filter-btn" @click="invertVisible">反选可见</button>
                 <select v-model="rulePick" class="li-ws-combo-select" @change="onRulePick">
                   <option value="">按规则命中选…</option>
-                  <option v-for="r in ruleOptions" :key="r.id" :value="r.id">{{ r.id }}（命中 {{ r.hitCount }}）</option>
+                  <option v-for="r in ruleOptions" :key="r.id" :value="r.id">{{ ruleNameOf(r.id) }}（命中 {{ r.hitCount }}）</option>
                 </select>
                 <select v-model="authorPick" class="li-ws-combo-select" @change="onAuthorPick">
                   <option value="">按作者声明选…</option>
@@ -603,6 +603,7 @@
                 :dir="dirPanelContext"
                 :assignments="assignmentList"
                 :ignored="false"
+                :rule-names="ruleNameMap"
                 :pending-items="[]"
                 :diff="diff"
                 :recognizing="recognizing"
@@ -641,10 +642,34 @@
                   <template v-if="selectedFile.final && selectedFile.final.length">
                     <div v-for="(d, i) in selectedFile.final" :key="i" class="li-ws-decl">
                       <span class="li-ws-decl-main">{{ declLabel(d) }}</span>
-                      <span class="li-ws-decl-src">{{ sourceLabel(d.source) }}<template v-if="d.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(d.ruleId)" :title="`跳规则管理子页并打开「${d.ruleId}」编辑`">{{ d.ruleId }}</a></template></span>
+                      <span class="li-ws-decl-src">
+                        <span class="li-ws-decl-src-text">{{ sourceLabel(d.source) }}<template v-if="d.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(d.ruleId)" :title="`跳规则管理子页并打开「${ruleNameOf(d.ruleId)}」编辑`">{{ ruleNameOf(d.ruleId) }}</a></template></span>
+                        <button
+                          v-if="(d.alsoRuleIds || []).length"
+                          type="button"
+                          class="li-ws-same-toggle"
+                          @click="toggleSameExpand(i)"
+                        >{{ sameToggleLabel((d.alsoRuleIds || []).length, isSameExpanded(i)) }}</button>
+                      </span>
+                      <div v-if="(d.alsoRuleIds || []).length && isSameExpanded(i)" class="li-ws-same-list">
+                        <p v-for="rid in d.alsoRuleIds" :key="rid" class="li-ws-same-item">· <a class="li-ws-rule-link" :href="ruleEditRoute(rid)" :title="`跳规则管理子页并打开「${ruleNameOf(rid)}」编辑`">{{ ruleNameOf(rid) }}</a></p>
+                      </div>
                     </div>
                   </template>
                   <p v-else class="li-ws-empty">无终选声明</p>
+                </div>
+                <div class="li-ws-sec">
+                  <h4 class="li-ws-sec-title">{{ hitRuleCount ? `命中规则（${hitRuleCount}）` : '命中规则' }}</h4>
+                  <div v-if="hitRuleCount" class="li-ws-hit-rules">
+                    <a
+                      v-for="rid in selectedFile.matchedRuleIds || []"
+                      :key="rid"
+                      class="li-ws-hit-pill"
+                      :href="ruleEditRoute(rid)"
+                      :title="`跳规则管理子页并打开「${ruleNameOf(rid)}」编辑`"
+                    >{{ ruleNameOf(rid) }}</a>
+                  </div>
+                  <p v-else class="li-ws-empty">无命中规则</p>
                 </div>
                 <div class="li-ws-sec">
                   <h4 class="li-ws-sec-title">所属序列群</h4>
@@ -663,6 +688,7 @@
                   :file="selectedFile"
                   :assignments="assignmentList"
                   :ignored="selectedIgnored"
+                  :rule-names="ruleNameMap"
                   :pending-items="selectedPending"
                   :diff="diff"
                   :recognizing="recognizing"
@@ -760,7 +786,7 @@
           </div>
           <div class="li-ws-pending-cands">
             <span v-for="(c, j) in p.candidates || []" :key="j" class="li-ws-pending-cand">
-              {{ dimLabel(c.dimension) }}={{ c.value }}（{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(c.ruleId)" :title="`跳规则管理子页并打开「${c.ruleId}」编辑`">{{ c.ruleId }}</a></template>）
+              {{ dimLabel(c.dimension) }}={{ c.value }}（{{ sourceLabel(c.source) }}<template v-if="c.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(c.ruleId)" :title="`跳规则管理子页并打开「${ruleNameOf(c.ruleId)}」编辑`">{{ ruleNameOf(c.ruleId) }}</a></template>）
             </span>
           </div>
           <p class="li-ws-pending-reason">{{ p.reason }}</p>
@@ -806,6 +832,9 @@ interface SnapDecl {
   source: string
   roleName?: string
   ruleId?: string
+  // 同值伴生来源：与本声明产出相同值的其他规则（终选合成同值去重的伴生记录，
+  // 保序；缺省=无同值伴随）
+  alsoRuleIds?: string[]
 }
 
 interface SnapFile {
@@ -1377,11 +1406,36 @@ const selectedGroupMember = computed(() => {
   return group.members.find((m) => m.relPath === file.relPath) || null
 })
 
-// 群卡定群来源标注：结构形态群=「结构·形态名」（形态表命中形态透出），规则定群
-// 群=定群规则 ID，兜底「结构」（群卡列表与右栏「所属序列群」共用）
+// 选中文件的提取段命中规则数（matchedRuleIds 为档案序；定群规则不入提取段命中）
+const hitRuleCount = computed<number>(() => {
+  const file = selectedFile.value
+  return file ? (file.matchedRuleIds || []).length : 0
+})
+
+// 终选声明同值折叠展开态（键=声明行下标，仅所点行切换；换选中文件收起全部）
+const sameExpandedIndexes = ref(new Set<number>())
+const isSameExpanded = (i: number): boolean => sameExpandedIndexes.value.has(i)
+function toggleSameExpand(i: number): void {
+  const next = new Set(sameExpandedIndexes.value)
+  if (next.has(i)) next.delete(i)
+  else next.add(i)
+  sameExpandedIndexes.value = next
+}
+watch(selectedRelPath, () => {
+  sameExpandedIndexes.value = new Set()
+})
+
+// 同值折叠标签文案：[同值 +N]，展开态 [同值 +N ▴]
+function sameToggleLabel(n: number, expanded: boolean): string {
+  return `[同值 +${n}${expanded ? ' ▴' : ''}]`
+}
+
+// 群定群来源标注（右栏「所属序列群」区消费）：结构形态群=「结构·形态名」
+// （形态表命中形态透出），规则定群群=定群规则名称（无名称/已删回退规则编码），
+// 兜底「结构」
 const groupBadge = (g: SnapGroup): string => {
   if (g.formName) return `结构·${g.formName}`
-  return g.ruleId || '结构'
+  return g.ruleId ? ruleNameOf(g.ruleId) : '结构'
 }
 
 // —— 右栏解析面板数据投影（ParsePanel 消费；请求仍走本组件唯一 workbench 通道） ——
@@ -1522,6 +1576,18 @@ function subRoute(key: string): string {
 function goSub(key: string): void {
   location.hash = subRoute(key)
 }
+
+// 规则名称映射（快照 ruleStats 的 id→description）：工作台呈现面统一按规则名称
+// 渲染；description 空（无名称规则）或映射未命中（规则已删）回退规则编码。
+// ParsePanel 无快照数据，经 prop 注入该映射。
+const ruleNameMap = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  for (const r of (snapshot.value ? snapshot.value.ruleStats : null) || []) {
+    map[r.id] = r.description
+  }
+  return map
+})
+const ruleNameOf = (ruleId: string): string => ruleNameMap.value[ruleId] || ruleId
 
 // 声明来源规则名直达编辑：跳规则管理子页并携规则 ID——子页载入规则档案后按 ID
 // 打开该规则编辑态。规则名出现在待裁决候选/终选声明的来源小字处（含泛化规则），
@@ -4301,8 +4367,66 @@ onUnmounted(() => {
 }
 
 .li-ws-decl-src {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
   color: var(--app-text-secondary);
+}
+
+.li-ws-decl-src-text {
+  word-break: break-all;
+}
+
+/* 同值折叠标签：终选声明来源行尾 [同值 +N]（展开态 [同值 +N ▴]），点击展开/收起 */
+.li-ws-same-toggle {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--app-radius-sm);
+  background: var(--app-tag-neutral-bg);
+  color: var(--app-color-primary);
+  cursor: pointer;
+}
+
+/* 同值展开列表：所属声明行下的同值规则名链接（逐条直达规则编辑） */
+.li-ws-same-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 12px;
+}
+
+.li-ws-same-item {
+  margin: 0;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  word-break: break-all;
+}
+
+/* 命中规则区：提取段命中规则的名称胶囊（逐条直达规则编辑） */
+.li-ws-hit-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.li-ws-hit-pill {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: var(--app-radius-sm);
+  background: var(--app-tag-neutral-bg);
+  color: var(--app-color-primary);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.li-ws-hit-pill:hover {
+  text-decoration: underline dotted;
 }
 
 .li-ws-clue {

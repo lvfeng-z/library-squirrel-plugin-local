@@ -37,7 +37,8 @@ func TestSynthesizeUnionCoexistWithRoles(t *testing.T) {
 }
 
 // TestSynthesizeUnionDedupByValue 覆盖 union 的按值去重：同值声明只保留首个
-// （来源与规则归属取先到者），不同值全部保留。
+// （来源与规则归属取先到者），不同值全部保留；被吞声明的规则 ID 记入保留者
+// 附属清单。
 func TestSynthesizeUnionDedupByValue(t *testing.T) {
 	decls := []MetadataDeclaration{
 		{Dimension: DimTag, Value: "同人志", Source: SourceFilename, RuleID: "r1"},
@@ -51,11 +52,11 @@ func TestSynthesizeUnionDedupByValue(t *testing.T) {
 		t.Fatalf("并集不应有待裁决项，实际 %+v", pending)
 	}
 	want := []MetadataDeclaration{
-		{Dimension: DimTag, Value: "同人志", Source: SourceFilename, RuleID: "r1"},
+		{Dimension: DimTag, Value: "同人志", Source: SourceFilename, RuleID: "r1", AlsoRuleIDs: []string{"r2"}},
 		{Dimension: DimTag, Value: "漫画", Source: SourceFilename, RuleID: "r3"},
 	}
 	if !reflect.DeepEqual(final, want) {
-		t.Errorf("去重结果为 %+v，期望 %+v（同值保首个）", final, want)
+		t.Errorf("去重结果为 %+v，期望 %+v（同值保首个、吞并出处入附属清单）", final, want)
 	}
 }
 
@@ -275,5 +276,97 @@ func TestSynthesizeRoleBindingOnlyWhenEmpty(t *testing.T) {
 	}
 	if final[2].RoleName != "" {
 		t.Errorf("Source 不匹配不应绑定，实际 %q", final[2].RoleName)
+	}
+}
+
+// TestSynthesizeUnionAbsorbSwallowedRuleID 覆盖 union 同值吞并的出处补记：
+// 保留声明吞并同值声明时，被吞声明出自其他规则的 ID 按到达序记入附属清单，
+// 三条同值声明保留者记两条且保序。
+func TestSynthesizeUnionAbsorbSwallowedRuleID(t *testing.T) {
+	decls := []MetadataDeclaration{
+		{Dimension: DimAuthor, Value: "作者甲", Source: SourceDir, RuleID: "r1"},
+		{Dimension: DimAuthor, Value: "作者甲", Source: SourceFilename, RuleID: "r2"},
+		{Dimension: DimAuthor, Value: "作者甲", Source: SourceConstant, RuleID: "r3"},
+	}
+	final, pending := Synthesize(decls, SynthesisPolicy{
+		DimPolicies: []DimPolicy{{Dimension: DimAuthor, Strategy: StrategyUnion}},
+	})
+	if len(pending) != 0 {
+		t.Fatalf("同值不冲突不应有待裁决项，实际 %+v", pending)
+	}
+	if len(final) != 1 {
+		t.Fatalf("同值去重后应只剩 1 条，实际 %+v", final)
+	}
+	want := []string{"r2", "r3"}
+	if !reflect.DeepEqual(final[0].AlsoRuleIDs, want) {
+		t.Errorf("附属规则 ID 为 %+v，期望 %+v（按到达序保序）", final[0].AlsoRuleIDs, want)
+	}
+}
+
+// TestSynthesizeUnionAbsorbSkipsBlankAndSelfRule 覆盖出处补记的跳过形态：
+// 被吞声明无规则 ID（内置惯例/纯捕获缺失形态）不记；与保留者同规则
+//（多值扇出的同值重复）不记自身；已登记过的规则 ID 不重复记。
+func TestSynthesizeUnionAbsorbSkipsBlankAndSelfRule(t *testing.T) {
+	decls := []MetadataDeclaration{
+		{Dimension: DimTag, Value: "标签甲", Source: SourceFilename, RuleID: "r1"},
+		{Dimension: DimTag, Value: "标签甲", Source: SourceDir},
+		{Dimension: DimTag, Value: "标签甲", Source: SourceConstant, RuleID: "r1"},
+		{Dimension: DimTag, Value: "标签甲", Source: SourceGroup, RuleID: "r2"},
+		{Dimension: DimTag, Value: "标签甲", Source: SourcePredicate, RuleID: "r2"},
+	}
+	final, _ := Synthesize(decls, SynthesisPolicy{
+		DimPolicies: []DimPolicy{{Dimension: DimTag, Strategy: StrategyUnion}},
+	})
+	if len(final) != 1 {
+		t.Fatalf("同值去重后应只剩 1 条，实际 %+v", final)
+	}
+	want := []string{"r2"}
+	if !reflect.DeepEqual(final[0].AlsoRuleIDs, want) {
+		t.Errorf("附属规则 ID 为 %+v，期望仅 %+v", final[0].AlsoRuleIDs, want)
+	}
+}
+
+// TestSynthesizeHighTrustNoAlsoRuleIDs 覆盖 highTrust 维不记附属规则：
+// 同层同值择首条是值竞争语义而非同值重复并入，落选声明的规则 ID 不入
+// 保留者附属清单。
+func TestSynthesizeHighTrustNoAlsoRuleIDs(t *testing.T) {
+	decls := []MetadataDeclaration{
+		{Dimension: DimTitle, Value: "同值标题", Source: SourceFilename, RuleID: "r1"},
+		{Dimension: DimTitle, Value: "同值标题", Source: SourceFilename, RuleID: "r2"},
+	}
+	final, pending := Synthesize(decls, SynthesisPolicy{
+		DimPolicies: []DimPolicy{{Dimension: DimTitle, Strategy: StrategyHighTrust}},
+	})
+	if len(pending) != 0 {
+		t.Fatalf("同层同值不作冲突，实际有待裁决项 %+v", pending)
+	}
+	if len(final) != 1 {
+		t.Fatalf("同层同值应择首条，实际 %+v", final)
+	}
+	if len(final[0].AlsoRuleIDs) != 0 {
+		t.Errorf("highTrust 择一不应记附属规则 ID，实际 %+v", final[0].AlsoRuleIDs)
+	}
+}
+
+// TestSynthesizeUnionOrderInvariantWithAbsorb 覆盖等价锚：吞并补记附属规则
+// 后，终选声明的维度、值、来源与顺序仍与按值去重保首的结果逐条一致
+//（附属清单为纯增量，不参与去重判定）。
+func TestSynthesizeUnionOrderInvariantWithAbsorb(t *testing.T) {
+	decls := []MetadataDeclaration{
+		{Dimension: DimAuthor, Value: "作者甲", Source: SourceDir, RuleID: "r1"},
+		{Dimension: DimCollection, Value: "集甲", Source: SourceFilename, RuleID: "r2"},
+		{Dimension: DimAuthor, Value: "作者甲", Source: SourceFilename, RuleID: "r3"},
+		{Dimension: DimTag, Value: "标签甲", Source: SourceFilename, RuleID: "r4"},
+		{Dimension: DimCollection, Value: "集乙", Source: SourceDir, RuleID: "r5"},
+	}
+	final, _ := Synthesize(decls, SynthesisPolicy{})
+	want := []MetadataDeclaration{
+		{Dimension: DimAuthor, Value: "作者甲", Source: SourceDir, RuleID: "r1", AlsoRuleIDs: []string{"r3"}},
+		{Dimension: DimCollection, Value: "集甲", Source: SourceFilename, RuleID: "r2"},
+		{Dimension: DimCollection, Value: "集乙", Source: SourceDir, RuleID: "r5"},
+		{Dimension: DimTag, Value: "标签甲", Source: SourceFilename, RuleID: "r4"},
+	}
+	if !reflect.DeepEqual(final, want) {
+		t.Errorf("终选声明为 %+v，期望 %+v（维度/值/来源/序与按值去重结果一致）", final, want)
 	}
 }

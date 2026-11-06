@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -407,13 +408,14 @@ func TestProfileLegacyVersionsRejected(t *testing.T) {
 	}
 }
 
-// equalDeclarations 声明序列逐条等值比较（求值结论一致性断言用）。
+// equalDeclarations 声明序列逐条等值比较（求值结论一致性断言用；
+// 声明含附属规则清单切片字段，不可用 ==）。
 func equalDeclarations(a, b []MetadataDeclaration) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if !reflect.DeepEqual(a[i], b[i]) {
 			return false
 		}
 	}

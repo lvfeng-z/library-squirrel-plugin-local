@@ -1886,6 +1886,7 @@ func snapFileWireBytes(f SnapFile) int {
 	n += len(f.RelPath) + len(f.FileName) + len(f.DirRelKey) + len(f.State) + len(f.GroupKey)
 	for _, d := range f.Final {
 		n += 72 + len(d.Dimension) + len(d.Value) + len(d.Source) + len(d.RoleName) + len(d.RuleID)
+		n += alsoRuleIDsWireBytes(d.AlsoRuleIDs)
 	}
 	for _, dim := range f.PendingDims {
 		n += 16 + len(dim)
@@ -2002,11 +2003,26 @@ func assignmentWireBytes(a workbenchAssignmentView) int {
 // stringItemWireBytes 字符串清单条目（决策态忽略清单/选择集）的序列化字节估算。
 func stringItemWireBytes(s string) int { return 8 + len(s) }
 
+// alsoRuleIDsWireBytes 声明附属规则 ID 清单的序列化字节估算（口径同上：
+// 键名与方括号骨架按定长、条目按引号/逗号骨架 + UTF-8 字节数；空清单按
+// omitempty 记零）。
+func alsoRuleIDsWireBytes(ids []string) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	n := 16
+	for _, id := range ids {
+		n += 3 + len(id)
+	}
+	return n
+}
+
 // snapConclusionWireBytes 差异条目前/后结论摘要的序列化字节估算（口径同上）。
 func snapConclusionWireBytes(c SnapConclusion) int {
 	n := 40 + len(c.State)
 	for _, d := range c.Final {
 		n += 72 + len(d.Dimension) + len(d.Value) + len(d.Source) + len(d.RoleName) + len(d.RuleID)
+		n += alsoRuleIDsWireBytes(d.AlsoRuleIDs)
 	}
 	for _, dim := range c.PendingDims {
 		n += 16 + len(dim)

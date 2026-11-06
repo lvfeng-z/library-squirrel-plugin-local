@@ -712,13 +712,15 @@ func Synthesize(decls []MetadataDeclaration, policy SynthesisPolicy) (final []Me
 			final, pending = pickHighTrust(final, pending, dim, group)
 			continue
 		}
-		// union 分支（含缺省回退与未知维度的保底）：按值去重，保首个声明。
-		seenValue := make(map[string]bool, len(group))
+		// union 分支（含缺省回退与未知维度的保底）：按值去重，保首个声明；
+		// 被吞并的同值声明若出自其他规则，规则 ID 记入保留声明的附属清单。
+		retainedIdx := make(map[string]int, len(group))
 		for _, decl := range group {
-			if seenValue[decl.Value] {
+			if idx, ok := retainedIdx[decl.Value]; ok {
+				absorbAlsoRuleID(&final[idx], decl)
 				continue
 			}
-			seenValue[decl.Value] = true
+			retainedIdx[decl.Value] = len(final)
 			final = append(final, decl)
 		}
 	}
@@ -730,6 +732,21 @@ func Synthesize(decls []MetadataDeclaration, policy SynthesisPolicy) (final []Me
 		}
 	}
 	return final, pending
+}
+
+// absorbAlsoRuleID 同值吞并时登记被吞声明的规则出处：被吞声明无规则 ID
+//（内置惯例或纯捕获形态）不记；与保留声明自身同规则（含已登记过的）不重复
+// 记。声明按档案序到达，追加顺序即附属清单顺序。
+func absorbAlsoRuleID(retained *MetadataDeclaration, absorbed MetadataDeclaration) {
+	if absorbed.RuleID == "" || absorbed.RuleID == retained.RuleID {
+		return
+	}
+	for _, id := range retained.AlsoRuleIDs {
+		if id == absorbed.RuleID {
+			return
+		}
+	}
+	retained.AlsoRuleIDs = append(retained.AlsoRuleIDs, absorbed.RuleID)
 }
 
 // strategyOf 查含义维度的生效合成策略：先查已配置策略，再回退缺省策略表；
