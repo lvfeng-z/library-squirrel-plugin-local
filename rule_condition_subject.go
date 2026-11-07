@@ -407,11 +407,14 @@ func (p *ParentNamePattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 }
 
 // bindCondxCaptures 对 text 求一次子匹配并绑定命名捕获组：命中时把 Captures
-// 列出的组按本次命中值追加为绑定（不存在的组名绑定空串），再对 Repeats 各
-// 重复段按整段位置组拆出全部单元值、逐条追加同名绑定（{标签+} 一名 N 绑定，
-// 阶段2 扇出根基），返回 true；不命中返回 false 且不绑定。绑定语义与
-// RegexPattern.matchWithCaptures 一致（区间供贪婪识别「未覆盖片段」复用；v4
-// 主体捕获沿用同一绑定空间）。
+// 列出的组按本次命中值追加为绑定，再对 Repeats 各重复段按整段位置组拆出全部
+// 单元值、逐条追加同名绑定（{标签+} 一名 N 绑定，阶段2 扇出根基），返回 true；
+// 不命中返回 false 且不绑定。未参与本次匹配的命名组（子匹配索引 -1，如可选
+// 词位缺席）跳过绑定登记——缺席≠空串绑定，下游按「取不到值」处理；参与匹配
+// 但捕获空串的组照常登记（判定只看索引）。表达式内不存在的组名仍绑空串
+// （历史行为，与 RegexPattern.matchWithCaptures 同款；两域缺席语义分叉：模板域
+// 缺席无绑定、手写 JSON 原生正则域绑空串）。区间供贪婪识别「未覆盖片段」复用；
+// v4 主体捕获沿用同一绑定空间。
 func bindCondxCaptures(re *regexp.Regexp, text string, names []string, repeats []condxRepeatDesc, ctx *ParseContext) bool {
 	idx := re.FindStringSubmatchIndex(text)
 	if idx == nil {
@@ -420,15 +423,22 @@ func bindCondxCaptures(re *regexp.Regexp, text string, names []string, repeats [
 	groupNames := re.SubexpNames()
 	for _, name := range names {
 		binding := CaptureBinding{Name: name, Segment: text}
+		found, participated := false, false
 		for i, groupName := range groupNames {
 			if i > 0 && groupName == name {
+				found = true
 				s, e := idx[2*i], idx[2*i+1]
 				if s >= 0 && e >= 0 {
 					binding.Value = text[s:e]
 					binding.Start, binding.End = s, e
+					participated = true
 				}
 				break
 			}
+		}
+		if found && !participated {
+			// 组在表达式内但本次匹配未参与：跳过绑定登记（缺席=无绑定）。
+			continue
 		}
 		ctx.Captures = append(ctx.Captures, binding)
 	}

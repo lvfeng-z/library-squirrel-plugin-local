@@ -156,7 +156,7 @@
                       v-for="ex in CONDX_EXAMPLES"
                       :key="ex.name"
                       type="button"
-                      class="li-condx-chip is-example"
+                      :class="['li-condx-chip is-example', { 'is-optional': ex.template.indexOf('?') >= 0 }]"
                       :title="`${ex.template}（${ex.description}）`"
                       @click="applyExample(row, ex)"
                     >{{ ex.name }}</button>
@@ -2411,6 +2411,24 @@ function previewSampleLine(s: RulePreviewSampleView): string {
 
 .li-condx-chip.is-example {
   color: var(--app-text-secondary);
+}
+
+/* 可选记号词条（模板含 ? 的示例）：虚化虚线边框 + 淡色「可选」角标——阶段3
+   可选 chip 样式（无既有可选类先例，不阻塞语义的小额呈现设计）。 */
+.li-condx-chip.is-optional {
+  border-style: dashed;
+  color: var(--app-text-secondary);
+}
+
+.li-condx-chip.is-optional::after {
+  content: '可选';
+  margin-left: 4px;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1.4;
+  border-radius: 4px;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
 }
 
 .li-condx-chips-sep {

@@ -294,6 +294,103 @@ func hasCondxVariantMark(word string) bool {
 	return strings.ContainsAny(word, "+*;")
 }
 
+// condxOptRoot 报告占位词内容是否 ? 后缀形态：是则返回剥去一个结尾 ? 的词根
+//（{作者?} → 作者、{what??} → what?——可选字面自身以 ? 结尾用双写表达）。
+// 词法无转义语法且不引入（2026-11-07 终审澄清1）：花括号外的 \ 与 ? 皆为
+// 普通字面，存量模板含 \ 的含义不变；成对花括号文本无法按字面表达属既有边界。
+func condxOptRoot(word string) (string, bool) {
+	if !strings.HasSuffix(word, "?") {
+		return "", false
+	}
+	return strings.TrimSuffix(word, "?"), true
+}
+
+// condxOptWordEn 返回 ? 后缀占位词的可选词位词根英文组名（词根在词表——含
+// 任意/键/公共段，三者随后由各自拒绝面拦下）；可选分隔字面与空词根返回 false。
+func condxOptWordEn(word string) (string, bool) {
+	root, ok := condxOptRoot(word)
+	if !ok || root == "" {
+		return "", false
+	}
+	en, known := condxVocab[root]
+	return en, known
+}
+
+// condxOptSepPlaceholder 报告占位词内容是否可选分隔字面形态（{字面?}）：非
+// 变体、剥去一个结尾 ? 后非空且不在词表（2026-11-07 终审澄清2 的词根判定
+// 顺序：先查词表命中=可选词位，未命中且非空=可选分隔字面）。
+func condxOptSepPlaceholder(word string) bool {
+	if hasCondxVariantMark(word) {
+		return false
+	}
+	root, ok := condxOptRoot(word)
+	if !ok || root == "" {
+		return false
+	}
+	_, known := condxVocab[root]
+	return !known
+}
+
+// condxHoldsTrailingOpen 报告后邻占位词是否需要暂扣前字面段收尾的开括号：
+// 量词变体（既有）与可选词位（包裹组可选——开括号随词进退）两类；可选分隔
+// 字面不包裹任何词，不暂扣。
+func condxHoldsTrailingOpen(next string) bool {
+	if hasCondxVariantMark(next) {
+		return true
+	}
+	_, ok := condxOptWordEn(next)
+	return ok
+}
+
+// condxOptSepAnchored 校验可选分隔字面（tokens[idx]，占位词内容 {字面?} 形态）
+// 的位置约束（决策4）：左邻与右邻中至少一侧须为非空必选字面段或模板首/尾，
+// 占位词不作锚。左邻取前一字面段的必选残留（0+ 包裹重复段/包裹可选词位把
+// 起首闭括号收进可缺形态后残留为空，风险5 已知边界）；右邻取后一字面段的
+// 必选残留前瞻（condxLitMandatoryAnchor）。相邻两可选分隔互不作锚——
+// { ?}{_?} 一类天然被拒。
+func condxOptSepAnchored(tokens []condxToken, idx int, lastLitMandatory string) bool {
+	if idx > 0 && condxOptSepPlaceholder(tokens[idx-1].placeholder) {
+		return false
+	}
+	if idx+1 < len(tokens) && condxOptSepPlaceholder(tokens[idx+1].placeholder) {
+		return false
+	}
+	leftOK := idx == 0 || (tokens[idx-1].literal != "" && lastLitMandatory != "")
+	rightOK := idx == len(tokens)-1 || (tokens[idx+1].literal != "" && condxLitMandatoryAnchor(tokens, idx+1))
+	return leftOK || rightOK
+}
+
+// condxLitMandatoryAnchor 报告字面段 tokens[j] 的必选（非可缺）内容是否非空
+// （作可选分隔的右邻锚）：普通字面段恒非空；收尾开括号将被后邻 0+ 包裹重复
+// 段或包裹可选词位收进可缺形态时，必选残留=去开括号（空则不作锚）；1+ 档与
+// 裸词形态的开括号按字面回放、仍必选。变体解析失败时保守作锚（由变体分支
+// 自身报错）。
+func condxLitMandatoryAnchor(tokens []condxToken, j int) bool {
+	rs := []rune(tokens[j].literal)
+	if j+1 >= len(tokens) || len(rs) == 0 || condxOpenBrackets[rs[len(rs)-1]] == 0 {
+		return true
+	}
+	openCh := rs[len(rs)-1]
+	closeCh := condxOpenBrackets[openCh]
+	nextNext := ""
+	if j+2 < len(tokens) {
+		nextNext = tokens[j+2].literal
+	}
+	wrapped := strings.HasPrefix(nextNext, string(closeCh))
+	if hasCondxVariantMark(tokens[j+1].placeholder) {
+		v, verr := parseCondxVariant(tokens[j+1].placeholder)
+		if verr != nil || v.AtLeastOne || !wrapped {
+			// 1+ 档与裸词档：暂扣开括号原样回放，仍必选；解析错误由变体分支报错。
+			return true
+		}
+		return len(rs) > 1 // 0+ 包裹档收进可缺形态：必选残留=去开括号。
+	}
+	if _, ok := condxOptWordEn(tokens[j+1].placeholder); ok && wrapped {
+		return len(rs) > 1 // 包裹可选词位收进可缺形态：必选残留=去开括号。
+	}
+	return true // 非包裹形态：开括号按字面回放，仍必选。
+}
+
 // parseCondxVariant 解析占位词内部的量词变体：词根 + 量词（+ 或 *）+ 可选
 // 分隔字面（; 引出，取首个分号起的全部、含分号本身）。仅 标签/作者/集名
 // 三词位可带量词；仅分隔无量词、量词后残留非分号开头、未知词根与越权词位
@@ -382,7 +479,11 @@ func condxClassEscape(s string) string {
 // 不跨括号组吞并——前邻惰性 span 赖此收界）。量词变体占位词（{标签+} 一类）
 // 推导为重复段：整段为恰一个位置捕获组（非命名、组内全非捕获）、单元值类为
 // 排除类（带包裹排除配对闭括号、裸词排除分隔字面全部字符）、分隔缺省为可选
-// 空白（仅限带包裹）、0+ 档整段含包裹括号外套可缺形态。返回表达式原文、
+// 空白（仅限带包裹）、0+ 档整段含包裹括号外套可缺形态。? 后缀记号（相似
+// 模板可选分隔表达方案）：可选分隔字面 {字面?} 编译 (?:字面)?（QuoteMeta，
+// 受位置约束——两侧至少一侧非空必选字面段或模板首/尾）、可选词位 {词?} 编译
+// (?:(?P<组名>捕获类))?（捕获类沿用三分支；包裹判定复用量词变体的暂扣开
+// 括号/闭括号去重机制，开括号+词+闭括号整组同进退）。返回表达式原文、
 // 捕获组名列表与重复段描述列表；词表外/重复/相邻占位词与非法重复段返回
 // 中文错误。
 func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condxRepeatDesc, error) {
@@ -404,18 +505,20 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condx
 	captureIdx := 0
 	heldOpen := rune(0)
 	skipCloserHead := false
+	lastLitMandatory := ""
 	for i, tok := range tokens {
 		if tok.literal != "" {
 			lit := tok.literal
 			if skipCloserHead {
-				// 0+ 包裹重复段已把后字面段起首的配对闭括号收进可缺形态，去重。
+				// 0+ 包裹重复段/包裹可选词位已把后字面段起首的配对闭括号收进
+				// 可缺形态，去重。
 				lit = string([]rune(lit)[1:])
 				skipCloserHead = false
 			}
 			heldOpen = rune(0)
-			if i+1 < len(tokens) && hasCondxVariantMark(tokens[i+1].placeholder) {
-				// 后邻量词变体：暂扣字面段收尾开括号——0+ 包裹档须把它收进
-				// 可缺形态，其余形态由变体分支原样回放。
+			if i+1 < len(tokens) && condxHoldsTrailingOpen(tokens[i+1].placeholder) {
+				// 后邻量词变体/可选词位：暂扣字面段收尾开括号——0+ 包裹重复档
+				// 与包裹可选词位把它收进可缺形态（整组同进退），其余形态原样回放。
 				if rs := []rune(lit); len(rs) > 0 && condxOpenBrackets[rs[len(rs)-1]] != 0 {
 					heldOpen = rs[len(rs)-1]
 					lit = string(rs[:len(rs)-1])
@@ -424,15 +527,20 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condx
 			if lit != "" {
 				sb.WriteString(regexp.QuoteMeta(lit))
 			}
+			lastLitMandatory = lit
 			prevPlaceholder = false
 			pendingCloser = tailClosingBracket(lit)
 			continue
 		}
-		if prevPlaceholder {
-			return "", nil, nil, fmt.Errorf("相邻占位词 {%s} 与前一个占位词之间缺少分隔文字", tok.placeholder)
-		}
-		prevPlaceholder = true
 		word := tok.placeholder
+		// 可选分隔字面（{字面?}）自身即分隔：豁免相邻占位词检查（改受位置
+		// 约束 condxOptSepAnchored）；其余占位词（含可选词位）照常受检。
+		if !condxOptSepPlaceholder(word) {
+			if prevPlaceholder {
+				return "", nil, nil, fmt.Errorf("相邻占位词 {%s} 与前一个占位词之间缺少分隔文字", word)
+			}
+			prevPlaceholder = true
+		}
 		if hasCondxVariantMark(word) {
 			// 重复段表达（任务B）：量词变体占位词不走词表单词路径。整段为恰
 			// 一个位置捕获组（非命名——SubexpNames 该组名为空串，不进推导出的
@@ -510,6 +618,74 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condx
 			seen[v.En] = true
 			repeats = append(repeats, desc)
 			pendingCloser = rune(0)
+			continue
+		}
+		if optRoot, isOpt := condxOptRoot(word); isOpt {
+			// ? 后缀记号（相似模板可选分隔表达方案，阶段1）：判定居量词变体
+			// 之后；词根先查词表（命中=可选词位），未命中且非空=可选分隔字面。
+			if optRoot == "" {
+				return "", nil, nil, fmt.Errorf("模板占位词 {%s}：问号前无可选内容", word)
+			}
+			if en, known := condxVocab[optRoot]; known {
+				// 可选词位 {词?}：走普通命名组通路（三面引用可用，引用权由
+				// 书写记号静态决定，与 {词*} 多值通路正交）；缺席=无绑定（绑
+				// 定层归阶段2）。
+				if optRoot == "任意" {
+					return "", nil, nil, fmt.Errorf("模板占位词 {%s}：吞位词 {任意} 不产出声明、无可选语义，不可带问号", word)
+				}
+				if optRoot == "键" || optRoot == "公共段" {
+					return "", nil, nil, fmt.Errorf("模板占位词 {%s}：{公共段} 是序列成套的成群依据，不可带问号", word)
+				}
+				if opts.requireSeq {
+					return "", nil, nil, fmt.Errorf("模板占位词 {%s}：序列成员格式不支持可选词位（可选分隔字面不受限）", word)
+				}
+				if seen[en] {
+					return "", nil, nil, fmt.Errorf("模板占位词 {%s} 重复", word)
+				}
+				seen[en] = true
+				captures = append(captures, en)
+				captureIdx++
+				nextLit := ""
+				if i+1 < len(tokens) {
+					nextLit = tokens[i+1].literal
+				}
+				nextRs := []rune(nextLit)
+				if heldOpen != 0 && len(nextRs) > 0 && nextRs[0] == condxOpenBrackets[heldOpen] {
+					// 包裹词可选：开括号+词+闭括号整组同进退（复用量词变体的
+					// 暂扣开括号与闭括号去重机制），编译 (?:开(?P<词>[^闭]+)闭)?
+					// ——括号随词同缺席，不产「空括号命中」。
+					closeCh := condxOpenBrackets[heldOpen]
+					sb.WriteString("(?:" + regexp.QuoteMeta(string(heldOpen)) + "(?P<" + en + ">[^" + string(closeCh) + "]+)" + regexp.QuoteMeta(string(closeCh)) + ")?")
+					skipCloserHead = true
+				} else {
+					if heldOpen != 0 {
+						// 暂扣的开括号不配对（后字面段非配对闭括号起首）：按字面
+						// 回放（同量词变体的开括号回放逻辑），词按裸词可选。
+						sb.WriteString(regexp.QuoteMeta(string(heldOpen)))
+					}
+					cls := ".+?"
+					switch {
+					case condxDigits[optRoot]:
+						cls = "[0-9]+"
+					case heldOpen != 0:
+						cls = "[^" + string(condxOpenBrackets[heldOpen]) + "]+"
+					case pendingCloser != 0:
+						cls = "[^" + string(pendingCloser) + "]+"
+					}
+					sb.WriteString("(?:(?P<" + en + ">" + cls + "))?")
+				}
+				heldOpen = rune(0)
+				pendingCloser = rune(0)
+				continue
+			}
+			// 可选分隔字面（{ ?} 可选空格、{_?} 可选下划线、{what??} 可选
+			// what?）：编译 (?:字面)?（QuoteMeta）；位置约束=决策4（两侧至少
+			// 一侧字面锚）。
+			if !condxOptSepAnchored(tokens, i, lastLitMandatory) {
+				return "", nil, nil, fmt.Errorf("可选分隔两侧均无字面锚：两取值词之间的可选分隔在无分隔形态下切分位置任意，请将一侧落在字面（如括号或固定前后缀）后使用")
+			}
+			sb.WriteString("(?:" + regexp.QuoteMeta(optRoot) + ")?")
+			prevPlaceholder = false
 			continue
 		}
 		en, known := condxVocab[word]

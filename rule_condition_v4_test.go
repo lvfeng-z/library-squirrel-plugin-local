@@ -1215,3 +1215,313 @@ func TestDeriveCondxTemplateRepeat(t *testing.T) {
 		})
 	}
 }
+
+// TestDeriveCondxTemplateOptional 可选记号推导锚（阶段1，相似模板可选分隔表达
+// 方案）：{字面?} 可选分隔字面编译 (?:字面)?（QuoteMeta，{what??} 双写表达可选
+// what?）；{词?} 可选词位编译 (?:(?P<词>捕获类))?（捕获类沿用数字类/括号感知
+// 类/惰性段三分支）；包裹词可选复用量词变体的暂扣开括号/闭括号去重机制——
+// 开括号+词+闭括号整组同进退、不产「空括号命中」、后闭括号不配对时开括号按
+// 字面回放走裸词可选；位置约束（决策4）=可选分隔两侧至少一侧非空必选字面段
+// 或模板首/尾——0+ 包裹组吞闭括号后的空残留不作锚（风险5 已知边界）、右邻开
+// 括号将被收进可缺形态时同理；拒绝面覆盖 {?}/{任意?}/{公共段?}{键?}/seq 词位/
+// 两侧无锚/{标签+?} 既有拒绝/同词根重复。
+func TestDeriveCondxTemplateOptional(t *testing.T) {
+	type matchCase struct {
+		input string
+		want  map[string]string // 命名组→期望值；"<无>"=组未参与（词位缺席）
+	}
+	green := []struct {
+		name    string
+		tpl     string
+		opts    deriveOpts
+		expr    string
+		caps    []string
+		reps    []condxRepeatDesc
+		matches []matchCase
+		misses  []string
+	}{
+		{
+			name: "可选空格分隔·双形态通吃（todo#100 实例）",
+			tpl:  "[{作者}]{ ?}{集名}",
+			expr: `^\[(?P<author>[^]]+)\](?: )?(?P<setname>.+?)$`,
+			caps: []string{"author", "setname"},
+			matches: []matchCase{
+				{"[A]S", map[string]string{"author": "A", "setname": "S"}},
+				{"[A] S", map[string]string{"author": "A", "setname": "S"}},
+			},
+		},
+		{
+			name: "多字符可选分隔（空格-连字符-空格）",
+			tpl:  "[{作者}]{ - ?}{集名}",
+			expr: `^\[(?P<author>[^]]+)\](?: - )?(?P<setname>.+?)$`,
+			caps: []string{"author", "setname"},
+			matches: []matchCase{
+				{"[A]-S", map[string]string{"author": "A", "setname": "-S"}},
+				{"[A] - S", map[string]string{"author": "A", "setname": "S"}},
+			},
+		},
+		{
+			name: "包裹词可选·整组同进退不产空括号命中",
+			tpl:  "[{作者?}] {集名}",
+			expr: `^(?:\[(?P<author>[^]]+)\])? (?P<setname>.+?)$`,
+			caps: []string{"author", "setname"},
+			matches: []matchCase{
+				{"[Isel] Set", map[string]string{"author": "Isel", "setname": "Set"}},
+				{" Set", map[string]string{"author": "<无>", "setname": "Set"}},
+			},
+			misses: []string{"[] Set", "Set"},
+		},
+		{
+			name: "裸词可选·惰性段",
+			tpl:  "{标题?}",
+			expr: `^(?:(?P<title>.+?))?$`,
+			caps: []string{"title"},
+			matches: []matchCase{
+				{"X", map[string]string{"title": "X"}},
+				{"", map[string]string{"title": "<无>"}},
+			},
+		},
+		{
+			name: "裸词可选·数字类沿用",
+			tpl:  "第{序号?}话",
+			expr: `^第(?:(?P<seq>[0-9]+))?话$`,
+			caps: []string{"seq"},
+			matches: []matchCase{
+				{"第12话", map[string]string{"seq": "12"}},
+				{"第话", map[string]string{"seq": "<无>"}},
+			},
+		},
+		{
+			name: "前开括号不配对·回放开括号走裸词可选（括号感知类）",
+			tpl:  "[{标题?}x",
+			expr: `^\[(?:(?P<title>[^]]+))?x$`,
+			caps: []string{"title"},
+			matches: []matchCase{
+				{"[abx", map[string]string{"title": "ab"}},
+				{"[x", map[string]string{"title": "<无>"}},
+			},
+		},
+		{
+			name:    "可选字面自身以问号结尾·双写表达",
+			tpl:     "{what??}",
+			expr:    `^(?:what\?)?$`,
+			matches: []matchCase{{"what?", nil}, {"", nil}},
+			misses:  []string{"what"},
+		},
+		{
+			name: "尾随可选分隔不进入取值（风险3 锚：leftmost-first 下惰性段先取满足位）",
+			tpl:  "{标题}{ ?}",
+			expr: `^(?P<title>.+?)(?: )?$`,
+			caps: []string{"title"},
+			matches: []matchCase{
+				{"a ", map[string]string{"title": "a"}},
+				{"a", map[string]string{"title": "a"}},
+				{"a b", map[string]string{"title": "a b"}},
+			},
+		},
+		{
+			name: "首部可选分隔·模板首为锚",
+			tpl:  "{ ?}{集名}",
+			expr: `^(?: )?(?P<setname>.+?)$`,
+			caps: []string{"setname"},
+			matches: []matchCase{
+				{" Set", map[string]string{"setname": "Set"}},
+				{"Set", map[string]string{"setname": "Set"}},
+			},
+		},
+		{
+			name: "0+包裹重复组后接可选分隔·闭括号去重后非空残留作锚",
+			tpl:  "[{标签*}]x{ ?}{标题}",
+			expr: `^(?:\[([^]]+(?:\]\s*\[[^]]+)*)\])?x(?: )?(?P<title>.+?)$`,
+			caps: []string{"title"},
+			reps: []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{
+				{"x T", map[string]string{"title": "T"}},
+				{"[a] [b]x T", map[string]string{"title": "T"}},
+			},
+		},
+		{
+			name: "右邻开括号由1+包裹重复段承载·仍为必选锚",
+			tpl:  "{集名}{ ?}[{标签+}]",
+			expr: `^(?P<setname>.+?)(?: )?\[([^]]+(?:\]\s*\[[^]]+)*)\]$`,
+			caps: []string{"setname"},
+			reps: []condxRepeatDesc{{En: "tag", GroupIndex: 2, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{
+				{"a [b] [c]", map[string]string{"setname": "a"}},
+				{"a[b]", map[string]string{"setname": "a"}},
+			},
+		},
+		{
+			name: "重复段与可选词位同模板并存（次数轴正交）",
+			tpl:  "[{标签*}]_{标题?}",
+			expr: `^(?:\[([^]]+(?:\]\s*\[[^]]+)*)\])?_(?:(?P<title>.+?))?$`,
+			caps: []string{"title"},
+			reps: []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{
+				{"[a] [b]_T", map[string]string{"title": "T"}},
+				{"_T", map[string]string{"title": "T"}},
+			},
+		},
+		{
+			name: "序列成员模板·可选分隔字面不受限",
+			tpl:  "{公共段}_{序号}{ ?}",
+			opts: deriveOpts{allowKey: true, requireSeq: true},
+			expr: `^(?P<key>.+?)_(?P<seq>[0-9]+)(?: )?$`,
+			caps: []string{"key", "seq"},
+			matches: []matchCase{
+				{"a_1", map[string]string{"key": "a", "seq": "1"}},
+				{"a_1 ", map[string]string{"key": "a", "seq": "1"}},
+			},
+		},
+	}
+	for _, tc := range green {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, caps, reps, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			if err != nil {
+				t.Fatalf("推导失败: %v", err)
+			}
+			if expr != tc.expr {
+				t.Fatalf("表达式不符:\n得到 %q\n期望 %q", expr, tc.expr)
+			}
+			if !reflect.DeepEqual(caps, tc.caps) {
+				t.Fatalf("捕获组不符: 得到 %v 期望 %v", caps, tc.caps)
+			}
+			if !reflect.DeepEqual(reps, tc.reps) {
+				t.Fatalf("重复段描述不符:\n得到 %+v\n期望 %+v", reps, tc.reps)
+			}
+			re := regexp.MustCompile(expr)
+			for _, m := range tc.matches {
+				idx := re.FindStringSubmatchIndex(m.input)
+				if idx == nil {
+					t.Fatalf("%q 应命中 %q", m.input, expr)
+				}
+				for name, want := range m.want {
+					gi := re.SubexpIndex(name)
+					if gi < 0 {
+						t.Fatalf("命名组 %s 不在表达式内", name)
+					}
+					lo, hi := idx[2*gi], idx[2*gi+1]
+					got := "<无>"
+					if lo >= 0 {
+						got = m.input[lo:hi]
+					}
+					if got != want {
+						t.Fatalf("%q 命名组 %s 不符: 得到 %q 期望 %q", m.input, name, got, want)
+					}
+				}
+			}
+			for _, s := range tc.misses {
+				if re.FindStringIndex(s) != nil {
+					t.Fatalf("%q 不应命中 %q", s, expr)
+				}
+			}
+		})
+	}
+	red := []struct {
+		name    string
+		tpl     string
+		opts    deriveOpts
+		wantErr string
+	}{
+		{name: "问号前无可选内容", tpl: "{?}", wantErr: "问号前无可选内容"},
+		{name: "吞位词不可带问号", tpl: "{任意?}", wantErr: "不产出声明、无可选语义，不可带问号"},
+		{name: "公共段不可带问号", tpl: "{公共段?}", wantErr: "成套的成群依据，不可带问号"},
+		{name: "旧词键经别名归公共段同拒", tpl: "{键?}", wantErr: "成套的成群依据"},
+		{name: "序列成员禁可选词位", tpl: "{公共段}_{标题?}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "序列成员格式不支持可选词位"},
+		{name: "两取值词之间可选分隔无字面锚", tpl: "{作者}{ ?}{集名}", wantErr: "可选分隔两侧均无字面锚"},
+		{name: "相邻两可选分隔天然被拒", tpl: "{ ?}{_?}", wantErr: "可选分隔两侧均无字面锚"},
+		{name: "0+包裹重复组后接可选分隔·闭括号被吞无锚（风险5 已知边界）", tpl: "[{标签*}]{ ?}{标题}", wantErr: "可选分隔两侧均无字面锚"},
+		{name: "可选包裹组后接可选分隔·闭括号被吞无锚（同机制）", tpl: "[{作者?}]{ ?}{集名}", wantErr: "可选分隔两侧均无字面锚"},
+		{name: "右邻开括号将被0+包裹组收进可缺形态·无必选锚", tpl: "{集名}{ ?}[{标签*}]", wantErr: "可选分隔两侧均无字面锚"},
+		{name: "右邻开括号将被包裹可选词位收进可缺形态·无必选锚", tpl: "{集名}{ ?}[{作者?}]", wantErr: "可选分隔两侧均无字面锚"},
+		{name: "量词后问号·既有拒绝不回归", tpl: "{标签+?}", wantErr: "量词后只能跟分号引出的分隔字面"},
+		{name: "可选词位与单词同词根重复", tpl: "{作者?}_{作者}", wantErr: "重复"},
+		{name: "可选词位双写同词根重复", tpl: "{作者?}_{作者?}", wantErr: "重复"},
+		{name: "重复段与可选词位同词根重复", tpl: "[{标签*}]_{标签?}", wantErr: "重复"},
+		{name: "可选词位仍受相邻占位词约束", tpl: "{作者}{标题?}", wantErr: "缺少分隔"},
+	}
+	for _, tc := range red {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestCondxOptionalEvaluate 可选记号求值锚（阶段1）：[{作者}]{ ?}{集名} 一条
+// 规则通吃有无空格两形态并取值（todo#100 验收）；[{作者?}] {集名} 包裹组可选
+// ——在场单值捕获、缺席仍命中、空括号不命中（缺席=无绑定的登记语义属阶段2
+// 绑定层，此处只锚命中与在场取值）；{标题}{ ?} 尾随可选分隔不进入取值（风险3：
+// leftmost-first 下惰性段先取满足位）。
+func TestCondxOptionalEvaluate(t *testing.T) {
+	fileHit := func(tpl, fileName string) (*ParseContext, bool) {
+		p, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl(tpl)}, 1)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		ctx := &ParseContext{}
+		ok := p.Evaluate(&MatchInput{FileName: fileName}, nil, ctx)
+		return ctx, ok
+	}
+
+	// todo#100 实例：一条规则通吃 [{作者}]{集名} 与 [{作者}] {集名} 两形态。
+	ctx, ok := fileHit("[{作者}]{ ?}{集名}", "[Isel]Set.jpg")
+	if !ok {
+		t.Fatalf("无分隔形态应命中")
+	}
+	if author, _ := ctx.Capture("r1.author"); author != "Isel" {
+		t.Fatalf("无分隔形态作者捕获不符: %q", author)
+	}
+	if setname, _ := ctx.Capture("r1.setname"); setname != "Set" {
+		t.Fatalf("无分隔形态集名捕获不符: %q", setname)
+	}
+	ctx, ok = fileHit("[{作者}]{ ?}{集名}", "[Isel] Set.jpg")
+	if !ok {
+		t.Fatalf("空格分隔形态应命中")
+	}
+	if author, _ := ctx.Capture("r1.author"); author != "Isel" {
+		t.Fatalf("空格分隔形态作者捕获不符: %q", author)
+	}
+	if setname, _ := ctx.Capture("r1.setname"); setname != "Set" {
+		t.Fatalf("空格分隔形态集名捕获不符: %q", setname)
+	}
+
+	// 包裹组可选：在场单值捕获；缺席仍命中（字面空格仍必选）；空括号不命中。
+	ctx, ok = fileHit("[{作者?}] {集名}", "[Isel] Set.jpg")
+	if !ok {
+		t.Fatalf("包裹组在场形态应命中")
+	}
+	if author, _ := ctx.Capture("r1.author"); author != "Isel" {
+		t.Fatalf("包裹组在场作者捕获不符: %q", author)
+	}
+	if setname, _ := ctx.Capture("r1.setname"); setname != "Set" {
+		t.Fatalf("包裹组在场集名捕获不符: %q", setname)
+	}
+	ctx, ok = fileHit("[{作者?}] {集名}", " Set.jpg")
+	if !ok {
+		t.Fatalf("包裹组缺席形态应命中（缺席登记语义属阶段2 绑定层）")
+	}
+	if setname, _ := ctx.Capture("r1.setname"); setname != "Set" {
+		t.Fatalf("包裹组缺席集名捕获不符: %q", setname)
+	}
+	if _, ok := fileHit("[{作者?}] {集名}", "[] Set.jpg"); ok {
+		t.Fatalf("空括号不应命中（开括号+词+闭括号同进退）")
+	}
+	if _, ok := fileHit("[{作者?}] {集名}", "Set.jpg"); ok {
+		t.Fatalf("缺字面空格的形态不应命中")
+	}
+
+	// 尾随可选分隔不进入取值（风险3 锚）。
+	ctx, ok = fileHit("{标题}{ ?}", "name .jpg")
+	if !ok {
+		t.Fatalf("尾随可选分隔形态应命中")
+	}
+	if title, _ := ctx.Capture("r1.title"); title != "name" {
+		t.Fatalf("尾随可选分隔不应进入取值: %q", title)
+	}
+	if _, ok := fileHit("{标题}{ ?}", "name.jpg"); !ok {
+		t.Fatalf("无尾随分隔形态应命中")
+	}
+}
