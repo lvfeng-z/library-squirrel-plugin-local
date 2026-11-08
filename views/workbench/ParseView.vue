@@ -59,7 +59,7 @@
       :closable="false"
       show-icon
       title="规则档案在会话外被变更"
-      description="既有识别结论可能与最新规则不一致，建议重新识别。"
+      description="既有识别结果可能与最新规则不一致，建议重新识别。"
     />
     <!-- 识别失败横幅（页头下方，常态不占行） -->
     <el-alert
@@ -628,7 +628,7 @@
                 <p class="li-ws-panel-guide-title">未选中文件</p>
                 <p class="li-ws-panel-guide-text">
                   点击左栏清单中任意文件行，此处将呈现该文件的解析面板：
-                  终选声明、线索、所属序列群与赋值表单。
+                  识别结果、线索、所属序列群与赋值表单。
                 </p>
               </div>
               <!-- 边界：选中文件已从当前快照消失（重识别后） -->
@@ -645,7 +645,7 @@
                   <span class="li-ws-file-state">{{ stateLabel(selectedFile.state) }}</span>
                 </div>
                 <div class="li-ws-sec">
-                  <h4 class="li-ws-sec-title">终选声明</h4>
+                  <h4 class="li-ws-sec-title">识别结果</h4>
                   <template v-if="selectedFile.final && selectedFile.final.length">
                     <div v-for="(d, i) in selectedFile.final" :key="i" class="li-ws-decl">
                       <span class="li-ws-decl-main">{{ declLabel(d) }}</span>
@@ -663,7 +663,7 @@
                       </div>
                     </div>
                   </template>
-                  <p v-else class="li-ws-empty">无终选声明</p>
+                  <p v-else class="li-ws-empty">无识别结果</p>
                 </div>
                 <div class="li-ws-sec">
                   <h4 class="li-ws-sec-title">{{ hitRuleCount ? `命中规则（${hitRuleCount}）` : '命中规则' }}</h4>

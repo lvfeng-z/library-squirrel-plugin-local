@@ -932,12 +932,12 @@ func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, Profil
 	current := m.currentProfileDigest()
 	if current != "" && sess.ProfileDigest != "" && current != sess.ProfileDigest {
 		reconcile.Changed = true
-		reconcile.Message = "规则档案在会话外被变更，既有识别结论可能与最新规则不一致，建议重新识别"
+		reconcile.Message = "规则档案在会话外被变更，既有识别结果可能与最新规则不一致，建议重新识别"
 	}
 	if evalID := m.evaluatorBuildID(); evalID != "" && sess.Snapshot != nil &&
 		sess.Snapshot.EvaluatorBuildID != evalID {
 		reconcile.Changed = true
-		reconcile.Message = "识别求值器已更新，既有识别结论可能与当前版本不一致，建议重新识别"
+		reconcile.Message = "识别求值器已更新，既有识别结果可能与当前版本不一致，建议重新识别"
 	}
 	return sess, reconcile, nil
 }
