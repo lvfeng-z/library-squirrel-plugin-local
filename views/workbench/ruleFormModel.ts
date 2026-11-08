@@ -156,7 +156,7 @@ export function hasOtherConds(when: unknown): boolean {
   return buildWhenWithoutSeqAtom(when) != null
 }
 
-// —— v4 条件行（收敛档 R1-R11：目标三分 + 格式模板 + 附加终结谓词 + 值级小标） ——
+// —— v4 条件行（收敛档 R1-R11：目标三分 + 格式模板 + 附加终结谓词 + 值校验） ——
 
 // 格式段：template（整条按模板）/ contains（含这个词，仅目录）。
 export interface CondxFormatForm {
@@ -165,15 +165,20 @@ export interface CondxFormatForm {
   word?: string
 }
 
-// 值级小标（R6/R7 封闭三选一）：library 在库名单 / equal 与另一行占位词相等 /
-// constant =常量。
+// 值校验（R6/R7 封闭三选一，JSON 字段名不动）：
+// library 在库名单 / equal 与另一行占位词相等 / constant =常量。
 export interface CondxBadgeForm {
   placeholder: string
+  // occur 为值校验作用占位词的位次（同词根多次出现按出现序 1 起；缺省=位1
+  // 裸组名——存量档案零变化，与内核 CondxBadge.Occur 同口径）。
+  occur?: number
   kind: 'library' | 'equal' | 'constant'
   dim?: string
   fold?: boolean
   againstRow?: number
   againstPh?: string
+  // againstOccur 为 equal 对方占位词的位次（语义同 occur，作用于 againstPh）。
+  againstOccur?: number
   value?: string
 }
 
@@ -211,7 +216,7 @@ export interface CondxRowForm {
 // 量词变体（重复段，与内核 parseCondxVariant 同口径）：标签/作者/集名 三词位
 // 可带量词——{词+}=至少一组、{词*}=可零组；分隔记号写作「;分隔」紧跟量词
 // （如 {标签+;_}，分隔字面=首个分号起的全部、含分号本身）。变体词为多值产出，
-// 仅提取段可引用，生效条件/值级小标/组合接线三面禁引。
+// 仅提取段可引用，生效条件/值校验/组合接线三面禁引。
 export const CONDX_VOCAB: { word: string; group: string; digit: boolean; refable: boolean; note: string }[] = [
   { word: '作者', group: 'author', digit: false, refable: true, note: '贪婪取词（.+），相邻须有分隔文字；可带量词 +/*（{作者+} 一类重复段）' },
   { word: '集名', group: 'setname', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合；可带量词 +/*（{集名*} 一类重复段）' },
@@ -279,7 +284,7 @@ export const CONDX_ATTACH_OPTIONS: Record<string, { value: string; label: string
 // 类型列表谓词（childTypeIs / seqMemberType）的封闭类型集。
 export const CONDX_TYPE_OPTIONS = ['image', 'video', 'document', 'archive']
 
-// 值级小标类别（R6 三选一）与 library 名单维度。
+// 值校验类别（R6 三选一）与 library 名单维度。
 export const CONDX_BADGE_KINDS: { value: 'library' | 'equal' | 'constant'; label: string; needs: string[] }[] = [
   { value: 'library', label: '在库名单', needs: ['dim'] },
   { value: 'equal', label: '与另一行的占位词相等', needs: ['againstRow', 'againstPh'] },
@@ -300,7 +305,8 @@ export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 
   { name: '连写标签×N（指定分隔）', template: '{标签+;_}', target: 'file', description: '下划线分隔连写标签各取一值（a_b_c 三值、ab 不拆）。方括号包裹的标签组请用『括号标签×N』词条' },
   { name: '任意段吞位', template: '{标题}_{任意}', target: 'file', description: '{任意} 吞掉标题之后的一切' },
   { name: '可选分隔', template: '[{作者}]{ ?}{集名}', target: 'file', description: '可选分隔字面 { ?} 表示可缺席的字面空格：一条规则通吃 [{作者}]{集名} 与 [{作者}] {集名} 两形态（两侧至少一侧须有字面锚）' },
-  { name: '可选作者组', template: '[{作者?}] {集名}', target: 'file', description: '可选词位：{作者?} 的方括号组整组可缺席、在场时单值可引用；缺席形态需保留包裹组后的字面空格' }
+  { name: '可选作者组', template: '[{作者?}] {集名}', target: 'file', description: '可选词位：{作者?} 的方括号组整组可缺席、在场时单值可引用；缺席形态需保留包裹组后的字面空格' },
+  { name: '多处标签', template: '({标签})[{作者}]{集名}{ ?}[{标签+}]', target: 'file', description: '同占位词多次出现（位次分立）：圆括号内为位1「标签」、尾部方括号组为位2「标签·第2处」（重复段多值），各处独立产出与引用' }
 ]
 
 // 模板解析为 chips（literal/word 交替）：未闭合 { 报错（与内核同口径）。
@@ -372,6 +378,32 @@ export function condxTemplateChips(tpl: string): { chips?: TemplateChip[]; error
   return { chips }
 }
 
+// 模板词元切分 chips（位次角标供呈现）：字面段与占位词 chip 交替，同词根多位
+// 各自成 chip；可多次出现词根（标签/作者/集名）的位≥2 标注位次 occur 与寻址
+// 组名 posName（呈现层据此出「第N处」角标——复用可选 chip 的角标样式先例）。
+// 与内核 condxPosOccur 同口径：量词变体/可选词位/普通词统一计数，{任意} 与
+// 可选分隔字面不计数。
+export interface CondxTplTok extends TemplateChip {
+  occur?: number
+  posName?: string
+  repeat?: boolean
+}
+
+export function condxTplOccurChips(tpl: string): { chips?: CondxTplTok[]; error?: string } {
+  const parsed = condxTemplateChips(tpl)
+  if (parsed.error) return { error: parsed.error }
+  const occ = new Map<string, number>()
+  const chips = (parsed.chips || []).map((c): CondxTplTok => {
+    const hit = condxChipBase(c)
+    if (!hit) return { ...c }
+    const n = (occ.get(hit.base) || 0) + 1
+    occ.set(hit.base, n)
+    if (CONDX_REPEAT_GROUPS.indexOf(hit.base) < 0) return { ...c }
+    return { ...c, occur: n, posName: condxPosName(hit.base, n), repeat: hit.repeat }
+  })
+  return { chips }
+}
+
 // 先序展平（Group 递归）：行号按内核口径 1 起连续计数（equal 的 againstRow、
 // 提取动作 Row 同源）。只数 condition 行。
 export function condxFlatRows(rows: CondxRowForm[]): { row: number; condx: CondxForm }[] {
@@ -395,6 +427,11 @@ export function condxFlatRows(rows: CondxRowForm[]): { row: number; condx: Condx
 
 // 可带量词的词位（与内核 condxRepeatable 同源：仅 标签/作者/集名 三词位）。
 export const CONDX_REPEAT_ROOTS = ['标签', '作者', '集名']
+
+// 可多次出现（位次分立）的词根英文组名（与内核 condxRepeatableEn 同源：
+// 标签/作者/集名 → tag/author/setname）——同词根多位各自成条目、位次独立；
+// 其余词根第二次出现维持既有「重复」拒绝（轻校验镜像）。
+export const CONDX_REPEAT_GROUPS = ['tag', 'author', 'setname']
 
 // 组界六对同型括号的开→闭映射（包裹单元判定用；与内核 condxOpenBrackets 同源）。
 const CONDX_OPEN_BRACKETS: Record<string, string> = {
@@ -489,54 +526,149 @@ function condxOptSepAnchored(chips: TemplateChip[], idx: number, lastLitMandator
   return leftOK || rightOK
 }
 
-// 一行的全部可引用占位词（含重复段词——多值产出，仅提取段可引用）：word=
-// 模板书写原文（重复段词带量词/分隔，如 标签+），group=英文组名寻址口径。
-// 可选词位 {作者?} 按现行词（作者）登记——引用权由书写记号静态决定、提取段
-// 可引用（非禁区，引用下拉不过滤）；可选分隔字面不产出占位词。
-export function condxRowAllPlaceholders(condx: CondxForm): { word: string; group: string; repeat: boolean }[] {
+// —— 同占位词多次出现（位次分立）前端镜像：位次化组名、位次表条目 ——
+
+// 位次化组名（与内核 condxPosName 同口径）：位1=裸组名（存量单出现模板零变化，
+// 决策6），位 N≥2=「组名__N」（双下划线+位次；九组名全无下划线、后缀无碰撞）。
+export function condxPosName(group: string, occur: number): string {
+  return occur > 1 ? `${group}__${occur}` : group
+}
+
+// 位次表条目：模板内一个占位词出现（词元切分序）。group 为位次化组名=寻址键
+// （captureName/限定名按此寻址）；sig 为记号签名（词根+记号形态归一——旧词
+// {键} 与 {公共段} 同签名），供位次漂移 diff 判「指向变化」。
+export interface CondxOccEntry {
+  // word 为显示词：位1=词根现行词或变体书写原文；位≥2 追加「·第N处」。
+  word: string
+  // baseWord 为词根现行词（标签——旧词 {键} 归一为 公共段）。
+  baseWord: string
+  // base 为词根英文组名（位次化前的裸组名，如 tag）。
+  base: string
+  // group 为位次化组名（tag / tag__2）——寻址与下拉取值口径。
+  group: string
+  // occur 为位次（同词根从左到右出现序 1 起，量词变体/可选词位/普通词统一计数）。
+  occur: number
+  // repeat 为该位是否重复段（多值产出，三面禁引；提取段可引用）。
+  repeat: boolean
+  // sig 为记号签名（普通词=词根、可选词位=词根?、重复段=词根+量词+分隔）。
+  sig: string
+}
+
+// 占位词 chip 的词根归类（供出现计数）：可选词位/量词变体/普通词 → 词根组名、
+// 现行词、是否重复段与显示词；{任意}（非引用）、可选分隔字面、词表外/变体
+// 解析错词返回 null（不计数——与内核 任意 提前返回、词表外报错同口径）。
+function condxChipBase(c: TemplateChip): { base: string; baseWord: string; repeat: boolean; display: string; sig: string } | null {
+  if (!c.ph || c.opt === 'sep') return null
+  if (c.opt === 'word') {
+    const v = condxVocabOf(c.root || '')
+    if (!v || !v.refable) return null
+    return { base: v.group, baseWord: v.word, repeat: false, display: v.word, sig: `${v.word}?` }
+  }
+  const pv = condxVariantOfWord(c.text)
+  if (pv.variant) {
+    const v = pv.variant
+    return {
+      base: v.group,
+      baseWord: v.root,
+      repeat: true,
+      display: c.text,
+      sig: `${v.root}${v.atLeastOne ? '+' : '*'}${v.sepSpecified ? v.sep : ''}`
+    }
+  }
+  const v = condxVocabOf(c.text)
+  if (!v || !v.refable) return null
+  return { base: v.group, baseWord: v.word, repeat: false, display: v.word, sig: v.word }
+}
+
+// 一行的全部占位词出现（含重复段位——多值产出，仅提取段可引用；含各位次）：
+// 同词根（仅 标签/作者/集名 可多次出现）多位各自成条目、位次=出现序；其余词根
+// 第二次出现由轻校验报错（条目仍按位产出，供行内标红下的呈现完整性）。可选词位
+// {作者?} 按现行词登记——引用权由书写记号静态决定；可选分隔字面与 {任意}
+//（非引用吞位词）不产出条目、不计数（与内核 condxPosOccur 同口径）。
+export function condxRowAllPlaceholders(condx: CondxForm): CondxOccEntry[] {
   if (!condx || condx.format.mode !== 'template') return []
   const parsed = condxTemplateChips(condx.format.tpl || '')
   if (!parsed.chips) return []
-  const out: { word: string; group: string; repeat: boolean }[] = []
-  const seen = new Set<string>()
+  const out: CondxOccEntry[] = []
+  const occ = new Map<string, number>()
   for (const c of parsed.chips) {
-    if (!c.ph) continue
-    if (c.opt === 'sep') continue
-    if (c.opt === 'word') {
-      const v = condxVocabOf(c.root || '')
-      if (v && v.refable && !seen.has(v.group)) {
-        seen.add(v.group)
-        out.push({ word: v.word, group: v.group, repeat: false })
+    const hit = condxChipBase(c)
+    if (!hit) continue
+    const n = (occ.get(hit.base) || 0) + 1
+    occ.set(hit.base, n)
+    out.push({
+      word: n > 1 ? `${hit.display}·第${n}处` : hit.display,
+      baseWord: hit.baseWord,
+      base: hit.base,
+      group: condxPosName(hit.base, n),
+      occur: n,
+      repeat: hit.repeat,
+      sig: hit.sig
+    })
+  }
+  return out
+}
+
+// 一行的可引用占位词条目（剔除重复段位）：生效条件/值校验/组合接线三面禁引的
+// 按位镜像——位为重复段（多值产出）禁引、位为单值词（含可选词位）可引用。
+// 顺序=模板内出现序；旧词 {键} 书写的模板归一为 {公共段}（组名同 key，寻址
+// 不受影响，显示不出旧词）。
+export function condxRowPlaceholders(condx: CondxForm): CondxOccEntry[] {
+  return condxRowAllPlaceholders(condx).filter((p) => !p.repeat)
+}
+
+// —— 位次漂移 diff（风险1 缓解）：编辑会话内模板变更前后位次表对照 ——
+
+// 位次漂移判定：按词根分组做尾对齐贪心匹配（每个先前出现对齐其后最晚的同
+// 签名出现），报出「位次号变化/指向变化」的组名——主形态=在已有出现之前插入
+// 同词根新出现（含可选词位/重复段变体），后续位次整体 +1（旧 tag__2 仍存在
+// 但指向新插入处、存在性检查不报警）；尾部追加新出现对齐不变、不报；先前位次
+// 消失由既有「已不在上半声明」校验兜底，不算漂移。返回受影响组名与显示词
+//（配置行按组名反查提示需复核——提取/生效条件/值校验/组合接线）。
+export function condxOccurDrift(before: CondxOccEntry[], after: CondxOccEntry[]): { group: string; word: string }[] {
+  const out: { group: string; word: string }[] = []
+  const seen = new Set<string>()
+  const roots = new Set<string>()
+  for (const e of before) roots.add(e.base)
+  for (const e of after) roots.add(e.base)
+  for (const base of roots) {
+    const b = before.filter((e) => e.base === base)
+    const a = after.filter((e) => e.base === base)
+    // 尾对齐：先前出现从后往前，各找其后最晚的同签名出现（新出现=after 中
+    // 未对齐项；先前位次在 after 中无同签名出现=已删除/改写形态）。
+    const pairs: Array<[number, number]> = []
+    let j = a.length - 1
+    for (let i = b.length - 1; i >= 0; i--) {
+      let jj = j
+      while (jj >= 0 && a[jj].sig !== b[i].sig) jj--
+      if (jj >= 0) {
+        pairs.push([i, jj])
+        j = jj - 1
       }
-      continue
     }
-    const pv = condxVariantOfWord(c.text)
-    if (pv.variant) {
-      if (seen.has(pv.variant.group)) continue
-      seen.add(pv.variant.group)
-      out.push({ word: c.text, group: pv.variant.group, repeat: true })
-      continue
+    const hit: Array<{ group: string; word: string }> = []
+    for (const [bi, ai] of pairs) {
+      if (bi !== ai) hit.push({ group: b[bi].group, word: b[bi].word })
     }
-    const v = condxVocabOf(c.text)
-    if (v && v.refable && !seen.has(v.group)) {
-      seen.add(v.group)
-      out.push({ word: v.word, group: v.group, repeat: false })
+    // 未对齐的新出现落在先前位次号域内=改写形态（原记号被换成别的记号），
+    // 该位次指向已变。
+    const matched = new Set(pairs.map((p) => p[1]))
+    for (let ai = 0; ai < a.length && ai < b.length; ai++) {
+      if (!matched.has(ai)) hit.push({ group: a[ai].group, word: a[ai].word })
+    }
+    for (const h of hit) {
+      if (seen.has(h.group)) continue
+      seen.add(h.group)
+      out.push(h)
     }
   }
   return out
 }
 
-// 一行的可引用占位词（模板中出现且 refable，剔除重复段词）：生效条件/值级小标/
-// 组合接线三面禁引的镜像——这些下拉里选择不到多值产出的重复段词。顺序=模板内
-// 出现序。返回现行词——旧词 {键} 书写的模板归一为 {公共段}（组名同 key，寻址
-// 不受影响，显示不出旧词）。
-export function condxRowPlaceholders(condx: CondxForm): string[] {
-  return condxRowAllPlaceholders(condx).filter((p) => !p.repeat).map((p) => p.word)
-}
-
 // 模板轻校验（与内核 deriveCondxTemplate 主要拒绝面同口径，构造期校验兜底
 // 真源）：词表外词（旧词别名合法）/ 引用词重复（按英文组名判重——{键} 与
-// {公共段} 同组，同模板并用即重复）/ 相邻占位词无分隔 / 重复段词（量词变体）
+// {公共段} 同组，同模板并用即重复；标签/作者/集名 三词位多次出现放行、位次
+// 分立）/ 相邻占位词无分隔 / 重复段词（量词变体）
 // 语法与形态（越权词位带量词、裸词无分隔、序列成员不支持重复段）/ 可选记号
 // 拒绝面（{?} 空根、{任意?} 与 {公共段?}/{键?} 带问号、序列成员可选词位、
 // 可选分隔两侧无字面锚）。target 传入时按主体镜像序列成员禁区。返回中文错误
@@ -578,7 +710,9 @@ export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq')
     if (pv.variant) {
       const v = pv.variant
       if (target === 'seq') return `模板占位词 {${c.text}} 不可重复：序列成员格式不支持重复段`
-      if (seen.has(v.group)) return `模板占位词 {${c.text}} 重复`
+      // 位次分立：重复段词根恒为三词位（condxVariantOfWord 已拒绝越权词位），
+      // 同词根多次出现（含与普通词/可选词位混排）放行、位次独立——查重不再
+      // 按词根拒绝。
       // 包裹判定：前字面段收尾开括号且后字面段起首为其配对闭括号（六对同型
       // 括号映射）→ 包裹单元；否则裸词（裸词必须指定分隔字面）。
       const prev = chips[ci - 1]
@@ -595,7 +729,6 @@ export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq')
         // 0+ 包裹档把配对闭括号收进可缺形态：后一字面段起首闭括号去重。
         skipCloserHead = true
       }
-      seen.add(v.group)
       continue
     }
     // 量词变体判定在前（{标签+?} 走既有「量词后只能跟分号引出的分隔字面」报错），
@@ -616,8 +749,12 @@ export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq')
         if (target === 'seq') {
           return `模板占位词 {${c.text}}：序列成员格式不支持可选词位（可选分隔字面不受限）`
         }
-        if (seen.has(v.group)) return `模板占位词 {${c.text}} 重复`
-        seen.add(v.group)
+        // 位次分立：三词位（标签/作者/集名）多次出现放行、位次独立；其余词根
+        // 第二次出现维持既有「重复」拒绝。
+        if (CONDX_REPEAT_GROUPS.indexOf(v.group) < 0) {
+          if (seen.has(v.group)) return `模板占位词 {${c.text}} 重复`
+          seen.add(v.group)
+        }
         // 包裹组可选：可选作用域=整组（开括号+词+配对闭括号同进退），后一
         // 字面段起首配对闭括号随组收进可缺形态（去重，同 0+ 包裹档机制）。
         const prev = chips[ci - 1]
@@ -638,16 +775,20 @@ export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq')
     const v = condxVocabOf(c.text)
     if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品号/日期/公共段/任意）`
     if (!v.refable) continue
-    if (seen.has(v.group)) {
-      return `占位词「${c.text}」在同一模板内重复（引用词不可重复；同一词根重复取值请用重复段记号 {${v.word}+}，吞位用 {任意}）`
+    // 位次分立：三词位（标签/作者/集名）多次出现放行、位次独立；其余词根重复
+    // 维持既有报错文案（{标签2} 词表外报错由上一行维持）。
+    if (CONDX_REPEAT_GROUPS.indexOf(v.group) < 0) {
+      if (seen.has(v.group)) {
+        return `占位词「${c.text}」在同一模板内重复（引用词不可重复；同一词根重复取值请用重复段记号 {${v.word}+}，吞位用 {任意}）`
+      }
+      seen.add(v.group)
     }
-    seen.add(v.group)
   }
   return ''
 }
 
-// 单行校验（含附加/小标字段族与跨行引用）：row 为该行展平行号，flat 为全表
-// 展平（equal 对方行须早于本行且对方行模板含该词）。
+// 单行校验（含附加/值校验字段族与跨行引用）：row 为该行展平行号，flat 为全表
+// 展平（equal 对方行须早于本行且对方行模板含该词位）。
 export function condxRowError(rowNum: number, condx: CondxForm | null | undefined, flat: { row: number; condx: CondxForm }[]): string {
   if (!condx) return '须选择目标与格式'
   if (condx.anchor != null) return '主体锚（ref）为二期能力，v4 不支持'
@@ -688,34 +829,30 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
     }
   }
   for (const b of condx.badges || []) {
-    if (!badgePlaceholderInRow(placeholders, b.placeholder)) {
-      return `小标占位词「{${b.placeholder || '?'}}」不在本行模板中`
+    if (!badgePlaceholderInRow(placeholders, b.placeholder, b.occur)) {
+      return `值校验占位词「{${b.placeholder || '?'}${b.occur && b.occur > 1 ? `·第${b.occur}处` : ''}}」不在本行模板中`
     }
     if (b.kind === 'library') {
-      if (CONDX_BADGE_DIMS.indexOf(b.dim || '') < 0) return '在库名单小标须选择维度（作者/标签/作品集）'
+      if (CONDX_BADGE_DIMS.indexOf(b.dim || '') < 0) return '在库名单值校验须选择维度（作者/标签/作品集）'
     } else if (b.kind === 'equal') {
       const against = flat.find((f) => f.row === b.againstRow)
-      if (!against || against.row >= rowNum) return '相等小标须引用更早的行'
-      if (!badgePlaceholderInRow(condxRowPlaceholders(against.condx), b.againstPh)) {
-        return `相等小标的对方占位词「{${b.againstPh || '?'}}」不在第 ${b.againstRow} 行模板中`
+      if (!against || against.row >= rowNum) return '相等值校验须引用更早的行'
+      if (!badgePlaceholderInRow(condxRowPlaceholders(against.condx), b.againstPh, b.againstOccur)) {
+        return `相等值校验的对方占位词「{${b.againstPh || '?'}${b.againstOccur && b.againstOccur > 1 ? `·第${b.againstOccur}处` : ''}}」不在第 ${b.againstRow} 行模板中`
       }
     } else if (b.kind === 'constant') {
-      if (!(b.value || '').trim()) return '常量小标的值为空'
+      if (!(b.value || '').trim()) return '常量值校验的值为空'
     }
   }
   return ''
 }
 
-// 小标占位词是否在本行可引用词内：现行词精确命中，或与某词同英文组名
-//（旧词 {键} 与 {公共段} 同组同义——JSON 手写旧词照常通过，保存时归一为新词）。
-function badgePlaceholderInRow(placeholders: string[], placeholder: string | undefined): boolean {
-  if (placeholders.indexOf(placeholder || '') >= 0) return true
+// 值校验占位词+位次是否在本行可引用词内：按词根组名+位次配对命中（旧词 {键}
+// 与 {公共段} 同组同义——JSON 手写旧词照常通过，保存时归一为新词）。
+function badgePlaceholderInRow(placeholders: CondxOccEntry[], placeholder: string | undefined, occur: number | undefined): boolean {
   const own = condxVocabOf(placeholder || '')
   if (!own) return false
-  return placeholders.some((w) => {
-    const v = condxVocabOf(w)
-    return v ? v.group === own.group : false
-  })
+  return placeholders.some((p) => p.base === own.group && p.occur === (occur || 1))
 }
 
 // 全表校验：行完整性（至少一行 condition/Group 非空）+ 逐行 condxRowError。
@@ -732,7 +869,7 @@ export function condxRowsError(rows: CondxRowForm[]): string {
 // 捕获声明清单（v4：行号+占位词+英文组名）：提取段「行N·{词}」选项与清单
 // 呈现用 word（现行词——旧词 {键} 书写归一显示为 {公共段}；重复段词为模板
 // 书写原文如 标签+）；captureName 落 JSON 用 group（内核寻址口径=英文组名）。
-// repeat=true 为重复段词（多值产出）：提取段可引用，三面（生效条件/值级小标/
+// repeat=true 为重复段词（多值产出）：提取段可引用，三面（生效条件/值校验/
 // 组合接线）禁引——opts.includeRepeat=false 时剔除（组合接线的成员下拉口径）。
 export interface CondxCaptureDecl {
   row: number
@@ -762,7 +899,7 @@ export function condxNormalizeTpl(tpl: string): string {
 }
 
 // 条件行树归一：行/括号子组递归遍历，格式模板（含附加条件迷你模板）整位
-// 换词、值级小标的占位词字段（placeholder/againstPh）按词换词。编辑打开旧档
+// 换词、值校验的占位词字段（placeholder/againstPh）按词换词。编辑打开旧档
 // 的显示归一与保存载荷构造共用本函数——结构化与 JSON 高级模式同路径，保存
 // 即落档新词。
 export function condxNormalizeRows<T>(rows: T): T {

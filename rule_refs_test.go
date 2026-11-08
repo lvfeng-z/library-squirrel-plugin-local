@@ -440,7 +440,7 @@ func refsRepeatMember(t *testing.T, id string) RuleEntry {
 }
 
 // refsRepeatErrWants 断言重复段占位词引用禁区的统一文案关键词（三面同形：
-// 生效条件 / 值级小标 / 组合接线）。
+// 生效条件 / 值校验 / 组合接线）。
 func refsRepeatErrWants(t *testing.T, errs []error) string {
 	t.Helper()
 	if len(errs) != 1 {
@@ -521,5 +521,130 @@ func TestRefsRepeatWordReferenceForbidden(t *testing.T) {
 			t.Fatalf("普通词引用不应报错，实际: %v", errs)
 		}
 		assertRefsLoadedIDs(t, profile, "member-plain", "combo-plain")
+	})
+}
+
+// multiOccurRepeatMember 构造位次分立的重复段成员规则：模板 {标签}_[{标签+}]
+//（位1 单值 tag、位2 重复段 tag__2），供三面禁引按位锚定用例消费。
+func multiOccurRepeatMember(t *testing.T, id string) RuleEntry {
+	t.Helper()
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{标签}_[{标签+}]")}}}
+	pat, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("多位重复段条件行应可编译: %v", err)
+	}
+	return RuleEntry{
+		ID: id, Description: "测试规则 " + id, Source: RuleSourceManual, Enabled: true,
+		Conditions: rows, Pattern: pat,
+	}
+}
+
+// TestMultiOccurRepeatThreeFaceForbidden 位为重复段时的三面禁引按位锚定（模板
+// 同占位词多次出现表达方案·阶段2 锚④）：位2 为重复段（组名 tag__2）时——生效
+// 条件引用自有位2、组合接线 refCapture 引用成员位2、组合接线 when 限定名引用
+// 成员位2 三路一律拒载，统一文案对位次名 r1.tag__2 经词根剥离按「标签」渲染
+//（condxRepeatEnOfCapture 扩展）；位2 为单值词时三面照常放行（按位判定）；
+// 求值面防御语义——位2 重复段 0+ 缺席＝零绑定，引用取不到值＝条件不成立、
+// 提取零产出，不报错。
+func TestMultiOccurRepeatThreeFaceForbidden(t *testing.T) {
+	t.Run("when引用自有位2重复段拒载（词根文案）", func(t *testing.T) {
+		rule := multiOccurRepeatMember(t, "mo-when")
+		rule.Extractions = []ExtractionAction{{
+			Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1,
+			When: refEqExpr("r1.tag__2", "x"),
+		}}
+		profile, errs := ParseProfile(refsTestProfileJSON(t, rule))
+		msg := refsRepeatErrWants(t, errs)
+		for _, want := range []string{"mo-when", "「标签」"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("告警应含 %q（位次名按词根渲染），实际: %s", want, msg)
+			}
+		}
+		if profile == nil || len(profile.Rules) != 0 {
+			t.Fatalf("违规规则应被跳过，实际载入 %d 条", len(profile.Rules))
+		}
+	})
+
+	t.Run("组合接线refCapture引用成员位2重复段拒载", func(t *testing.T) {
+		member := multiOccurRepeatMember(t, "mo-member")
+		combo := refsTestRule(t, "mo-combo-ref", []string{"mo-member"}, []ExtractionAction{
+			{Dimension: DimTag, From: FromRefCapture, RefRule: "mo-member", CaptureName: "tag__2", Row: 1},
+		})
+		profile, errs := ParseProfile(refsTestProfileJSON(t, member, combo))
+		msg := refsRepeatErrWants(t, errs)
+		for _, want := range []string{"mo-combo-ref", "mo-member", "r1.tag__2", "「标签」"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("告警应含 %q，实际: %s", want, msg)
+			}
+		}
+		assertRefsLoadedIDs(t, profile, "mo-member")
+	})
+
+	t.Run("组合接线when限定名引用成员位2重复段拒载", func(t *testing.T) {
+		member := multiOccurRepeatMember(t, "mo-member")
+		combo := refsTestRule(t, "mo-combo-when", []string{"mo-member"}, []ExtractionAction{
+			{Dimension: DimTitle, From: FromConstant, Constant: "x",
+				When: refEqExpr("mo-member.r1.tag__2", "x")},
+		})
+		profile, errs := ParseProfile(refsTestProfileJSON(t, member, combo))
+		msg := refsRepeatErrWants(t, errs)
+		for _, want := range []string{"mo-combo-when", "mo-member", "r1.tag__2", "「标签」"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("告警应含 %q，实际: %s", want, msg)
+			}
+		}
+		assertRefsLoadedIDs(t, profile, "mo-member")
+	})
+
+	t.Run("位2单值词三面照常放行（按位判定）", func(t *testing.T) {
+		rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{标签}_{标签}")}}}
+		pat, err := CompileRuleConditions(rows)
+		if err != nil {
+			t.Fatalf("双位单值条件行应可编译: %v", err)
+		}
+		plain := RuleEntry{
+			ID: "mo-plain", Description: "测试规则 mo-plain", Source: RuleSourceManual, Enabled: true,
+			Conditions: rows, Pattern: pat,
+			Extractions: []ExtractionAction{
+				{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1},
+				{Dimension: DimCollection, From: FromCapture, CaptureName: "tag__2", Row: 1,
+					When: refEqExpr("r1.tag__2", "乙")},
+			},
+		}
+		combo := refsTestRule(t, "mo-combo-plain", []string{"mo-plain"}, []ExtractionAction{
+			{Dimension: DimTag, From: FromRefCapture, RefRule: "mo-plain", CaptureName: "tag__2", Row: 1},
+			{Dimension: DimTitle, From: FromConstant, Constant: "x",
+				When: refEqExpr("mo-plain.r1.tag__2", "乙")},
+		})
+		profile, errs := ParseProfile(refsTestProfileJSON(t, plain, combo))
+		if len(errs) != 0 {
+			t.Fatalf("位2 单值词三面引用应照常放行，实际: %v", errs)
+		}
+		assertRefsLoadedIDs(t, profile, "mo-plain", "mo-combo-plain")
+	})
+
+	t.Run("求值面位2重复段0+缺席取不到值不成立", func(t *testing.T) {
+		// 三面构造期已拒（上路三例）；此处锚求值层防御语义：位2 重复段 0+
+		// 缺席＝零绑定，引用取不到值＝条件不成立（when 面）/零产出（提取
+		// 面），不报错。
+		rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{标签}_[{标签*}]")}}}
+		pat, err := CompileRuleConditions(rows)
+		if err != nil {
+			t.Fatalf("0+ 多位条件行应可编译: %v", err)
+		}
+		ctx := &ParseContext{}
+		if !pat.Evaluate(&MatchInput{FileName: "art_.jpg"}, nil, ctx) {
+			t.Fatalf("0+ 位2 缺席应仍命中")
+		}
+		if bindings := ctx.CaptureAll("r1.tag__2"); len(bindings) != 0 {
+			t.Fatalf("0+ 位2 缺席应零绑定: %+v", bindings)
+		}
+		if refEqExpr("r1.tag__2", "art").Holds(ctx, nil) {
+			t.Fatalf("零绑定位引用应取不到值、条件不成立")
+		}
+		act := ExtractionAction{Dimension: DimTag, From: FromCapture, CaptureName: "tag__2", Row: 1}
+		if got := act.ApplyDeclarations("mo-absent", ctx); len(got) != 0 {
+			t.Fatalf("零绑定位提取应零产出: %+v", got)
+		}
 	})
 }

@@ -366,3 +366,76 @@ func TestRefCaptureWhenValidation(t *testing.T) {
 		assertRefsLoadedIDs(t, profile, "member-a")
 	})
 }
+
+// —— 多位出现的限定名消费锚（模板同占位词多次出现表达方案·阶段2）——
+
+// TestMultiOccurRefCaptureQualifiedHit when/组合接线限定名锚（锚②）：位2 单值
+// 词的组名后缀即寻址键——refCapture 提取行写 author__2 取位2 值、写 author 取
+// 位1 值；when 限定名「成员ID.r1.author__2」命中位2 且不误取位1。
+func TestMultiOccurRefCaptureQualifiedHit(t *testing.T) {
+	member := refFileRowRule(t, "member-2", "{作者}_{作者}", nil, nil)
+	combo := refComboRule(t, "combo-2", []string{"member-2"}, nil, []ExtractionAction{
+		{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-2", CaptureName: "author", Row: 1},
+		{Dimension: DimCollection, From: FromRefCapture, RefRule: "member-2", CaptureName: "author__2", Row: 1},
+		{Dimension: DimTitle, From: FromConstant, Constant: "位2限定名产出",
+			When: refEqExpr("member-2.r1.author__2", "Other")},
+		{Dimension: DimTag, From: FromConstant, Constant: "不应产出",
+			When: refEqExpr("member-2.r1.author__2", "Isel")},
+		{Dimension: DimTag, From: FromConstant, Constant: "位1限定名产出",
+			When: refEqExpr("member-2.r1.author", "Isel")},
+	})
+	in := &MatchInput{FileName: "Isel_Other.jpg", RelPath: "Isel_Other.jpg", Siblings: []string{"Isel_Other.jpg"}}
+	decision := runRefEval(t, []RuleEntry{member, combo}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-2", "combo-2")
+	if v, ok := declOf(decision, "combo-2", DimAuthor); !ok || v != "Isel" {
+		t.Fatalf("接线位1 应取位1 值 Isel: %q %v", v, ok)
+	}
+	if v, ok := declOf(decision, "combo-2", DimCollection); !ok || v != "Other" {
+		t.Fatalf("接线位2 应取位2 值 Other: %q %v", v, ok)
+	}
+	if v, ok := declOf(decision, "combo-2", DimTitle); !ok || v != "位2限定名产出" {
+		t.Fatalf("位2 限定名相等应命中: %q %v", v, ok)
+	}
+	if v, ok := declOf(decision, "combo-2", DimTag); !ok || v != "位1限定名产出" {
+		t.Fatalf("限定名取值不符（位2 不应误取位1）: %q %v", v, ok)
+	}
+}
+
+// TestMultiOccurCanonSuffixIsolation #canon 后缀隔离锚（锚③）：位2 值校验（库名单
+// 折叠）产出 r1.author__2#canon 规范名限定键——接线 refCapture 写 author__2 走
+// #canon 同序回退取位2 规范名；位1 无值校验＝无 canon 键，回落位1 原始绑定、
+// 不受位2 canon 扰动；when 限定名 canon 书写名按书写直接命中，位1 canon 书写名
+// 未绑定＝取值不可用（键位次隔离，位1 与位2 键不互扰）。
+func TestMultiOccurCanonSuffixIsolation(t *testing.T) {
+	lib := &LibraryIndex{AuthorNames: map[string]struct{}{"Jake_Jaccobus": {}, "Isel_Isel": {}}}
+	member := refFileRowRule(t, "member-3", "{作者}_{作者}", []CondxBadge{
+		{Placeholder: "作者", Occur: 2, Kind: CondxBadgeLibrary, Dim: "author", Fold: true},
+	}, nil)
+	combo := refComboRule(t, "combo-3", []string{"member-3"}, nil, []ExtractionAction{
+		{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-3", CaptureName: "author", Row: 1},
+		{Dimension: DimCollection, From: FromRefCapture, RefRule: "member-3", CaptureName: "author__2", Row: 1},
+		{Dimension: DimTitle, From: FromConstant, Constant: "不应产出",
+			When: refEqExpr("member-3.r1.author#canon", "Jake_Jaccobus")},
+		{Dimension: DimTitle, From: FromConstant, Constant: "位2canon书写名产出",
+			When: refEqExpr("member-3.r1.author__2#canon", "Isel_Isel")},
+		{Dimension: DimTag, From: FromConstant, Constant: "不应产出",
+			When: refEqExpr("member-3.r1.author__2#canon", "Jake_Jaccobus")},
+		{Dimension: DimTag, From: FromConstant, Constant: "位2原始书写名产出",
+			When: refEqExpr("member-3.r1.author__2", "isel isel")},
+	})
+	in := &MatchInput{FileName: "jake jaccobus_isel isel.jpg", RelPath: "jake jaccobus_isel isel.jpg", Siblings: []string{"jake jaccobus_isel isel.jpg"}}
+	decision := runRefEval(t, []RuleEntry{member, combo}, in, lib)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-3", "combo-3")
+	if v, ok := declOf(decision, "combo-3", DimAuthor); !ok || v != "jake jaccobus" {
+		t.Fatalf("位1 无 canon 应回落位1 原始绑定: %q %v", v, ok)
+	}
+	if v, ok := declOf(decision, "combo-3", DimCollection); !ok || v != "Isel_Isel" {
+		t.Fatalf("位2 接线应 #canon 优先取位2 规范名: %q %v", v, ok)
+	}
+	if v, ok := declOf(decision, "combo-3", DimTitle); !ok || v != "位2canon书写名产出" {
+		t.Fatalf("位2 canon 书写名应直接命中（位1 canon 键未绑定为假在前）: %q %v", v, ok)
+	}
+	if v, ok := declOf(decision, "combo-3", DimTag); !ok || v != "位2原始书写名产出" {
+		t.Fatalf("位2 原始书写名应照旧可读（canon 键不互扰）: %q %v", v, ok)
+	}
+}

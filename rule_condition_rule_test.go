@@ -147,7 +147,7 @@ func TestDeclaredConditionCaptures(t *testing.T) {
 	}
 }
 
-// TestBadgeRepeatWordForbidden 值级小标三断言（库名单/相等/常量）引用重复段
+// TestBadgeRepeatWordForbidden 值校验三断言（库名单/相等/常量）引用重复段
 // 占位词一律拒绝：模板 {标签+;_} 的整段是多值产出，小标的单一值断言无定义；
 // 错误文案与生效条件/组合接线两面同形（关键词「重复段占位词」「多值产出」）。
 func TestBadgeRepeatWordForbidden(t *testing.T) {
@@ -164,7 +164,7 @@ func TestBadgeRepeatWordForbidden(t *testing.T) {
 			}
 			_, err := CompileRuleConditions(rows)
 			if err == nil {
-				t.Fatalf("重复段占位词上的值级小标应拒绝")
+				t.Fatalf("重复段占位词上的值校验应拒绝")
 			}
 			for _, want := range []string{"重复段占位词", "多值产出"} {
 				if !strings.Contains(err.Error(), want) {
@@ -179,7 +179,7 @@ func TestBadgeRepeatWordForbidden(t *testing.T) {
 			Badges: []CondxBadge{{Placeholder: "标签", Kind: CondxBadgeLibrary, Dim: "tag"}}}},
 	}
 	if _, err := CompileRuleConditions(ok); err != nil {
-		t.Fatalf("普通词上的值级小标应可编译: %v", err)
+		t.Fatalf("普通词上的值校验应可编译: %v", err)
 	}
 }
 

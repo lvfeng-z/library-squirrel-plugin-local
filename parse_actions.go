@@ -1228,7 +1228,7 @@ func patternSummary(p Pattern) string {
 	case *RowSubjectPattern:
 		summary := patternSummary(t.Inner)
 		if len(t.Gates) > 0 {
-			summary += "（值级小标 " + strconv.Itoa(len(t.Gates)) + " 项）"
+			summary += "（值校验 " + strconv.Itoa(len(t.Gates)) + " 项）"
 		}
 		return summary
 	case *FileSubjectPattern:

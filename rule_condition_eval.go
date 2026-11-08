@@ -1,7 +1,7 @@
-// v4 行作用域与值级小标求值（条件构建语法硬化期1 第二步）：每条条件行在
+// v4 行作用域与值校验求值（条件构建语法硬化期1 第二步）：每条条件行在
 // 独立子上下文求值，捕获绑定以行号前缀（rN.组名）并入主上下文——跨行值级
 // 相等（T2 作者壳制：目录行的 {作者} 与文件行的 {作者} 相等）引用前缀绑定，
-// 行序即求值序（校验层已保证引用早于本行）。库名单小标支持形变归一（折叠
+// 行序即求值序（校验层已保证引用早于本行）。库名单值校验支持形变归一（折叠
 // _ - 与大小写后仍唯一才命中，多义不填）。纯模型，无 IO 与日志。
 package main
 
@@ -17,14 +17,14 @@ func rowCaptureName(row int, name string) string {
 
 // RowSubjectPattern 行包装模式：行内主体在独立子上下文求值（规则作用域内的
 // 第二层私有——行间同名捕获互不遮蔽，T2 的两行 {作者} 各自独立可引用），
-// 命中后以行号前缀并回捕获，再对小标门（Gates）求值。DirHits 并回供
+// 命中后以行号前缀并回捕获，再对值校验门（Gates）求值。DirHits 并回供
 // FromAncestorDir 提取「取最深命中」语义；Group 由主体写入子上下文后并回。
 type RowSubjectPattern struct {
 	// Ordinal 为行号（先序展平，1 起）。
 	Ordinal int `json:"ordinal"`
 	// Inner 为行内主体（及随主体谓词）。
 	Inner Pattern `json:"inner"`
-	// Gates 为值级小标门（引用本行前缀绑定；跨行相等门另引他行前缀绑定）。
+	// Gates 为值校验门（引用本行前缀绑定；跨行相等门另引他行前缀绑定）。
 	Gates []Pattern `json:"gates,omitempty"`
 }
 
@@ -32,7 +32,7 @@ type RowSubjectPattern struct {
 func (p *RowSubjectPattern) patternMarker() {}
 
 // Evaluate 行内主体先在子上下文求值：未中即整行不中；命中则前缀并回捕获与
-// 目录命中、并回群组产物，随后全部小标门对主上下文求值（任一门未中整行不中；
+// 目录命中、并回群组产物，随后全部值校验门对主上下文求值（任一门未中整行不中；
 // 未绑定引用保守为假，与 CondExpr 的未绑定语义一致）。
 func (p *RowSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseContext) bool {
 	sub := &ParseContext{DirNames: ctx.DirNames, Depth: ctx.Depth}
@@ -59,7 +59,7 @@ func (p *RowSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 	return true
 }
 
-// BadgeGatePattern 值级小标门：对某行的某占位词绑定值断言。
+// BadgeGatePattern 值校验门：对某行的某占位词绑定值断言。
 //   - library：值在库名单（dim 维度集合）；fold=true 时形变归一——折叠 _ - 与
 //     大小写后在名单中恰有一个来源名才命中（多义不填，宁缺勿错），命中并回
 //     规范名绑定（原前缀绑定保留，规范名以 {前缀}canon 形态附加，供提取消费）；
@@ -69,7 +69,7 @@ type BadgeGatePattern struct {
 	// Row / Name 为左值行号与前缀绑定名。
 	Row  int    `json:"row"`
 	Name string `json:"name"`
-	// Kind 为小标类别（library / equal / constant）。
+	// Kind 为值校验类别（library / equal / constant）。
 	Kind string `json:"kind"`
 	// Dim 为库名单维度（library）。
 	Dim string `json:"dim,omitempty"`

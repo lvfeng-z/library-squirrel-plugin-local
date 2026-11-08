@@ -719,3 +719,86 @@ func TestExtractRepeatFanoutPipeline(t *testing.T) {
 		t.Fatalf("普通词应经管线产标题甲+作者乙两条: %+v", decision2.Declarations)
 	}
 }
+
+// —— 多位出现的消费面锚（模板同占位词多次出现表达方案·阶段2）——
+
+// TestMultiOccurExtractionFanoutFaces 提取面锚（锚①）：提取行 CaptureName 写
+// 位次名 tag__2 即取位2 绑定——captureValues 按名取全部绑定（rule_profile.go
+// 的 FromCapture 取值面）、ApplyDeclarations 逐值产 N 条声明（值序=绑定序）；
+// 位1 裸名单声明独立；管线层（runExtractionStage）两条提取行各自产出、命中
+// 登记单次；0+ 位2 缺席＝零绑定→提取行零声明零报错（引用取不到值=零产出）。
+func TestMultiOccurExtractionFanoutFaces(t *testing.T) {
+	run := func(tpl, fileName string) (*ParseContext, bool) {
+		t.Helper()
+		p, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl(tpl)}, 1)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		ctx := &ParseContext{}
+		ok := p.Evaluate(&MatchInput{FileName: fileName}, nil, ctx)
+		return ctx, ok
+	}
+
+	// 用户实例形态（位1 裸词 + 位2 包裹重复段）：提取行分别引用两处。
+	ctx, ok := run("({标签})_[{标签+}]", "(art)_[a] [b].jpg")
+	if !ok {
+		t.Fatalf("位1/位2 形态应命中")
+	}
+	pos2 := ExtractionAction{Dimension: DimCollection, From: FromCapture, CaptureName: "tag__2", Row: 1}
+	decls := pos2.ApplyDeclarations("rule-mo", ctx)
+	if len(decls) != 2 || decls[0].Value != "a" || decls[1].Value != "b" {
+		t.Fatalf("位2 提取行应逐值产 2 条声明 a/b（值序=绑定序）: %+v", decls)
+	}
+	for _, d := range decls {
+		if d.RuleID != "rule-mo" || d.Dimension != DimCollection || d.Source != SourceFilename {
+			t.Fatalf("位2 扇出声明形不符: %+v", d)
+		}
+	}
+	pos1 := ExtractionAction{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1}
+	if got := pos1.ApplyDeclarations("rule-mo", ctx); len(got) != 1 || got[0].Value != "art" {
+		t.Fatalf("位1 提取行应独立单声明 art: %+v", got)
+	}
+	// Apply 单返回面维持末值（位次名与既有分工同构）。
+	if last, hit := pos2.Apply("rule-mo", ctx); !hit || last.Value != "b" {
+		t.Fatalf("位2 Apply 应维持末值单条 b: %+v hit=%v", last, hit)
+	}
+
+	// 管线层：两条提取行（位1→标签、位2→作品集）各自产出，命中登记单次。
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("({标签})_[{标签+}]")}}}
+	pattern, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	rule := RuleEntry{
+		ID: "rule-mo-pipe", Description: "多位提取管线规则", Source: RuleSourceManual, Enabled: true,
+		Conditions: rows, Pattern: pattern,
+		Extractions: []ExtractionAction{
+			{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1},
+			{Dimension: DimCollection, From: FromCapture, CaptureName: "tag__2", Row: 1},
+		},
+	}
+	in := &MatchInput{FileName: "(art)_[a] [b].jpg", RelPath: "(art)_[a] [b].jpg", Siblings: []string{"(art)_[a] [b].jpg"}}
+	decision := &FileDecision{RelPath: in.RelPath, FileName: in.FileName}
+	runExtractionStage(decision, []RuleEntry{rule}, in, nil, &ParseContext{})
+	if len(decision.MatchedRuleIDs) != 1 || decision.MatchedRuleIDs[0] != "rule-mo-pipe" {
+		t.Fatalf("多位规则应单次命中登记: %+v", decision.MatchedRuleIDs)
+	}
+	if len(decision.Declarations) != 3 ||
+		decision.Declarations[0].Dimension != DimTag || decision.Declarations[0].Value != "art" ||
+		decision.Declarations[1].Dimension != DimCollection || decision.Declarations[1].Value != "a" ||
+		decision.Declarations[2].Dimension != DimCollection || decision.Declarations[2].Value != "b" {
+		t.Fatalf("管线应产 位1标签art + 位2作品集a/b 三条: %+v", decision.Declarations)
+	}
+
+	// 0+ 位2 缺席：零绑定→位2 提取行零声明零报错（位1 照常产出）。
+	ctxAbs, okAbs := run("{标签}_[{标签*}]", "art_.jpg")
+	if !okAbs {
+		t.Fatalf("0+ 位2 缺席应仍命中")
+	}
+	if got := pos2.ApplyDeclarations("rule-mo", ctxAbs); len(got) != 0 {
+		t.Fatalf("0+ 位2 缺席提取行应零声明零报错: %+v", got)
+	}
+	if got := pos1.ApplyDeclarations("rule-mo", ctxAbs); len(got) != 1 || got[0].Value != "art" {
+		t.Fatalf("0+ 位2 缺席不扰位1 产出: %+v", got)
+	}
+}

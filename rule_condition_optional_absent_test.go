@@ -78,7 +78,7 @@ func TestCondxOptionalAbsentExtraction(t *testing.T) {
 	}
 }
 
-// TestCondxOptionalAbsentBadgeGate 值级小标面：跨行相等小标的左值缺席 → 取不到
+// TestCondxOptionalAbsentBadgeGate 值校验面：跨行相等小标的左值缺席 → 取不到
 // 值 → 门为假（不得把两个「缺席」判为相等）。构造两行：目录行可选标签缺席、
 // 文件行可选作者缺席，文件行相等小标把作者与目录行标签比对。
 func TestCondxOptionalAbsentBadgeGate(t *testing.T) {

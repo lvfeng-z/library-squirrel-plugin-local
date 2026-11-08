@@ -21,7 +21,7 @@
         </div>
 
         <!-- 上半「识别规则」（v4 条件行 · 三步漏斗）：目标四卡（文件/目录/序列/
-             引用规则）→ 格式模板 → 附加条件+值级小标；行前 且/或 + 行级非 + 括号
+             引用规则）→ 格式模板 → 附加条件+值校验；行前 且/或 + 行级非 + 括号
              子组（子组走高级 JSON）；引用行恒置条件行上方、独立编号「引用 N」、
              不占条件行「第 N 行」（W4 规则组合引用） -->
         <section class="li-red-sec">
@@ -142,6 +142,20 @@
                       @click="onTplSelection(i, $event.target.selectionStart)"
                     />
                   </div>
+                  <!-- 模板词元切分预览（位次角标）：同词根多位各自成 chip，位≥2 带
+                       「第N处」角标（data-pos，复用可选 chip 的 ::after 角标样式
+                       先例）；悬浮注记位次与寻址组名、重复段位的多值禁引 -->
+                  <div v-if="tplTokChips(row.condition).length" class="li-condx-toks">
+                    <template v-for="(t, ti) in tplTokChips(row.condition)" :key="ti">
+                      <span v-if="!t.ph" class="li-condx-tok-lit">{{ t.text }}</span>
+                      <span
+                        v-else
+                        class="li-condx-tok"
+                        :data-pos="t.occur && t.occur > 1 ? `第${t.occur}处` : null"
+                        :title="tplTokTitle(t) || undefined"
+                      >{{ '{' + t.text + '}' }}</span>
+                    </template>
+                  </div>
                   <div v-if="row.condition.format.mode === 'template'" class="li-condx-chips">
                     <button
                       v-for="v in CONDX_VOCAB"
@@ -161,7 +175,7 @@
                       @click="applyExample(row, ex)"
                     >{{ ex.name }}</button>
                   </div>
-                  <!-- Step 3 附加条件（终结谓词，按目标封闭集）+ 值级小标 -->
+                  <!-- Step 3 附加条件（终结谓词，按目标封闭集）+ 值校验 -->
                   <div class="li-condx-extra">
                     <div class="li-condx-extra-head">
                       <span class="li-condx-label">附加条件（终结谓词）</span>
@@ -195,7 +209,7 @@
                       <el-button size="small" text type="danger" @click="row.condition!.attach!.splice(ai, 1)">删</el-button>
                     </div>
                     <div class="li-condx-extra-head">
-                      <span class="li-condx-label">值级小标（占位词上的断言）</span>
+                      <span class="li-condx-label">值校验（占位词上的断言）</span>
                       <el-select
                         v-if="condxRowPlaceholders(row.condition).length"
                         :model-value="''"
@@ -208,8 +222,16 @@
                       </el-select>
                     </div>
                     <div v-for="(b, bi) in row.condition.badges" :key="bi" class="li-condx-inline">
-                      <el-select v-model="b.placeholder" size="small" class="li-condx-mini">
-                        <el-option v-for="w in condxRowPlaceholders(row.condition)" :key="w" :label="`{${w}}`" :value="w" />
+                      <!-- 词位下拉位次化：取值=位次化组名（行内唯一）、条目按位出
+                           （位≥2 显示「词·第N处」）；选中回写词根+位次（位1 不落
+                           occur，与内核 omitempty 同口径=存量档案零变化） -->
+                      <el-select
+                        :model-value="badgePhKey(row.condition, b)"
+                        size="small"
+                        class="li-condx-mini"
+                        @update:model-value="setBadgePh(row.condition, b, $event)"
+                      >
+                        <el-option v-for="p in condxRowPlaceholders(row.condition)" :key="p.group" :label="`{${p.word}}`" :value="p.group" />
                       </el-select>
                       <span class="li-condx-dot">●</span>
                       <el-select :model-value="b.kind" size="small" class="li-condx-mini" @update:model-value="setBadgeKind(b, $event)">
@@ -223,14 +245,28 @@
                         <el-select v-model="b.againstRow" size="small" placeholder="对方行" class="li-condx-mini">
                           <el-option v-for="f in earlierFlatRows(i)" :key="f.row" :label="`第 ${f.row} 行`" :value="f.row" />
                         </el-select>
-                        <el-select v-model="b.againstPh" size="small" placeholder="对方占位词" class="li-condx-mini">
-                          <el-option v-for="w in againstWords(b)" :key="w" :label="`{${w}}`" :value="w" />
+                        <!-- 相等类别的对方词下拉按对方行位次出条目（含「·第N处」） -->
+                        <el-select
+                          :model-value="againstPhKey(b)"
+                          size="small"
+                          placeholder="对方占位词"
+                          class="li-condx-mini"
+                          @update:model-value="setBadgeAgainstPh(b, $event)"
+                        >
+                          <el-option v-for="p in againstEntries(b)" :key="p.group" :label="`{${p.word}}`" :value="p.group" />
                         </el-select>
                       </template>
                       <el-input v-if="badgeNeeds(b, 'value')" v-model="b.value" size="small" placeholder="常量值" class="li-condx-mini" />
                       <el-button size="small" text type="danger" @click="row.condition!.badges!.splice(bi, 1)">删</el-button>
                     </div>
+                    <!-- 位次漂移提示（值校验面）：占位词位次/相等对方词位次落在受
+                         影响组名上时报出，请复核指向 -->
+                    <p v-if="badgeDriftNotice(i)" class="li-ref-notice">{{ badgeDriftNotice(i) }}</p>
                   </div>
+                  <!-- 位次漂移提示（模板面）：编辑会话内模板变更前后位次表 diff 出
+                       「位次号变化/指向变化」的组名（主形态=在已有出现之前插入同
+                       词根新出现→后续位次整体 +1），报出受影响词位 -->
+                  <p v-if="rowOccurDriftNotice(i)" class="li-ref-notice">{{ rowOccurDriftNotice(i) }}</p>
                 </template>
               </template>
               <p v-if="condxRowHint(i)" class="li-red-row-hint">{{ condxRowHint(i) }}</p>
@@ -241,7 +277,7 @@
               <span class="li-red-label">占位词捕获清单</span>
               <div v-for="(c, i) in captureList" :key="`${c.row}/${c.word}/${i}`" class="li-red-cap-row">
                 <span class="li-red-cap-name">第 {{ c.row }} 行 · {{ '{' + c.word + '}' }}</span>
-                <span v-if="c.repeat" class="li-red-cap-multi" title="重复段词（多值产出）：提取段可引用，暂不能用于生效条件/值级小标/组合接线">多值</span>
+                <span v-if="c.repeat" class="li-red-cap-multi" title="重复段词（多值产出）：提取段可引用，暂不能用于生效条件/值校验/组合接线">多值</span>
               </div>
               <p class="li-red-hint">
                 {占位词}＝命名捕获槽：只负责在匹配时捕获文本，本身不识别也不产生元数据——槽名与维度同字只是习惯叫法，无绑定
@@ -380,6 +416,9 @@
                 <span v-if="extractionRowHasOtherConds(row) && row.from !== 'scan'" class="li-red-other">含其他手写条件（高级 JSON 模式可编辑）</span>
               </div>
               <p v-if="extractionRowHint(row)" class="li-red-row-hint">{{ extractionRowHint(row) }}</p>
+              <!-- 位次漂移提示（提取面）：capture 引用受影响组名、或 when 条件
+                   （含组合接线限定名）文本命中受影响组名时报出 -->
+              <p v-if="extractionDriftWarn(row)" class="li-red-mirror-warn">{{ extractionDriftWarn(row) }}</p>
               <!-- 镜像缺失提示（D）：成员多行声明同组词而本行只接线部分行 -->
               <p v-if="refCaptureMirrorWarn(row, i)" class="li-red-mirror-warn">{{ refCaptureMirrorWarn(row, i) }}</p>
             </div>
@@ -575,6 +614,11 @@ import {
   CONDX_EXAMPLES,
   condxFlatRows,
   condxRowPlaceholders,
+  condxRowAllPlaceholders,
+  condxPosName,
+  condxVocabOf,
+  condxTplOccurChips,
+  condxOccurDrift,
   condxTemplateError,
   condxRowsError,
   condxRowError,
@@ -589,6 +633,8 @@ import {
   type CondxBadgeForm,
   type CondxAttachForm,
   type CondxCaptureDecl,
+  type CondxOccEntry,
+  type CondxTplTok,
   type ExtractionActionJSON
 } from './ruleFormModel'
 
@@ -925,10 +971,14 @@ const declaredRefCaptures = computed<Set<string>>(() =>
   new Set(refCaptureGroups.value.flatMap((g) => g.captures.map((c) => `${g.ruleId}/${c.row}/${c.group}`)))
 )
 
-// 英文组名 → 中文词（失效行残影呈现用；词表九词组名唯一）
+// 英文组名 → 中文词（失效行残影呈现用；词表九词组名唯一）；位次化组名
+//（tag__2）按词根中文+「·第N处」呈现。
 function groupWordOf(group: string): string {
-  const hit = CONDX_VOCAB.find((v) => v.group === group)
-  return hit ? hit.word : group
+  const m = /^(.+?)__(\d+)$/.exec(group)
+  const base = m ? m[1] : group
+  const hit = CONDX_VOCAB.find((v) => v.group === base)
+  const word = hit ? hit.word : base
+  return m ? `${word}·第${m[2]}处` : word
 }
 
 // 失效占位词残影选项（剧本三·帧1）：行值不在成员现声明中时补一枚禁用选项，
@@ -1083,7 +1133,7 @@ const condxSummary = computed((): string => {
     const c = f.condx
     const target = CONDX_TARGETS.find((t) => t.value === c.target)
     const fmt = c.format.mode === 'contains' ? `含「${c.format.word || '?'}」` : condxNormalizeTpl(c.format.tpl || '?')
-    const badges = (c.badges || []).length ? ` ·${(c.badges || []).length} 枚小标` : ''
+    const badges = (c.badges || []).length ? ` ·${(c.badges || []).length} 项值校验` : ''
     const attach = (c.attach || []).length ? ` ·${(c.attach || []).length} 条附加` : ''
     const levelNote = condxDirLevelNote(c)
     return `第${f.row}行 ${target ? target.label : c.target}「${fmt}」${badges}${attach}${levelNote ? ` · ${levelNote}` : ''}`
@@ -1103,7 +1153,7 @@ const condxRowHint = (i: number): string => {
   return condxRowError(hit.row, row.condition, flat)
 }
 
-// —— 行编辑辅助（目标卡/格式/词条插入/例子模板/附加/小标） ——
+// —— 行编辑辅助（目标卡/格式/词条插入/例子模板/附加/值校验） ——
 
 function addCondxRow(): void {
   condxRows.value.push({ connector: condxRows.value.length ? 'and' : '', negated: false, condition: null, group: null })
@@ -1179,25 +1229,35 @@ function addRowAttach(row: CondxRowForm, kind: string): void {
   row.condition.attach.push({ kind })
 }
 
-// 值级小标
+// 值校验
 function addRowBadge(row: CondxRowForm, kind: string): void {
   if (!row.condition) return
   if (!row.condition.badges) row.condition.badges = []
-  const first = condxRowPlaceholders(row.condition)[0] || ''
-  row.condition.badges.push({ placeholder: first, kind: kind as CondxBadgeForm['kind'] })
+  const first = condxRowPlaceholders(row.condition)[0]
+  // 词位缺省=首个可引用位；occur 仅在位≥2 落 JSON（位1 裸组名=存量档案零变化，
+  // 与内核 omitempty 同口径）。
+  row.condition.badges.push(
+    first
+      ? { placeholder: first.baseWord, occur: first.occur > 1 ? first.occur : undefined, kind: kind as CondxBadgeForm['kind'] }
+      : { placeholder: '', kind: kind as CondxBadgeForm['kind'] }
+  )
 }
-function setBadgeKind(b: CondxBadgeForm, kind: string): void {
-  b.kind = kind as CondxBadgeForm['kind']
-  b.dim = undefined
-  b.fold = undefined
-  b.againstRow = undefined
-  b.againstPh = undefined
-  b.value = undefined
+// 模板词元切分 chips（位次角标呈现）：解析失败（未闭合 { 等）静默不显示——
+// 行级校验已报错。
+function tplTokChips(condx: CondxForm): CondxTplTok[] {
+  if (!condx || condx.format.mode !== 'template') return []
+  return condxTplOccurChips(condx.format.tpl || '').chips || []
 }
-function badgeNeeds(b: CondxBadgeForm, need: string): boolean {
-  const hit = CONDX_BADGE_KINDS.find((k) => k.value === b.kind)
-  return !!hit && hit.needs.indexOf(need) >= 0
+
+// 占位词 chip 的悬浮说明：位≥2 注记位次与寻址组名；重复段位注记多值禁引。
+function tplTokTitle(t: CondxTplTok): string {
+  if (t.occur && t.occur > 1) {
+    return `同词根第 ${t.occur} 处出现：独立产出与引用（寻址组名 ${t.posName}）${t.repeat ? '；重复段词（多值产出）仅提取段可引用' : ''}`
+  }
+  if (t.repeat) return '重复段词（多值产出）：提取段可引用，暂不能用于生效条件/值校验/组合接线'
+  return ''
 }
+
 // equal 对方行候选（展平行号早于本行的 condition 行）
 function earlierFlatRows(rowIndex: number): { row: number; condx: CondxForm }[] {
   const rows = condxRows.value
@@ -1208,18 +1268,172 @@ function earlierFlatRows(rowIndex: number): { row: number; condx: CondxForm }[] 
   if (!self) return []
   return flat.filter((f) => f.row < self.row)
 }
-function againstWords(b: CondxBadgeForm): string[] {
-  const hit = earlierFlatRowsForBadge(b)
-  return hit ? condxRowPlaceholders(hit) : []
+// 值校验词位选择的取值键：位次化组名（行内唯一）；旧档无 occur=位1 裸组名。
+function badgePhKey(condx: CondxForm, b: CondxBadgeForm): string {
+  const v = condxVocabOf(b.placeholder || '')
+  return v ? condxPosName(v.group, b.occur || 1) : b.placeholder || ''
 }
+function setBadgePh(condx: CondxForm, b: CondxBadgeForm, group: string): void {
+  const hit = condxRowPlaceholders(condx).find((p) => p.group === group)
+  if (!hit) return
+  b.placeholder = hit.baseWord
+  b.occur = hit.occur > 1 ? hit.occur : undefined
+}
+function setBadgeKind(b: CondxBadgeForm, kind: string): void {
+  b.kind = kind as CondxBadgeForm['kind']
+  b.dim = undefined
+  b.fold = undefined
+  b.againstRow = undefined
+  b.againstPh = undefined
+  b.againstOccur = undefined
+  b.value = undefined
+}
+function badgeNeeds(b: CondxBadgeForm, need: string): boolean {
+  const hit = CONDX_BADGE_KINDS.find((k) => k.value === b.kind)
+  return !!hit && hit.needs.indexOf(need) >= 0
+}
+// equal 相等类别的对方词下拉：按对方行位次出条目（含「·第N处」）。
 function earlierFlatRowsForBadge(b: CondxBadgeForm): CondxForm | null {
   const flat = condxFlatRows(condxRows.value)
   const hit = flat.find((f) => f.row === b.againstRow)
   return hit ? hit.condx : null
 }
+function againstEntries(b: CondxBadgeForm): CondxOccEntry[] {
+  const hit = earlierFlatRowsForBadge(b)
+  return hit ? condxRowPlaceholders(hit) : []
+}
+function againstPhKey(b: CondxBadgeForm): string {
+  const v = condxVocabOf(b.againstPh || '')
+  return v ? condxPosName(v.group, b.againstOccur || 1) : b.againstPh || ''
+}
+function setBadgeAgainstPh(b: CondxBadgeForm, group: string): void {
+  const condx = earlierFlatRowsForBadge(b)
+  const hit = condx ? condxRowPlaceholders(condx).find((p) => p.group === group) : undefined
+  if (!hit) return
+  b.againstPh = hit.baseWord
+  b.againstOccur = hit.occur > 1 ? hit.occur : undefined
+}
 function dimNameOf(dim: string): string {
   const hit = DIMENSION_OPTIONS.find((d) => d.value === dim)
   return hit ? hit.label : dim
+}
+
+// —— 位次漂移 diff（风险1 缓解）：编辑会话内模板变更前后位次表对照 ——
+
+// 上一快照（按展平行号存位次表）与漂移结果（行号→受影响组名+显示词）；弹窗
+// 打开时复位基线，模板每变一次即 diff+刷新。
+let occurSnapshot = new Map<number, CondxOccEntry[]>()
+const occurDrift = ref<Record<number, { group: string; word: string }[]>>({})
+
+function refreshOccurDrift(rows: CondxRowForm[]): void {
+  const flat = condxFlatRows(rows)
+  const next = new Map<number, CondxOccEntry[]>()
+  for (const f of flat) next.set(f.row, condxRowAllPlaceholders(f.condx))
+  // 行集结构变化（加/删行导致展平行号重排）时放弃对照、重建基线——位次漂移
+  // 检测只覆盖「行集稳定、行内模板变更」的编辑形态（风险1 主形态）；行号重排
+  // 的引用失效由既有「已不在上半声明」校验兜底。
+  const stable = flat.length === occurSnapshot.size && flat.every((f) => occurSnapshot.has(f.row))
+  const drift: Record<number, { group: string; word: string }[]> = {}
+  if (stable) {
+    for (const f of flat) {
+      const before = occurSnapshot.get(f.row)
+      if (!before) continue
+      const after = next.get(f.row) || []
+      if (condxOccurEntriesEqual(before, after)) {
+        // 本行位次表未变：沿用既有漂移提示——跨多次无关编辑保留，直至该行
+        // 模板再变（重算）或漂移被修复（重算为空）。
+        if (occurDrift.value[f.row]) drift[f.row] = occurDrift.value[f.row]
+        continue
+      }
+      const hit = condxOccurDrift(before, after)
+      if (hit.length) drift[f.row] = hit
+    }
+  }
+  occurSnapshot = next
+  occurDrift.value = drift
+}
+
+// 位次表是否未变（签名序列逐一相等——位次表由模板确定性地推导，签名同序即同表）。
+function condxOccurEntriesEqual(a: CondxOccEntry[], b: CondxOccEntry[]): boolean {
+  return a.length === b.length && a.every((e, i) => e.sig === b[i].sig)
+}
+
+watch(
+  () => [condxRows.value, condxParsed.value] as const,
+  () => refreshOccurDrift(activeCondxRows.value),
+  { deep: true }
+)
+
+// 全部漂移项展平（提取行 when/接线文本反查用）。
+function allOccurDrift(): { row: number; group: string; word: string }[] {
+  const out: { row: number; group: string; word: string }[] = []
+  for (const rowNo of Object.keys(occurDrift.value)) {
+    for (const d of occurDrift.value[Number(rowNo)] || []) {
+      out.push({ row: Number(rowNo), group: d.group, word: d.word })
+    }
+  }
+  return out
+}
+
+// 本行模板的位次漂移提示：受影响词位按行报出，指向复核（提取/生效条件/值校验/
+// 组合接线）。
+function rowOccurDriftNotice(i: number): string {
+  const row = condxRows.value[i]
+  if (!row || !row.condition) return ''
+  const flat = condxFlatRows(condxRows.value)
+  const self = flat.find((f) => f.condx === row.condition)
+  if (!self) return ''
+  const drift = occurDrift.value[self.row]
+  if (!drift || !drift.length) return ''
+  const words = drift.map((d) => `{${d.word}}`).join('、')
+  return `⚠ 模板位次已变化：${words} 的指向可能已漂移（插入同词根新出现会使后续位次整体 +1）——引用它的提取/生效条件/值校验/组合接线行需复核`
+}
+
+// 本行值校验的漂移提示：占位词位次或相等对方词位次落在受影响组名上。
+function badgeDriftNotice(i: number): string {
+  const row = condxRows.value[i]
+  if (!row || !row.condition || !(row.condition.badges || []).length) return ''
+  const flat = condxFlatRows(condxRows.value)
+  const self = flat.find((f) => f.condx === row.condition)
+  if (!self) return ''
+  const ownDrift = occurDrift.value[self.row] || []
+  const hits: string[] = []
+  for (const b of row.condition.badges || []) {
+    const v = condxVocabOf(b.placeholder || '')
+    if (v && ownDrift.some((d) => d.group === condxPosName(v.group, b.occur || 1))) {
+      hits.push(`{${b.placeholder || '?'}${b.occur && b.occur > 1 ? `·第${b.occur}处` : ''}}`)
+    }
+    if (b.kind === 'equal' && b.againstRow) {
+      const av = condxVocabOf(b.againstPh || '')
+      const againstDrift = occurDrift.value[b.againstRow] || []
+      if (av && againstDrift.some((d) => d.group === condxPosName(av.group, b.againstOccur || 1))) {
+        hits.push(`第 ${b.againstRow} 行 {${b.againstPh || '?'}${b.againstOccur && b.againstOccur > 1 ? `·第${b.againstOccur}处` : ''}}`)
+      }
+    }
+  }
+  if (!hits.length) return ''
+  return `⚠ 值校验引用的占位词位次已漂移：${hits.join('、')}——请复核指向`
+}
+
+// 提取行的漂移提示：capture 引用受影响组名，或 when 条件（含组合接线限定名
+// rN.组名）文本命中受影响组名（词边界防 tag 命中 tag__2）。
+function extractionDriftWarn(row: ExtractionRow): string {
+  const drift = allOccurDrift()
+  if (!drift.length) return ''
+  if (row.from === 'capture' && row.captureName) {
+    const hit = drift.find((d) => d.row === row.captureRow && d.group === row.captureName)
+    if (hit) return `⚠ 第 ${hit.row} 行模板位次已变化：{${hit.word}} 的指向可能已漂移，请复核本行引用`
+  }
+  if (row.when != null) {
+    const text = JSON.stringify(row.when)
+    for (const d of drift) {
+      const re = new RegExp(`(^|[^A-Za-z0-9_])${d.group.replace(/[$()*+.?[\\\]^{|}]/g, (s) => `\\${s}`)}(?![A-Za-z0-9_])`)
+      if (re.test(text)) {
+        return `⚠ 生效条件/接线引用的占位词位次已漂移（第 ${d.row} 行 {${d.word}}），请复核本行条件`
+      }
+    }
+  }
+  return ''
 }
 
 // JSON 模式下边输入边解析：合法即刷新清单/摘要，非法就地显示错误位置、不丢输入
@@ -1554,6 +1768,10 @@ function initFromProps(): void {
     } else {
       condxError.value = condxRowsErrorWithRefs(condxRows.value)
     }
+    // 位次漂移基线复位（编辑会话内模板变更前后对照的「前」快照——打开弹窗
+    // 取值不算变更，不产生漂移提示）
+    occurSnapshot = new Map(condxFlatRows(activeCondxRows.value).map((f) => [f.row, condxRowAllPlaceholders(f.condx)] as const))
+    occurDrift.value = {}
     extractionsJsonMode.value = false
     extractionsText.value = ''
     const rawExtractions: unknown = !rule || rule.isNew ? NEW_EXTRACTIONS_SAMPLE : rule.extractions
@@ -2175,7 +2393,7 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   color: var(--app-text-secondary);
 }
 
-/* v4 条件行（三步漏斗）：行卡片 + 目标三卡 + 词条 chips + 附加/小标行 */
+/* v4 条件行（三步漏斗）：行卡片 + 目标三卡 + 词条 chips + 附加/值校验行 */
 .li-condx-row {
   display: flex;
   flex-direction: column;
@@ -2392,6 +2610,44 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+}
+
+/* 模板词元切分预览（位次角标）：字面段灰字 + 占位词 chip；位≥2 的 chip 带
+   「第N处」角标（data-pos，复用可选 chip 的 ::after 角标样式先例）、主色描边 */
+.li-condx-toks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.li-condx-tok-lit {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  word-break: break-all;
+}
+
+.li-condx-tok {
+  font-size: 12px;
+  padding: 1px 6px;
+  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  border-radius: 10px;
+  color: var(--app-text-primary);
+}
+
+.li-condx-tok[data-pos] {
+  border-color: var(--el-color-primary);
+}
+
+.li-condx-tok[data-pos]::after {
+  content: attr(data-pos);
+  margin-left: 4px;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1.4;
+  border-radius: 4px;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
 }
 
 .li-condx-chip {

@@ -76,4 +76,24 @@ func TestExampleTemplatesSanity(t *testing.T) {
 			t.Errorf("首组内名词条说明缺文案锚 %q: %q", piece, firstInner.Description)
 		}
 	}
+	// 「多处标签」词条在场：同占位词多次出现（位次分立）演示——位1 圆括号组 +
+	// 位2 尾部重复段组，说明注记「标签·第2处」=尾部标签组。
+	var multiTag *exampleTemplate
+	for i := range templates {
+		if templates[i].Template == "({标签})[{作者}]{集名}{ ?}[{标签+}]" {
+			multiTag = &templates[i]
+			break
+		}
+	}
+	if multiTag == nil {
+		t.Fatal("例子模板表应含多处标签词条（模板 ({标签})[{作者}]{集名}{ ?}[{标签+}]）")
+	}
+	if multiTag.Target != string(TargetFileName) {
+		t.Errorf("多处标签词条主体应为文件名，实际 %q", multiTag.Target)
+	}
+	for _, piece := range []string{"位次分立", "标签·第2处"} {
+		if !strings.Contains(multiTag.Description, piece) {
+			t.Errorf("多处标签词条说明缺文案锚 %q: %q", piece, multiTag.Description)
+		}
+	}
 }

@@ -95,7 +95,9 @@ func TestDeriveCondxTemplate(t *testing.T) {
 		},
 		{name: "空模板", tpl: " ", wantErr: "格式模板不能为空"},
 		{name: "词表外", tpl: "{不存在}_{序号}", wantErr: "不在词表"},
-		{name: "重复占位词", tpl: "{作者}_{作者}", wantErr: "重复"},
+		// 三词位（标签/作者/集名）多次出现已放行位次分立（2026-11-08 方案），
+		// 拒绝面锚改用非三词位词根。
+		{name: "重复占位词", tpl: "{标题}_{标题}", wantErr: "重复"},
 		{name: "相邻占位词", tpl: "{作者}{序号}", wantErr: "缺少分隔"},
 		{name: "键用于文件模板", tpl: "{键}_{序号}", wantErr: "仅适用于序列"},
 		{name: "公共段用于文件模板", tpl: "{公共段}_{序号}", wantErr: "仅适用于序列"},
@@ -534,7 +536,7 @@ func TestCompileCondxRejectsFileSizeMin(t *testing.T) {
 	if _, err := compileCondx(c, 1); err == nil || !strings.Contains(err.Error(), "文件尺寸") {
 		t.Fatalf("fileSizeMin 应显式拒绝，得到 %v", err)
 	}
-	// 子女谓词与值级小标本步已接入：应编译成功。
+	// 子女谓词与值校验本步已接入：应编译成功。
 	ok1 := &Condx{
 		Target: CondxTargetDir,
 		Format: condxTpl("[{作者}][{作品号}][{标题}]"),
@@ -549,7 +551,7 @@ func TestCompileCondxRejectsFileSizeMin(t *testing.T) {
 		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true}},
 	}
 	if _, err := compileCondx(ok2, 1); err != nil {
-		t.Fatalf("值级小标应可编译，得到 %v", err)
+		t.Fatalf("值校验应可编译，得到 %v", err)
 	}
 }
 
@@ -573,7 +575,7 @@ func TestFileSubjectEvaluate(t *testing.T) {
 		t.Fatalf("序号捕获不符: %q", seq)
 	}
 	// 扩展名不参与模板：同基名不同扩展名同样命中；序号位非数字（违反格式）不命中
-	//——「集名换了个值」不会失配，那是值级小标（库名单）的职责，不是格式的职责。
+	//——「集名换了个值」不会失配，那是值校验（库名单）的职责，不是格式的职责。
 	if !p.Evaluate(&MatchInput{FileName: "Isel_瞬間的に絡み合う_01_[中文翻譯][高清].png"}, nil, &ParseContext{}) {
 		t.Fatalf("扩展名变化不应影响命中")
 	}
@@ -901,7 +903,7 @@ func TestSeqMemberType(t *testing.T) {
 	}
 }
 
-// TestBadgeGates 值级小标三门：库名单（形变归一唯一才命中）、常量；折叠
+// TestBadgeGates 值校验三门：库名单（形变归一唯一才命中）、常量；折叠
 // 规范名以 #canon 后缀回绑供提取消费。
 func TestBadgeGates(t *testing.T) {
 	lib := &LibraryIndex{AuthorNames: map[string]struct{}{
@@ -1202,8 +1204,8 @@ func TestDeriveCondxTemplateRepeat(t *testing.T) {
 	}{
 		{name: "裸词无分隔", tpl: "{标题}={标签+}", wantErr: "缺分隔字面"},
 		{name: "seq主体行用重复词", tpl: "{公共段}_{标签+}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "序列成员格式不支持重复段"},
-		{name: "同词根重复段并用", tpl: "[{标签+}]_[{标签*}]", wantErr: "重复"},
-		{name: "重复词与单词同词根并用", tpl: "{标签}_[{标签+}]", wantErr: "重复"},
+		// 同词根三词位重复段并用与单词+重复段并用已放行位次分立（2026-11-08
+		// 方案），绿锚见 TestDeriveCondxTemplateMultiOccur。
 		{name: "裸词分隔字面为空", tpl: "{标题}={标签+;}", wantErr: "分隔字面不能为空"},
 	}
 	for _, tc := range red {
@@ -1435,9 +1437,10 @@ func TestDeriveCondxTemplateOptional(t *testing.T) {
 		{name: "右邻开括号将被0+包裹组收进可缺形态·无必选锚", tpl: "{集名}{ ?}[{标签*}]", wantErr: "可选分隔两侧均无字面锚"},
 		{name: "右邻开括号将被包裹可选词位收进可缺形态·无必选锚", tpl: "{集名}{ ?}[{作者?}]", wantErr: "可选分隔两侧均无字面锚"},
 		{name: "量词后问号·既有拒绝不回归", tpl: "{标签+?}", wantErr: "量词后只能跟分号引出的分隔字面"},
-		{name: "可选词位与单词同词根重复", tpl: "{作者?}_{作者}", wantErr: "重复"},
-		{name: "可选词位双写同词根重复", tpl: "{作者?}_{作者?}", wantErr: "重复"},
-		{name: "重复段与可选词位同词根重复", tpl: "[{标签*}]_{标签?}", wantErr: "重复"},
+		// 三词位同词根重复已放行位次分立（2026-11-08 方案），同形拒绝面锚改用
+		// 非三词位词根；三词位绿锚见 TestDeriveCondxTemplateMultiOccur。
+		{name: "可选词位与单词同词根重复", tpl: "{标题?}_{标题}", wantErr: "重复"},
+		{name: "可选词位双写同词根重复", tpl: "{标题?}_{标题?}", wantErr: "重复"},
 		{name: "可选词位仍受相邻占位词约束", tpl: "{作者}{标题?}", wantErr: "缺少分隔"},
 	}
 	for _, tc := range red {
@@ -1523,5 +1526,466 @@ func TestCondxOptionalEvaluate(t *testing.T) {
 	}
 	if _, ok := fileHit("{标题}{ ?}", "name.jpg"); !ok {
 		t.Fatalf("无尾随分隔形态应命中")
+	}
+}
+
+// TestDeriveCondxTemplateMultiOccur 同占位词多次出现（位次分立）推导锚（阶段1，
+// 模板同占位词多次出现表达方案）：三词位（标签/作者/集名）第 N 次出现即位 N——
+// 位1 裸组名（存量零变化）、位 N≥2 组名 en__N（双下划线）；出现序按 tokens 从左
+// 到右，跨 普通词/可选词位/重复段变体 统一计数；同记号重复位次分立、各自整段
+// 位置组；非三词位重复维持既有拒绝文案、{标签2} 维持词表外报错。
+func TestDeriveCondxTemplateMultiOccur(t *testing.T) {
+	type matchCase struct {
+		input string
+		named map[string]string // 命名组→期望值（"<无>"=组未参与/词位缺席）
+		pos   map[int]string    // 重复段位置组序号→期望整段文本
+	}
+	green := []struct {
+		name    string
+		tpl     string
+		expr    string
+		caps    []string
+		reps    []condxRepeatDesc
+		matches []matchCase
+	}{
+		{
+			name: "矩阵①·位1裸词+位2包裹重复段（用户实例形态）",
+			tpl:  "({标签})_[{标签+}]",
+			expr: `^\((?P<tag>[^)]+)\)_\[([^]]+(?:\]\s*\[[^]]+)*)\]$`,
+			caps: []string{"tag"},
+			reps: []condxRepeatDesc{{En: "tag__2", GroupIndex: 2, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{{input: "(art)_[a] [b]", named: map[string]string{"tag": "art"}, pos: map[int]string{2: "a] [b"}}},
+		},
+		{
+			name:    "矩阵②·裸词双作者多位",
+			tpl:     "{作者}_{作者}",
+			expr:    `^(?P<author>.+?)_(?P<author__2>.+?)$`,
+			caps:    []string{"author", "author__2"},
+			matches: []matchCase{{input: "Isel_Other", named: map[string]string{"author": "Isel", "author__2": "Other"}}},
+		},
+		{
+			name: "矩阵③·包裹可选双标签多位（缺席/在场两态）",
+			tpl:  "[{标签?}]_[{标签?}]",
+			expr: `^(?:\[(?P<tag>[^]]+)\])?_(?:\[(?P<tag__2>[^]]+)\])?$`,
+			caps: []string{"tag", "tag__2"},
+			matches: []matchCase{
+				{input: "[a]_[b]", named: map[string]string{"tag": "a", "tag__2": "b"}},
+				{input: "[a]_", named: map[string]string{"tag": "a", "tag__2": "<无>"}},
+				{input: "_[b]", named: map[string]string{"tag": "<无>", "tag__2": "b"}},
+				{input: "_", named: map[string]string{"tag": "<无>", "tag__2": "<无>"}},
+			},
+		},
+		{
+			name: "矩阵④·裸词带分隔双重复段（同记号重复位次分立）",
+			tpl:  "{标签+;_}={标签+;_}",
+			expr: `^([^_]+(?:_[^_]+)*)=([^_]+(?:_[^_]+)*)$`,
+			reps: []condxRepeatDesc{
+				{En: "tag", GroupIndex: 1, UnitPattern: `([^_]+)`, Exclude: "_"},
+				{En: "tag__2", GroupIndex: 2, UnitPattern: `([^_]+)`, Exclude: "_"},
+			},
+			matches: []matchCase{{input: "a_b=c_d", pos: map[int]string{1: "a_b", 2: "c_d"}}},
+		},
+		{
+			name: "矩阵⑤a·单词+包裹可选同词根混排",
+			tpl:  "{标签}_[{标签?}]",
+			expr: `^(?P<tag>.+?)_(?:\[(?P<tag__2>[^]]+)\])?$`,
+			caps: []string{"tag", "tag__2"},
+			matches: []matchCase{
+				{input: "T_[S]", named: map[string]string{"tag": "T", "tag__2": "S"}},
+				{input: "T_", named: map[string]string{"tag": "T", "tag__2": "<无>"}},
+			},
+		},
+		{
+			name: "矩阵⑤b·包裹可选+包裹重复段同词根混排",
+			tpl:  "[{标签?}]_[{标签+}]",
+			expr: `^(?:\[(?P<tag>[^]]+)\])?_\[([^]]+(?:\]\s*\[[^]]+)*)\]$`,
+			caps: []string{"tag"},
+			reps: []condxRepeatDesc{{En: "tag__2", GroupIndex: 2, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{
+				{input: "[a]_[b] [c]", named: map[string]string{"tag": "a"}, pos: map[int]string{2: "b] [c"}},
+				{input: "_[b]", named: map[string]string{"tag": "<无>"}, pos: map[int]string{2: "b"}},
+			},
+		},
+		{
+			name: "矩阵⑤c·0+重复段+裸可选同词根混排",
+			tpl:  "[{标签*}]_{标签?}",
+			expr: `^(?:\[([^]]+(?:\]\s*\[[^]]+)*)\])?_(?:(?P<tag__2>.+?))?$`,
+			caps: []string{"tag__2"},
+			reps: []condxRepeatDesc{{En: "tag", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{
+				{input: "[a] [b]_T", named: map[string]string{"tag__2": "T"}, pos: map[int]string{1: "a] [b"}},
+				{input: "_T", named: map[string]string{"tag__2": "T"}, pos: map[int]string{1: "<无>"}},
+			},
+		},
+		{
+			name: "单词+包裹重复段同词根（原拒绝面锚的位次分立形态）",
+			tpl:  "{标签}_[{标签+}]",
+			expr: `^(?P<tag>.+?)_\[([^]]+(?:\]\s*\[[^]]+)*)\]$`,
+			caps: []string{"tag"},
+			reps: []condxRepeatDesc{{En: "tag__2", GroupIndex: 2, UnitPattern: `\[([^]]+)\]`, Exclude: "]"}},
+			matches: []matchCase{{input: "T_[a] [b]", named: map[string]string{"tag": "T"}, pos: map[int]string{2: "a] [b"}}},
+		},
+		{
+			name: "矩阵⑥a·集名重复段双写多位",
+			tpl:  "[{集名+}]_[{集名+}]",
+			expr: `^\[([^]]+(?:\]\s*\[[^]]+)*)\]_\[([^]]+(?:\]\s*\[[^]]+)*)\]$`,
+			reps: []condxRepeatDesc{
+				{En: "setname", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"},
+				{En: "setname__2", GroupIndex: 2, UnitPattern: `\[([^]]+)\]`, Exclude: "]"},
+			},
+			matches: []matchCase{{input: "[a] [b]_[c]", pos: map[int]string{1: "a] [b", 2: "c"}}},
+		},
+		{
+			name: "矩阵⑥b·作者0+重复段双写多位",
+			tpl:  "[{作者*}]_[{作者*}]",
+			expr: `^(?:\[([^]]+(?:\]\s*\[[^]]+)*)\])?_(?:\[([^]]+(?:\]\s*\[[^]]+)*)\])?$`,
+			reps: []condxRepeatDesc{
+				{En: "author", GroupIndex: 1, UnitPattern: `\[([^]]+)\]`, Exclude: "]"},
+				{En: "author__2", GroupIndex: 2, UnitPattern: `\[([^]]+)\]`, Exclude: "]"},
+			},
+			matches: []matchCase{{input: "[a]_[b] [c]", pos: map[int]string{1: "a", 2: "b] [c"}}},
+		},
+		{
+			name: "矩阵⑦·单出现模板编译产物逐字零变化（位1 裸组名）",
+			tpl:  "({标签})={作者+;_}",
+			expr: `^\((?P<tag>[^)]+)\)=([^_]+(?:_[^_]+)*)$`,
+			caps: []string{"tag"},
+			reps: []condxRepeatDesc{{En: "author", GroupIndex: 2, UnitPattern: `([^_]+)`, Exclude: "_"}},
+			matches: []matchCase{{input: "(art)=a_b", named: map[string]string{"tag": "art"}, pos: map[int]string{2: "a_b"}}},
+		},
+	}
+	for _, tc := range green {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, caps, reps, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
+			if err != nil {
+				t.Fatalf("推导失败: %v", err)
+			}
+			if expr != tc.expr {
+				t.Fatalf("表达式不符:\n得到 %q\n期望 %q", expr, tc.expr)
+			}
+			if !reflect.DeepEqual(caps, tc.caps) {
+				t.Fatalf("捕获组不符: 得到 %v 期望 %v", caps, tc.caps)
+			}
+			if !reflect.DeepEqual(reps, tc.reps) {
+				t.Fatalf("重复段描述不符: 得到 %+v 期望 %+v", reps, tc.reps)
+			}
+			re := regexp.MustCompile(expr)
+			for _, m := range tc.matches {
+				idx := re.FindStringSubmatchIndex(m.input)
+				if idx == nil {
+					t.Fatalf("%q 应命中 %q", m.input, expr)
+				}
+				for name, want := range m.named {
+					gi := re.SubexpIndex(name)
+					if gi < 0 {
+						t.Fatalf("命名组 %s 不在表达式内", name)
+					}
+					lo, hi := idx[2*gi], idx[2*gi+1]
+					got := "<无>"
+					if lo >= 0 {
+						got = m.input[lo:hi]
+					}
+					if got != want {
+						t.Fatalf("%q 命名组 %s 不符: 得到 %q 期望 %q", m.input, name, got, want)
+					}
+				}
+				for gi, want := range m.pos {
+					lo, hi := idx[2*gi], idx[2*gi+1]
+					got := "<无>"
+					if lo >= 0 {
+						got = m.input[lo:hi]
+					}
+					if got != want {
+						t.Fatalf("%q 位置组 %d 不符: 得到 %q 期望 %q", m.input, gi, got, want)
+					}
+				}
+			}
+		})
+	}
+	red := []struct {
+		name    string
+		tpl     string
+		wantErr string
+	}{
+		{name: "矩阵⑧·非三词位裸词重复维持拒绝（文案不变）", tpl: "{标题}_{标题}", wantErr: "模板占位词 {标题} 重复"},
+		{name: "矩阵⑧·非三词位可选词位双写维持拒绝", tpl: "{标题?}_{标题?}", wantErr: "模板占位词 {标题?} 重复"},
+		{name: "矩阵⑧·非三词位单词与可选混排维持拒绝", tpl: "{标题?}_{标题}", wantErr: "模板占位词 {标题} 重复"},
+		{name: "矩阵⑨·{标签2} 词表外报错不回归", tpl: "{标签2}_{标签}", wantErr: "不在词表"},
+	}
+	for _, tc := range red {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestMultiOccurEvaluate 同占位词多位绑定与取值锚（阶段1）：位1/位2 独立绑定
+// 互不遮蔽（r1.tag 与 r1.tag__2）、重复段多位扇出绑定各自归位、可选词位缺席
+// =无绑定不扰另一位、声明面三口径（提取含位2/条件剔位2/重复段标记归位2）。
+func TestMultiOccurEvaluate(t *testing.T) {
+	fileHit := func(tpl, fileName string) (*ParseContext, bool) {
+		p, err := compileCondx(&Condx{Target: CondxTargetFile, Format: condxTpl(tpl)}, 1)
+		if err != nil {
+			t.Fatalf("模板 %q 编译失败: %v", tpl, err)
+		}
+		ctx := &ParseContext{}
+		ok := p.Evaluate(&MatchInput{FileName: fileName}, nil, ctx)
+		return ctx, ok
+	}
+
+	// 矩阵①·位1 单值与位2 重复段扇出独立绑定取值。
+	ctx, ok := fileHit("({标签})_[{标签+}]", "(art)_[a] [b].jpg")
+	if !ok {
+		t.Fatalf("位1/位2 形态应命中")
+	}
+	if v, _ := ctx.Capture("r1.tag"); v != "art" {
+		t.Fatalf("位1 标签取值不符: %q", v)
+	}
+	if units := ctx.CaptureAll("r1.tag__2"); len(units) != 2 || units[0].Value != "a" || units[1].Value != "b" {
+		t.Fatalf("位2 重复段单元值不符: %+v", units)
+	}
+	// 声明面：位1 入提取/条件两口径，位2（重复段）只入提取口径并打标。
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("({标签})_[{标签+}]")}}}
+	all, cond, repeat := declaredConditionCaptureSets(rows)
+	if !all["r1.tag"] || !all["r1.tag__2"] || !cond["r1.tag"] || cond["r1.tag__2"] {
+		t.Fatalf("声明口径不符: all=%v cond=%v", all, cond)
+	}
+	if !repeat["r1.tag__2"] || repeat["r1.tag"] {
+		t.Fatalf("重复段标记应独归位2: %v", repeat)
+	}
+
+	// 矩阵②·裸词双作者独立绑定。
+	ctx, ok = fileHit("{作者}_{作者}", "Isel_Other.jpg")
+	if !ok {
+		t.Fatalf("双作者形态应命中")
+	}
+	if v, _ := ctx.Capture("r1.author"); v != "Isel" {
+		t.Fatalf("位1 作者取值不符: %q", v)
+	}
+	if v, _ := ctx.Capture("r1.author__2"); v != "Other" {
+		t.Fatalf("位2 作者取值不符: %q", v)
+	}
+
+	// 矩阵③·包裹可选多位：在场/缺席两态独立（缺席=无绑定、仍命中）。
+	ctx, ok = fileHit("[{标签?}]_[{标签?}]", "[a]_[b].jpg")
+	if !ok {
+		t.Fatalf("两态在场应命中")
+	}
+	if v, _ := ctx.Capture("r1.tag"); v != "a" {
+		t.Fatalf("在场位1 取值不符: %q", v)
+	}
+	if v, _ := ctx.Capture("r1.tag__2"); v != "b" {
+		t.Fatalf("在场位2 取值不符: %q", v)
+	}
+	ctx, ok = fileHit("[{标签?}]_[{标签?}]", "_[b].jpg")
+	if !ok {
+		t.Fatalf("位1 缺席应仍命中")
+	}
+	if _, ok := ctx.Capture("r1.tag"); ok {
+		t.Fatalf("位1 缺席应无绑定")
+	}
+	if v, _ := ctx.Capture("r1.tag__2"); v != "b" {
+		t.Fatalf("位2 在场取值不符: %q", v)
+	}
+
+	// 矩阵④·双重复段扇出各自归位。
+	ctx, ok = fileHit("{标签+;_}={标签+;_}", "a_b=c_d.jpg")
+	if !ok {
+		t.Fatalf("双重复段形态应命中")
+	}
+	if l := ctx.CaptureAll("r1.tag"); len(l) != 2 || l[0].Value != "a" || l[1].Value != "b" {
+		t.Fatalf("位1 重复段单元值不符: %+v", l)
+	}
+	if r := ctx.CaptureAll("r1.tag__2"); len(r) != 2 || r[0].Value != "c" || r[1].Value != "d" {
+		t.Fatalf("位2 重复段单元值不符: %+v", r)
+	}
+
+	// 矩阵⑤·同词根混排：单词+可选、可选+重复段、重复段+可选。
+	ctx, ok = fileHit("{标签}_[{标签?}]", "T_[S].jpg")
+	if !ok {
+		t.Fatalf("单词+可选混排应命中")
+	}
+	if v, _ := ctx.Capture("r1.tag"); v != "T" {
+		t.Fatalf("混排位1 取值不符: %q", v)
+	}
+	if v, _ := ctx.Capture("r1.tag__2"); v != "S" {
+		t.Fatalf("混排位2 取值不符: %q", v)
+	}
+	ctx, ok = fileHit("{标签}_[{标签?}]", "T_.jpg")
+	if !ok {
+		t.Fatalf("位2 缺席应仍命中")
+	}
+	if v, _ := ctx.Capture("r1.tag"); v != "T" {
+		t.Fatalf("位2 缺席不扰位1: %q", v)
+	}
+	ctx, ok = fileHit("[{标签?}]_[{标签+}]", "[a]_[b] [c].jpg")
+	if !ok {
+		t.Fatalf("可选+重复段混排应命中")
+	}
+	if v, _ := ctx.Capture("r1.tag"); v != "a" {
+		t.Fatalf("可选+重复段位1 取值不符: %q", v)
+	}
+	if units := ctx.CaptureAll("r1.tag__2"); len(units) != 2 || units[0].Value != "b" || units[1].Value != "c" {
+		t.Fatalf("可选+重复段位2 单元值不符: %+v", units)
+	}
+}
+
+// TestMultiOccurBadges 值校验位次化锚（阶段1 矩阵⑩）：位2 断言命中且位1 不受扰
+// （编译名/求值寻址/#canon 键随位次名）；相等类别对方词取位2 词；重复段位挂值
+// 校验按位拒绝（文案按词根中文渲染）；位次越界走既有「不在本行格式模板内」。
+func TestMultiOccurBadges(t *testing.T) {
+	// 位1+位2 双常量断言：位2 命中、位1 独立生效。
+	c := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{作者}"),
+		Badges: []CondxBadge{
+			{Placeholder: "作者", Kind: CondxBadgeConstant, Value: "A"},
+			{Placeholder: "作者", Occur: 2, Kind: CondxBadgeConstant, Value: "X"},
+		}}
+	p, err := compileCondx(c, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	if !p.Evaluate(&MatchInput{FileName: "A_X.jpg"}, nil, &ParseContext{}) {
+		t.Fatalf("位1/位2 双常量断言应命中")
+	}
+	if p.Evaluate(&MatchInput{FileName: "B_X.jpg"}, nil, &ParseContext{}) {
+		t.Fatalf("位1 值不符不应命中（位1 断言独立生效）")
+	}
+	if p.Evaluate(&MatchInput{FileName: "X_A.jpg"}, nil, &ParseContext{}) {
+		t.Fatalf("位2 值不符不应命中（断言不落在位1）")
+	}
+
+	// 位2 库名单折叠：#canon 键带位次后缀、位1 无 #canon 绑定（键位次隔离）。
+	lib := &LibraryIndex{AuthorNames: map[string]struct{}{"Jake_Jaccobus": {}, "jake--other": {}}}
+	c2 := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{作者}"),
+		Badges: []CondxBadge{{Placeholder: "作者", Occur: 2, Kind: CondxBadgeLibrary, Dim: "author", Fold: true}}}
+	p2, err := compileCondx(c2, 1)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	ctx := &ParseContext{}
+	if !p2.Evaluate(&MatchInput{FileName: "sunset_jake jaccobus.jpg"}, lib, ctx) {
+		t.Fatalf("位2 折叠唯一应命中")
+	}
+	if v, ok := ctx.Capture("r1.author__2#canon"); !ok || v != "Jake_Jaccobus" {
+		t.Fatalf("位2 规范名键不符: %q %v", v, ok)
+	}
+	if _, ok := ctx.Capture("r1.author#canon"); ok {
+		t.Fatalf("位1 不应产出规范名绑定（键位次隔离）")
+	}
+	if p2.Evaluate(&MatchInput{FileName: "jake jaccobus_sunset.jpg"}, lib, &ParseContext{}) {
+		t.Fatalf("位1 值在名单但位2 值不在不应命中（断言取位2 词）")
+	}
+	// 声明面 #canon 键位次隔离：r1.author__2#canon 入提取声明集、位1 键不在。
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{作者}"),
+		Badges: []CondxBadge{{Placeholder: "作者", Occur: 2, Kind: CondxBadgeLibrary, Dim: "author", Fold: true}}}}}
+	if all := declaredConditionCaptures(rows); !all["r1.author__2#canon"] || all["r1.author#canon"] {
+		t.Fatalf("声明集 #canon 键应位次隔离: %v", all)
+	}
+
+	// 相等类别：对方词取位2 词（跨行）。
+	rowsEq := []CondxRow{
+		{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{作者}")}},
+		{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("Artist[{作者}]"),
+			Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeEqual, AgainstRow: 1, AgainstPh: "作者", AgainstOccur: 2}}}},
+	}
+	pEq, err := compileCondxRows(rowsEq)
+	if err != nil {
+		t.Fatalf("编译失败: %v", err)
+	}
+	in := &MatchInput{FileName: "A_B.jpg", DirNames: []string{"Artist[B]"}}
+	if !pEq.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("对方词取位2 应相等命中")
+	}
+	in.DirNames[0] = "Artist[A]"
+	if pEq.Evaluate(in, nil, &ParseContext{}) {
+		t.Fatalf("对方词取位2 不应误取位1 命中")
+	}
+
+	// 拒绝面：位2 为重复段时挂值校验按位拒绝（文案按词根中文渲染）。
+	cBad := &Condx{Target: CondxTargetFile, Format: condxTpl("({标签})_[{标签+}]"),
+		Badges: []CondxBadge{{Placeholder: "标签", Occur: 2, Kind: CondxBadgeConstant, Value: "x"}}}
+	if err := validateCondx(cBad, 1); err == nil || !strings.Contains(err.Error(), "「标签」为重复段占位词") {
+		t.Fatalf("重复段位2 挂值校验应拒绝（词根中文渲染），得到 %v", err)
+	}
+	// 位1 单值词挂值校验不受位2 重复段干扰（校验面）。
+	cOK := &Condx{Target: CondxTargetFile, Format: condxTpl("({标签})_[{标签+}]"),
+		Badges: []CondxBadge{{Placeholder: "标签", Occur: 1, Kind: CondxBadgeConstant, Value: "art"}}}
+	if err := validateCondx(cOK, 1); err != nil {
+		t.Fatalf("位1 值校验不应受位2 重复段干扰: %v", err)
+	}
+	// 位次越界：单出现模板挂位2 走既有「不在本行格式模板内」。
+	cMiss := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}"),
+		Badges: []CondxBadge{{Placeholder: "作者", Occur: 2, Kind: CondxBadgeConstant, Value: "x"}}}
+	if err := validateCondx(cMiss, 1); err == nil || !strings.Contains(err.Error(), "不在本行格式模板内") {
+		t.Fatalf("位次越界应报不在本行格式模板内，得到 %v", err)
+	}
+	// 位次为负：显式拒绝不静默归位1。
+	cNeg := &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}"),
+		Badges: []CondxBadge{{Placeholder: "作者", Occur: -1, Kind: CondxBadgeConstant, Value: "x"}}}
+	if err := validateCondx(cNeg, 1); err == nil || !strings.Contains(err.Error(), "位次") {
+		t.Fatalf("负位次应显式拒绝，得到 %v", err)
+	}
+}
+
+// TestMultiOccurBadgePos2CanonExtraction 值校验位2 的消费面锚（模板同占位词多次
+// 出现表达方案·阶段2 锚⑤）：位1/位2 双挂库名单折叠值校验（各自命中）后，提取
+// 行写位次名经 captureValues 的 #canon 优先序取**本位**规范名单值声明（键位次
+// 隔离互不取值）；无值校验位回落原始绑定；位次名与 #canon 声明键入提取声明集、
+// 提取行动作经构造期校验放行。
+func TestMultiOccurBadgePos2CanonExtraction(t *testing.T) {
+	lib := &LibraryIndex{AuthorNames: map[string]struct{}{"Jake_Jaccobus": {}, "Isel_Isel": {}}}
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{作者}"),
+		Badges: []CondxBadge{
+			{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true},
+			{Placeholder: "作者", Occur: 2, Kind: CondxBadgeLibrary, Dim: "author", Fold: true},
+		}}}}
+	p, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("双位值校验应可编译: %v", err)
+	}
+	ctx := &ParseContext{}
+	if !p.Evaluate(&MatchInput{FileName: "jake jaccobus_isel isel.jpg"}, lib, ctx) {
+		t.Fatalf("双位折叠唯一应命中")
+	}
+	// 位2 求值复核：canon 绑定键随位次名（阶段1 锚的消费面在场）。
+	if v, ok := ctx.Capture("r1.author__2#canon"); !ok || v != "Isel_Isel" {
+		t.Fatalf("位2 规范名键不符: %q %v", v, ok)
+	}
+	// 提取消费：#canon 优先——位1/位2 各取自身规范名单值，互不取值。
+	pos1 := ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 1}
+	pos2 := ExtractionAction{Dimension: DimCollection, From: FromCapture, CaptureName: "author__2", Row: 1}
+	if got := pos1.ApplyDeclarations("rule-b2", ctx); len(got) != 1 || got[0].Value != "Jake_Jaccobus" {
+		t.Fatalf("位1 提取应取位1 规范名单值: %+v", got)
+	}
+	if got := pos2.ApplyDeclarations("rule-b2", ctx); len(got) != 1 || got[0].Value != "Isel_Isel" {
+		t.Fatalf("位2 提取应取位2 规范名单值（canon 优先、键位次隔离）: %+v", got)
+	}
+
+	// 无值校验回落原始绑定（canon 键缺席走全量绑定序）。
+	plainRows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作者}_{作者}")}}}
+	pp, err := CompileRuleConditions(plainRows)
+	if err != nil {
+		t.Fatalf("无值校验形态应可编译: %v", err)
+	}
+	plainCtx := &ParseContext{}
+	if !pp.Evaluate(&MatchInput{FileName: "jake jaccobus_isel isel.jpg"}, lib, plainCtx) {
+		t.Fatalf("无值校验形态应命中")
+	}
+	if got := pos2.ApplyDeclarations("rule-b2", plainCtx); len(got) != 1 || got[0].Value != "isel isel" {
+		t.Fatalf("无 canon 应回落位2 原始绑定: %+v", got)
+	}
+
+	// 声明面：位次名与 #canon 声明键入提取声明集，提取行经构造期校验放行。
+	all := declaredConditionCaptures(rows)
+	for _, key := range []string{"r1.author", "r1.author__2", "r1.author#canon", "r1.author__2#canon"} {
+		if !all[key] {
+			t.Fatalf("声明集应含 %q: %v", key, all)
+		}
+	}
+	if err := validateExtractionsCore("rule-b2", nil, nil, []ExtractionAction{pos1, pos2}, all, nil, true); err != nil {
+		t.Fatalf("位次名提取行应经构造期校验放行: %v", err)
 	}
 }
