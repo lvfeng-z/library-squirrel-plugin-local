@@ -22,8 +22,9 @@
 
         <!-- 上半「识别规则」（v4 条件行 · 三步漏斗）：目标四卡（文件/目录/序列/
              引用规则）→ 格式模板 → 附加条件+值校验；行前 且/或 + 行级非 + 括号
-             子组（子组走高级 JSON）；引用行恒置条件行上方、独立编号「引用 N」、
-             不占条件行「第 N 行」（W4 规则组合引用） -->
+             子组（行内「括号」开关入组、紧凑卡一行承载、弹窗编辑）；引用行恒置
+             条件行上方、独立编号「引用 N」、不占条件行「第 N 行」（W4 规则组合
+             引用） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">识别规则<span class="li-red-sec-note">上半 · 决定规则命中哪些文件</span></h4>
@@ -75,203 +76,16 @@
               </template>
             </div>
             <div v-if="refRows.length && condxRows.length" class="li-ref-divider"></div>
-            <div v-for="(row, i) in condxRows" :key="i" class="li-condx-row" :class="{ 'is-invalid': !!condxRowHint(i) }">
-              <div class="li-condx-row-head">
-                <el-select v-if="i > 0" v-model="row.connector" size="small" class="li-condx-conn">
-                  <el-option label="且（都命中）" value="and" />
-                  <el-option label="或（任一命中）" value="or" />
-                </el-select>
-                <label class="li-condx-neg"><input v-model="row.negated" type="checkbox"><span>非</span></label>
-                <!-- 括号子组：结构化模式只读占位（嵌套编辑走高级 JSON），保存原样 -->
-                <div v-if="row.group" class="li-condx-groupnote">括号子组（{{ row.group.length }} 行）——完整嵌套编辑请用「高级（JSON）」</div>
-                <el-button v-else size="small" text type="danger" class="li-condx-del" @click="condxRows.splice(i, 1)">删行</el-button>
-              </div>
-              <template v-if="!row.group">
-                <!-- Step 1 目标四卡（一次点选；第四卡＝W4 引用规则，帧3） -->
-                <div class="li-condx-targets">
-                  <button
-                    v-for="t in CONDX_TARGETS"
-                    :key="t.value"
-                    type="button"
-                    class="li-condx-card"
-                    :class="{ 'is-active': row.condition && row.condition.target === t.value }"
-                    :title="t.note"
-                    @click="setRowTarget(row, t.value)"
-                  >
-                    <span class="li-condx-card-label">{{ t.label }}</span>
-                    <span class="li-condx-card-note">{{ t.note }}</span>
-                  </button>
-                  <button
-                    type="button"
-                    class="li-condx-card"
-                    :title="CONDX_TARGET_REF_NOTE"
-                    @click="setRowToRef(row)"
-                  >
-                    <span class="li-condx-card-label">引用规则</span>
-                    <span class="li-condx-card-note">{{ CONDX_TARGET_REF_NOTE }}</span>
-                  </button>
-                </div>
-                <template v-if="row.condition">
-                  <!-- Step 2 格式模板：目录双问法 + 模板输入 + 词条点选 + 例子模板 -->
-                  <div class="li-condx-fmt">
-                    <el-select
-                      v-if="row.condition.target === 'dir'"
-                      :model-value="row.condition.format.mode"
-                      size="small"
-                      class="li-condx-mode"
-                      @update:model-value="setRowFormatMode(row, $event)"
-                    >
-                      <el-option label="整条按模板" value="template" />
-                      <el-option label="含这个词" value="contains" />
-                    </el-select>
-                    <el-input
-                      v-if="row.condition.format.mode === 'contains'"
-                      v-model="row.condition.format.word"
-                      size="small"
-                      placeholder="包含词（纯文字，不含占位词）"
-                    />
-                    <textarea
-                      v-else
-                      v-model="row.condition.format.tpl"
-                      class="li-condx-tpl"
-                      rows="2"
-                      spellcheck="false"
-                      :placeholder="'如 【{作者}】{标题} / {公共段}_{序号}（点下方词条插入光标处）'"
-                      @blur="onTplSelection(i, $event.target.selectionStart)"
-                      @keyup="onTplSelection(i, $event.target.selectionStart)"
-                      @click="onTplSelection(i, $event.target.selectionStart)"
-                    />
-                  </div>
-                  <!-- 模板词元切分预览（位次角标）：同词根多位各自成 chip，位≥2 带
-                       「第N处」角标（data-pos，复用可选 chip 的 ::after 角标样式
-                       先例）；悬浮注记位次与寻址组名、重复段位的多值禁引 -->
-                  <div v-if="tplTokChips(row.condition).length" class="li-condx-toks">
-                    <template v-for="(t, ti) in tplTokChips(row.condition)" :key="ti">
-                      <span v-if="!t.ph" class="li-condx-tok-lit">{{ t.text }}</span>
-                      <span
-                        v-else
-                        class="li-condx-tok"
-                        :data-pos="t.occur && t.occur > 1 ? `第${t.occur}处` : null"
-                        :title="tplTokTitle(t) || undefined"
-                      >{{ '{' + t.text + '}' }}</span>
-                    </template>
-                  </div>
-                  <div v-if="row.condition.format.mode === 'template'" class="li-condx-chips">
-                    <button
-                      v-for="v in CONDX_VOCAB"
-                      :key="v.word"
-                      type="button"
-                      class="li-condx-chip"
-                      :title="v.note"
-                      @click="insertWordAtCursor(row, v.word)"
-                    >{{ '{' + v.word + '}' }}</button>
-                    <span class="li-condx-chips-sep">｜</span>
-                    <button
-                      v-for="ex in CONDX_EXAMPLES"
-                      :key="ex.name"
-                      type="button"
-                      :class="['li-condx-chip is-example', { 'is-optional': ex.template.indexOf('?') >= 0 }]"
-                      :title="`${ex.template}（${ex.description}）`"
-                      @click="applyExample(row, ex)"
-                    >{{ ex.name }}</button>
-                  </div>
-                  <!-- Step 3 附加条件（终结谓词，按目标封闭集）+ 值校验 -->
-                  <div class="li-condx-extra">
-                    <div class="li-condx-extra-head">
-                      <span class="li-condx-label">附加条件（终结谓词）</span>
-                      <el-select
-                        v-if="rowAttachOptions(row).length"
-                        :model-value="''"
-                        size="small"
-                        class="li-condx-addsel"
-                        placeholder="+ 加一条"
-                        @update:model-value="addRowAttach(row, $event)"
-                      >
-                        <el-option v-for="o in rowAttachOptions(row)" :key="o.value" :label="o.label" :value="o.value" />
-                      </el-select>
-                    </div>
-                    <div v-for="(a, ai) in row.condition.attach" :key="ai" class="li-condx-inline">
-                      <span class="li-condx-inline-label">{{ attachLabelOf(row, a.kind) }}</span>
-                      <textarea
-                        v-if="attachNeeds(a, 'tpl')"
-                        v-model="a.tpl"
-                        class="li-condx-minitpl"
-                        rows="1"
-                        spellcheck="false"
-                        placeholder="迷你模板（如 {序号}）"
-                      />
-                      <el-input v-if="attachNeeds(a, 'word')" v-model="a.word" size="small" placeholder="包含词" class="li-condx-mini" />
-                      <el-input-number v-if="attachNeeds(a, 'count')" v-model="a.minCount" :min="1" size="small" controls-position="right" class="li-condx-num" />
-                      <el-select v-if="attachNeeds(a, 'types')" v-model="a.types" size="small" multiple placeholder="类型" class="li-condx-mini">
-                        <el-option v-for="t in CONDX_TYPE_OPTIONS" :key="t" :label="t" :value="t" />
-                      </el-select>
-                      <el-input v-if="attachNeeds(a, 'value')" v-model="a.value" size="small" placeholder=".jpg" class="li-condx-mini" />
-                      <el-button size="small" text type="danger" @click="row.condition!.attach!.splice(ai, 1)">删</el-button>
-                    </div>
-                    <div class="li-condx-extra-head">
-                      <span class="li-condx-label">值校验（占位词上的断言）</span>
-                      <el-select
-                        v-if="condxRowPlaceholders(row.condition).length"
-                        :model-value="''"
-                        size="small"
-                        class="li-condx-addsel"
-                        placeholder="+ 加一枚"
-                        @update:model-value="addRowBadge(row, $event)"
-                      >
-                        <el-option v-for="k in CONDX_BADGE_KINDS" :key="k.value" :label="k.label" :value="k.value" />
-                      </el-select>
-                    </div>
-                    <div v-for="(b, bi) in row.condition.badges" :key="bi" class="li-condx-inline">
-                      <!-- 词位下拉位次化：取值=位次化组名（行内唯一）、条目按位出
-                           （位≥2 显示「词·第N处」）；选中回写词根+位次（位1 不落
-                           occur，与内核 omitempty 同口径=存量档案零变化） -->
-                      <el-select
-                        :model-value="badgePhKey(row.condition, b)"
-                        size="small"
-                        class="li-condx-mini"
-                        @update:model-value="setBadgePh(row.condition, b, $event)"
-                      >
-                        <el-option v-for="p in condxRowPlaceholders(row.condition)" :key="p.group" :label="`{${p.word}}`" :value="p.group" />
-                      </el-select>
-                      <span class="li-condx-dot">●</span>
-                      <el-select :model-value="b.kind" size="small" class="li-condx-mini" @update:model-value="setBadgeKind(b, $event)">
-                        <el-option v-for="k in CONDX_BADGE_KINDS" :key="k.value" :label="k.label" :value="k.value" />
-                      </el-select>
-                      <el-select v-if="badgeNeeds(b, 'dim')" v-model="b.dim" size="small" placeholder="名单维度" class="li-condx-mini">
-                        <el-option v-for="d in CONDX_BADGE_DIMS" :key="d" :label="dimNameOf(d)" :value="d" />
-                      </el-select>
-                      <label v-if="badgeNeeds(b, 'dim')" class="li-condx-fold"><input v-model="b.fold" type="checkbox"><span>形变归一</span></label>
-                      <template v-if="badgeNeeds(b, 'againstRow')">
-                        <el-select v-model="b.againstRow" size="small" placeholder="对方行" class="li-condx-mini">
-                          <el-option v-for="f in earlierFlatRows(i)" :key="f.row" :label="`第 ${f.row} 行`" :value="f.row" />
-                        </el-select>
-                        <!-- 相等类别的对方词下拉按对方行位次出条目（含「·第N处」） -->
-                        <el-select
-                          :model-value="againstPhKey(b)"
-                          size="small"
-                          placeholder="对方占位词"
-                          class="li-condx-mini"
-                          @update:model-value="setBadgeAgainstPh(b, $event)"
-                        >
-                          <el-option v-for="p in againstEntries(b)" :key="p.group" :label="`{${p.word}}`" :value="p.group" />
-                        </el-select>
-                      </template>
-                      <el-input v-if="badgeNeeds(b, 'value')" v-model="b.value" size="small" placeholder="常量值" class="li-condx-mini" />
-                      <el-button size="small" text type="danger" @click="row.condition!.badges!.splice(bi, 1)">删</el-button>
-                    </div>
-                    <!-- 位次漂移提示（值校验面）：占位词位次/相等对方词位次落在受
-                         影响组名上时报出，请复核指向 -->
-                    <p v-if="badgeDriftNotice(i)" class="li-ref-notice">{{ badgeDriftNotice(i) }}</p>
-                  </div>
-                  <!-- 位次漂移提示（模板面）：编辑会话内模板变更前后位次表 diff 出
-                       「位次号变化/指向变化」的组名（主形态=在已有出现之前插入同
-                       词根新出现→后续位次整体 +1），报出受影响词位 -->
-                  <p v-if="rowOccurDriftNotice(i)" class="li-ref-notice">{{ rowOccurDriftNotice(i) }}</p>
-                </template>
-              </template>
-              <p v-if="condxRowHint(i)" class="li-red-row-hint">{{ condxRowHint(i) }}</p>
-            </div>
-            <el-button size="small" text @click="addCondxRow">+ 加一行</el-button>
+            <!-- 条件行区块（CondxRowsEditor）：行表经 v-model:rows 传同一 reactive
+                 数组（就地编辑、无拷贝）；行转引用行经 toRef 上抛、括号子组紧凑卡
+                 〔编辑〕经 editGroup 上抛开窗（组内编辑器后续阶段接入）、位次漂移
+                 结果经 occurDrift 下传（快照与刷新留本组件，提取行漂移提示共用） -->
+            <CondxRowsEditor
+              v-model:rows="condxRows"
+              :occur-drift="occurDrift"
+              @to-ref="onRowToRef"
+              @edit-group="condxGroupDialogState = true"
+            />
             <!-- 占位词捕获清单（行号+词）：提取段引用的唯一来源 -->
             <div v-if="captureList.length" class="li-red-caps">
               <span class="li-red-label">占位词捕获清单</span>
@@ -469,6 +283,11 @@
             <el-button size="small" text type="danger" @click="dimRows.splice(i, 1)">删</el-button>
           </div>
         </section>
+
+        <!-- 括号子组编辑弹窗：常驻挂载、开关纯由 state 控制（紧凑卡〔编辑〕开窗，
+             组内条件行编辑器后续阶段接入）；先挂载后开窗，保证壳组件 @open 高度
+             测量正常触发 -->
+        <CondxGroupDialog v-model:state="condxGroupDialogState" />
       </template>
 
       <!-- ================= 入口②：集规则调整（SetRulePanel「调整规则」，剧本E 语义随迁） ================= -->
@@ -591,6 +410,8 @@
 // 提取来源新增「被引规则捕获」＝成员规则·占位词（按引用行顺序分组）；引用行在
 // 场时空条件表合法；保存载荷增 refs（成员 ID 列表随既有 saveRule 原样入档）。
 import { ref, computed, watch } from 'vue'
+import CondxGroupDialog from './CondxGroupDialog.vue'
+import CondxRowsEditor from './CondxRowsEditor.vue'
 import {
   DIMENSION_OPTIONS,
   FROM_OPTIONS,
@@ -605,23 +426,12 @@ import {
   buildWhenWithoutSeqAtom,
   hasOtherConds,
   CONDX_TARGETS,
-  CONDX_TARGET_REF_NOTE,
   CONDX_VOCAB,
-  CONDX_ATTACH_OPTIONS,
-  CONDX_TYPE_OPTIONS,
-  CONDX_BADGE_KINDS,
-  CONDX_BADGE_DIMS,
-  CONDX_EXAMPLES,
   condxFlatRows,
-  condxRowPlaceholders,
+  condxRowsSummary,
   condxRowAllPlaceholders,
-  condxPosName,
-  condxVocabOf,
-  condxTplOccurChips,
   condxOccurDrift,
-  condxTemplateError,
   condxRowsError,
-  condxRowError,
   condxCaptures,
   condxNormalizeTpl,
   condxNormalizeRows,
@@ -629,12 +439,8 @@ import {
   condxShapeSummary,
   condxDirLevelNote,
   type CondxRowForm,
-  type CondxForm,
-  type CondxBadgeForm,
-  type CondxAttachForm,
   type CondxCaptureDecl,
   type CondxOccEntry,
-  type CondxTplTok,
   type ExtractionActionJSON
 } from './ruleFormModel'
 
@@ -816,6 +622,8 @@ interface RefRowForm {
   ruleId: string
 }
 const refRows = ref<RefRowForm[]>([])
+// 括号子组编辑弹窗开关（空壳：紧凑卡〔编辑〕入口随后续阶段接入）
+const condxGroupDialogState = ref(false)
 const condxText = ref('')
 const condxJsonMode = ref(false)
 const condxError = ref('')
@@ -1102,7 +910,9 @@ function refCaptureMirrorWarn(row: ExtractionRow, index: number): string {
 
 // 点「引用规则」卡（帧3）：该行转出条件行列表、追加为引用行——恒置条件行上方、
 // 独立编号「引用 N」、不占条件行「第 N 行」（占位词寻址不受影响）、不带且/或
-function setRowToRef(row: CondxRowForm): void {
+// 行转引用行（CondxRowsEditor 目标卡「引用规则」toRef 事件上抛）：该行从条件行表
+// 移入引用行表
+function onRowToRef(row: CondxRowForm): void {
   const idx = condxRows.value.indexOf(row)
   if (idx < 0) return
   condxRows.value.splice(idx, 1)
@@ -1129,194 +939,9 @@ const condxSummary = computed((): string => {
   }
   const refPrefix = refRows.value.length ? `引用 ${refRows.value.length} 条成员规则；` : ''
   if (!flat.length) return `${refPrefix}（无条件行）`
-  const parts = flat.map((f) => {
-    const c = f.condx
-    const target = CONDX_TARGETS.find((t) => t.value === c.target)
-    const fmt = c.format.mode === 'contains' ? `含「${c.format.word || '?'}」` : condxNormalizeTpl(c.format.tpl || '?')
-    const badges = (c.badges || []).length ? ` ·${(c.badges || []).length} 项值校验` : ''
-    const attach = (c.attach || []).length ? ` ·${(c.attach || []).length} 条附加` : ''
-    const levelNote = condxDirLevelNote(c)
-    return `第${f.row}行 ${target ? target.label : c.target}「${fmt}」${badges}${attach}${levelNote ? ` · ${levelNote}` : ''}`
-  })
-  return `${refPrefix}${parts.join('；')}`
+  // 摘要括号化：先序递归拼接（组=圆括号包成员、接词随行、行号=全局先序号）
+  return `${refPrefix}${condxRowsSummary(activeCondxRows.value)}`
 })
-
-// 结构化模式的行级校验提示（含 JSON 模式聚合错误的呈现位）
-const condxRowHint = (i: number): string => {
-  const rows = condxRows.value
-  const row = rows[i]
-  if (!row) return ''
-  const flat = condxFlatRows(rows)
-  if (row.group) return ''
-  const hit = flat.find((f) => f.condx === row.condition)
-  if (!hit) return '行内容不完整'
-  return condxRowError(hit.row, row.condition, flat)
-}
-
-// —— 行编辑辅助（目标卡/格式/词条插入/例子模板/附加/值校验） ——
-
-function addCondxRow(): void {
-  condxRows.value.push({ connector: condxRows.value.length ? 'and' : '', negated: false, condition: null, group: null })
-}
-
-// 目标三卡点选：首次进入带默认格式（template + 空模板），切换目标保留格式段
-function setRowTarget(row: CondxRowForm, target: 'file' | 'dir' | 'seq'): void {
-  if (!row.condition) {
-    row.condition = { target, format: { mode: 'template', tpl: '' }, badges: [], attach: [] }
-    return
-  }
-  row.condition.target = target
-  if (target !== 'dir' && row.condition.format.mode === 'contains') {
-    row.condition.format = { mode: 'template', tpl: '' }
-  }
-  // 序列默认形态一步到位（{公共段}_{序号}）
-  if (target === 'seq' && row.condition.format.mode === 'template' && !(row.condition.format.tpl || '').trim()) {
-    row.condition.format.tpl = '{公共段}_{序号}'
-  }
-  row.condition.attach = (row.condition.attach || []).filter((a) => rowAttachValues(target).indexOf(a.kind) >= 0)
-}
-
-function setRowFormatMode(row: CondxRowForm, mode: string): void {
-  if (!row.condition) return
-  row.condition.format = mode === 'contains' ? { mode: 'contains', word: '' } : { mode: 'template', tpl: '' }
-}
-
-// 词条点选插入光标处（记录 textarea 选区；无选区追加到末尾）
-const tplSelections = new Map<number, number>()
-function onTplSelection(rowIdx: number, sel: number): void {
-  tplSelections.set(rowIdx, sel)
-}
-function insertWordAtCursor(row: CondxRowForm, word: string): void {
-  if (!row.condition || row.condition.format.mode !== 'template') return
-  const tpl = row.condition.format.tpl || ''
-  const idx = condxRows.value.indexOf(row)
-  const pos = tplSelections.get(idx)
-  const piece = `{${word}}`
-  if (pos == null || pos < 0 || pos > tpl.length) {
-    row.condition.format.tpl = tpl + piece
-    return
-  }
-  row.condition.format.tpl = tpl.slice(0, pos) + piece + tpl.slice(pos)
-  tplSelections.set(idx, pos + piece.length)
-}
-
-function applyExample(row: CondxRowForm, ex: { template: string; target: 'file' | 'dir' | 'seq' }): void {
-  setRowTarget(row, ex.target)
-  if (row.condition) row.condition.format = { mode: 'template', tpl: ex.template }
-}
-
-// 附加谓词（按目标封闭集）
-function rowAttachValues(target: string): string[] {
-  return (CONDX_ATTACH_OPTIONS[target] || []).map((o) => o.value)
-}
-function rowAttachOptions(row: CondxRowForm): { value: string; label: string }[] {
-  const target = row.condition ? row.condition.target : ''
-  return (CONDX_ATTACH_OPTIONS[target] || []).map((o) => ({ value: o.value, label: o.label }))
-}
-function attachLabelOf(row: CondxRowForm, kind: string): string {
-  const target = row.condition ? row.condition.target : ''
-  const hit = (CONDX_ATTACH_OPTIONS[target] || []).find((o) => o.value === kind)
-  return hit ? hit.label : kind
-}
-function attachNeeds(a: CondxAttachForm, need: string): boolean {
-  const target = (condxRows.value.find((r) => r.condition && (r.condition.attach || []).indexOf(a) >= 0)?.condition?.target) || ''
-  const hit = (CONDX_ATTACH_OPTIONS[target] || []).find((o) => o.value === a.kind)
-  return !!hit && hit.needs.indexOf(need) >= 0
-}
-function addRowAttach(row: CondxRowForm, kind: string): void {
-  if (!row.condition) return
-  if (!row.condition.attach) row.condition.attach = []
-  row.condition.attach.push({ kind })
-}
-
-// 值校验
-function addRowBadge(row: CondxRowForm, kind: string): void {
-  if (!row.condition) return
-  if (!row.condition.badges) row.condition.badges = []
-  const first = condxRowPlaceholders(row.condition)[0]
-  // 词位缺省=首个可引用位；occur 仅在位≥2 落 JSON（位1 裸组名=存量档案零变化，
-  // 与内核 omitempty 同口径）。
-  row.condition.badges.push(
-    first
-      ? { placeholder: first.baseWord, occur: first.occur > 1 ? first.occur : undefined, kind: kind as CondxBadgeForm['kind'] }
-      : { placeholder: '', kind: kind as CondxBadgeForm['kind'] }
-  )
-}
-// 模板词元切分 chips（位次角标呈现）：解析失败（未闭合 { 等）静默不显示——
-// 行级校验已报错。
-function tplTokChips(condx: CondxForm): CondxTplTok[] {
-  if (!condx || condx.format.mode !== 'template') return []
-  return condxTplOccurChips(condx.format.tpl || '').chips || []
-}
-
-// 占位词 chip 的悬浮说明：位≥2 注记位次与寻址组名；重复段位注记多值禁引。
-function tplTokTitle(t: CondxTplTok): string {
-  if (t.occur && t.occur > 1) {
-    return `同词根第 ${t.occur} 处出现：独立产出与引用（寻址组名 ${t.posName}）${t.repeat ? '；重复段词（多值产出）仅提取段可引用' : ''}`
-  }
-  if (t.repeat) return '重复段词（多值产出）：提取段可引用，暂不能用于生效条件/值校验/组合接线'
-  return ''
-}
-
-// equal 对方行候选（展平行号早于本行的 condition 行）
-function earlierFlatRows(rowIndex: number): { row: number; condx: CondxForm }[] {
-  const rows = condxRows.value
-  const flat = condxFlatRows(rows)
-  const row = rows[rowIndex]
-  if (!row || !row.condition) return []
-  const self = flat.find((f) => f.condx === row.condition)
-  if (!self) return []
-  return flat.filter((f) => f.row < self.row)
-}
-// 值校验词位选择的取值键：位次化组名（行内唯一）；旧档无 occur=位1 裸组名。
-function badgePhKey(condx: CondxForm, b: CondxBadgeForm): string {
-  const v = condxVocabOf(b.placeholder || '')
-  return v ? condxPosName(v.group, b.occur || 1) : b.placeholder || ''
-}
-function setBadgePh(condx: CondxForm, b: CondxBadgeForm, group: string): void {
-  const hit = condxRowPlaceholders(condx).find((p) => p.group === group)
-  if (!hit) return
-  b.placeholder = hit.baseWord
-  b.occur = hit.occur > 1 ? hit.occur : undefined
-}
-function setBadgeKind(b: CondxBadgeForm, kind: string): void {
-  b.kind = kind as CondxBadgeForm['kind']
-  b.dim = undefined
-  b.fold = undefined
-  b.againstRow = undefined
-  b.againstPh = undefined
-  b.againstOccur = undefined
-  b.value = undefined
-}
-function badgeNeeds(b: CondxBadgeForm, need: string): boolean {
-  const hit = CONDX_BADGE_KINDS.find((k) => k.value === b.kind)
-  return !!hit && hit.needs.indexOf(need) >= 0
-}
-// equal 相等类别的对方词下拉：按对方行位次出条目（含「·第N处」）。
-function earlierFlatRowsForBadge(b: CondxBadgeForm): CondxForm | null {
-  const flat = condxFlatRows(condxRows.value)
-  const hit = flat.find((f) => f.row === b.againstRow)
-  return hit ? hit.condx : null
-}
-function againstEntries(b: CondxBadgeForm): CondxOccEntry[] {
-  const hit = earlierFlatRowsForBadge(b)
-  return hit ? condxRowPlaceholders(hit) : []
-}
-function againstPhKey(b: CondxBadgeForm): string {
-  const v = condxVocabOf(b.againstPh || '')
-  return v ? condxPosName(v.group, b.againstOccur || 1) : b.againstPh || ''
-}
-function setBadgeAgainstPh(b: CondxBadgeForm, group: string): void {
-  const condx = earlierFlatRowsForBadge(b)
-  const hit = condx ? condxRowPlaceholders(condx).find((p) => p.group === group) : undefined
-  if (!hit) return
-  b.againstPh = hit.baseWord
-  b.againstOccur = hit.occur > 1 ? hit.occur : undefined
-}
-function dimNameOf(dim: string): string {
-  const hit = DIMENSION_OPTIONS.find((d) => d.value === dim)
-  return hit ? hit.label : dim
-}
 
 // —— 位次漂移 diff（风险1 缓解）：编辑会话内模板变更前后位次表对照 ——
 
@@ -1375,48 +1000,10 @@ function allOccurDrift(): { row: number; group: string; word: string }[] {
   return out
 }
 
-// 本行模板的位次漂移提示：受影响词位按行报出，指向复核（提取/生效条件/值校验/
-// 组合接线）。
-function rowOccurDriftNotice(i: number): string {
-  const row = condxRows.value[i]
-  if (!row || !row.condition) return ''
-  const flat = condxFlatRows(condxRows.value)
-  const self = flat.find((f) => f.condx === row.condition)
-  if (!self) return ''
-  const drift = occurDrift.value[self.row]
-  if (!drift || !drift.length) return ''
-  const words = drift.map((d) => `{${d.word}}`).join('、')
-  return `⚠ 模板位次已变化：${words} 的指向可能已漂移（插入同词根新出现会使后续位次整体 +1）——引用它的提取/生效条件/值校验/组合接线行需复核`
-}
-
-// 本行值校验的漂移提示：占位词位次或相等对方词位次落在受影响组名上。
-function badgeDriftNotice(i: number): string {
-  const row = condxRows.value[i]
-  if (!row || !row.condition || !(row.condition.badges || []).length) return ''
-  const flat = condxFlatRows(condxRows.value)
-  const self = flat.find((f) => f.condx === row.condition)
-  if (!self) return ''
-  const ownDrift = occurDrift.value[self.row] || []
-  const hits: string[] = []
-  for (const b of row.condition.badges || []) {
-    const v = condxVocabOf(b.placeholder || '')
-    if (v && ownDrift.some((d) => d.group === condxPosName(v.group, b.occur || 1))) {
-      hits.push(`{${b.placeholder || '?'}${b.occur && b.occur > 1 ? `·第${b.occur}处` : ''}}`)
-    }
-    if (b.kind === 'equal' && b.againstRow) {
-      const av = condxVocabOf(b.againstPh || '')
-      const againstDrift = occurDrift.value[b.againstRow] || []
-      if (av && againstDrift.some((d) => d.group === condxPosName(av.group, b.againstOccur || 1))) {
-        hits.push(`第 ${b.againstRow} 行 {${b.againstPh || '?'}${b.againstOccur && b.againstOccur > 1 ? `·第${b.againstOccur}处` : ''}}`)
-      }
-    }
-  }
-  if (!hits.length) return ''
-  return `⚠ 值校验引用的占位词位次已漂移：${hits.join('、')}——请复核指向`
-}
-
 // 提取行的漂移提示：capture 引用受影响组名，或 when 条件（含组合接线限定名
 // rN.组名）文本命中受影响组名（词边界防 tag 命中 tag__2）。
+// 行内漂移提示（模板面/值校验面）随条件行区块迁入 CondxRowsEditor，经
+// occurDrift prop 读取本组件刷新结果。
 function extractionDriftWarn(row: ExtractionRow): string {
   const drift = allOccurDrift()
   if (!drift.length) return ''
@@ -1725,7 +1312,6 @@ function initFromProps(): void {
     // 内容，本组件 setup 态跨开关存留——每个字段都须重置后再按初值分支）
     condxJsonMode.value = false
     condxText.value = ''
-    tplSelections.clear()
     // 引用行复位（W4）：档案 refs（组合规则成员）逐条转为引用行；坏档非字符串项滤除
     const initRefs = rule && Array.isArray(rule.refs) ? rule.refs : []
     refRows.value = initRefs.filter((id): id is string => typeof id === 'string').map((id) => ({ ruleId: id }))
@@ -2418,24 +2004,6 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   gap: 8px;
 }
 
-.li-condx-conn {
-  width: 130px;
-}
-
-.li-condx-neg {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--app-text-secondary);
-}
-
-.li-condx-groupnote {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-  flex: 1;
-}
-
 .li-condx-del {
   margin-left: auto;
 }
@@ -2538,219 +2106,6 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   margin: 0;
   font-size: 12px;
   line-height: 1.7;
-  color: var(--app-text-secondary);
-}
-
-.li-condx-targets {
-  display: flex;
-  gap: 8px;
-}
-
-.li-condx-card {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: var(--app-radius);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.li-condx-card.is-active {
-  border-color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.li-condx-card-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--app-text-primary);
-}
-
-.li-condx-card-note {
-  font-size: 11px;
-  color: var(--app-text-secondary);
-  line-height: 1.5;
-}
-
-.li-condx-fmt {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-
-.li-condx-mode {
-  width: 130px;
-  flex: none;
-}
-
-.li-condx-tpl {
-  flex: 1;
-  resize: vertical;
-  font-family: var(--app-font-mono, monospace);
-  font-size: 13px;
-  line-height: 1.6;
-  padding: 6px 8px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: var(--app-radius);
-  background: transparent;
-  color: var(--app-text-primary);
-}
-
-.li-condx-tpl:focus {
-  outline: none;
-  border-color: var(--el-color-primary);
-}
-
-.li-condx-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-/* 模板词元切分预览（位次角标）：字面段灰字 + 占位词 chip；位≥2 的 chip 带
-   「第N处」角标（data-pos，复用可选 chip 的 ::after 角标样式先例）、主色描边 */
-.li-condx-toks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
-
-.li-condx-tok-lit {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-  word-break: break-all;
-}
-
-.li-condx-tok {
-  font-size: 12px;
-  padding: 1px 6px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: 10px;
-  color: var(--app-text-primary);
-}
-
-.li-condx-tok[data-pos] {
-  border-color: var(--el-color-primary);
-}
-
-.li-condx-tok[data-pos]::after {
-  content: attr(data-pos);
-  margin-left: 4px;
-  padding: 0 3px;
-  font-size: 10px;
-  line-height: 1.4;
-  border-radius: 4px;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.li-condx-chip {
-  font-size: 12px;
-  padding: 2px 8px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: 10px;
-  background: transparent;
-  cursor: pointer;
-  color: var(--app-text-primary);
-}
-
-.li-condx-chip:hover {
-  border-color: var(--el-color-primary);
-  color: var(--el-color-primary);
-}
-
-.li-condx-chip.is-example {
-  color: var(--app-text-secondary);
-}
-
-/* 可选记号词条（模板含 ? 的示例）：虚化虚线边框 + 淡色「可选」角标——阶段3
-   可选 chip 样式（无既有可选类先例，不阻塞语义的小额呈现设计）。 */
-.li-condx-chip.is-optional {
-  border-style: dashed;
-  color: var(--app-text-secondary);
-}
-
-.li-condx-chip.is-optional::after {
-  content: '可选';
-  margin-left: 4px;
-  padding: 0 3px;
-  font-size: 10px;
-  line-height: 1.4;
-  border-radius: 4px;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.li-condx-chips-sep {
-  color: var(--app-border-color-lighter, var(--app-border-color-light));
-}
-
-.li-condx-extra {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-top: 1px dashed var(--app-border-color-lighter, var(--app-border-color-light));
-  padding-top: 8px;
-}
-
-.li-condx-extra-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.li-condx-addsel {
-  width: 180px;
-}
-
-.li-condx-inline {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.li-condx-inline-label {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-}
-
-.li-condx-minitpl {
-  width: 160px;
-  resize: none;
-  font-family: var(--app-font-mono, monospace);
-  font-size: 12px;
-  padding: 4px 6px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: var(--app-radius);
-  background: transparent;
-  color: var(--app-text-primary);
-}
-
-.li-condx-mini {
-  width: 150px;
-}
-
-.li-condx-num {
-  width: 110px;
-}
-
-.li-condx-dot {
-  color: var(--el-color-primary);
-  font-size: 10px;
-}
-
-.li-condx-fold {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
   color: var(--app-text-secondary);
 }
 </style>

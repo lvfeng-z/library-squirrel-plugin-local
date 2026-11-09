@@ -1,6 +1,7 @@
 // 规则编辑弹窗（RuleEditDialog）的共享模型与纯函数：v4 条件行（三步漏斗）
 // 模型 + 提取段选项与「仅序列成员产出」when 原子构造/判别/并入/移除逻辑。
-// 纯前端模型，无 IO。
+// 纯前端模型，无 IO（唯一非纯量=文末「括号子组编辑入口」侧信道的一个 Vue ref）。
+import { ref } from 'vue'
 
 
 // 提取动作 JSON 的前端镜像（when 为原样透传的条件表达式树；row 为 v4 capture
@@ -422,6 +423,161 @@ export function condxFlatRows(rows: CondxRowForm[]): { row: number; condx: Condx
   walk(rows)
   return out
 }
+
+// —— 括号子组结构化入口（行内开关/紧凑卡摘要/深度封顶/结构轻校验） ——
+
+// 括号嵌套深度封顶：顶层=第 1 层，第 3 层内的行不再提供「括号」开关（更深的
+// 组合走高级 JSON）。
+export const CONDX_GROUP_MAX_DEPTH = 3
+
+// 行表子树高度（本层=1）：叶子行=1、组行=1+组内最高；空表=0。深层怪态判定用。
+export function condxRowsHeight(rows: CondxRowForm[]): number {
+  let h = 0
+  for (const row of rows) h = Math.max(h, row.group ? 1 + condxRowsHeight(row.group) : 1)
+  return h
+}
+
+// 深层怪态判定（剧本三帧4）：组行所在层 depth（顶层=1）放进组内子树后的最深层
+// 会超过封顶（depth + 组内高度 > CONDX_GROUP_MAX_DEPTH，即组内还套组套到第 4 层
+// 及更深）——JSON 手写的合法形态，结构化模式不提供编辑：只读占位一行+可删，
+// 保存原样带过（不跑结构归一，技术要点6）。
+export function condxGroupBeyondDepth(group: CondxRowForm[], depth: number): boolean {
+  return depth + condxRowsHeight(group) > CONDX_GROUP_MAX_DEPTH
+}
+
+// 接词显示词（且/或）；非 and/or 的值回退「；」——内核要求非首行接词必为
+// and/or，回退仅防御 JSON 手写怪态。
+export function condxConnLabel(connector?: string): string {
+  return connector === 'and' ? '且' : connector === 'or' ? '或' : '；'
+}
+
+// 行表内每行的全局先序行号：叶子行=自身条件行序号；括号子组行=组内首行序号
+//（空组=下一可用序号）——与 condxFlatRows 行号、内核 countCondxRows 先序累计
+// 同口径（空叶子行占号与 condxFlatRows 一致）。
+export function condxRowNos(rows: CondxRowForm[], base = 0): number[] {
+  const out: number[] = []
+  let n = base
+  for (const row of rows) {
+    out.push(n + 1)
+    n += row.group ? condxFlatRows(row.group).length : 1
+  }
+  return out
+}
+
+// 行内容概要（紧凑卡与摘要行共用的目标+格式段）：目标标签+「格式」（含这个词
+// →含「词」；模板→旧词归一后的模板文本）。
+export function condxRowBrief(condx: CondxForm): string {
+  const target = CONDX_TARGETS.find((t) => t.value === condx.target)
+  const fmt = condx.format.mode === 'contains'
+    ? `含「${condx.format.word || '?'}」`
+    : condxNormalizeTpl(condx.format.tpl || '?')
+  return `${target ? target.label : condx.target}「${fmt}」`
+}
+
+// 括号子组紧凑卡成员概要：单成员=成员概要（成员又是子组时递归圆括号包裹）；
+// 多成员=成员全局行号以接词相连（「第2行 或 第3行」形态，行号=全局先序号）。
+export function condxGroupBrief(group: CondxRowForm[], base: number): string {
+  if (group.length === 1) {
+    const member = group[0]
+    return member.condition
+      ? condxRowBrief(member.condition)
+      : `（${condxGroupBrief(member.group || [], base)}）`
+  }
+  const nos = condxRowNos(group, base)
+  return group
+    .map((member, idx) => (idx === 0 ? `第${nos[idx]}行` : ` ${condxConnLabel(member.connector)} 第${nos[idx]}行`))
+    .join('')
+}
+
+// 开关「开」（叶子行入组）：原行去接词入组（组内首行无接词）、组行继承原行接词
+// 与「非」。就地改写传入行对象（行表为同一 reactive 数组，编辑实时生效）。
+export function condxWrapRow(row: CondxRowForm): void {
+  if (!row.condition) return
+  row.group = [{ connector: '', negated: false, condition: row.condition }]
+  row.condition = null
+}
+
+// 开关「关」（单成员组拆括号，入组的逆向展开）：还原行继承组行接词；行级「非」
+// 双重否定相消（组行非与成员非异或——语义等价、成员内容原样保留）。
+export function condxUnwrapRow(row: CondxRowForm): void {
+  const group = row.group || []
+  if (group.length !== 1) return
+  const member = group[0]
+  row.negated = !!row.negated !== !!member.negated
+  row.condition = member.condition || null
+  row.group = member.group || null
+}
+
+// 摘要段带计数的行概要（值校验/附加条数与层级锚小字缀于内容概要后）。
+function condxSummaryBrief(condx: CondxForm): string {
+  const badges = (condx.badges || []).length ? ` ·${(condx.badges || []).length} 项值校验` : ''
+  const attach = (condx.attach || []).length ? ` ·${(condx.attach || []).length} 条附加` : ''
+  const levelNote = condxDirLevelNote(condx)
+  return `${condxRowBrief(condx)}${badges}${attach}${levelNote ? ` · ${levelNote}` : ''}`
+}
+
+// 摘要行先序递归拼接（括号化）：组=圆括号包成员、接词随行、行号=全局先序号；
+// 段间分隔——首段后为「；」，其后以接词（且/或）相连；空叶子行不进摘要。
+export function condxRowsSummary(rows: CondxRowForm[]): string {
+  const sepFor = (emitted: number, top: boolean, connector?: string): string =>
+    emitted === 0 ? '' : top && emitted === 1 ? '；' : ` ${condxConnLabel(connector)} `
+  const build = (list: CondxRowForm[], base: number, top: boolean): string => {
+    let out = ''
+    let n = base
+    let emitted = 0
+    for (const row of list) {
+      if (row.group) {
+        out += sepFor(emitted, top, row.connector) + `（${build(row.group, n, false)}）`
+        emitted += 1
+        n += condxFlatRows(row.group).length
+      } else if (row.condition) {
+        out += sepFor(emitted, top, row.connector) + `第${n + 1}行 ${condxSummaryBrief(row.condition)}`
+        emitted += 1
+        n += 1
+      } else {
+        n += 1
+      }
+    }
+    return out
+  }
+  return build(rows, 0, true)
+}
+
+// 结构轻校验：显式空括号子组（group 数组在场且为空）与「条件/非空子组」双占为
+// 不可存档形态——文案与内核 validateCondxRows 拒绝面逐字一致（空组行=「第 N 行
+// 须为条件行或括号子组之一（非空）」、子组内错误以「第 N 行子组: 」前缀包装，
+// 行号口径同内核：同级序号/组行全局先序号）。纯空叶子行（无条件且无 group 数组）
+// 不在此列——行级「须选择目标与格式」提示与「至少需要一行条件」既有口径覆盖。
+export function condxRowsShapeError(rows: CondxRowForm[]): string {
+  return condxRowsShapeErrorAt(rows, 0)
+}
+
+function condxRowsShapeErrorAt(rows: CondxRowForm[], base: number): string {
+  let prefix = 0
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    const group = Array.isArray(row.group) ? row.group : null
+    if (group) {
+      if (row.condition || group.length === 0) {
+        return `第 ${i + 1} 行须为条件行或括号子组之一（非空）`
+      }
+      const inner = condxRowsShapeErrorAt(group, base + prefix)
+      if (inner) return `第 ${base + prefix + 1} 行子组: ${inner}`
+      prefix += condxFlatRows(group).length
+    }
+  }
+  return ''
+}
+
+// —— 括号子组编辑入口（组件间侧信道；本文件唯一非纯量） ——
+
+// 顶层 CondxRowsEditor 紧凑卡〔编辑〕点击的组行与其所在行表：RuleEditDialog 的
+// edit-group 接线只开窗（不带行引用），CondxGroupDialog 开窗时经此取得组行与
+// 顶层行表，构建面包屑导航栈首层与删空拆组的定位基准（组行 group 引用=编辑直改
+// 同一 reactive 行树，无取消语义、实时生效）。弹窗内的下钻不写此信道（弹窗内
+// 编辑器 recordEntry=false；CondxGroupDialog 直接接 editGroup 事件 push 导航栈）
+// ——开窗入口的组行引用在整个弹窗生命周期内不变。
+export const condxGroupEditEntry = ref<{ row: CondxRowForm; rows: CondxRowForm[] } | null>(null)
 
 // —— 重复段词（占位词内部量词变体）前端轻量镜像（与内核 parseCondxVariant 同口径） ——
 
@@ -855,8 +1011,11 @@ function badgePlaceholderInRow(placeholders: CondxOccEntry[], placeholder: strin
   return placeholders.some((p) => p.base === own.group && p.occur === (occur || 1))
 }
 
-// 全表校验：行完整性（至少一行 condition/Group 非空）+ 逐行 condxRowError。
+// 全表校验：结构轻校验（空组/双占，文案与内核逐字一致）+ 行完整性（至少一行
+// condition/Group 非空）+ 逐行 condxRowError。
 export function condxRowsError(rows: CondxRowForm[]): string {
+  const shapeErr = condxRowsShapeError(rows)
+  if (shapeErr) return shapeErr
   const flat = condxFlatRows(rows)
   if (!flat.length) return '至少需要一行条件'
   for (const f of flat) {
