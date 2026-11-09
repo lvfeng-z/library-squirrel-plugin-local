@@ -64,7 +64,7 @@
 // condxGroupEditEntry 侧信道携带（RuleEditDialog 的 edit-group 接线只开窗不带行）。
 import { computed, ref, watch } from 'vue'
 import CondxRowsEditor from './CondxRowsEditor.vue'
-import { condxFlatRows, condxGroupEditEntry, type CondxRowForm } from './ruleFormModel'
+import { condxFlatRows, condxGroupEditEntry, condxRemoveRow, type CondxRowForm } from './ruleFormModel'
 
 const state = defineModel<boolean>('state', { required: true })
 
@@ -131,14 +131,16 @@ watch(
       const parent = stack.value[stack.value.length - 2]
       const childRows = current.value.rows
       const gi = parent.rows.findIndex((r) => r.group === childRows)
-      if (gi >= 0) parent.rows.splice(gi, 1)
+      // 规整移除（condxRemoveRow）：组行居父表 0 位时新首行接词清零
+      if (gi >= 0) condxRemoveRow(parent.rows, gi)
       stack.value.splice(stack.value.length - 1, 1)
       return
     }
     const entry = condxGroupEditEntry.value
     if (entry) {
       const gi = entry.rows.indexOf(entry.row)
-      if (gi >= 0) entry.rows.splice(gi, 1)
+      // 规整移除（condxRemoveRow）：组行居顶层 0 位时新首行接词清零
+      if (gi >= 0) condxRemoveRow(entry.rows, gi)
     }
     stack.value = []
     state.value = false

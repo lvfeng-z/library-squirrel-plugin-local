@@ -508,6 +508,18 @@ export function condxUnwrapRow(row: CondxRowForm): void {
   row.group = member.group || null
 }
 
+// 行表规整移除：splice 指定位后，删的是 0 位且仍有后行时清空新首行 connector——
+// 首行接词控件不渲染（编辑器 v-if="i > 0"），残留接词在 UI 不可见、保存被内核
+// validateCondxRowsAt 拒（「首行不能带行前连接词」，顶层与组内行表同规递归）。
+// 所有条件行表移除路径统一经本函数：删普通行/删整组紧凑卡（CondxRowsEditor）、
+// 组内删空自动拆组的组行移除（CondxGroupDialog 父表/顶层表两处）、条件行转
+// 引用行（RuleEditDialog）。
+export function condxRemoveRow(rows: CondxRowForm[], idx: number): void {
+  if (idx < 0 || idx >= rows.length) return
+  rows.splice(idx, 1)
+  if (idx === 0 && rows.length) rows[0].connector = ''
+}
+
 // 摘要段带计数的行概要（值校验/附加条数与层级锚小字缀于内容概要后）。
 function condxSummaryBrief(condx: CondxForm): string {
   const badges = (condx.badges || []).length ? ` ·${(condx.badges || []).length} 项值校验` : ''

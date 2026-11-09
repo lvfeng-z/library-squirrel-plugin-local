@@ -435,6 +435,7 @@ import {
   condxCaptures,
   condxNormalizeTpl,
   condxNormalizeRows,
+  condxRemoveRow,
   condxComboSentence,
   condxShapeSummary,
   condxDirLevelNote,
@@ -915,7 +916,8 @@ function refCaptureMirrorWarn(row: ExtractionRow, index: number): string {
 function onRowToRef(row: CondxRowForm): void {
   const idx = condxRows.value.indexOf(row)
   if (idx < 0) return
-  condxRows.value.splice(idx, 1)
+  // 规整移除（condxRemoveRow）：转出的是 0 位行且仍有后行时，新首行接词清零
+  condxRemoveRow(condxRows.value, idx)
   refRows.value.push({ ruleId: '' })
 }
 

@@ -32,7 +32,7 @@
         <el-button size="small" text @click="onEditGroup(row)">编辑</el-button>
         <el-button size="small" text type="danger" class="li-condx-del" @click="askDeleteGroup(i)">删行</el-button>
       </template>
-      <el-button v-if="!row.group" size="small" text type="danger" class="li-condx-del" @click="rows.splice(i, 1)">删行</el-button>
+      <el-button v-if="!row.group" size="small" text type="danger" class="li-condx-del" @click="condxRemoveRow(rows, i)">删行</el-button>
     </div>
     <!-- 「括号」开关禁用态提示：深度封顶 / 多成员组减行引导 -->
     <p v-if="bracketLockHint(i)" class="li-ref-notice">{{ bracketLockHint(i) }}</p>
@@ -273,6 +273,7 @@ import {
   condxRowNos,
   condxWrapRow,
   condxUnwrapRow,
+  condxRemoveRow,
   condxGroupEditEntry,
   type CondxRowForm,
   type CondxForm,
@@ -426,7 +427,8 @@ function askDeleteGroup(i: number): void {
 
 function doDeleteGroup(): void {
   const idx = delGroupIndex.value
-  if (idx >= 0 && idx < rows.value.length) rows.value.splice(idx, 1)
+  // 规整移除（condxRemoveRow）：删 0 位组行后新首行接词清零——残留会被内核拒保存
+  if (idx >= 0 && idx < rows.value.length) condxRemoveRow(rows.value, idx)
   delGroupState.value = false
   delGroupIndex.value = -1
 }
