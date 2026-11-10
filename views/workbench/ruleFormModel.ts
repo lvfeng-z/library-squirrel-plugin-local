@@ -520,6 +520,198 @@ export function condxRemoveRow(rows: CondxRowForm[], idx: number): void {
   if (idx === 0 && rows.length) rows[0].connector = ''
 }
 
+// —— 条件行换位（上移/下移：内容交换 + 行号映射 + 引用重映射 + 相等门拦截） ——
+
+// 换位方向（行头〔上移〕〔下移〕按钮语义）。
+export type CondxMoveDir = 'up' | 'down'
+
+// 「旧行号→新行号」全量映射（未受换位影响的行号为恒等项）。行号口径与
+// condxFlatRows/condxRowNos 同源：先序展平、括号子组内行递归、空叶子行占号
+//（草稿态显示语义，声明6——空行保存即拒、落档数据永无空行，落档形态下与
+// 内核 countCondxRows 只数已填行等价）。查无键（引用行号越界/怪态）=不改写，
+// 交由既有保存校验兜底。
+export type CondxRowNoMap = Record<number, number | undefined>
+
+// 换位落位（内容交换式，决策2）：rows[idx] 与相邻行（上移=前一行、下移=后一行）
+// 交换除 connector 外的全部自身字段（negated/condition/group，及 JSON 手写可能
+// 携带的其余字段——行间连接词留在原位，布尔骨架不动，首行规整天然无需）。
+// 就地改写两行对象（行表为同一 reactive 数组，换位实时生效、不触发保存）。
+// 边界越界（首行上移/末行下移/下标非法）返回 false 且不动任何行。
+export function condxMoveSwapRows(rows: CondxRowForm[], idx: number, dir: CondxMoveDir): boolean {
+  const j = dir === 'up' ? idx - 1 : idx + 1
+  if (!Array.isArray(rows) || idx < 0 || idx >= rows.length || j < 0 || j >= rows.length) return false
+  const a = rows[idx] as Record<string, unknown>
+  const b = rows[j] as Record<string, unknown>
+  for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (key === 'connector') continue
+    const hasA = key in a
+    const hasB = key in b
+    const fromA = a[key]
+    const fromB = b[key]
+    if (hasB) a[key] = fromB
+    else delete a[key]
+    if (hasA) b[key] = fromA
+    else delete b[key]
+  }
+  return true
+}
+
+// 行表的先序位数（换位映射的计数口径）：叶子行每位占一号（空行同占，与
+// condxFlatRows 的行号递增一致——引用面行号即此口径）、括号子组行=组内递归
+// 求和（空组占 0 位；条件/子组双占时组优先，与 condxFlatRows 的 group 分支
+// 一致）。
+function condxMoveRowsSpan(rows: CondxRowForm[]): number {
+  let n = 0
+  for (const row of rows) n += Array.isArray(row.group) ? condxMoveRowsSpan(row.group) : 1
+  return n
+}
+
+function condxMoveRowSpan(row: CondxRowForm): number {
+  return Array.isArray(row.group) ? condxMoveRowsSpan(row.group) : 1
+}
+
+// 在根行树内按引用同一性定位目标行表，返回其先序基位（该表首行之前累计的
+// 叶子位数；表即根本身=0）。未找到（表不在根树内——调用方数据不同源）返回
+// null，调用面按不可换位处理。
+function condxMoveListBase(root: CondxRowForm[], target: CondxRowForm[], before: number): number | null {
+  if (root === target) return before
+  for (const row of root) {
+    if (Array.isArray(row.group)) {
+      const hit = condxMoveListBase(row.group, target, before)
+      if (hit !== null) return hit
+      before += condxMoveRowsSpan(row.group)
+    } else {
+      before += 1
+    }
+  }
+  return null
+}
+
+// 全规则「旧行号→新行号」映射（决策3 的映射源）：list[idx] 与相邻行按内容
+// 交换换位后，两行各自（括号子组整块、组内行递归）的新行号，其余行恒等。
+// 须在 condxMoveSwapRows 落位**之前**按换位前形态调用（换位后同一调用得到的
+// 是逆映射）。边界越界或 list 不在 root 树内（引用同一性定位失败）返回 null。
+export function condxMoveRowNoMap(
+  root: CondxRowForm[],
+  list: CondxRowForm[],
+  idx: number,
+  dir: CondxMoveDir
+): CondxRowNoMap | null {
+  const j = dir === 'up' ? idx - 1 : idx + 1
+  if (!Array.isArray(list) || idx < 0 || idx >= list.length || j < 0 || j >= list.length) return null
+  const base = condxMoveListBase(root, list, 0)
+  if (base === null) return null
+  const first = Math.min(idx, j)
+  const second = Math.max(idx, j)
+  let start = base
+  for (let k = 0; k < first; k++) start += condxMoveRowSpan(list[k])
+  const headLen = condxMoveRowSpan(list[first])
+  const tailLen = condxMoveRowSpan(list[second])
+  const map: CondxRowNoMap = {}
+  for (let n = 1; n <= condxMoveRowsSpan(root); n++) map[n] = n
+  // 相邻两块整体对调：前块（list[first] 起占 headLen 位）后移 tailLen 位、后块
+  //（相邻行）前移 headLen 位——组行与其组内行同块同移（剧本三：组内换位经
+  // 全局行号映射改写主弹窗提取引用）。
+  for (let n = 1; n <= headLen; n++) map[start + n] = start + tailLen + n
+  for (let n = 1; n <= tailLen; n++) map[start + headLen + n] = start + n
+  return map
+}
+
+// 三类行号引用重映射的消费面（提取行的结构子集——RuleEditDialog 的
+// ExtractionRow 结构满足之；from/captureRow/when 三字段即重映射全部触点）。
+export interface CondxMoveExtractionForm {
+  from?: string
+  captureRow?: number
+  when?: unknown
+}
+
+// 三类行号引用重映射（决策3，换位后按映射就地改写草稿态——引用跟着行走）：
+// ① 条件树值校验 againstRow（递归括号子组）；② 提取行 captureRow（仅
+// from=capture——本规则行号寻址、缺省行号=1（声明3）；refCapture 的行号指向
+// **被引成员规则**，不改写，声明9）；③ 提取行生效条件 when 树内的捕获操作数
+//（行号前缀形态 rN.组名 改写 N——内核 rowCaptureName 同型、漂移扫描同源形态，
+// 声明8；限定名 成员ID.rN.组名（三段）与裸组名等其余形态原样）。查无映射键的
+// 越界引用保持原样，交由既有保存校验兜底。
+export function condxMoveRemapRefs(
+  rows: CondxRowForm[],
+  extractions: CondxMoveExtractionForm[],
+  rowNoMap: CondxRowNoMap
+): void {
+  const remapBadges = (list: CondxRowForm[]): void => {
+    for (const row of list) {
+      if (Array.isArray(row.group)) remapBadges(row.group)
+      for (const b of (row.condition && row.condition.badges) || []) {
+        if (!b || b.kind !== 'equal' || typeof b.againstRow !== 'number') continue
+        const to = rowNoMap[b.againstRow]
+        if (to !== undefined) b.againstRow = to
+      }
+    }
+  }
+  remapBadges(rows)
+  for (const e of extractions || []) {
+    if (!e) continue
+    if (e.from === 'capture') {
+      const eff = typeof e.captureRow === 'number' ? e.captureRow : 1
+      const to = rowNoMap[eff]
+      if (to !== undefined) e.captureRow = to
+    }
+    condxMoveRemapWhen(e.when, rowNoMap)
+  }
+}
+
+// when 树递归改写捕获操作数：只认已知形态（kind=capture 且 captureName 为
+// 字符串，与内核 ExprCapture 判别同源），其余节点/字段原样递归（结构化遍历，
+// 手写怪态保守不动——风险2；漂移提示与保存期内核校验兜底）。
+function condxMoveRemapWhen(node: unknown, rowNoMap: CondxRowNoMap): void {
+  if (Array.isArray(node)) {
+    for (const sub of node) condxMoveRemapWhen(sub, rowNoMap)
+    return
+  }
+  if (!isCondNode(node)) return
+  if (node['kind'] === 'capture' && typeof node['captureName'] === 'string') {
+    const to = condxMoveRowPrefixNo(node['captureName'], rowNoMap)
+    if (to !== undefined) node['captureName'] = to
+  }
+  for (const key of Object.keys(node)) condxMoveRemapWhen(node[key], rowNoMap)
+}
+
+// 行号前缀形态 rN.组名（恰两段：首段 rN——N≥1 无前导零，与内核
+// isRowOrdinalPrefix 同口径；末段=组名/位次化组名，可带 #canon 规范名后缀）
+// 改写 N 为映射后行号；其余形态（三段限定名 成员ID.rN.组名 指向被引成员、
+// 裸组名、怪态）返回 undefined 不改写。
+function condxMoveRowPrefixNo(name: string, rowNoMap: CondxRowNoMap): string | undefined {
+  const parts = name.split('.')
+  if (parts.length !== 2 || !parts[1]) return undefined
+  if (!/^r[1-9][0-9]*$/.test(parts[0])) return undefined
+  const to = rowNoMap[Number(parts[0].slice(1))]
+  return to === undefined ? undefined : `r${to}.${parts[1]}`
+}
+
+// 相等门拦截判定（决策4）：模拟换位（按 condxMoveRowNoMap 重算先序号）后，
+// 全树任一 equal 值校验的对方行新行号 ≥ 自身新行号即拦截——「与另一行相等须
+// 引用更早行」约束会被破坏（判据与保存期校验同口径：前端 condxRowError 的
+// against.row >= rowNum、内核 rule_condition.go 的 AgainstRow >= ordinal）。
+// 返回拦截文案（空串=放行）：文案为悬停说明锚（剧本二帧1，上移/下移按方向），
+// 行头按钮禁用态直接消费。边界越界/表不在树内不构成拦截（换位可行性由
+// condxMoveSwapRows/condxMoveRowNoMap 兜）。
+export function condxMoveBlockReason(root: CondxRowForm[], list: CondxRowForm[], idx: number, dir: CondxMoveDir): string {
+  const map = condxMoveRowNoMap(root, list, idx, dir)
+  if (!map) return ''
+  for (const f of condxFlatRows(root)) {
+    for (const b of f.condx.badges || []) {
+      if (!b || b.kind !== 'equal' || typeof b.againstRow !== 'number') continue
+      const refNo = map[b.againstRow]
+      const selfNo = map[f.row]
+      if (refNo !== undefined && selfNo !== undefined && refNo >= selfNo) {
+        return dir === 'up'
+          ? '上移会使"与另一行相等"校验引用的行晚于本行——请先调整该值校验'
+          : '下移会使"与另一行相等"校验引用的行晚于本行——请先调整该值校验'
+      }
+    }
+  }
+  return ''
+}
+
 // 摘要段带计数的行概要（值校验/附加条数与层级锚小字缀于内容概要后）。
 function condxSummaryBrief(condx: CondxForm): string {
   const badges = (condx.badges || []).length ? ` ·${(condx.badges || []).length} 项值校验` : ''

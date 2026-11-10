@@ -16,23 +16,47 @@
         <span>括号</span>
       </label>
       <!-- 深层怪态（>3 层，JSON 手写合法形态）：只读占位一行（剧本三帧4）——完整
-           内容请用「高级（JSON）」，可〔删行〕（删整组带确认）；保存原样带过 -->
+           内容请用「高级（JSON）」，可〔删行〕（删整组带确认）；保存原样带过；
+           组行（含深层只读占位形态）可移动——内容整块换位（边界条件） -->
       <template v-else-if="groupBeyondDepth(i)">
         <span class="li-condx-neg is-locked">—</span>
         <div class="li-condx-groupcard">括号子组（深层嵌套）——完整内容请用「高级（JSON）」</div>
-        <el-button size="small" text type="danger" class="li-condx-del" @click="askDeleteGroup(i)">删行</el-button>
       </template>
-      <!-- 括号子组紧凑卡：☑括号（单成员可拆、多成员禁用）+成员摘要+〔编辑〕+〔删行〕（删整组带确认） -->
+      <!-- 括号子组紧凑卡：☑括号（单成员可拆、多成员禁用）+成员摘要（删整组带确认） -->
       <template v-else>
         <label class="li-condx-neg" :class="{ 'is-locked': row.group.length !== 1 }">
           <input type="checkbox" :checked="true" :disabled="row.group.length !== 1" @change="onBracketOff(i)">
           <span>括号</span>
         </label>
         <div class="li-condx-groupcard">{{ groupCardText(i) }}</div>
-        <el-button size="small" text @click="onEditGroup(row)">编辑</el-button>
-        <el-button size="small" text type="danger" class="li-condx-del" @click="askDeleteGroup(i)">删行</el-button>
       </template>
-      <el-button v-if="!row.group" size="small" text type="danger" class="li-condx-del" @click="condxRemoveRow(rows, i)">删行</el-button>
+      <!-- 行头换位组（决策1/2，靠右成组）：上移/下移图标按钮（ArrowUp/ArrowDown，
+           宿主全局注册按名直用）——首行上移/末行下移禁用（单行列表双禁用，无提示，
+           BC 同款）；相等门阻断方向禁用+悬停说明（文案=condxMoveBlockReason 返回值，
+           剧本二帧1 逐字锚）；提取区「高级（JSON）」模式整体禁用+悬停提示（自决2）。
+           禁用按钮外包一层 span 接管悬浮（禁用原生按钮不派发鼠标事件，tooltip 先例） -->
+      <span class="li-condx-move">
+        <el-tooltip :disabled="!moveTip(i, 'up')" :content="moveTip(i, 'up')" placement="top">
+          <span class="li-condx-move-btn">
+            <el-button size="small" text :disabled="moveLocked(i, 'up')" aria-label="上移" @click="onMoveRow(i, 'up')">
+              <el-icon><ArrowUp /></el-icon>
+            </el-button>
+          </span>
+        </el-tooltip>
+        <el-tooltip :disabled="!moveTip(i, 'down')" :content="moveTip(i, 'down')" placement="top">
+          <span class="li-condx-move-btn">
+            <el-button size="small" text :disabled="moveLocked(i, 'down')" aria-label="下移" @click="onMoveRow(i, 'down')">
+              <el-icon><ArrowDown /></el-icon>
+            </el-button>
+          </span>
+        </el-tooltip>
+      </span>
+      <!-- 换位组与行操作按钮的竖分隔线（2026-11-10 审片修订）：叶子行=〔↑〕〔↓〕│〔删行〕、
+           子组紧凑卡=〔↑〕〔↓〕│〔编辑〕〔删行〕 -->
+      <el-divider direction="vertical" class="li-condx-move-sep" />
+      <el-button v-if="row.group && !groupBeyondDepth(i)" size="small" text @click="onEditGroup(row)">编辑</el-button>
+      <el-button v-if="row.group" size="small" text type="danger" class="li-condx-del" @click="askDeleteGroup(i)">删行</el-button>
+      <el-button v-else size="small" text type="danger" class="li-condx-del" @click="condxRemoveRow(rows, i)">删行</el-button>
     </div>
     <!-- 「括号」开关禁用态提示：深度封顶 / 多成员组减行引导 -->
     <p v-if="bracketLockHint(i)" class="li-ref-notice">{{ bracketLockHint(i) }}</p>
@@ -275,7 +299,12 @@ import {
   condxUnwrapRow,
   condxRemoveRow,
   condxGroupEditEntry,
+  condxMoveSwapRows,
+  condxMoveRowNoMap,
+  condxMoveBlockReason,
   type CondxRowForm,
+  type CondxMoveDir,
+  type CondxRowNoMap,
   type CondxForm,
   type CondxBadgeForm,
   type CondxAttachForm,
@@ -308,8 +337,12 @@ const props = withDefaults(
     // 编辑器开窗需要；弹窗内复用时传 false，下钻由 CondxGroupDialog 接 editGroup
     // 事件自行 push，不覆写开窗入口的组行引用）
     recordEntry?: boolean
+    // 提取区「高级（JSON）」模式（RuleEditDialog 下传、CondxGroupDialog 透传）：
+    // 移动按钮整体禁用+悬停提示（自决2——JSON 文本里的行号引用无法可靠重映射，
+    // 放行会静默失同步；子组内换位同样要改写主弹窗提取引用，禁用口径与顶层一致）
+    extractionsJsonMode?: boolean
   }>(),
-  { allowRefRow: true, rootRows: null, recordEntry: true }
+  { allowRefRow: true, rootRows: null, recordEntry: true, extractionsJsonMode: false }
 )
 
 const emit = defineEmits<{
@@ -318,6 +351,10 @@ const emit = defineEmits<{
   // 紧凑卡〔编辑〕上抛（组行同时记入 condxGroupEditEntry 侧信道）：顶层由
   // RuleEditDialog 接住开窗；弹窗内由 CondxGroupDialog 接住下钻切层
   editGroup: [row: CondxRowForm]
+  // 行换位落地上抛（携「旧行号→新行号」全量映射，技术要点3）：行表已在编辑器内
+  // 就地内容交换，RuleEditDialog 接住按映射改写提取行与条件树草稿态的三类行号
+  // 引用（决策3）；弹窗内复用时由 CondxGroupDialog 透传（剧本三帧1-2）
+  moved: [rowNoMap: CondxRowNoMap]
 }>()
 
 // 结构化模式的行级校验提示
@@ -410,6 +447,51 @@ function groupBeyondDepth(i: number): boolean {
 function onEditGroup(row: CondxRowForm): void {
   if (props.recordEntry) condxGroupEditEntry.value = { row, rows: rows.value }
   emit('editGroup', row)
+}
+
+// —— 行头换位（决策1/2：上移/下移与相邻行内容交换，连接词留位） ——
+
+// 提取区「高级（JSON）」模式的移动禁用提示（自决2，固定文案）：JSON 文本里的
+// 行号引用无法可靠重映射（手工改写会毁掉用户手排格式），放行则引用静默失同步。
+const MOVE_JSON_TIP = '提取区为「高级（JSON）」模式，不能移动——请切回结构化编辑'
+
+// 换位全树（行号映射与相等门判定的基准）：顶层=本容器行表；弹窗内=rootRows 顶层表
+function moveRootRows(): CondxRowForm[] {
+  return props.rootRows || rows.value
+}
+
+// 换位边界（首行上移/末行下移，含单行列表双向）
+function moveAtEdge(i: number, dir: CondxMoveDir): boolean {
+  return dir === 'up' ? i <= 0 : i >= rows.value.length - 1
+}
+
+// 换位禁用态：① 边界（无提示，BC 同款）；② 相等门阻断方向（决策4——模拟换位后
+// 「与另一行相等」校验引用的行会晚于本行）；③ 提取区 JSON 模式整体禁用（自决2）。
+function moveLocked(i: number, dir: CondxMoveDir): boolean {
+  if (moveAtEdge(i, dir)) return true
+  if (props.extractionsJsonMode) return true
+  return condxMoveBlockReason(moveRootRows(), rows.value, i, dir) !== ''
+}
+
+// 禁用态悬停说明（空串=不弹）：边界禁用自明无提示（BC 同款）；相等门=拦截文案
+//（condxMoveBlockReason 返回值，剧本二帧1 逐字锚）；提取区 JSON 模式=固定提示。
+function moveTip(i: number, dir: CondxMoveDir): string {
+  if (moveAtEdge(i, dir)) return ''
+  if (props.extractionsJsonMode) return MOVE_JSON_TIP
+  return condxMoveBlockReason(moveRootRows(), rows.value, i, dir)
+}
+
+// 换位落地：先按换位前形态取「旧行号→新行号」全量映射（调用顺序契约——映射必须在
+// SwapRows 落位之前），再内容交换换位（连接词留位、布尔骨架不动，决策2）；成功上抛
+// moved 携映射（顶层由 RuleEditDialog 改写提取行与条件树的三类行号引用，决策3）。
+// 阻断方向在禁用态已拦（moveLocked），此处再核一次防御。移动不触发保存、无确认
+// 弹窗（自决4）。
+function onMoveRow(i: number, dir: CondxMoveDir): void {
+  if (moveLocked(i, dir)) return
+  const map = condxMoveRowNoMap(moveRootRows(), rows.value, i, dir)
+  if (!map) return
+  if (!condxMoveSwapRows(rows.value, i, dir)) return
+  emit('moved', map)
 }
 
 // 删整组（带确认）：确认文案行数=组内条件行数（递归计）；〔取消〕什么都不变。
@@ -722,8 +804,28 @@ function badgeDriftNotice(i: number): string {
   gap: 8px;
 }
 
-.li-condx-del {
+/* 行头换位组（决策1）：靠右成组（叶子行吃掉行头剩余空间；组行的紧凑卡 flex:1
+   已占满、margin-left:auto 无副作用）；tooltip 悬停由内层 span 接管 */
+.li-condx-move {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.li-condx-move-btn {
+  display: inline-flex;
+}
+
+/* 换位组与行操作按钮的竖分隔线（2026-11-10 审片修订）：间距交由行头 gap 统一
+   （清零 divider 自带 margin），高度对齐 small 按钮行 */
+.li-condx-move-sep {
+  margin: 0;
+  height: 14px;
+}
+
+/* 删行按钮：随换位组之后成组靠右（右对齐职责已移交 .li-condx-move） */
+.li-condx-del {
+  flex: none;
 }
 
 /* 行级校验红字（与父组件引用行/提取行共用同名词，两份同值） */

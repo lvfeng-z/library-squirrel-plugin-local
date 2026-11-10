@@ -42,7 +42,9 @@
         :root-rows="topRows"
         :allow-ref-row="false"
         :record-entry="false"
+        :extractions-json-mode="extractionsJsonMode"
         @edit-group="pushLevel"
+        @moved="emit('moved', $event)"
       />
     </div>
 
@@ -64,9 +66,18 @@
 // condxGroupEditEntry 侧信道携带（RuleEditDialog 的 edit-group 接线只开窗不带行）。
 import { computed, ref, watch } from 'vue'
 import CondxRowsEditor from './CondxRowsEditor.vue'
-import { condxFlatRows, condxGroupEditEntry, condxRemoveRow, type CondxRowForm } from './ruleFormModel'
+import { condxFlatRows, condxGroupEditEntry, condxRemoveRow, type CondxRowForm, type CondxRowNoMap } from './ruleFormModel'
 
 const state = defineModel<boolean>('state', { required: true })
+
+// 提取区「高级（JSON）」模式（RuleEditDialog 下传）：透传组内行编辑器的移动
+// 禁用态（自决2——子组内换位同样要改写主弹窗提取引用，禁用口径与顶层一致）
+defineProps<{ extractionsJsonMode?: boolean }>()
+
+// 组内行换位上抛透传（技术要点3、剧本三帧1-2）：子组行树与顶层同一 reactive 树
+// （行表已在编辑器内落位），全局行号映射交 RuleEditDialog 改写主弹窗的提取行与
+// 条件树引用
+const emit = defineEmits<{ moved: [rowNoMap: CondxRowNoMap] }>()
 
 // 导航栈的一层：label=面包屑段文案、rows=本层行容器（组内成员行表引用——同一
 // reactive 行树，编辑直改）、base=本层全局行号基数（condxRowNos 的 base 参数）。

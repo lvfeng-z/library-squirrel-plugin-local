@@ -79,12 +79,16 @@
             <!-- 条件行区块（CondxRowsEditor）：行表经 v-model:rows 传同一 reactive
                  数组（就地编辑、无拷贝）；行转引用行经 toRef 上抛、括号子组紧凑卡
                  〔编辑〕经 editGroup 上抛开窗（组内编辑器后续阶段接入）、位次漂移
-                 结果经 occurDrift 下传（快照与刷新留本组件，提取行漂移提示共用） -->
+                 结果经 occurDrift 下传（快照与刷新留本组件，提取行漂移提示共用）、
+                 行换位经 moved 上抛（onCondxRowsMoved 改写引用）、提取区 JSON 模式
+                 经 extractionsJsonMode 下传（移动按钮禁用，自决2） -->
             <CondxRowsEditor
               v-model:rows="condxRows"
               :occur-drift="occurDrift"
+              :extractions-json-mode="extractionsJsonMode"
               @to-ref="onRowToRef"
               @edit-group="condxGroupDialogState = true"
+              @moved="onCondxRowsMoved"
             />
             <!-- 占位词捕获清单（行号+词）：提取段引用的唯一来源 -->
             <div v-if="captureList.length" class="li-red-caps">
@@ -286,8 +290,13 @@
 
         <!-- 括号子组编辑弹窗：常驻挂载、开关纯由 state 控制（紧凑卡〔编辑〕开窗，
              组内条件行编辑器后续阶段接入）；先挂载后开窗，保证壳组件 @open 高度
-             测量正常触发 -->
-        <CondxGroupDialog v-model:state="condxGroupDialogState" />
+             测量正常触发；组内行换位经 moved 透传（onCondxRowsMoved 同一消费）、
+             提取区 JSON 模式经 extractionsJsonMode 下传（子组内移动禁用同口径） -->
+        <CondxGroupDialog
+          v-model:state="condxGroupDialogState"
+          :extractions-json-mode="extractionsJsonMode"
+          @moved="onCondxRowsMoved"
+        />
       </template>
 
       <!-- ================= 入口②：集规则调整（SetRulePanel「调整规则」，剧本E 语义随迁） ================= -->
@@ -436,10 +445,12 @@ import {
   condxNormalizeTpl,
   condxNormalizeRows,
   condxRemoveRow,
+  condxMoveRemapRefs,
   condxComboSentence,
   condxShapeSummary,
   condxDirLevelNote,
   type CondxRowForm,
+  type CondxRowNoMap,
   type CondxCaptureDecl,
   type CondxOccEntry,
   type ExtractionActionJSON
@@ -919,6 +930,30 @@ function onRowToRef(row: CondxRowForm): void {
   // 规整移除（condxRemoveRow）：转出的是 0 位行且仍有后行时，新首行接词清零
   condxRemoveRow(condxRows.value, idx)
   refRows.value.push({ ruleId: '' })
+}
+
+// 条件行换位落地（moved 事件，顶层编辑器与子组弹窗透传两路）：行表已在编辑器内
+// 就地内容交换，此处按随行上抛的全局行号映射改写三类行号引用（决策3）——提取行
+// captureRow 与生效条件 when 树捕获操作数、条件树值校验 againstRow（递归子组）；
+// refCapture 行号指向被引规则不改写（声明9）。提取区 JSON 模式下移动按钮整体禁用
+//（自决2），无 JSON 文本失同步面。
+function onCondxRowsMoved(map: CondxRowNoMap): void {
+  condxMoveRemapRefs(condxRows.value, extractionRows.value, map)
+  // 位次漂移基线随行换位重挂（行号键改写）：换位属「行号重排」，不在漂移检测
+  // 「行集稳定、行内模板变更」覆盖面内——基线与既有漂移项按映射改键，避免合法
+  // 换位被误报为「模板位次已变化」（引用已由上方重映射跟随，无需用户复核）。
+  const snapshot = new Map<number, CondxOccEntry[]>()
+  for (const [no, entries] of occurSnapshot) {
+    const to = map[no]
+    snapshot.set(to === undefined ? no : to, entries)
+  }
+  occurSnapshot = snapshot
+  const drift: Record<number, { group: string; word: string }[]> = {}
+  for (const no of Object.keys(occurDrift.value)) {
+    const to = map[Number(no)]
+    if (to !== undefined) drift[to] = occurDrift.value[Number(no)]
+  }
+  occurDrift.value = drift
 }
 
 // 条件行完整性（W4）：引用行在场时空条件表合法——组合可仅由成员门控（帧5→帧6
