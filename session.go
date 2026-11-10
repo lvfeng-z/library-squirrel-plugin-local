@@ -223,7 +223,7 @@ const (
 	ArchiveWriteGeneralize ArchiveWriteEntry = "generalize"
 	// ArchiveWriteAdjudicate 冲突裁决生成组合规则。
 	ArchiveWriteAdjudicate ArchiveWriteEntry = "adjudicate"
-	// ArchiveWriteRuleEdit 规则编辑面（条目保存/启停/删除与内置禁用清单维护）。
+	// ArchiveWriteRuleEdit 规则编辑面（条目保存/启停/删除/全序重排与内置禁用清单维护）。
 	ArchiveWriteRuleEdit ArchiveWriteEntry = "rule-edit"
 )
 
@@ -1496,6 +1496,7 @@ const (
 	workbenchActionSaveRule           = "saveRule"           // 规则条目保存（新建/编辑，构造期单条校验）
 	workbenchActionDeleteRule         = "deleteRule"         // 删除档案规则条目
 	workbenchActionSetRuleEnabled     = "setRuleEnabled"     // 档案规则条目启停
+	workbenchActionReorderRules       = "reorderRules"       // 规则全序重排（全量 ID 新序清单；多重集校验一致后重排数组一次覆写）
 	workbenchActionSetBuiltinDisabled = "setBuiltinDisabled" // 内置规则禁用/启用（档案禁用清单）
 	workbenchActionRollbackProfile    = "rollbackProfile"    // 档案回退一代（写前备份）
 )
@@ -1619,6 +1620,10 @@ type workbenchFrontendRequest struct {
 	RuleID string `json:"ruleId,omitempty"`
 	// Enabled setRuleEnabled 的启停方向（假=停用，字段缺省同假）。
 	Enabled bool `json:"enabled,omitempty"`
+	// RuleIDs reorderRules 的全量规则 ID 新序清单（全序清单协议：与档案规则
+	// ID 集合多重集精确一致——不漏、不重、无未知 ID，一致才按清单序重排 Rules
+	// 数组一次覆写；不一致拒绝且档案零改动）。
+	RuleIDs []string `json:"ruleIds,omitempty"`
 	// BuiltinID setBuiltinDisabled 的内置规则寻址。
 	BuiltinID string `json:"builtinId,omitempty"`
 	// Disabled setBuiltinDisabled 的方向（真=加入禁用清单，缺省=移出即启用）。
@@ -2704,6 +2709,13 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		resp.RulesView = view
 	case workbenchActionSetRuleEnabled:
 		view, err := m.ApplySetRuleEnabled(req.RuleID, req.Enabled)
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		resp.RulesView = view
+	case workbenchActionReorderRules:
+		view, err := m.ApplyReorderRules(req.RuleIDs)
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break

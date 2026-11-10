@@ -55,14 +55,32 @@
                 <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条</span></h3>
                 <el-button type="primary" size="small" @click="openNew">新建规则…</el-button>
               </div>
+              <!-- 排序（剧本一帧1）：卡头顺序语义说明小字 -->
+              <p class="li-rules-order-note">顺序＝识别优先级：靠前的规则先被采用</p>
               <p v-if="!rules.length" class="li-rules-empty">档案为空：可从手动解析页泛化生成，或在此新建手写规则</p>
-              <div v-for="r in rules" :key="r.id" class="li-rules-row">
+              <div v-for="(r, i) in rules" :key="r.id" class="li-rules-row">
+                <span class="li-rules-row-pos">{{ `第${i + 1}位` }}</span>
                 <el-switch
                   size="small"
                   :model-value="r.enabled"
                   :loading="acting"
                   @change="doToggleRule(r, $event === true)"
                 />
+                <!-- 排序（剧本一帧1）：行头上移/下移按钮（首行上移、尾行下移禁用；禁用行照样可移=剧本三） -->
+                <span class="li-rules-row-moves">
+                  <el-button
+                    size="small"
+                    class="li-rules-move-btn"
+                    :disabled="acting || i === 0"
+                    @click="doMoveRule(i, -1)"
+                  >⇅</el-button>
+                  <el-button
+                    size="small"
+                    class="li-rules-move-btn"
+                    :disabled="acting || i === rules.length - 1"
+                    @click="doMoveRule(i, 1)"
+                  >⇩</el-button>
+                </span>
                 <div class="li-rules-row-main">
                   <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
                   <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
@@ -429,6 +447,33 @@ async function doDeleteRuleConfirmed(rule: RuleEntryView): Promise<void> {
   }
   applyRulesView(resp.rulesView)
   notice.value = `规则「${rule.description || rule.id}」已删除（可在档案备份回退一代找回）`
+}
+
+// —— 一·补、列表操作：行级排序（规则管理列表·排序操作 剧本一） ——
+// 上移/下移＝与相邻行换位；移动即保存（无确认弹窗，与启停开关同模型）。
+// 先本地换位再发 reorderRules（全量规则 ID 新序清单），成功套用应答视图全量刷新；
+// 失败（校验拒绝/请求失败/超时同归）回滚本地换位并提示错误。
+async function doMoveRule(index: number, delta: -1 | 1): Promise<void> {
+  const list = rules.value
+  const target = index + delta
+  if (index < 0 || index >= list.length || target < 0 || target >= list.length) return
+  acting.value = true
+  actionError.value = ''
+  const before = list.slice()
+  const moved = list.slice()
+  moved[index] = list[target]
+  moved[target] = list[index]
+  rules.value = moved
+  const resp = await request('reorderRules', { ruleIds: moved.map((r) => r.id) })
+  acting.value = false
+  if (!resp.ok) {
+    // 回滚本地换位（档案以后端为准，下次全量刷新自然纠偏）
+    rules.value = before
+    actionError.value = resp.error || '调整规则顺序失败'
+    return
+  }
+  applyRulesView(resp.rulesView)
+  notice.value = '顺序已保存（可在识别全景页重新识别查看效果）'
 }
 
 // —— 一·二、级联管理确认框（W5 剧本二·帧2/帧4）：后果清单逐字对齐剧本 ——
@@ -916,6 +961,26 @@ onUnmounted(() => {
 .li-rules-row-side {
   display: flex;
   gap: 6px;
+}
+
+/* 排序（剧本一帧1）：卡头顺序语义说明小字 */
+.li-rules-order-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* 排序（剧本一帧1）：行头「第N位」位号小字 */
+.li-rules-row-pos {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  white-space: nowrap;
+}
+
+/* 排序（剧本一帧1）：行头移动按钮组（与启停开关同区；首尾禁用态由组件灰显） */
+.li-rules-row-moves {
+  display: flex;
+  align-items: center;
 }
 
 </style>

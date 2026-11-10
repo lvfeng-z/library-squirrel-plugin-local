@@ -1,5 +1,5 @@
 // 规则管理面（工作台「规则」子页）的编辑事务与前端视图：档案条目的保存/启停/
-// 删除、内置规则的禁用清单维护与档案备份回退。全部档案写经会话管理器的
+// 删除/全序重排、内置规则的禁用清单维护与档案备份回退。全部档案写经会话管理器的
 // UpdateProfile 单点串行；条目保存复用构造期校验管线单条即时报错，不落盘坏条目。
 package main
 
@@ -189,6 +189,59 @@ func (m *SessionManager) ApplySetRuleEnabled(ruleID string, enabled bool) (*rule
 		return nil, err
 	}
 	return m.RulesAdminView()
+}
+
+// ApplyReorderRules 规则全序重排事务（排序操作入口）：ruleIDs 为前端一次请求
+// 传入的全量规则 ID 新序清单（全序清单协议），经与档案现有规则 ID 集合的多重集
+// 精确校验（不漏、不重、无未知 ID）后按清单序重排 Rules 数组一次覆写。校验在
+// UpdateProfile 的 mutate 内完成——不一致即中止返回错误，档案字节零改动；一致
+// 则落档并产生写前单代备份（复用既有写入链，白得单点串行与回退一代）。重排作用
+// 于存储数组序，与启用态无关（禁用行照样占位可移）。返回重排后的规则管理视图。
+func (m *SessionManager) ApplyReorderRules(ruleIDs []string) (*rulesAdminView, error) {
+	if err := m.UpdateProfile(ArchiveWriteRuleEdit, func(p *RuleProfile) error {
+		reordered, err := reorderRuleEntries(p.Rules, ruleIDs)
+		if err != nil {
+			return err
+		}
+		p.Rules = reordered
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return m.RulesAdminView()
+}
+
+// reorderRuleEntries 按全序清单重排规则数组：清单须与现有规则 ID 的多重集精确
+// 一致（逐元素在场+无重复+不漏），未知 ID / 重复 ID / 漏 ID 均报错且不产出新
+// 数组；一致时返回按清单序搬运既有条目的新数组（条目内容零变化，仅位置重排）。
+func reorderRuleEntries(rules []RuleEntry, ruleIDs []string) ([]RuleEntry, error) {
+	pos := make(map[string]int, len(rules))
+	for i := range rules {
+		pos[rules[i].ID] = i
+	}
+	reordered := make([]RuleEntry, 0, len(rules))
+	seen := make(map[string]bool, len(rules))
+	for _, id := range ruleIDs {
+		i, ok := pos[id]
+		if !ok {
+			return nil, fmt.Errorf("重排清单含档案中不存在的规则 %q", id)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("重排清单中规则 %q 重复出现", id)
+		}
+		seen[id] = true
+		reordered = append(reordered, rules[i])
+	}
+	if len(seen) != len(pos) {
+		missing := make([]string, 0)
+		for _, r := range rules {
+			if !seen[r.ID] {
+				missing = append(missing, r.ID)
+			}
+		}
+		return nil, fmt.Errorf("重排清单漏掉档案中的规则 %v（清单须为全部规则 ID 的全序排列，不漏不重）", missing)
+	}
+	return reordered, nil
 }
 
 // ApplySetBuiltinDisabled 内置规则启停（已退役）：v4 起内置规则退休为例子
