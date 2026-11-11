@@ -30,7 +30,7 @@
         </label>
         <div class="li-condx-groupcard">{{ groupCardText(i) }}</div>
       </template>
-      <!-- 行头换位组（决策1/2，靠右成组）：上移/下移图标按钮（ArrowUp/ArrowDown，
+      <!-- 行头换位组（决策1/2，靠右成组）：上移/下移图标按钮（SortUp/SortDown，
            宿主全局注册按名直用）——首行上移/末行下移禁用（单行列表双禁用，无提示，
            BC 同款）；相等门阻断方向禁用+悬停说明（文案=condxMoveBlockReason 返回值，
            剧本二帧1 逐字锚）；提取区「高级（JSON）」模式整体禁用+悬停提示（自决2）。
@@ -39,14 +39,14 @@
         <el-tooltip :disabled="!moveTip(i, 'up')" :content="moveTip(i, 'up')" placement="top">
           <span class="li-condx-move-btn">
             <el-button size="small" text :disabled="moveLocked(i, 'up')" aria-label="上移" @click="onMoveRow(i, 'up')">
-              <el-icon><ArrowUp /></el-icon>
+              <el-icon><SortUp /></el-icon>
             </el-button>
           </span>
         </el-tooltip>
         <el-tooltip :disabled="!moveTip(i, 'down')" :content="moveTip(i, 'down')" placement="top">
           <span class="li-condx-move-btn">
             <el-button size="small" text :disabled="moveLocked(i, 'down')" aria-label="下移" @click="onMoveRow(i, 'down')">
-              <el-icon><ArrowDown /></el-icon>
+              <el-icon><SortDown /></el-icon>
             </el-button>
           </span>
         </el-tooltip>

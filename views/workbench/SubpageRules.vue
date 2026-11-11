@@ -73,13 +73,13 @@
                     class="li-rules-move-btn"
                     :disabled="acting || i === 0"
                     @click="doMoveRule(i, -1)"
-                  >⇅</el-button>
+                  ><el-icon><SortUp /></el-icon></el-button>
                   <el-button
                     size="small"
                     class="li-rules-move-btn"
                     :disabled="acting || i === rules.length - 1"
                     @click="doMoveRule(i, 1)"
-                  >⇩</el-button>
+                  ><el-icon><SortDown /></el-icon></el-button>
                 </span>
                 <div class="li-rules-row-main">
                   <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
