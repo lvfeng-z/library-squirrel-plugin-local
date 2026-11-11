@@ -11,7 +11,9 @@
       </div>
     </template>
 
-    <div class="li-red-body">
+    <!-- 结果卡在场时表单区同步收窄（配套 footer 结果卡封顶）：弹窗总高压回视口内，
+         见样式 .li-red-body--preview 注释 -->
+    <div class="li-red-body" :class="{ 'li-red-body--preview': mode === 'rule' && previewResult }">
       <!-- ================= 入口①：档案规则编辑（SubpageRules「编辑/新建」） ================= -->
       <template v-if="mode === 'rule'">
         <!-- 规则元信息：描述 + 启停 -->
@@ -1585,6 +1587,16 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   padding: 2px 4px;
 }
 
+/* 用户终审反馈批（预览结果卡撑高弹窗→页面级原生滚动条）：结果卡在 footer 槽，
+   而壳 AutoHeightDialog 的表单区封顶测量发生在 @open 时刻（卡未在场、footer 仅
+   按钮行高），卡出现后 footer 增高不会反馈进壳的测量——弹窗被整体撑出视口、
+   .el-overlay 出原生滚动条。此处卡在场时表单区同步收窄让位：弹窗总高 ≈
+   头部+表单+按钮行+卡 ≤ 头部+（76vh-170px）+按钮行+min(24vh,220px) ≤ 100vh
+   （170px≈头部+按钮行+弹窗内衬固定高度，含窄窗换行余量）。 */
+.li-red-body--preview {
+  max-height: calc(76vh - 170px);
+}
+
 .li-red-meta {
   display: flex;
   align-items: center;
@@ -1953,7 +1965,9 @@ function previewSampleLine(s: RulePreviewSampleView): string {
 
 /* —— 命中预览（E 件·剧本三）：结果卡（帧2）+ 失败文案/禁用态说明小字（帧3） —— */
 
-/* 结果卡：弹窗底部整行、按钮行上方；只读呈现与表单互不干扰 */
+/* 结果卡：弹窗底部整行、按钮行上方；只读呈现与表单互不干扰；高度封顶
+   min(24vh, 220px)（超高样例在卡内样例区滚动，不再撑高 footer/弹窗——
+   与 .li-red-body--preview 表单区收窄配套，见其注释） */
 .li-red-preview-card {
   flex-basis: 100%;
   display: flex;
@@ -1963,6 +1977,14 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   border-radius: var(--app-radius);
   background: var(--app-bg-surface);
   padding: 10px 12px;
+  max-height: min(24vh, 220px);
+}
+
+/* 样例区自身内滚（SetRulePanel .li-sr-members 同款形态）；min-height:0 允许在
+   卡封顶时收缩（flex 子项默认不缩破内容高） */
+.li-red-preview-samples {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .li-red-preview-head {
