@@ -83,6 +83,9 @@ type workbenchTestCtx struct {
 
 	// library 谓词索引构造的分页数据集（Query* 五方法的桩数据；零值=五轨全空）。
 	library libraryFixture
+	// indexBuildSeq 谓词索引构造的观测计数（QueryLocalAuthors 首轨递增——每次
+	// BuildLibraryIndex 必经该轨，计数值=索引构造次数；名单缓存命中/失效断言面）。
+	indexBuildSeq atomic.Int64
 	// workSetIDSeq QueryLocalWorkSets 桩的行 id 发号器（跨页单调递增）；
 	// atomic：ApplyAssignment 异步识别刷新与测试自驱识别可并发拉取，
 	// 无锁自增曾致 -race 偶发（2026-10-30 AJ 阶段5 归因，pristine 树复现）。

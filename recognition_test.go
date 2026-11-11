@@ -62,6 +62,7 @@ func pageOf(names []string, req *sdkdto.PageRequest) []string {
 }
 
 func (c *workbenchTestCtx) QueryLocalAuthors(req *sdkdto.QueryLocalAuthorsRequest) (*sdkdto.QueryLocalAuthorsResponse, error) {
+	c.indexBuildSeq.Add(1) // 索引构造观测：首轨必经（名单缓存测试的计数额面）
 	names := pageOf(c.library.localAuthors, req.Page)
 	items := make([]*sdkdto.LocalAuthorDTO, 0, len(names))
 	for _, name := range names {

@@ -410,17 +410,23 @@ func seqMappingPhrase(els []SnapEl, span seqNameSpan) string {
 // 快照跑一遍合并求值（同目录兄弟全集 + 规则定群/结构群对齐 + when 原子求值
 // ——与入档后重识别同一口径），统计除样本外产出集名声明的文件数与全库总数；
 // 样例取跨目录（快照序）前 3 个求值结论（sibling 无目录锚定，跨目录样例天然
-// 在场；不足时回落同目录样例）。
-func previewSequenceFormRules(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPath string) (int, int, []RuleSuggestionSample) {
+// 在场；不足时回落同目录样例）。sub 为预览基座供给（nil=现行现场重建形态）：
+// 求值清单与聚合表复用预铸件，规则求值本身同一实现。
+func previewSequenceFormRules(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPath string, sub *evalSubstrate) (int, int, []RuleSuggestionSample) {
 	if snap == nil {
 		return 0, 0, nil
 	}
-	files := make([]ScanFile, 0, len(snap.Files))
-	for i := range snap.Files {
-		f := &snap.Files[i]
-		files = append(files, ScanFile{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath})
+	var conclusions []FileConclusion
+	if sub != nil && len(sub.files) == len(snap.Files) {
+		conclusions = MergedRecognitionOnSubstrate(sub, rules, nil, nil)
+	} else {
+		files := make([]ScanFile, 0, len(snap.Files))
+		for i := range snap.Files {
+			f := &snap.Files[i]
+			files = append(files, ScanFile{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath})
+		}
+		conclusions = MergedRecognition(files, rules, nil, nil)
 	}
-	conclusions := MergedRecognition(files, rules, nil, nil)
 	captureID := ""
 	for i := range rules {
 		if _, isSibling := rules[i].Pattern.(*SiblingPattern); !isSibling {

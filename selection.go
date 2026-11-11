@@ -906,6 +906,9 @@ func (m *SessionManager) runCreateTasks(root, taskName string, workCount int) {
 		m.abortCreateTasks(root, fmt.Sprintf("宿主创建任务失败: %s", msg))
 		return
 	}
+	// 收批失效：作品入库令在库名单（作者/标签/集名五轨）已变，会话缓存挂靠
+	// 的名单索引作废——下次弹窗预览重建。
+	m.invalidateLibraryIndexCache()
 	// 创建成功清理选择集（轻字段变异走信封级通路，四刀之二）：单键小读→变异
 	//→轻保存，不触大载荷 gzip 分片（选择集是信封轻字段；赋值与快照保留）。
 	if _, err := m.mutateSessionEnvelope(root, func(sess *WorkbenchSession) error {

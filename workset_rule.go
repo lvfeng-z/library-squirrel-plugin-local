@@ -434,6 +434,8 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 	clues, segPlan, dirPlan := workSetRuleClues(sess.RootPath, sess.Snapshot, ws)
 	sugg.Clues = clues
 	sugg.DefaultSeqSegRef = segPlan.seqRef()
+	// 预览基座取用（未就位返回 nil，命中统计与样例回退现行现场重建）
+	sub := m.evalSubstrateOf(sess)
 	draft, failReason := deriveWorkSetDraft(sess.Snapshot, ws)
 	if failReason != "" {
 		sugg.Failed, sugg.FailReason = true, failReason
@@ -466,7 +468,7 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 			sugg.Rules = append(sugg.Rules, generatedRuleViewOf(&draft.rules[i]))
 		}
 		sugg.HitCount, sugg.HitTotal, sugg.Samples = previewWorkSetRules(
-			draft.rules, sess.Snapshot, ws.cand.Dir, draft.rules[len(draft.rules)-1].ID)
+			draft.rules, sess.Snapshot, ws.cand.Dir, draft.rules[len(draft.rules)-1].ID, sub)
 		return sugg, nil
 	}
 	sugg.Mappings = []RuleSuggestionMapping{{Dimension: string(DimCollection), From: draft.mapping}}
@@ -480,7 +482,7 @@ func (m *SessionManager) ApplyWorkSetRuleSummary(root, target string) (*SetRuleS
 	sugg.DefaultCollectionSegRefs = []string{setClueSeqRef}
 	sugg.DefaultVariableSegRefs = segPlan.otherSegRefs(nil)
 	sugg.HitCount, sugg.HitTotal, sugg.Samples = previewWorkSetRules(
-		draft.rules, sess.Snapshot, ws.cand.Dir, draft.rules[len(draft.rules)-1].ID)
+		draft.rules, sess.Snapshot, ws.cand.Dir, draft.rules[len(draft.rules)-1].ID, sub)
 	return sugg, nil
 }
 
@@ -1789,17 +1791,22 @@ func workSetAnchorTemplate(repRelPath string, anchor *SetRuleClue) (string, int,
 // previewWorkSetRules 集规则命中预览（全库求值，与 previewSequenceFormRules
 // 同口径——MergedRecognition 合并求值）：统计产出 captureID 声明的文件数
 // （含本集成员——集为主体）与全库总数；样例偏好跨目录（相对 setDir）前 3
-// 条，不足回落同目录。
-func previewWorkSetRules(rules []RuleEntry, snap *RecognitionSnapshot, setDir, captureID string) (int, int, []RuleSuggestionSample) {
+// 条，不足回落同目录。sub 为预览基座供给（nil=现行现场重建形态）。
+func previewWorkSetRules(rules []RuleEntry, snap *RecognitionSnapshot, setDir, captureID string, sub *evalSubstrate) (int, int, []RuleSuggestionSample) {
 	if snap == nil || captureID == "" {
 		return 0, 0, nil
 	}
-	files := make([]ScanFile, 0, len(snap.Files))
-	for i := range snap.Files {
-		f := &snap.Files[i]
-		files = append(files, ScanFile{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath})
+	var conclusions []FileConclusion
+	if sub != nil && len(sub.files) == len(snap.Files) {
+		conclusions = MergedRecognitionOnSubstrate(sub, rules, nil, nil)
+	} else {
+		files := make([]ScanFile, 0, len(snap.Files))
+		for i := range snap.Files {
+			f := &snap.Files[i]
+			files = append(files, ScanFile{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath})
+		}
+		conclusions = MergedRecognition(files, rules, nil, nil)
 	}
-	conclusions := MergedRecognition(files, rules, nil, nil)
 	hitCount, hitTotal := 0, len(snap.Files)
 	var samples, fallback []RuleSuggestionSample
 	for i := range conclusions {

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
@@ -120,9 +121,10 @@ type WorkbenchSession struct {
 	// 指纹比对，不一致即档案在会话外被变更，提示重新识别。
 	ProfileDigest string `json:"profileDigest"`
 	// AssignRevision 会话赋值修订号：每次赋值写（新增/修改/清除）递增。识别
-	// 快照记录其求值所依据的修订号，重识别的增量资格按修订号一致判定——赋值
-	// 被清除后其目录不再由赋值集锚定，修订号闸门保证清除前的结论不被 mtime
-	// 游标复用（赋值变更一律全量重算）。
+	// 快照记录其求值所依据的修订号——赋值保存触发的刷新轮在修订号失配且其余
+	// 守卫键一致时走赋值增量重算（tryAssignmentIncremental，秒级合成重放），
+	// 资格不符回落整库；赋值被清除后其目录不再由赋值集锚定，修订号闸门保证
+	// 清除前的结论不被 mtime 游标复用。
 	AssignRevision int64 `json:"assignRevision,omitempty"`
 	// PendingWorkbenchCreate 旧工件字段（已退役）：工作台发起创建标记已外置为
 	// 独立 KV 键（workbench-create-marker:{库根}，O(1) 单键读写，BeginWorkbenchCreate/
@@ -617,6 +619,16 @@ type sessionCacheEntry struct {
 	// 整体作废（世代与忽略集随 sess 一并失效）。
 	domainMu sync.Mutex
 	domain   *WorkDomain
+	// foundation 预览求值基座（识别轮完成时铸造置入；读取守卫=条目会话实例
+	// 等值且基座与条目快照匹配——铸造来源快照指针等值或文件集身份键等值，
+	// 见 previewFoundationOf/matchesSnapshot；赋值写等轻保存经 putSessionCache
+	// 值守卫携带）。sessCacheMu 保护；铸造后整体只读共享。
+	foundation *previewFoundation
+	// libIndex 在库名单索引的惰性缓存（弹窗预览的求值依赖，建任务收批后经
+	// invalidateLibraryIndexCache 失效清空）。原子指针形态：构造（五轨分页
+	// 拉全，秒级）不得持 sessCacheMu 长跑（缓存锁纪律），信封级条目重建经
+	// Load/Store 无锁携带。
+	libIndex atomic.Pointer[LibraryIndex]
 	// lastUsed 最近一次命中（或写入）时点，TTL 与 LRU 判定基准。
 	lastUsed time.Time
 }
@@ -689,7 +701,20 @@ func (m *SessionManager) putSessionCache(sess *WorkbenchSession) {
 	if m.sessCache == nil {
 		m.sessCache = make(map[string]*sessionCacheEntry)
 	}
-	m.sessCache[norm] = &sessionCacheEntry{sess: sess, lastUsed: now}
+	entry := &sessionCacheEntry{sess: sess, lastUsed: now}
+	// 在库名单索引跨条目重建携带：名单只随建任务收批失效（库内容变更），
+	// 与会话实例/快照换代无关——同库根旧条目在场即无失效信号，直接共享。
+	// 预览基座值守卫携带（阶段5）：文件集身份键等值（赋值写等轻保存不触
+	// 文件集与规则求值面——规则段结论与赋值无关）即随新条目携带——赋值写
+	// 后基座规则段层仍可取用（赋值增量重算与预览快路径的供给源）；识别轮
+	// 换新快照（文件集换代）即键失配不携带，识别轮完成时重铸置入。
+	if prev := m.sessCache[norm]; prev != nil {
+		entry.libIndex.Store(prev.libIndex.Load())
+		if prev.foundation != nil && prev.foundation.matchesSnapshot(sess.Snapshot) {
+			entry.foundation = prev.foundation
+		}
+	}
+	m.sessCache[norm] = entry
 	m.trimSessionCacheLocked(now)
 }
 
@@ -737,6 +762,116 @@ func (m *SessionManager) cachedEntryOf(sess *WorkbenchSession) *sessionCacheEntr
 		return nil
 	}
 	return entry
+}
+
+// —— 预览求值基座与在库名单索引（挂靠会话缓存条目，与条目同生命周期）——
+
+// previewFoundationOf 预览通路的基座取用（阶段5 携带/守卫改造）：条目会话实例
+// 等值且基座与当前快照匹配（铸造来源快照指针等值的零成本快路径，或文件集
+// 身份键等值——赋值写等轻保存重建缓存条目后快照实例换代而文件集未变的携带
+// 形态，见 previewFoundation.matchesSnapshot）才可用；未就位（未识别/被逐出/
+// 文件集已换代/冷启动）返回 nil，调用方回退现行整库重建路径，结果一致。
+func (m *SessionManager) previewFoundationOf(sess *WorkbenchSession) *previewFoundation {
+	m.sessCacheMu.Lock()
+	entry := m.sessCache[normalizeLibraryRoot(sess.RootPath)]
+	if entry == nil || entry.sess != sess || entry.foundation == nil || !entry.foundation.matchesSnapshot(sess.Snapshot) {
+		m.sessCacheMu.Unlock()
+		return nil
+	}
+	f := entry.foundation
+	m.sessCacheMu.Unlock()
+	return f
+}
+
+// evalSubstrateOf 基座规则无关层的取用视图（三条建议卡路径消费；未就位返回
+// nil=调用方现场重建）。
+func (m *SessionManager) evalSubstrateOf(sess *WorkbenchSession) *evalSubstrate {
+	if f := m.previewFoundationOf(sess); f != nil {
+		return f.indep
+	}
+	return nil
+}
+
+// cachedFoundation 识别轮起点的上轮基座预取：缓存条目当前持有的基座（与条目
+// 会话快照匹配=基座与条目自洽，指针快路径或文件集身份键等值）。赋值写轻保存
+// 重建条目后基座经值守卫携带在位，取到的必属当前存储态快照——识别主体的
+// 私有解码实例与之值等（指针不同源）。供规则相关层增量携带与赋值增量重算的
+// 资格判定（守卫在铸造/消费处按值再判）。
+func (m *SessionManager) cachedFoundation(root string) *previewFoundation {
+	m.sessCacheMu.Lock()
+	defer m.sessCacheMu.Unlock()
+	entry := m.sessCache[normalizeLibraryRoot(root)]
+	if entry == nil || entry.sess == nil || entry.foundation == nil || !entry.foundation.matchesSnapshot(entry.sess.Snapshot) {
+		return nil
+	}
+	return entry.foundation
+}
+
+// attachPreviewFoundation 识别完成后的基座置入：保存路径已重建缓存条目（新
+// 快照实例），基座与条目快照匹配（指针或文件集身份键等值）时置入；条目缺席
+//（保存与置入之间被逐出）或失配时弃置——下次预览回退现行路径，下一轮识别
+// 重铸，正确性不受影响。
+func (m *SessionManager) attachPreviewFoundation(root string, f *previewFoundation) {
+	if f == nil || f.snapshot == nil {
+		return
+	}
+	m.sessCacheMu.Lock()
+	defer m.sessCacheMu.Unlock()
+	if entry, ok := m.sessCache[normalizeLibraryRoot(root)]; ok && entry.sess != nil && f.matchesSnapshot(entry.sess.Snapshot) {
+		entry.foundation = f
+	}
+}
+
+// libraryIndexForIncremental 赋值增量重算的名单索引取用：优先共享缓存条目的
+// 惰性名单（建任务收批失效；名单内容键守卫在调用方 tryAssignmentIncremental），
+// 缺席时现场构造（与整库路径同源 BuildLibraryIndex）。
+func (m *SessionManager) libraryIndexForIncremental(root string) *LibraryIndex {
+	m.sessCacheMu.Lock()
+	var lib *LibraryIndex
+	if entry, ok := m.sessCache[normalizeLibraryRoot(root)]; ok {
+		lib = entry.libIndex.Load()
+	}
+	m.sessCacheMu.Unlock()
+	if lib != nil {
+		return lib
+	}
+	if m.ctx != nil {
+		return BuildLibraryIndex(m.ctx, m.warnf)
+	}
+	return nil
+}
+
+// libraryIndexOf 在库名单索引取用（弹窗预览的求值依赖）：缓存条目内惰性构造
+// 一次复用（构造在锁外——并发未命中可能重复构造，后写覆盖，两者皆为当前库
+// 真值）；条目缺席（私有实例/未装填）现场构造不驻留。建任务收批（作品入库）
+// 后经 invalidateLibraryIndexCache 失效。
+func (m *SessionManager) libraryIndexOf(sess *WorkbenchSession) *LibraryIndex {
+	if m.ctx == nil {
+		return nil
+	}
+	if entry := m.cachedEntryOf(sess); entry != nil {
+		if lib := entry.libIndex.Load(); lib != nil {
+			return lib
+		}
+		lib := BuildLibraryIndex(m.ctx, m.warnf)
+		entry.libIndex.Store(lib)
+		return lib
+	}
+	return BuildLibraryIndex(m.ctx, m.warnf)
+}
+
+// invalidateLibraryIndexCache 在库名单缓存失效（建任务收批——作品入库令作者/
+// 标签/集名五轨名单已变）：名单为宿主全局库的面，全部库根条目一并失效。
+func (m *SessionManager) invalidateLibraryIndexCache() {
+	m.sessCacheMu.Lock()
+	entries := make([]*sessionCacheEntry, 0, len(m.sessCache))
+	for _, entry := range m.sessCache {
+		entries = append(entries, entry)
+	}
+	m.sessCacheMu.Unlock()
+	for _, entry := range entries {
+		entry.libIndex.Store(nil)
+	}
 }
 
 // SessionOf 按库根取会话（读路径：进程内缓存命中零存储读；返回共享只读实例，
@@ -1063,7 +1198,15 @@ func (m *SessionManager) refreshSessionCacheEnvelope(norm string, light *Workben
 	}
 	rebuilt := *light
 	rebuilt.Snapshot, rebuilt.LastDiff = prev.sess.Snapshot, prev.sess.LastDiff // 只读共享
-	m.sessCache[norm] = &sessionCacheEntry{sess: &rebuilt, lastUsed: m.cacheNow()}
+	entry := &sessionCacheEntry{sess: &rebuilt, lastUsed: m.cacheNow()}
+	// 基座与在库名单索引随载荷指针共享携带：信封级轻变异不触文件集（守卫=
+	// 与条目快照匹配：指针快路径或文件集身份键等值）也不改库内容。domain
+	// 惰性推导不携带（忽略集等轻字段影响推导，见上）。
+	if prev.foundation != nil && prev.foundation.matchesSnapshot(prev.sess.Snapshot) {
+		entry.foundation = prev.foundation
+	}
+	entry.libIndex.Store(prev.libIndex.Load())
+	m.sessCache[norm] = entry
 }
 
 // mutateSessionFull 全保存入口：锁内会话读改写后按重载荷全量落库（gzip 分片+

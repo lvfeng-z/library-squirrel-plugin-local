@@ -810,6 +810,7 @@ import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivate
 import { Events } from '@wailsio/runtime'
 import ParsePanel from './ParsePanel.vue'
 import SetRulePanel from './SetRulePanel.vue'
+import { requestTimeoutMs } from './requestTimeout'
 
 // 双栏主从解析工作区（识别全景 × 手动解析合一，视口锁定：双卡等高填满、各自卡内滚动）：
 // 左卡 = 资源清单（过滤器 + 统计 + 目录树/平铺/疑似作品集三标签滚动体 + 卡头创建任务入口 +
@@ -1553,7 +1554,8 @@ function onResponse(event: { data?: unknown }) {
   pending.delete(resp.seq)
 }
 
-// 带序号配对的请求（识别全景载荷较大，超时放宽到 30 秒）
+// 带序号配对的请求（超时口径经 requestTimeoutMs：预览类动作 summarizeRule/
+// summarizeWorkSetRule 全库求值 180 秒——大库线性增长分钟级；识别全景等其余动作 30 秒）
 function request(action: string, payload: Record<string, unknown> = {}): Promise<WorkbenchResponse> {
   seq += 1
   const reqSeq = seq
@@ -1565,7 +1567,7 @@ function request(action: string, payload: Record<string, unknown> = {}): Promise
         pending.delete(reqSeq)
         resolve({ seq: reqSeq, ok: false, error: '插件响应超时（插件进程未运行或通道异常）' })
       }
-    }, 30000)
+    }, requestTimeoutMs(action))
   })
 }
 

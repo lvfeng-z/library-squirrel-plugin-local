@@ -181,6 +181,7 @@ import { ref, computed, onMounted, onUnmounted, onActivated } from 'vue'
 import { Events } from '@wailsio/runtime'
 import RuleEditDialog from './RuleEditDialog.vue'
 import { condxComboSentence, condxShapeSummary, type CondxComboMember } from './ruleFormModel'
+import { requestTimeoutMs } from './requestTimeout'
 
 // 工作台事件协议通道（与插件 Go 侧 session.go 约定一致）
 const TOPIC_REQUEST = 'plugin:local-import:workbench:request'
@@ -315,7 +316,7 @@ function onResponse(event: { data?: unknown }) {
   pending.delete(resp.seq)
 }
 
-// 带序号配对的请求
+// 带序号配对的请求（超时口径经 requestTimeoutMs：预览类动作 180 秒、其余 30 秒）
 function request(action: string, payload: Record<string, unknown> = {}): Promise<WorkbenchResponse> {
   seq += 1
   const reqSeq = seq
@@ -327,7 +328,7 @@ function request(action: string, payload: Record<string, unknown> = {}): Promise
         pending.delete(reqSeq)
         resolve({ seq: reqSeq, ok: false, error: '插件响应超时（插件进程未运行或通道异常）' })
       }
-    }, 30000)
+    }, requestTimeoutMs(action))
   })
 }
 

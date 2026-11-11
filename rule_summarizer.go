@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 )
@@ -819,13 +821,15 @@ func (m *SessionManager) applyStructSummary(root, relPath, dirRelKey string) (*R
 	if fileRec == nil {
 		return nil, fmt.Errorf("识别全景中无文件 %s 的记录（磁盘可能与快照不一致），请重新识别", relPath)
 	}
+	// 预览基座取用（未就位返回 nil，命中统计与样例回退现行现场重建）
+	sub := m.evalSubstrateOf(sess)
 	// 序列形态路径（建议即所见即所入）：样本属序列群且集名对得上群键元素段
 	// 组合时产出序列形态规则（sibling 形态跟随 + 集名捕获，无目录层锚定）；
 	// 属序列群但对不上段组合时退回既有结构映射形态并附说明行；不属序列群
 	// 完全走既有形态（与现状零差异）。
 	out := trySequenceFormSummary(relPath, fileRec.FileName, &assign, sess.Snapshot)
 	if out.matched {
-		out.sugg.HitCount, out.sugg.HitTotal, out.sugg.Samples = previewSequenceFormRules(out.rules, sess.Snapshot, relPath)
+		out.sugg.HitCount, out.sugg.HitTotal, out.sugg.Samples = previewSequenceFormRules(out.rules, sess.Snapshot, relPath, sub)
 		if dirAddressed {
 			out.sugg.RelPath = dirRelKey
 		}
@@ -848,7 +852,7 @@ func (m *SessionManager) applyStructSummary(root, relPath, dirRelKey string) (*R
 	if out.unmatched {
 		sugg.Notes = append(sugg.Notes, seqNameUnmatchedNote)
 	}
-	sugg.HitCount, sugg.HitTotal, sugg.Samples = previewStructRules(rules, sess.Snapshot, relPath)
+	sugg.HitCount, sugg.HitTotal, sugg.Samples = previewStructRules(rules, sess.Snapshot, relPath, sub)
 	if dirAddressed {
 		sugg.RelPath = dirRelKey
 	}
@@ -881,14 +885,26 @@ func manualOnlySeqSuggestion(relPath string, assign *SessionAssignment) *RuleSug
 
 // previewStructRules 命中预览（全库）：全库文件逐一经组合规则求值（各规则独立
 // 上下文，与流水线逐规则求值同构），全部命中才算覆盖；统计除样本文件外的命中
-// 数与全库文件总数，样例取跨目录（快照序）前 3 个求值结论（附目录键）。
-func previewStructRules(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPath string) (int, int, []RuleSuggestionSample) {
-	hitCount, hitTotal := 0, 0
-	var samples []RuleSuggestionSample
-	for i := range snap.Files {
+// 数与全库文件总数，样例取跨目录（快照序）前 3 个求值结论（附目录键）。sub 为
+// 预览基座供给（nil=现行现场重建形态）：目录层拆分复用预铸清单（快照同序对位）。
+// 求值相块并行（预览面大库性能方案·阶段4）：逐文件求值无跨文件累积态（共享
+// 输入——规则段/快照/基座预铸清单——求值期只读，零锁纪律），命中声明按下标
+// 写入；跨文件累积面（命中计数、样例的快照原序前 3 装配）收口到汇流段串行
+// 执行——与串行求值逐字段等值。并行区与 mergedRecognition（recognition.go）及
+// 弹窗快路径（rules_preview.go）同款形态：块约百余文件、原子游标取块、结论按
+// 下标写入保持输入序；工作子 panic 沿串行同款冒泡，严禁 recover。
+func previewStructRules(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPath string, sub *evalSubstrate) (int, int, []RuleSuggestionSample) {
+	onSubstrate := sub != nil && len(sub.files) == len(snap.Files)
+	// 逐文件求值（纯函数面）：全部规则命中且声明非空才算命中文件，命中声明
+	// 按下标写入（未命中保持 nil）——块间下标不重叠、写者唯一，无锁。
+	hitDecls := make([][]MetadataDeclaration, len(snap.Files))
+	evaluateFileAt := func(i int) {
 		f := &snap.Files[i]
-		hitTotal++
-		in := &MatchInput{FileName: f.FileName, DirNames: ExtractDirLevels(f.RelPath), RelPath: f.RelPath}
+		dirNames := ExtractDirLevels(f.RelPath)
+		if onSubstrate {
+			dirNames = sub.files[i].DirNames
+		}
+		in := &MatchInput{FileName: f.FileName, DirNames: dirNames, RelPath: f.RelPath}
 		var decls []MetadataDeclaration
 		all := true
 		for j := range rules {
@@ -903,9 +919,47 @@ func previewStructRules(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPat
 				}
 			}
 		}
-		if !all || len(decls) == 0 {
+		if all && len(decls) > 0 {
+			hitDecls[i] = decls
+		}
+	}
+	if chunks := (len(snap.Files) + evalFileChunkSize - 1) / evalFileChunkSize; chunks > 1 && evalWorkerCount() > 1 {
+		workers := min(evalWorkerCount(), chunks)
+		var cursor atomic.Int64
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for w := 0; w < workers; w++ {
+			go func() {
+				defer wg.Done()
+				for {
+					c := int(cursor.Add(1)) - 1
+					if c >= chunks {
+						return
+					}
+					start := c * evalFileChunkSize
+					end := min(start+evalFileChunkSize, len(snap.Files))
+					for i := start; i < end; i++ {
+						evaluateFileAt(i)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	} else {
+		for i := range snap.Files {
+			evaluateFileAt(i)
+		}
+	}
+	// 汇流段（串行、快照原序）：命中计数与样例装配——自排样本不计入、样例
+	// 取命中文件前 3（快照原序语义与串行实现一致）。
+	hitCount, hitTotal := 0, len(snap.Files)
+	var samples []RuleSuggestionSample
+	for i := range snap.Files {
+		decls := hitDecls[i]
+		if decls == nil {
 			continue
 		}
+		f := &snap.Files[i]
 		if f.RelPath == selfRelPath {
 			continue
 		}

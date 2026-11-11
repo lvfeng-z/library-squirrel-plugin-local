@@ -7,6 +7,8 @@ package main
 //（单文件与目录寻址）。
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -312,7 +314,7 @@ func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
 // 模板=前缀字面+[{标签}]+首组后间隙字面+{任意}（首组后正文全部由吞位段
 // 承接），标签提取=行 1 捕获且自检复现首组内名；人话包裹形态与来源标签随
 // 新语义措辞（首组内名）。单组收尾形态产物零漂移由既有断言锚定
-//（Artist[{作者}]/[{标签}]，见本文件其余壳形用例）。
+// （Artist[{作者}]/[{标签}]，见本文件其余壳形用例）。
 func TestSummarizeMultiGroupDirFirstGroupTemplate(t *testing.T) {
 	const dir = "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
 	rel := dir + "/001.png"
@@ -649,4 +651,132 @@ func TestHandleFrontendRequestSummarizeRule(t *testing.T) {
 	if resp := ctx.lastResponse(t); resp.OK || !strings.Contains(resp.Error, "无会话赋值") {
 		t.Fatalf("无赋值应回可读错误: %+v", resp)
 	}
+}
+
+// previewStructRulesSerialRef 结构建议卡命中预览的串行参考实现（阶段4 求值相
+// 并行化前的原实现逐行复刻）：并行实现的等值锚基准——并行只改变求值顺序的
+// 可并行面，逐字段输出（计数/样例）须与本参考全等。
+func previewStructRulesSerialRef(rules []RuleEntry, snap *RecognitionSnapshot, selfRelPath string, sub *evalSubstrate) (int, int, []RuleSuggestionSample) {
+	hitCount, hitTotal := 0, 0
+	var samples []RuleSuggestionSample
+	onSubstrate := sub != nil && len(sub.files) == len(snap.Files)
+	for i := range snap.Files {
+		f := &snap.Files[i]
+		hitTotal++
+		dirNames := ExtractDirLevels(f.RelPath)
+		if onSubstrate {
+			dirNames = sub.files[i].DirNames
+		}
+		in := &MatchInput{FileName: f.FileName, DirNames: dirNames, RelPath: f.RelPath}
+		var decls []MetadataDeclaration
+		all := true
+		for j := range rules {
+			ctx := &ParseContext{}
+			if !rules[j].Pattern.Evaluate(in, nil, ctx) {
+				all = false
+				break
+			}
+			for _, action := range rules[j].Extractions {
+				if decl, ok := action.Apply(rules[j].ID, ctx); ok {
+					decls = append(decls, decl)
+				}
+			}
+		}
+		if !all || len(decls) == 0 {
+			continue
+		}
+		if f.RelPath == selfRelPath {
+			continue
+		}
+		hitCount++
+		if len(samples) < 3 {
+			parts := make([]string, 0, len(decls))
+			for _, decl := range decls {
+				parts = append(parts, qnaDimensionLabel(decl.Dimension)+"="+decl.Value)
+			}
+			samples = append(samples, RuleSuggestionSample{
+				FileName: f.FileName, DirRelKey: f.DirRelKey, Result: strings.Join(parts, "，"),
+			})
+		}
+	}
+	return hitCount, hitTotal, samples
+}
+
+// TestPreviewStructRulesParallelEquivalence 结构建议卡命中预览求值并行化等值锚
+// （预览面大库性能方案·阶段4）：同一夹具（文件数越过分块阈值 evalFileChunkSize
+// ——并行区真多块）上，串行参考实现（previewStructRulesSerialRef）vs 生产实现
+// 在多工作子与 1 工作子（串行回退路径）两模式、基座供给（sub）与现场重建
+// （nil）两形态下，计数与样例逐字段全等（reflect.DeepEqual）；夹具形态保证
+// 命中数远超样例上限 3（样例原序装配面非空转）且自排样本在命中集内（自排除
+// 路径被走）。求值期共享态只读的声明同由本锚在 -race 下运行期验证。
+func TestPreviewStructRulesParallelEquivalence(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newRecognitionFixture(t, root, nil)
+	// 体量树：5 目录 × 60 同形命中文件（Artist[X] 壳目录 + 标题__任意_任意.png
+	// 文件名形态）+ 少量不命中形态（异名目录/异形文件名——未命中路径覆盖），
+	// 总数越过分块阈值 128（并行区 ≥3 块）。
+	for d := 0; d < 5; d++ {
+		for i := 1; i <= 60; i++ {
+			writeTestFile(t, fmt.Sprintf("%s/Artist[%c]/t%02d__x_%03d.png", root, 'A'+rune(d), i, i), "x")
+		}
+	}
+	writeTestFile(t, root+"/其他/root.jpg", "d")
+	writeTestFile(t, root+"/Artist[A]/notes.txt", "e")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	snap := sess.Snapshot
+	if len(snap.Files) <= evalFileChunkSize {
+		t.Fatalf("夹具形态缺损：文件数 %d 未越过分块阈值 %d（并行区不会多块）", len(snap.Files), evalFileChunkSize)
+	}
+	sub := m.evalSubstrateOf(sess)
+	if sub == nil {
+		t.Fatal("识别完成后预览基座应就位（sub 形态须实际被走）")
+	}
+
+	// 组合规则对（与建议卡同款构造）：目录壳模板 + 文件名段模板，命中=全部
+	// 5 目录 × 60 文件同形。
+	self := "Artist[A]/t01__x_001.png"
+	assign := &SessionAssignment{
+		Author: "A", AuthorClueRef: "dirLevelStripped1",
+		Title: "t01", TitleClueRef: "filenameSeg0",
+	}
+	_, rules, err := buildStructMapRules(root, self, "t01__x_001.png", assign)
+	if err != nil {
+		t.Fatalf("结构映射规则构造失败: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("夹具形态缺损：应构造目录+文件名两条规则，实际 %d", len(rules))
+	}
+
+	assertEqual := func(label string, sub *evalSubstrate) {
+		t.Helper()
+		gotH, gotTotal, gotSamples := previewStructRules(rules, snap, self, sub)
+		wantH, wantTotal, wantSamples := previewStructRulesSerialRef(rules, snap, self, sub)
+		if gotH != wantH || gotTotal != wantTotal || !reflect.DeepEqual(gotSamples, wantSamples) {
+			t.Fatalf("%s：并行与串行参考输出不等值：%d/%d %+v vs %d/%d %+v",
+				label, gotH, gotTotal, gotSamples, wantH, wantTotal, wantSamples)
+		}
+	}
+	// 夹具形态保证：命中数远超样例上限（样例恰 3 条、原序装配敏感）且自排
+	// 样本在命中集内（自排除路径实际生效）。
+	if wantH, _, _ := previewStructRulesSerialRef(rules, snap, self, nil); wantH < 4 {
+		t.Fatalf("夹具形态缺损：命中数 %d 未越样例上限（等值锚空转）", wantH)
+	}
+	if _, _, wantSamples := previewStructRulesSerialRef(rules, snap, self, nil); len(wantSamples) != 3 {
+		t.Fatalf("夹具形态缺损：样例应恰 3 条，实际 %d", len(wantSamples))
+	}
+
+	// 多工作子模式（并行区真多块）：sub/nil 两形态各与串行参考全等。
+	withEvalWorkers(t, parallelWorkersMulti)
+	assertEqual("多工作子·现场重建", nil)
+	assertEqual("多工作子·基座供给", sub)
+	// 1 工作子（生产串行回退路径）同样与串行参考全等。
+	withEvalWorkers(t, 1)
+	assertEqual("单工作子·现场重建", nil)
+	assertEqual("单工作子·基座供给", sub)
 }

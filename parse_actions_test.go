@@ -10,6 +10,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1185,4 +1188,457 @@ func TestClearAssignmentSchedulesRecognitionRefresh(t *testing.T) {
 	waitAssignmentRefresh(t, m, root, "顶层说明.txt", func(f *SnapFile) bool {
 		return !finalHasDecl(f, DimAuthor, "手动作者", SourceAssignment)
 	})
+}
+
+// —— 预览面大库性能方案·阶段5：赋值增量重算等值锚 ——
+
+// 等值锚契约（生死线）：赋值增量重算产出的快照 vs「同一赋值保存后跑整库全量
+// 重识别」产出的快照——逐字节全等（除时间戳字段，豁免清单={RecognitionSnapshot.
+// GeneratedAtMs——快照结构中唯一的时间戳字段，显式列举留档，无其他豁免}）+
+// 差异轮清单全等（零噪音=变更文件集恰为赋值影响面，无虚假差异/新增/消失）。
+// 对照实现用真实整库路径（runFullRecognition 经 assignIncrementalDisabled 强制
+// 全量），不用复刻。
+
+// assignIncrementWarmRel 暖机专用文件（不与各形态分箱的动作文件重叠）。
+const assignIncrementWarmRel = "12345678_p0.jpg"
+
+// cloneFakeStore 深拷贝内存会话存储（值均为不可变字符串，浅拷贝条目即足）。
+func cloneFakeStore(store SessionStore) *fakeSessionStore {
+	src, ok := store.(*fakeSessionStore)
+	if !ok {
+		panic("cloneFakeStore 仅支持内存会话存储")
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	out := newFakeSessionStore()
+	out.mu.Lock()
+	defer out.mu.Unlock()
+	for k, v := range src.values {
+		out.values[k] = v
+	}
+	return out
+}
+
+// waitIncrementalRoundLanded 轮询至刷新轮落地（快照修订号追平会话修订号——
+// 赋值写先落库、轮后写快照，追平即该轮保存完成；快路径/整库路径同判据）。
+func waitIncrementalRoundLanded(t *testing.T, m *SessionManager, root string) *WorkbenchSession {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		sess, err := m.SessionOf(root)
+		if err == nil && sess.Snapshot != nil && sess.Snapshot.AssignmentRevision == sess.AssignRevision {
+			return sess
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("等待识别刷新轮落地超时")
+	return nil
+}
+
+// warmAssignmentIncremental 暖机协议（两侧同款，修订号同计数）：写暖机赋值→
+// 整库轮（基座冷启动回退整库、铸造置入）→清除→增量轮（基座经轻保存值守卫
+// 携带、快分支命中）。暖机终态=基准内容（无暖机赋值残留）+就位基座。
+func warmAssignmentIncremental(t *testing.T, m *SessionManager, root string) {
+	t.Helper()
+	before := assignIncrementalTaken.Load()
+	if _, err := m.SetAssignment(root, assignIncrementWarmRel, SessionAssignment{Author: "暖机作者"}); err != nil {
+		t.Fatalf("暖机写入赋值失败: %v", err)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("暖机整库轮失败: %v", err)
+	}
+	if got := assignIncrementalTaken.Load(); got != before {
+		t.Fatalf("暖机首轮（基座冷启动）应回退整库：探针 %d → %d", before, got)
+	}
+	if _, err := m.SetAssignment(root, assignIncrementWarmRel, SessionAssignment{}); err != nil {
+		t.Fatalf("暖机清除赋值失败: %v", err)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("暖机增量轮失败: %v", err)
+	}
+	if got := assignIncrementalTaken.Load(); got != before+1 {
+		t.Fatalf("暖机次轮应走赋值增量（基座经轻保存值守卫携带）：探针 %d → %d", before, got)
+	}
+}
+
+// assignIncrementalHarness 等值锚环境：基准夹具（样例树+首轮全量识别）+双侧
+// 克隆管理器（同一磁盘、同一基准存储快照、同一暖机协议——动作执行时点两侧
+// 会话态逐字段同构，仅修订号历史等长）。
+type assignIncrementalHarness struct {
+	root string
+	fast *SessionManager
+	full *SessionManager
+}
+
+func newAssignIncrementalHarness(t *testing.T) *assignIncrementalHarness {
+	t.Helper()
+	root := t.TempDir()
+	m0, ctx := newRecognitionFixture(t, root, nil)
+	recognitionSampleTree(t, root)
+	if err := m0.runFullRecognition(root); err != nil {
+		t.Fatalf("基准首轮识别失败: %v", err)
+	}
+	h := &assignIncrementalHarness{root: root}
+	// 第一台=增量侧、第二台=整库对照侧（同一磁盘、同一基准存储快照、同一暖机协议）
+	h.fast = NewSessionManagerWithStore(ctx, nil, cloneFakeStore(m0.store))
+	h.full = NewSessionManagerWithStore(ctx, nil, cloneFakeStore(m0.store))
+	for _, m := range []*SessionManager{h.fast, h.full} {
+		warmAssignmentIncremental(t, m, root)
+	}
+	return h
+}
+
+// assignIncrementalCapture 快照捕获：时间戳豁免后的规范 JSON + 差异集 + 修订号。
+type assignIncrementalCapture struct {
+	snapJSON string
+	diff     *SnapDiff
+	rev      int64
+}
+
+func captureAssignIncremental(t *testing.T, m *SessionManager, root string) assignIncrementalCapture {
+	t.Helper()
+	sess := waitIncrementalRoundLanded(t, m, root)
+	snap := *sess.Snapshot
+	snap.GeneratedAtMs = 0 // 时间戳豁免（唯一豁免字段，见文件头契约）
+	data, err := json.Marshal(&snap)
+	if err != nil {
+		t.Fatalf("序列化快照失败: %v", err)
+	}
+	return assignIncrementalCapture{snapJSON: string(data), diff: sess.LastDiff, rev: snap.AssignmentRevision}
+}
+
+// assertAssignIncrementalEqual 单形态分箱的等值断言：修订号同计数前提 + 快照
+// 逐字节全等（除时间戳）+ 差异轮清单全等 + 零噪音（变更文件集恰=期望清单、
+// 无新增/消失条目）。
+func assertAssignIncrementalEqual(t *testing.T, label string, fast, full assignIncrementalCapture, wantChanged []string) {
+	t.Helper()
+	if fast.rev != full.rev {
+		t.Fatalf("[%s] 双侧快照修订号不一致（等值锚前提破坏）：%d vs %d", label, fast.rev, full.rev)
+	}
+	if fast.snapJSON != full.snapJSON {
+		t.Fatalf("[%s] 快照逐字节比对失败（豁免仅 GeneratedAtMs）：\n增量=%s\n整库=%s", label, fast.snapJSON, full.snapJSON)
+	}
+	if fast.diff == nil || full.diff == nil {
+		t.Fatalf("[%s] 差异集缺席：%+v / %+v", label, fast.diff, full.diff)
+	}
+	if !reflect.DeepEqual(fast.diff, full.diff) {
+		t.Fatalf("[%s] 差异轮清单不等值：\n增量=%+v\n整库=%+v", label, fast.diff, full.diff)
+	}
+	if len(fast.diff.Added) != 0 || len(fast.diff.Removed) != 0 {
+		t.Fatalf("[%s] 差异集应无新增/消失条目（零噪音）：%+v / %+v", label, fast.diff.Added, fast.diff.Removed)
+	}
+	got := make([]string, 0, len(fast.diff.Changed))
+	for _, e := range fast.diff.Changed {
+		got = append(got, e.RelPath)
+	}
+	sort.Strings(got)
+	want := append([]string(nil), wantChanged...)
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("[%s] 差异轮变更文件集不符（零噪音断言）：got %v want %v", label, got, want)
+	}
+}
+
+// candidateGroupTargetOfDir 快照候选主清单内取指定目录的群候选目标键。
+func candidateGroupTargetOfDir(t *testing.T, snap *RecognitionSnapshot, dir string) string {
+	t.Helper()
+	for i := range snap.Candidates {
+		c := &snap.Candidates[i]
+		if c.Source == candSourceGroup && c.Dir == dir {
+			return c.target()
+		}
+	}
+	t.Fatalf("候选主清单内无 %s 的群候选（夹具形态退化）", dir)
+	return ""
+}
+
+// TestAssignmentIncrementalEquivalenceBins 赋值动作形态分箱等值锚（阶段5 生死
+// 线）：每箱=同一基准态（暖机协议同款）下，增量侧走赋值增量重算（探针必须
+// 增量——防双双侧皆回退的空转锚）、整库对照侧经 assignIncrementalDisabled
+// 强制全量重识别，两侧快照逐字节全等（除时间戳）+差异轮清单全等+零噪音。
+func TestAssignmentIncrementalEquivalenceBins(t *testing.T) {
+	const (
+		plainRel    = "顶层说明.txt"
+		conflictRel = "冲突/AB.jpg"
+		identRel    = "已识别/【作者A】标题1.jpg"
+	)
+	bins := []struct {
+		name        string
+		minProbes   int64 // 增量侧最小快分支命中数（防空转锚）
+		act         func(t *testing.T, m *SessionManager, root string)
+		wantChanged []string
+	}{
+		{
+			name:      "文件赋值（单文件表单保存）",
+			minProbes: 1,
+			act: func(t *testing.T, m *SessionManager, root string) {
+				if _, err := m.SetAssignment(root, plainRel, SessionAssignment{Author: "手动作者", Title: "手工标题", Tags: []string{"风景"}}); err != nil {
+					t.Fatalf("写入赋值失败: %v", err)
+				}
+				if err := m.runFullRecognition(root); err != nil {
+					t.Fatalf("重识别失败: %v", err)
+				}
+			},
+			wantChanged: []string{plainRel},
+		},
+		{
+			name:      "目录赋值+清除（子树生效与目录条目删除）",
+			minProbes: 2,
+			act: func(t *testing.T, m *SessionManager, root string) {
+				if _, _, err := m.ApplyDirAssignment(root, "序列", SessionAssignment{Collection: "序列合集"}); err != nil {
+					t.Fatalf("目录赋值失败: %v", err)
+				}
+				waitIncrementalRoundLanded(t, m, root)
+				if _, _, err := m.ClearDirAssignments(root, "序列"); err != nil {
+					t.Fatalf("清除目录赋值失败: %v", err)
+				}
+				waitIncrementalRoundLanded(t, m, root)
+			},
+			// 末轮差异=子树文件自目录条目供值回退（含 lone_007 的目录直属例外键形态）
+			wantChanged: []string{
+				"序列/库内作者名_001.jpg", "序列/库内作者名_002.jpg", "序列/库内作者名_003.jpg", "序列/lone_007.jpg",
+			},
+		},
+		{
+			name:      "目录条目+文件例外混合（AL 两类键）",
+			minProbes: 2,
+			act: func(t *testing.T, m *SessionManager, root string) {
+				// 库根目录条目（"/" 键形态，子树全扇出）
+				if _, _, err := m.ApplyDirAssignment(root, "", SessionAssignment{Collection: "目录集值"}); err != nil {
+					t.Fatalf("目录赋值失败: %v", err)
+				}
+				waitIncrementalRoundLanded(t, m, root)
+				// 文件例外整条替换（不与目录条目合并）：title 维就近覆盖、
+				// collection 维回落目录条目供值——两类键共居一轮装配。
+				if _, err := m.SetAssignment(root, identRel, SessionAssignment{Title: "例外标题"}); err != nil {
+					t.Fatalf("写入文件例外失败: %v", err)
+				}
+				if err := m.runFullRecognition(root); err != nil {
+					t.Fatalf("重识别失败: %v", err)
+				}
+			},
+			wantChanged: []string{identRel},
+		},
+		{
+			name:      "清除赋值（空维度等价）",
+			minProbes: 2,
+			act: func(t *testing.T, m *SessionManager, root string) {
+				if _, err := m.SetAssignment(root, conflictRel, SessionAssignment{Title: "消解标题"}); err != nil {
+					t.Fatalf("写入赋值失败: %v", err)
+				}
+				if err := m.runFullRecognition(root); err != nil {
+					t.Fatalf("重识别失败: %v", err)
+				}
+				if _, err := m.SetAssignment(root, conflictRel, SessionAssignment{}); err != nil {
+					t.Fatalf("清除赋值失败: %v", err)
+				}
+				if err := m.runFullRecognition(root); err != nil {
+					t.Fatalf("重识别失败: %v", err)
+				}
+			},
+			wantChanged: []string{conflictRel},
+		},
+		{
+			name:      "候选墙集名确认（候选集名赋值）",
+			minProbes: 1,
+			act: func(t *testing.T, m *SessionManager, root string) {
+				target := candidateGroupTargetOfDir(t, mustSessionSnapshot(t, m, root), "序列")
+				if _, _, err := m.ConfirmWorkSetCandidate(root, target, "确认的集名", 0); err != nil {
+					t.Fatalf("确认归集失败: %v", err)
+				}
+				waitIncrementalRoundLanded(t, m, root)
+			},
+			wantChanged: []string{
+				"序列/库内作者名_001.jpg", "序列/库内作者名_002.jpg", "序列/库内作者名_003.jpg",
+			},
+		},
+		{
+			name:      "多次连续赋值叠加（两次保存间的增量复用）",
+			minProbes: 2,
+			act: func(t *testing.T, m *SessionManager, root string) {
+				if _, err := m.SetAssignment(root, "线索/任意名.jpg", SessionAssignment{Title: "连环一"}); err != nil {
+					t.Fatalf("写入赋值一失败: %v", err)
+				}
+				if err := m.runFullRecognition(root); err != nil {
+					t.Fatalf("重识别一失败: %v", err)
+				}
+				if _, err := m.SetAssignment(root, plainRel, SessionAssignment{Author: "连环二"}); err != nil {
+					t.Fatalf("写入赋值二失败: %v", err)
+				}
+				if err := m.runFullRecognition(root); err != nil {
+					t.Fatalf("重识别二失败: %v", err)
+				}
+			},
+			wantChanged: []string{plainRel},
+		},
+		{
+			name:      "死路径赋值（StaleAssignments 面，零差异噪音）",
+			minProbes: 1,
+			act: func(t *testing.T, m *SessionManager, root string) {
+				if _, err := m.SetAssignment(root, "不存在的目录/旧文件.jpg", SessionAssignment{Author: "死路径作者"}); err != nil {
+					t.Fatalf("写入死路径赋值失败: %v", err)
+				}
+				if err := m.runFullRecognition(root); err != nil {
+					t.Fatalf("重识别失败: %v", err)
+				}
+			},
+			// 死路径赋值不触任何文件结论：差异轮应为空清单（零噪音），快照的
+			// StaleAssignments 面经逐字节比对覆盖。
+			wantChanged: nil,
+		},
+	}
+	for _, bin := range bins {
+		t.Run(bin.name, func(t *testing.T) {
+			h := newAssignIncrementalHarness(t)
+			before := assignIncrementalTaken.Load()
+			bin.act(t, h.fast, h.root)
+			delta := assignIncrementalTaken.Load() - before
+			if delta < bin.minProbes {
+				t.Fatalf("增量侧快分支命中不足（防空转锚）：%d 增量 < 最小 %d", delta, bin.minProbes)
+			}
+			fastCap := captureAssignIncremental(t, h.fast, h.root)
+			// 对照侧：强制整库全量重识别（同一动作、同一暖机协议）
+			restore := assignIncrementalDisabled
+			assignIncrementalDisabled = true
+			bin.act(t, h.full, h.root)
+			assignIncrementalDisabled = restore
+			if got := assignIncrementalTaken.Load() - before - delta; got != 0 {
+				t.Fatalf("整库对照侧不应命中快分支：%d 增量", got)
+			}
+			fullCap := captureAssignIncremental(t, h.full, h.root)
+			assertAssignIncrementalEqual(t, bin.name, fastCap, fullCap, bin.wantChanged)
+		})
+	}
+}
+
+// TestAssignmentIncrementalInFlightBoundary 并发边界（识别在途两态）：赋值写不
+// 阻塞在途识别、在途期不启动新轮；在途结束后补启轮走赋值增量落地，且终态与
+// 「同一动作跑整库全量」等值（等值锚契约同上）。
+func TestAssignmentIncrementalInFlightBoundary(t *testing.T) {
+	h := newAssignIncrementalHarness(t)
+	const rel = "顶层说明.txt"
+	m := h.fast
+
+	// 在途态：占用在途标记（在途识别装载旧赋值集的形态）——赋值保存只排定
+	// 补启轮（调度壳既有机制），期间零增量轮启动（标记在场时补启轮无法启动，
+	// 判定确定性成立）。
+	m.recogMu.Lock()
+	if m.recogRunning == nil {
+		m.recogRunning = make(map[string]bool)
+	}
+	m.recogRunning[h.root] = true
+	m.recogMu.Unlock()
+	before := assignIncrementalTaken.Load()
+	if _, _, err := m.ApplyAssignment(h.root, rel, SessionAssignment{Author: "在途作者"}); err != nil {
+		t.Fatalf("在途期写入赋值失败: %v", err)
+	}
+	if got := assignIncrementalTaken.Load(); got != before {
+		t.Fatalf("在途期不得启动增量轮（应排补启轮）：探针 %d → %d", before, got)
+	}
+	// 在途结束：补启轮启动并走赋值增量落地
+	m.recogMu.Lock()
+	delete(m.recogRunning, h.root)
+	m.recogMu.Unlock()
+	waitIncrementalRoundLanded(t, m, h.root)
+	if got := assignIncrementalTaken.Load(); got != before+1 {
+		t.Fatalf("在途结束后的补启轮应走赋值增量：%d → %d", before, got)
+	}
+	fastCap := captureAssignIncremental(t, m, h.root)
+
+	// 对照侧：同一动作强制整库全量
+	restore := assignIncrementalDisabled
+	assignIncrementalDisabled = true
+	defer func() { assignIncrementalDisabled = restore }()
+	if _, err := h.full.SetAssignment(h.root, rel, SessionAssignment{Author: "在途作者"}); err != nil {
+		t.Fatalf("对照写入赋值失败: %v", err)
+	}
+	if err := h.full.runFullRecognition(h.root); err != nil {
+		t.Fatalf("对照整库识别失败: %v", err)
+	}
+	assignIncrementalDisabled = restore
+	fullCap := captureAssignIncremental(t, h.full, h.root)
+	assertAssignIncrementalEqual(t, "在途两态", fastCap, fullCap, []string{rel})
+}
+
+// TestAssignmentIncrementalFallbackGuards 资格守卫回退：基座缺席（冷启动）、
+// 库名单换代（内容键失配）、档案变更（指纹失配）各自回退整库路径且结果正确；
+// 守卫放行时（对照）快分支命中。
+func TestAssignmentIncrementalFallbackGuards(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+	recognitionSampleTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮全量识别失败: %v", err)
+	}
+
+	// ① 冷启动（基座不在场——进程重启/缓存逐出形态）：回退整库，结果正确
+	m2 := NewSessionManagerWithStore(ctx, nil, cloneFakeStore(m.store))
+	before := assignIncrementalTaken.Load()
+	if _, err := m2.SetAssignment(root, "顶层说明.txt", SessionAssignment{Author: "冷启动作者"}); err != nil {
+		t.Fatalf("写入赋值失败: %v", err)
+	}
+	if err := m2.runFullRecognition(root); err != nil {
+		t.Fatalf("冷启动识别失败: %v", err)
+	}
+	if got := assignIncrementalTaken.Load(); got != before {
+		t.Fatalf("基座缺席应回退整库：%d → %d", before, got)
+	}
+	if f := snapshotFileOf(mustSessionSnapshot(t, m2, root), "顶层说明.txt"); f == nil || !finalHasDecl(f, DimAuthor, "冷启动作者", SourceAssignment) {
+		t.Fatalf("回退路径快照应正确反映赋值：%+v", f)
+	}
+
+	// ② 守卫放行对照：①的整库轮已铸基座，本轮走赋值增量
+	before = assignIncrementalTaken.Load()
+	if _, err := m2.SetAssignment(root, "线索/任意名.jpg", SessionAssignment{Title: "守卫对照"}); err != nil {
+		t.Fatalf("写入赋值失败: %v", err)
+	}
+	if err := m2.runFullRecognition(root); err != nil {
+		t.Fatalf("重识别失败: %v", err)
+	}
+	if got := assignIncrementalTaken.Load(); got != before+1 {
+		t.Fatalf("基座就位应走赋值增量：%d → %d", before, got)
+	}
+
+	// ③ 库名单换代（内容键失配）：回退整库
+	ctx.library.localAuthors = append(ctx.library.localAuthors, "新入库作者")
+	before = assignIncrementalTaken.Load()
+	if _, err := m2.SetAssignment(root, "冲突/AB.jpg", SessionAssignment{Title: "名单换代后"}); err != nil {
+		t.Fatalf("写入赋值失败: %v", err)
+	}
+	if err := m2.runFullRecognition(root); err != nil {
+		t.Fatalf("重识别失败: %v", err)
+	}
+	if got := assignIncrementalTaken.Load(); got != before {
+		t.Fatalf("名单换代（内容键失配）应回退整库：%d → %d", before, got)
+	}
+	if f := snapshotFileOf(mustSessionSnapshot(t, m2, root), "冲突/AB.jpg"); f == nil || !finalHasDecl(f, DimTitle, "名单换代后", SourceAssignment) {
+		t.Fatalf("回退路径快照应正确反映赋值：%+v", f)
+	}
+	ctx.library.localAuthors = ctx.library.localAuthors[:len(ctx.library.localAuthors)-1]
+
+	// ④ 档案变更（指纹失配）：回退整库
+	profile, errs := LoadProfile(m2.store)
+	if len(errs) > 0 || profile == nil {
+		t.Fatalf("载入规则档案失败: %v", errs)
+	}
+	profile.Rules = append(profile.Rules, RuleEntry{
+		ID: "assign-increment-guard-extra", Description: "测试：档案变更触发指纹失配",
+		Source: RuleSourceManual, Enabled: false, Pattern: mustRegexPattern(t, `^never_.+\.jpg$`, nil),
+	})
+	if err := SaveProfile(m2.store, profile); err != nil {
+		t.Fatalf("写入规则档案失败: %v", err)
+	}
+	before = assignIncrementalTaken.Load()
+	if _, err := m2.SetAssignment(root, "序列/lone_007.jpg", SessionAssignment{Author: "档案变更后"}); err != nil {
+		t.Fatalf("写入赋值失败: %v", err)
+	}
+	if err := m2.runFullRecognition(root); err != nil {
+		t.Fatalf("重识别失败: %v", err)
+	}
+	if got := assignIncrementalTaken.Load(); got != before {
+		t.Fatalf("档案变更（指纹失配）应回退整库：%d → %d", before, got)
+	}
+	if f := snapshotFileOf(mustSessionSnapshot(t, m2, root), "序列/lone_007.jpg"); f == nil || !finalHasDecl(f, DimAuthor, "档案变更后", SourceAssignment) {
+		t.Fatalf("回退路径快照应正确反映赋值：%+v", f)
+	}
 }
