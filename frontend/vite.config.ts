@@ -32,16 +32,27 @@ function componentFactoryPlugin(): Plugin {
             (_, imports) => `const {${imports.replace(/\s+as\s+/g, ': ')}} = __WAILS_RUNTIME__;`
           )
 
-          // 替换 export { X as default } 为 return
+          // 替换 export { X as default } 为 return（标识符须容 $ 前缀：minify 产物
+          // 的导出中间变量可能命名为 $c 这类 $ 系短名，\w 不含 $ 会让替换漏过，
+          // export 语句残留工厂函数体内成非法 ESM——2026-11-11 装载形态实案）
           code = code.replace(
-            /export\s*\{\s*(\w+)\s+as\s+default\s*}\s*;?/,
+            /export\s*\{\s*([$\w]+)\s+as\s+default\s*}\s*;?/,
             'return $1;'
           )
-          // 替换 export default X 为 return
+          // 替换 export default X 为 return（[$\w] 理由同上）
           code = code.replace(
-            /^export\s+default\s+(\w+)\s*;?\s*$/m,
+            /^export\s+default\s+([$\w]+)\s*;?\s*$/m,
             'return $1;'
           )
+
+          // 防回归闸：包装体内不得残留任何语句位置的 export（宿主以动态 import
+          // 装载本产物，非法 ESM 在装载期才炸且难溯源——构建期硬失败优于运行期翻车）
+          const leftover = code.match(/^[^\S\n]*export[\s{]/m)
+          if (leftover) {
+            throw new Error(
+              `工厂包装后仍残留 export 语句（存在未被改写的导出形态）: ${JSON.stringify(leftover[0])}`
+            )
+          }
 
           // 包装为工厂函数
           chunk.code = `export default function(__VUE__, __WAILS_RUNTIME__) {\n${code}\n}\n`
