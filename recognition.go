@@ -2957,6 +2957,9 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 		Kind: workbenchEventRecognitionDone, Root: root, Success: true,
 		Done: snapshot.Stats.TotalFiles, Total: snapshot.Stats.TotalFiles,
 		Message: recognitionDoneMessage(snapshot, diff),
+		// 完成时点档案对账（与全量轮同口径）：赋值增量轮完成后横幅同样按
+		// 完成时点对账撤销/保持。
+		ProfileChanged: m.profileChangedSince(digest),
 	})
 	return true, nil
 }
@@ -3203,6 +3206,9 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 		Kind: workbenchEventRecognitionDone, Root: root, Success: true,
 		Done: snapshot.Stats.TotalFiles, Total: snapshot.Stats.TotalFiles,
 		Message: doneMsg,
+		// 完成时点档案对账：识别期间档案未被再变更则横幅随本事件撤销（缺陷②
+		// 修复——会话指纹已随落库重捕，横幅不再滞留到下次 activateSession）。
+		ProfileChanged: m.profileChangedSince(digest),
 	})
 	return nil
 }

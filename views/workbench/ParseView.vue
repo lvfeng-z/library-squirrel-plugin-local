@@ -1056,6 +1056,9 @@ interface WorkbenchEvent {
   bytesPerSec?: number
   success?: boolean
   message?: string
+  // recognitionDone 携带的完成时点档案对账结论（真=识别期间档案又被变更，
+  // 「档案在会话外被变更」横幅保持；假/缺席=一致，横幅随即撤销）
+  profileChanged?: boolean
 }
 
 // Wails 将 []byte 载荷以 base64 或 JSON 文本送达，双路解码
@@ -2015,6 +2018,10 @@ function onEvent(event: { data?: unknown }) {
     recognizing.value = false
     if (evt.success) {
       progress.value = { phase: '', done: 0, total: 0 }
+      // 完成时点档案对账（缺陷②修复）：识别落库已将会话指纹重捕为本轮求值所用
+      // 指纹——档案未在识别期间再变更时横幅语义过期，随本事件撤销（后端对账
+      // 结论为准，避免再发 activateSession 全会话解码的大库秒级往返）
+      profileChanged.value = evt.profileChanged === true
       if (session.value) void loadPanorama(session.value.rootPath)
     } else {
       recognError.value = evt.message || '全量识别失败'
@@ -3210,6 +3217,11 @@ onUnmounted(() => {
 
 .li-ws-banner {
   border-radius: var(--app-radius);
+  /* 缺陷①修复（保活重插高度残影）：el-alert 自带 overflow:hidden，flex 项默认
+     min-height:auto 因此退化为 0、可被列负空间按比例压缩——保活切回时首帧布局
+     以未夹紧的滚动内容（目录树全量渲染）为基数解析，横幅被压至远低于内容高。
+     横幅为信息行恒取自然高，禁参与收缩 */
+  flex-shrink: 0;
 }
 
 .li-ws-back {
@@ -3412,7 +3424,12 @@ onUnmounted(() => {
       stretch 令双卡等高填满，各自卡内滚动 —— */
 
 .li-ws-main {
-  flex: 1 1 auto;
+  /* 缺陷①修复（保活重插高度残影）治根：基数 auto 时保活切回的首帧布局以
+     未夹紧的滚动内容高度（目录树全量渲染、卡墙增量批次）为 main 基数解析列
+     负空间，把同列可缩项（overflow:hidden 的横幅）压扁后不再复算；基数归零
+     （flex:1 = 1 1 0%）令 main 恒吃剩余空间、列内不再出现内容驱动的负空间。
+     与视口锁定设计语义一致（双卡高=容器高-头横幅，非内容高） */
+  flex: 1;
   min-height: 0;
   display: flex;
   gap: 10px;

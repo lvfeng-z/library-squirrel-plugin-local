@@ -1077,6 +1077,14 @@ func (m *SessionManager) ActivateSession(root string) (*WorkbenchSession, Profil
 	return sess, reconcile, nil
 }
 
+// profileChangedSince 求值所用档案指纹与档案当前指纹的对账（识别完成时点用，
+// 与 ActivateSession 的档案维度同口径：任一侧缺席不视为变更）。识别完成事件
+// 携带该结论，前端据此撤销或保持「档案在会话外被变更」横幅。
+func (m *SessionManager) profileChangedSince(digest string) bool {
+	current := m.currentProfileDigest()
+	return current != "" && digest != "" && current != digest
+}
+
 // mutateSession 轻保存入口：锁内会话读改写（单点串行）；mutate 返回错误即中止
 // 不落库。落库只写 meta 信封+索引（载荷簿记沿用旧 meta，见 saveSession）。读侧
 // 为**全会话解码**（含载荷分片，秒级）——只动轻字段的高频变异（如创建成功后的

@@ -3557,3 +3557,72 @@ func TestSnapDeclOfPassesAlsoRuleIDs(t *testing.T) {
 		t.Errorf("附属规则清单未透传，实际 %+v", got)
 	}
 }
+
+// TestRecognitionDoneCarriesProfileReconcile 识别完成事件携带完成时点档案对账
+// （「重识别完成后档案外变横幅不消失」缺陷锚定）：档案未被再变更与识别前被
+// 外部变更后重识别两种形态，完成时点对账均为假（本轮求值所用指纹与完成时档案
+// 当前指纹一致），前端据此撤销横幅；且会话指纹已随落库重捕，ActivateSession
+// 亦不再提示。识别期间档案又被变更的真值路径由 TestProfileChangedSince 锚定。
+func TestRecognitionDoneCarriesProfileReconcile(t *testing.T) {
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+	undercountFixtureTree(t, root)
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("首轮全量识别失败: %v", err)
+	}
+	done := lastUndercountDoneEvent(t, ctx, root)
+	if !done.Success || done.ProfileChanged {
+		t.Fatalf("档案未变更轮完成事件应为成功且对账为假: success=%v profileChanged=%v", done.Success, done.ProfileChanged)
+	}
+
+	// 外部变更档案（停库直写形态）后再识别：本轮求值已用新档案，完成时点对账
+	// 仍为假——横幅同样应撤销（结果已与最新档案一致）
+	store := m.store
+	profile, errs := LoadProfile(store)
+	if len(errs) != 0 || profile == nil {
+		t.Fatalf("档案载入异常: %v %+v", errs, profile)
+	}
+	rule, err := testMarkerRule(RuleSourceManual, "banner-defect-fixture")
+	if err != nil {
+		t.Fatalf("构造外部变更规则失败: %v", err)
+	}
+	profile.Rules = append(profile.Rules, rule)
+	if err := SaveProfile(store, profile); err != nil {
+		t.Fatalf("外部覆写档案失败: %v", err)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("外部变更后重识别失败: %v", err)
+	}
+	done = lastUndercountDoneEvent(t, ctx, root)
+	if !done.Success || done.ProfileChanged {
+		t.Fatalf("外部变更后重识别轮完成事件对账应为假: success=%v profileChanged=%v", done.Success, done.ProfileChanged)
+	}
+	_, reconcile, err := m.ActivateSession(root)
+	if err != nil {
+		t.Fatalf("恢复会话失败: %v", err)
+	}
+	if reconcile.Changed {
+		t.Fatalf("重识别落库后对账不应再提示重新识别: %+v", reconcile)
+	}
+}
+
+// TestProfileChangedSince 完成时点对账的指纹比对口径：求值指纹缺席（空串）不
+// 视为变更；与档案当前指纹不一致为真（识别期间档案又被变更的真值路径）；一致
+// 为假。
+func TestProfileChangedSince(t *testing.T) {
+	store := newFakeSessionStore()
+	mgr, _ := newTestManager(t, store)
+	current := mgr.currentProfileDigest()
+	if current == "" {
+		t.Fatal("空档案的当前指纹不应为空串（口径前提）")
+	}
+	if mgr.profileChangedSince("") {
+		t.Fatal("求值指纹缺席不应视为变更")
+	}
+	if !mgr.profileChangedSince("digest-mismatch") {
+		t.Fatal("求值指纹与当前指纹不一致应为真")
+	}
+	if mgr.profileChangedSince(current) {
+		t.Fatal("求值指纹与当前指纹一致应为假")
+	}
+}

@@ -1640,6 +1640,11 @@ type workbenchFrontendEvent struct {
 	// 于文案，X/N 同时镜像到 Done/Total）。
 	Success bool   `json:"success,omitempty"`
 	Message string `json:"message,omitempty"`
+	// ProfileChanged recognitionDone 携带的完成时点档案对账结论（真=本轮求值
+	// 所用档案指纹与完成时档案当前指纹不一致——识别期间档案又被变更，「档案
+	// 在会话外被变更」横幅应保持；假/缺席=一致，前端随本事件撤销横幅——会话
+	// 指纹已随落库重捕为求值所用指纹，横幅语义已过期）。
+	ProfileChanged bool `json:"profileChanged,omitempty"`
 }
 
 // entryConfirmOutcome 入口确认终态：采纳（accepted 真）或未采纳（携带原因）。
