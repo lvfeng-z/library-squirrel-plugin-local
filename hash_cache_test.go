@@ -116,13 +116,13 @@ func TestHashCacheHitReusesHashZeroReadBytes(t *testing.T) {
 	// 首轮（空缓存）：真实读盘计算并记录 → 压实回写 → 重载
 	c1 := newHashCache()
 	out1 := h.hashWorkFilesAllOrNothing(context.Background(), root, work, nil, c1)
-	if !out1.ok || out1.err != nil || len(out1.files) != 2 {
-		t.Fatalf("首轮全量哈希应成功（2 轨），实际 ok=%v err=%v files=%d", out1.ok, out1.err, len(out1.files))
+	if !out1.ok || out1.err != nil || len(out1.files) != 1 {
+		t.Fatalf("首轮全量哈希应成功（单轨），实际 ok=%v err=%v files=%d", out1.ok, out1.err, len(out1.files))
 	}
 	m.saveHashCache(root, c1, true)
 	c2 := m.loadHashCache(root)
-	if len(c2.entries) != 2 {
-		t.Fatalf("回写重载后清单应有 2 条记录，实际 %d", len(c2.entries))
+	if len(c2.entries) != 1 {
+		t.Fatalf("回写重载后清单应有 1 条记录，实际 %d", len(c2.entries))
 	}
 
 	// 探针：首轨等长改写 + mtime 还原（命中判据全符、内容已变）
@@ -134,8 +134,8 @@ func TestHashCacheHitReusesHashZeroReadBytes(t *testing.T) {
 	clock := &stepClock{t: time.Now()}
 	th := newHashThrottle(hashThrottleConfig{initial: 4, now: clock.now})
 	out2 := h.hashWorkFilesAllOrNothing(context.Background(), root, work, th, c2)
-	if !out2.ok || out2.err != nil || len(out2.files) != 2 {
-		t.Fatalf("命中轮应成功（2 轨），实际 ok=%v err=%v files=%d", out2.ok, out2.err, len(out2.files))
+	if !out2.ok || out2.err != nil || len(out2.files) != 1 {
+		t.Fatalf("命中轮应成功（单轨），实际 ok=%v err=%v files=%d", out2.ok, out2.err, len(out2.files))
 	}
 	if rate := th.windowRate(); rate != 0 {
 		t.Fatalf("缓存命中不得向控制器窗口进数（风险5），windowRate=%d", rate)
@@ -235,25 +235,25 @@ func TestHashCacheCompactionDropsVanishedPaths(t *testing.T) {
 	}
 
 	// 末作品移出本轮选择 + 其文件从磁盘消失（在场选择不受影响、创建照常成功）
-	for _, rel := range works[2].Files {
+	for _, rel := range works[5].Files {
 		if err := removeFile(t, root+"/"+rel); err != nil {
 			t.Fatalf("删除消失路径失败: %v", err)
 		}
 	}
-	if _, reason, cancelled := runEmitDirect(t, h, root, sess, works[:2], sdkdto.NoopHeartbeat{}); reason != "" || cancelled {
+	if _, reason, cancelled := runEmitDirect(t, h, root, sess, works[:5], sdkdto.NoopHeartbeat{}); reason != "" || cancelled {
 		t.Fatalf("部分选择轮不应中止: %s / %v", reason, cancelled)
 	}
 
 	c := m.loadHashCache(root)
-	if got := len(c.entries); got != 4 {
-		t.Fatalf("压实回写后清单应只含流见 4 条，实际 %d", got)
+	if got := len(c.entries); got != 5 {
+		t.Fatalf("压实回写后清单应只含流见 5 条，实际 %d", got)
 	}
-	for _, rel := range works[2].Files {
+	for _, rel := range works[5].Files {
 		if _, ok := c.entries[rel]; ok {
 			t.Fatalf("消失路径 %s 应被压实剔除", rel)
 		}
 	}
-	for _, work := range works[:2] {
+	for _, work := range works[:5] {
 		for _, rel := range work.Files {
 			if _, ok := c.entries[rel]; !ok {
 				t.Fatalf("流见路径 %s 应保留", rel)
@@ -508,32 +508,32 @@ func (s *failingHashCacheStore) GetValue(key string) (*sdkdto.StorageValue, erro
 // —— 中止合并回写（取消→重试命中面，交互剧本帧4 同源语义）——
 
 // TestHashCacheAbortMergeKeepsEntries 中止收尾不压实：合并保留未流见旧条目并
-// 叠加本轮新算记录。失败注入取确定性形态——次作品第二轨删除 → 域序放行至该
-// 单元时 Stat 中断（对账拆分·甲2 刀4），首作品全命中、次作品首轨先哈希入账
-// 再中断（记录先于结论投递，放行序保证入账必达）。
+// 叠加本轮新算记录。失败注入取确定性形态——并发钉死 1（单元串行），第三作品
+// 文件删除 → 域序放行至该单元时 Stat 中断（对账拆分·甲2 刀4），首作品全命中、
+// 次作品先哈希入账再中断（记录先于结论投递，放行序保证入账必达）。
 func TestHashCacheAbortMergeKeepsEntries(t *testing.T) {
-	root, h, m, _, sess, works := newParallelEmitFixture(t, 2, 2, emitDirectCfg{})
-	// 基线：仅首作品成功 → 压实回写 2 条
+	root, h, m, _, sess, works := newParallelEmitFixture(t, 2, 2, emitDirectCfg{pinned: 1})
+	// 基线：仅首作品成功 → 压实回写 1 条
 	if _, reason, cancelled := runEmitDirect(t, h, root, sess, works[:1], sdkdto.NoopHeartbeat{}); reason != "" || cancelled {
 		t.Fatalf("基线创建不应中止: %s / %v", reason, cancelled)
 	}
-	if got := len(m.loadHashCache(root).entries); got != 2 {
-		t.Fatalf("基线回写后清单应有 2 条记录，实际 %d", got)
+	if got := len(m.loadHashCache(root).entries); got != 1 {
+		t.Fatalf("基线回写后清单应有 1 条记录，实际 %d", got)
 	}
 
-	// 中止轮：全量发起，次作品第二轨消失 → 整次创建中断（对账文案收流）
-	if err := removeFile(t, root+"/"+works[1].Files[1]); err != nil {
-		t.Fatalf("删除中断轨失败: %v", err)
+	// 中止轮：全量发起，第三作品文件消失 → 整次创建中断（对账文案收流）
+	if err := removeFile(t, root+"/"+works[2].Files[0]); err != nil {
+		t.Fatalf("删除中断文件失败: %v", err)
 	}
 	_, reason, cancelled := runEmitDirect(t, h, root, sess, works, sdkdto.NoopHeartbeat{})
 	if cancelled || !strings.Contains(reason, "磁盘对账未通过") {
-		t.Fatalf("中断轨应整次中止并对账文案收流，实际 cancelled=%v reason=%q", cancelled, reason)
+		t.Fatalf("中断作品应整次中止并对账文案收流，实际 cancelled=%v reason=%q", cancelled, reason)
 	}
 
-	// 合并回写：基线 2 条保留（未流见不剔除）+ 次作品首轨新算叠加；中断轨缺席
+	// 合并回写：基线 1 条保留（未流见不剔除）+ 次作品新算叠加；中断作品文件缺席
 	c := m.loadHashCache(root)
-	if got := len(c.entries); got != 3 {
-		t.Fatalf("中止合并后清单应为基线 2 + 新算 1 = 3 条，实际 %d: %v", got, c.entries)
+	if got := len(c.entries); got != 2 {
+		t.Fatalf("中止合并后清单应为基线 1 + 新算 1 = 2 条，实际 %d: %v", got, c.entries)
 	}
 	for _, rel := range works[0].Files {
 		if _, ok := c.entries[rel]; !ok {
@@ -543,8 +543,8 @@ func TestHashCacheAbortMergeKeepsEntries(t *testing.T) {
 	if _, ok := c.entries[works[1].Files[0]]; !ok {
 		t.Fatalf("中止前已哈希入账的 %s 应叠加进清单", works[1].Files[0])
 	}
-	if _, ok := c.entries[works[1].Files[1]]; ok {
-		t.Fatalf("中断轨 %s 从未成功哈希，不得入账", works[1].Files[1])
+	if _, ok := c.entries[works[2].Files[0]]; ok {
+		t.Fatalf("中断文件 %s 从未成功哈希，不得入账", works[2].Files[0])
 	}
 }
 

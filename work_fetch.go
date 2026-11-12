@@ -225,7 +225,7 @@ func (h *LocalImportWorkFetcher) CreateWithHeartbeat(url string, reporter sdkdto
 }
 
 // createWorkbenchFiltered 工作台发起创建的过滤产出分支：从会话识别快照推导
-// 选择域（作品原子结构——集成员单文件作品/目录聚合多轨作品），按选择集产出批次
+// 选择域（作品原子结构——每件恰一文件，序列群成员另归集为集），按选择集产出批次
 // 应答组（emitSelectedWorks——按站点分组的单父多子行，一次创建=一个父任务）；
 // 任务名取编排动作暂存的原文（ApplyCreateTasks 经宿主 CreateTask RPC 递归进入本
 // 分支时在位），缺省/全空白按默认名兜底（与编排侧同一裁决函数，前端预填与后端
@@ -406,8 +406,8 @@ func emitChildBatches(ch chan<- *sdkdto.CreateStreamItem, parentID, taskName, pa
 // unitHashOutcome 单件作品哈希三态结论（verify 哈希循环作品粒度）。
 type unitHashOutcome struct {
 	// files / ok ok=true=全部轨道哈希完成；ok=false 且 err=nil=哈希计算失败整件
-	// 放弃（多轨作品轨道集原子，结构上不产出半作品；单轨集成员作品同口径，
-	// 失败仅弃该成员自身——v1 口径），dropErr 携带首失败原因（聚合上报样本）。
+	// 放弃（轨道集原子，结构上不产出半作品——作品现况恒单轨，失败即弃该文件），
+	// dropErr 携带首失败原因（聚合上报样本）。
 	files   []FileEntry
 	ok      bool
 	dropErr error
@@ -573,7 +573,7 @@ func (h *LocalImportWorkFetcher) childrenBatchBounds() (byteTarget, countLimit i
 }
 
 // emitSelectedWorks 按选择集产出批次应答（一次创建=一个父任务，B1+ 分帧形态）：
-// 文件按选择域确定序（目录按域序，目录内先目录聚合作品后集成员〔域序=集内序〕）
+// 文件按选择域确定序（目录按域序，目录内先落单作品后集成员〔域序=集内序〕）
 // 逐个裁决归属后归集——站点键=identity.Local.Key（创建域），子行归属经各自
 // siteKey 字段声明：真实域归属子行携归属站点键（作品身份落库域，仍受宿主站点
 // 表存在性校验），local 回退子行留空（继承父应答站点键）。
@@ -611,7 +611,8 @@ func (h *LocalImportWorkFetcher) childrenBatchBounds() (byteTarget, countLimit i
 // 已不存在，整次创建立即中断、对账文案经返回值（中止原因→SetReason 以 error 块
 // 收流——并行/取消路径下语义不回退：早放行单元已发射的批次无 last 末批，由
 // 宿主未收批统一回滚，用户可见结局与中断一致）；哈希计算失败仍为整件跳过
-//（半作品结构性不产出，v1 口径），失败样本聚合上报（风险6）。产出完成后向会话
+//（轨道集原子、不产出半作品——作品恒单轨即失败仅弃该文件），失败样本聚合上报
+//（风险6）。产出完成后向会话
 // 管理器记录批次摘要（子行总数与非 local 子行的归属分布，编排动作通知文案的
 // 数据源——宿主 CreateTask RPC 同步消费完整产出流后才返回，记录必先于编排
 // 读取）；降级超限中止与取消中止时不产出、零簿记。
@@ -658,9 +659,9 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		}
 	}
 
-	// 按目录组织产出计划：目录聚合作品与集成员分桶，目录序=选择域序
+	// 按目录组织产出计划：落单作品与集成员分桶，目录序=选择域序
 	type dirPlan struct {
-		dirWork    *SelectableWork
+		loneWorks  []*SelectableWork
 		setMembers []*SelectableWork
 	}
 	plans := make(map[string]*dirPlan)
@@ -672,10 +673,10 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			plans[work.DirRelKey] = plan
 			dirOrder = append(dirOrder, work.DirRelKey)
 		}
-		if work.Kind == WorkKindDirTracks {
-			plan.dirWork = work
-		} else {
+		if work.SetKey != "" {
 			plan.setMembers = append(plan.setMembers, work)
+		} else {
+			plan.loneWorks = append(plan.loneWorks, work)
 		}
 	}
 
@@ -696,7 +697,7 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		})
 	}
 
-	// 域序单元序列（乙1 作品粒度消费面）：目录序内先目录聚合作品后集成员
+	// 域序单元序列（乙1 作品粒度消费面）：目录序内先落单作品后集成员
 	//（集成员按上方集内序）——与串行基准同一序，单元只携计划素材（哈希在
 	// worker 池内做，归属裁决与子行构造在放行侧做，保序不变量锚定放行序）
 	type emitUnit struct {
@@ -711,8 +712,8 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		// 站点分类含义 → 子树归属站点键（快照回放含义不含 site 型——site 仅经
 		// 目录问答产生，会话模式问答不可达，此处恒走文件名形态归属裁决）
 		classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
-		if plan.dirWork != nil {
-			units = append(units, emitUnit{work: plan.dirWork, metadata: metadata, classifiedSiteKey: classifiedSiteKey})
+		for _, work := range plan.loneWorks {
+			units = append(units, emitUnit{work: work, metadata: metadata, classifiedSiteKey: classifiedSiteKey})
 		}
 		for _, member := range plan.setMembers {
 			units = append(units, emitUnit{work: member, metadata: metadata, classifiedSiteKey: classifiedSiteKey})
@@ -847,8 +848,8 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			plannedTotal -= len(unit.work.Files)
 			dropSamples = append(dropSamples, hashDropSample{workID: unit.work.WorkID, err: out.dropErr})
 		} else {
-			// 逐文件裁决归属后按原序扁平进批次（目录序内先目录聚合作品后集
-			// 成员——同目录文件不按归属重排）
+			// 逐文件裁决归属后按原序扁平进批次（目录序内先落单作品后集成
+			// 员——同目录文件不按归属重排）
 			unitItems := make([]batchFileItem, 0, len(out.files))
 			for _, f := range out.files {
 				attr := resolveWorkAttribution(filepath.Base(f.FullPath), unit.classifiedSiteKey)
@@ -966,9 +967,9 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 
 // hashWorkFilesAllOrNothing 对作品全部轨道计算内容哈希（verify 哈希循环的单件
 // 入口，worker 池内并发调用）。三态结论见 unitHashOutcome：ok=true=全部轨道
-// 哈希完成；ok=false 且 err=nil=哈希计算失败整件放弃（多轨作品的轨道集原子，
-// 结构上不产出半作品；单轨集成员作品同口径，失败仅弃该成员自身——v1 口径，
-// 失败原因聚合上报见放行循环，风险6）；err 非 nil=整次中止——轨道 Stat 失败=
+// 哈希完成；ok=false 且 err=nil=哈希计算失败整件放弃（轨道集原子，结构上不
+// 产出半作品——作品现况恒单轨，失败即弃该文件；失败原因聚合上报见放行循环，
+// 风险6）；err 非 nil=整次中止——轨道 Stat 失败=
 // 所选文件已不存在（磁盘对账未通过——对账拆分·甲2 刀4：逐文件存在性核对自
 // 守卫链并入本循环，守卫链只留目录级 mtime 游标抽查；Stat 失败即整次创建中断，
 // 对账文案经 err 由调用方收流，与原守卫链拒绝文案同一句，并行/取消路径下语义

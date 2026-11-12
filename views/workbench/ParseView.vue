@@ -964,11 +964,11 @@ interface DecisionsView {
 }
 
 // 选择域（服务端从识别快照派生的唯一结构源，键 ≡ 创建基面）：
-// 作品 = 集成员单文件作品（kind=setMember）或目录聚合多轨作品（kind=dirTracks），
-// 键形态为 f:{relPath} / d:{dirRelKey}——无文件级键，半作品结构性不可表达
+// 每件作品恰一文件，键形态 f:{relPath}；序列群成员另带 setKey 归集为集
+//（集=默认聚合单元，集内可拆选）——作品的多文件归属属识别面结论，
+// 识别面未提供前服务端不按目录虚构聚合
 interface SelectableWorkView {
   workId: string
-  kind: string
   dirRelKey: string
   files: string[]
   setKey?: string
@@ -2286,7 +2286,7 @@ const workIndex = computed<Map<string, SelectableWorkView>>(() => {
   return index
 })
 
-// 文件相对路径 → 所属作品（域内每文件恰属一作品；集成员=单文件键，目录聚合=目录键）
+// 文件相对路径 → 所属作品（域内每文件恰属一件单文件作品，键=前缀+相对路径）
 const workByRel = computed<Map<string, SelectableWorkView>>(() => {
   const index = new Map<string, SelectableWorkView>()
   for (const w of allWorks.value) {

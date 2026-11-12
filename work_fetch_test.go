@@ -630,7 +630,7 @@ func TestEmitSelectedWorksChildOrderFollowsGroupSeq(t *testing.T) {
 		sess.Snapshot.Files = append(sess.Snapshot.Files, sf)
 		groupMembers = append(groupMembers, SnapGroupMember{RelPath: rel, Seq: m.seq, SeqText: m.seqText})
 		works = append(works, &SelectableWork{
-			WorkID: "f:" + rel, Kind: WorkKindSetMember, DirRelKey: "乙",
+			WorkID: "f:" + rel, DirRelKey: "乙",
 			Files: []string{rel}, SetKey: workSetKey("乙", "集名"),
 		})
 	}
@@ -754,7 +754,10 @@ func TestEmitSelectedWorksChildrenBatchSplitting(t *testing.T) {
 	t.Run("字节界拆块", func(t *testing.T) {
 		m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
 		h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract }}
-		works := []*SelectableWork{{WorkID: "d:bulk", Kind: WorkKindDirTracks, DirRelKey: "bulk", Files: files}}
+		works := make([]*SelectableWork, 0, len(files))
+		for _, rel := range files {
+			works = append(works, &SelectableWork{WorkID: "f:" + rel, DirRelKey: "bulk", Files: []string{rel}})
+		}
 		items := collectEmitted(t, h, root, newSess("bulk"), works, "大批次")
 		tasks, batches := emittedTasks(items), emittedBatches(items)
 		if len(tasks) != 1 || len(batches) != 1 {
@@ -795,7 +798,10 @@ func TestEmitSelectedWorksChildrenBatchSplitting(t *testing.T) {
 	t.Run("降级单块全量内联", func(t *testing.T) {
 		m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
 		h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract - 1 }}
-		works := []*SelectableWork{{WorkID: "d:bulk", Kind: WorkKindDirTracks, DirRelKey: "bulk", Files: files}}
+		works := make([]*SelectableWork, 0, len(files))
+		for _, rel := range files {
+			works = append(works, &SelectableWork{WorkID: "f:" + rel, DirRelKey: "bulk", Files: []string{rel}})
+		}
 		items := collectEmitted(t, h, root, newSess("bulk"), works, "大批次")
 		if got := len(emittedBatches(items)); got != 0 {
 			t.Fatalf("降级形态不应有批次块，实得 %d", got)
@@ -815,7 +821,10 @@ func TestEmitSelectedWorksChildrenBatchSplitting(t *testing.T) {
 		}
 		m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
 		h := &LocalImportWorkFetcher{sessions: m, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract - 1 }}
-		works := []*SelectableWork{{WorkID: "d:over", Kind: WorkKindDirTracks, DirRelKey: "over", Files: overFiles}}
+		works := make([]*SelectableWork, 0, len(overFiles))
+		for _, rel := range overFiles {
+			works = append(works, &SelectableWork{WorkID: "f:" + rel, DirRelKey: "over", Files: []string{rel}})
+		}
 		items, reason, cancelled := collectEmittedWithReason(t, h, root, newSess("over"), works, "超限批次")
 		if reason == "" || !strings.Contains(reason, "宿主契约过旧") || !strings.Contains(reason, "载荷超限") {
 			t.Fatalf("降级超限应明确报错（宿主契约过旧且载荷超限），实际 %q", reason)

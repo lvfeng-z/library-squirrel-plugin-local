@@ -131,14 +131,14 @@ func newSelectionFixture(t *testing.T, root string, assigns map[string]SessionAs
 
 // selectionSampleTree 构造选择测试样例树：
 //
-//	<root>/已识别/【作者A】标题1.jpg    内置规则命中 → identified（d:已识别 单轨作品）
-//	<root>/多轨/【作者B】标题2.jpg      内置规则命中 → identified（d:多轨 双轨作品）
-//	<root>/多轨/【作者C】标题3.jpg      内置规则命中 → identified（d:多轨 双轨作品）
-//	<root>/未识别/随便.txt              plain（d:未识别 不可选）
+//	<root>/已识别/【作者A】标题1.jpg    内置规则命中 → identified（可单选）
+//	<root>/多轨/【作者B】标题2.jpg      内置规则命中 → identified（与标题3 互不捆绑）
+//	<root>/多轨/【作者C】标题3.jpg      内置规则命中 → identified（与标题2 互不捆绑）
+//	<root>/未识别/随便.txt              plain（不可选）
 //	<root>/序列/前缀名_001..003.jpg     兄弟群组成群+集名声明 → identified（集成员作品×3）
-//	<root>/序列/落单_009.jpg            序号形态组大小 1 → plain（d:序列 不可选）
-//	<root>/冲突/AB.jpg                  双规则冲突 → 待裁决（d:冲突 不可选）
-//	<root>/库内作者名.jpg               谓词规则命中（库内索引）→ identified（d:"" 单轨作品）
+//	<root>/序列/落单_009.jpg            序号形态组大小 1 → plain（不可选，不连坐集成员）
+//	<root>/冲突/AB.jpg                  双规则冲突 → 待裁决（不可选）
+//	<root>/库内作者名.jpg               谓词规则命中（库内索引）→ identified（可单选）
 func selectionSampleTree(t *testing.T, root string) {
 	t.Helper()
 	writeTestFile(t, root+"/已识别/【作者A】标题1.jpg", "a")
@@ -165,13 +165,13 @@ func recognizedSelectionFixture(t *testing.T, assigns map[string]SessionAssignme
 	return root, m, ctx
 }
 
-// —— 退出标准 2：作品原子结构 —— //
+// —— 退出标准 2：作品结构（每文件单作品，序列群归集为集） —— //
 
-// TestDeriveWorkDomainWorkAtomicity 选择域推导：集成员各自单文件作品（集=序列群，
-// 成员按集内序）、目录落单文件合为一件多轨作品（轨道集=该目录全部落单文件，
-// 整体持有——作品键只指向作品，无文件级键形态）；可选性=全部文件已识别且无
-// 待裁决（未识别/待裁决作品整体不可选——结构上表达不了半作品）。
-func TestDeriveWorkDomainWorkAtomicity(t *testing.T) {
+// TestDeriveWorkDomain 选择域推导：每个文件各自成一件单文件作品（键=前缀+相对
+// 路径，同目录落单文件互不捆绑）；GroupKey 非空成员按「目录+分组键」归集为集
+//（集=序列群，成员按集内序）；可选性=文件已识别且无待裁决（未识别/待裁决仅
+// 自身不可选，不连坐同目录其他文件）。
+func TestDeriveWorkDomain(t *testing.T) {
 	root, m, _ := recognizedSelectionFixture(t, nil)
 	sess, err := m.SessionOf(root)
 	if err != nil {
@@ -183,16 +183,21 @@ func TestDeriveWorkDomainWorkAtomicity(t *testing.T) {
 	for _, work := range domain.Works {
 		byID[work.WorkID] = work
 	}
-	// 目录聚合作品：多轨目录两文件为一件作品的完整轨道集
-	multi := byID["d:多轨"]
-	if multi == nil {
-		t.Fatalf("缺少 d:多轨 目录聚合作品（works: %+v）", domain.Works)
+	if len(domain.Works) != 10 {
+		t.Fatalf("样例树 10 文件应各成一件单文件作品，实际 %d 件（works: %+v）", len(domain.Works), domain.Works)
 	}
-	if multi.Kind != WorkKindDirTracks || len(multi.Files) != 2 || multi.SetKey != "" {
-		t.Fatalf("d:多轨 应为双轨原子目录聚合作品，实际 %+v", multi)
-	}
-	if !multi.Selectable || multi.State != workStateIdentified {
-		t.Fatalf("全轨已识别的目录聚合作品应可选，实际 selectable=%v state=%s", multi.Selectable, multi.State)
+	// 同目录落单文件互不捆绑：多轨目录两文件为两件独立单文件作品
+	for _, id := range []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"} {
+		work := byID[id]
+		if work == nil {
+			t.Fatalf("缺少单文件作品 %s（works: %+v）", id, domain.Works)
+		}
+		if len(work.Files) != 1 || work.Files[0] != strings.TrimPrefix(id, "f:") || work.SetKey != "" {
+			t.Fatalf("%s 应为无集单文件作品，实际 %+v", id, work)
+		}
+		if !work.Selectable || work.State != workStateIdentified {
+			t.Fatalf("已识别文件 %s 应可选，实际 selectable=%v state=%s", id, work.Selectable, work.State)
+		}
 	}
 
 	// 集成员：三名成员各自单文件作品、同属一集
@@ -207,8 +212,8 @@ func TestDeriveWorkDomainWorkAtomicity(t *testing.T) {
 	}
 	for i, memberID := range set.Members {
 		member := byID[memberID]
-		if member == nil || member.Kind != WorkKindSetMember || len(member.Files) != 1 {
-			t.Fatalf("集成员 %s 应为单文件作品，实际 %+v", memberID, member)
+		if member == nil || len(member.Files) != 1 || member.SetKey == "" {
+			t.Fatalf("集成员 %s 应为带集键的单文件作品，实际 %+v", memberID, member)
 		}
 		if !member.Selectable {
 			t.Fatalf("集成员 %s 应可选（集名声明已识别）", memberID)
@@ -219,14 +224,13 @@ func TestDeriveWorkDomainWorkAtomicity(t *testing.T) {
 		}
 	}
 
-	// 不可选作品：未识别（含落单 plain）、待裁决；根目录聚合作品（库内作者名.jpg
-	// 经谓词识别）可选
+	// 可选性按文件：未识别/待裁决仅自身不可选，不连坐同目录其他文件
 	for id, wantSelectable := range map[string]bool{
-		"d:未识别": false,
-		"d:序列":  false, // 落单_009 为 plain → 整件不可选
-		"d:冲突":  false, // 待裁决 → 整件不可选
-		"d:":    true,  // 库内作者名.jpg 谓词识别 → 可选
-		"d:已识别": true,
+		"f:未识别/随便.txt":         false,
+		"f:序列/落单_009.jpg":      false,
+		"f:冲突/AB.jpg":            false,
+		"f:库内作者名.jpg":           true,
+		"f:已识别/【作者A】标题1.jpg": true,
 	} {
 		work := byID[id]
 		if work == nil {
@@ -237,34 +241,34 @@ func TestDeriveWorkDomainWorkAtomicity(t *testing.T) {
 		}
 	}
 	// 待裁决呈现态
-	if byID["d:冲突"].State != workStatePending {
-		t.Fatalf("d:冲突 呈现态应为 pending，实际 %s", byID["d:冲突"].State)
+	if byID["f:冲突/AB.jpg"].State != workStatePending {
+		t.Fatalf("f:冲突/AB.jpg 呈现态应为 pending，实际 %s", byID["f:冲突/AB.jpg"].State)
 	}
 }
 
 // —— 退出标准 9：未识别项不可选 —— //
 
 // TestSetSelectionValidatesSelectability 选择集写入校验：未知作品键（含裸相对
-// 路径——文件级键形态结构性不存在）与不可选作品（未识别/待裁决）整体拒绝，
-// 不部分落库；合法键去重按稳定序落库并随决策态投影回读。
+// 路径——文件经作品键寻址，裸路径不是合法键形态）与不可选作品（未识别/待裁决）
+// 整体拒绝，不部分落库；合法键去重按稳定序落库并随决策态投影回读。
 func TestSetSelectionValidatesSelectability(t *testing.T) {
 	root, m, _ := recognizedSelectionFixture(t, nil)
 
-	// 裸相对路径不是作品键：文件级半选不可寻址
+	// 裸相对路径不是作品键
 	if _, err := m.SetSelection(root, []string{"多轨/【作者B】标题2.jpg"}); err == nil {
-		t.Fatalf("裸相对路径不应是合法作品键（文件级半选结构性不可表达）")
+		t.Fatalf("裸相对路径不应是合法作品键")
 	}
-	if _, err := m.SetSelection(root, []string{"d:不存在"}); err == nil {
+	if _, err := m.SetSelection(root, []string{"f:不存在.jpg"}); err == nil {
 		t.Fatalf("未知作品键应拒绝")
 	}
-	// 未识别/待裁决作品不可选
-	if _, err := m.SetSelection(root, []string{"d:未识别"}); err == nil {
-		t.Fatalf("未识别作品不可选")
+	// 未识别/待裁决文件不可选
+	if _, err := m.SetSelection(root, []string{"f:未识别/随便.txt"}); err == nil {
+		t.Fatalf("未识别文件的作品不可选")
 	}
-	if _, err := m.SetSelection(root, []string{"d:序列"}); err == nil {
-		t.Fatalf("含未识别文件的目录聚合作品不可选（半作品被结构性防止）")
+	if _, err := m.SetSelection(root, []string{"f:序列/落单_009.jpg"}); err == nil {
+		t.Fatalf("未识别落单文件的作品不可选（不因同目录集成员已识别而放行）")
 	}
-	if _, err := m.SetSelection(root, []string{"d:冲突"}); err == nil {
+	if _, err := m.SetSelection(root, []string{"f:冲突/AB.jpg"}); err == nil {
 		t.Fatalf("待裁决作品不可选（未定论）")
 	}
 	// 拒绝后零残留
@@ -277,11 +281,16 @@ func TestSetSelectionValidatesSelectability(t *testing.T) {
 	}
 
 	// 合法写入：去重 + 稳定序
-	sess, err = m.SetSelection(root, []string{"d:多轨", "d:多轨", "d:已识别", "d:"})
+	sess, err = m.SetSelection(root, []string{
+		"f:多轨/【作者B】标题2.jpg",
+		"f:多轨/【作者B】标题2.jpg",
+		"f:已识别/【作者A】标题1.jpg",
+		"f:库内作者名.jpg",
+	})
 	if err != nil {
 		t.Fatalf("合法选择集写入失败: %v", err)
 	}
-	if strings.Join(sess.Selection, "|") != "d:|d:多轨|d:已识别" {
+	if strings.Join(sess.Selection, "|") != "f:多轨/【作者B】标题2.jpg|f:已识别/【作者A】标题1.jpg|f:库内作者名.jpg" {
 		t.Fatalf("选择集应去重按稳定序落库，实际 %v", sess.Selection)
 	}
 }
@@ -339,17 +348,20 @@ func responseChildNames(resp *sdkdto.TaskCreateResponse) []string {
 }
 
 // TestCreateWorkbenchFilteredEmitsSelectedWorksOnly 会话模式 Create 过滤产出：
-// 选择=「d:多轨 双轨作品」+「集内 2/3 成员显式拆选」→ 只产出所选作品：纯 local
-// 批次=单应答单父（批次应答），子行=全部所选文件（确定序：目录序内先目录
-// 聚合作品后集成员）；未选作品（d:已识别、第三名集成员）零任务，未识别/待裁决
-// 作品即使混入选择集也非可选（写入即拒）。任务名走默认名兜底（未暂存用户名）。
+// 选择=「多轨目录两件单文件作品」+「集内 2/3 成员显式拆选」→ 只产出所选作品：
+// 纯 local 批次=单应答单父（批次应答），子行=全部所选文件（确定序：目录序内
+// 先落单作品后集成员）；未选作品（已识别目录、第三名集成员）零任务，未识别/
+// 待裁决作品即使混入选择集也非可选（写入即拒）。任务名走默认名兜底（未暂存用户名）。
 // 全程零前端事件（零 ClassifyDir 弹问——目录含义取快照回放，结构性不触问答）。
 // PluginData 携带内容哈希与赋值快照；父行为纯容器（DirRelPath 空、无含义链）。
 func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, map[string]SessionAssignment{
 		"多轨/【作者C】标题3.jpg": {Title: "手工标题", UpdatedAtMs: 1},
 	})
-	if _, err := m.SetSelection(root, []string{"d:多轨", "f:序列/前缀名_001.jpg", "f:序列/前缀名_002.jpg"}); err != nil {
+	if _, err := m.SetSelection(root, []string{
+		"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg",
+		"f:序列/前缀名_001.jpg", "f:序列/前缀名_002.jpg",
+	}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
 
@@ -362,10 +374,10 @@ func TestCreateWorkbenchFilteredEmitsSelectedWorksOnly(t *testing.T) {
 	}
 	batch := resps[0]
 
-	// 批次父行：默认名兜底（本地导入 · 库根名 · N 件作品，N=选择集作品数〔3 作品
+	// 批次父行：默认名兜底（本地导入 · 库根名 · N 件作品，N=选择集作品数〔4 作品
 	// 4 文件〕）、local-batch- 父身份、创建域站点键、纯容器 PluginData（DirRelPath
 	// 空、无含义链）
-	if want := fmt.Sprintf("本地导入 · %s · 3 件作品", filepath.Base(root)); batch.TaskName != want {
+	if want := fmt.Sprintf("本地导入 · %s · 4 件作品", filepath.Base(root)); batch.TaskName != want {
 		t.Fatalf("批次父行任务名应为默认名 %q，实际 %q", want, batch.TaskName)
 	}
 	if !strings.HasPrefix(batch.PluginTaskId, "local-batch-") || batch.SiteKey != identity.Local.Key {
@@ -514,9 +526,10 @@ func TestEmitSelectedWorksPureLocalSingleParent(t *testing.T) {
 		"乙/集名_002.jpg",
 	})
 	works := []*SelectableWork{
-		{WorkID: "d:甲", Kind: WorkKindDirTracks, DirRelKey: "甲", Files: []string{"甲/【作者A】标题1.jpg", "甲/【作者A】标题2.jpg"}},
-		{WorkID: "f:乙/集名_001.jpg", Kind: WorkKindSetMember, DirRelKey: "乙", Files: []string{"乙/集名_001.jpg"}, SetKey: workSetKey("乙", "集名")},
-		{WorkID: "f:乙/集名_002.jpg", Kind: WorkKindSetMember, DirRelKey: "乙", Files: []string{"乙/集名_002.jpg"}, SetKey: workSetKey("乙", "集名")},
+		{WorkID: "f:甲/【作者A】标题1.jpg", DirRelKey: "甲", Files: []string{"甲/【作者A】标题1.jpg"}},
+		{WorkID: "f:甲/【作者A】标题2.jpg", DirRelKey: "甲", Files: []string{"甲/【作者A】标题2.jpg"}},
+		{WorkID: "f:乙/集名_001.jpg", DirRelKey: "乙", Files: []string{"乙/集名_001.jpg"}, SetKey: workSetKey("乙", "集名")},
+		{WorkID: "f:乙/集名_002.jpg", DirRelKey: "乙", Files: []string{"乙/集名_002.jpg"}, SetKey: workSetKey("乙", "集名")},
 	}
 	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "整批导入"))
 	if len(resps) != 1 || resps[0].TaskName != "整批导入" {
@@ -549,10 +562,10 @@ func TestEmitSelectedWorksMixedAttributionSingleParent(t *testing.T) {
 		"混合/【作者A】标题1.jpg",
 		"混合/11111111_p0.jpg",
 	})
-	works := []*SelectableWork{{
-		WorkID: "d:混合", Kind: WorkKindDirTracks, DirRelKey: "混合",
-		Files: []string{"混合/【作者A】标题1.jpg", "混合/11111111_p0.jpg"},
-	}}
+	works := []*SelectableWork{
+		{WorkID: "f:混合/【作者A】标题1.jpg", DirRelKey: "混合", Files: []string{"混合/【作者A】标题1.jpg"}},
+		{WorkID: "f:混合/11111111_p0.jpg", DirRelKey: "混合", Files: []string{"混合/11111111_p0.jpg"}},
+	}
 	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "混归属批次"))
 	if len(resps) != 1 {
 		t.Fatalf("混归属批次应为单应答单父（全部子行进同一父），实得 %d: %+v", len(resps), resps)
@@ -616,7 +629,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 	})
 	t.Run("识别后目录新增文件", func(t *testing.T) {
 		root, m, ctx := recognizedSelectionFixture(t, nil)
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		writeTestFile(t, root+"/多轨/新文件.jpg", "x")
@@ -629,7 +642,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 	})
 	t.Run("仅目录 mtime 漂移（无文件变化）", func(t *testing.T) {
 		root, m, ctx := recognizedSelectionFixture(t, nil)
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		dir := root + "/多轨"
@@ -651,7 +664,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 	})
 	t.Run("所选文件被删除（目录 mtime 随之漂移，目录级对账拦截）", func(t *testing.T) {
 		root, m, ctx := recognizedSelectionFixture(t, nil)
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		if err := removeFile(t, root+"/多轨/【作者B】标题2.jpg"); err != nil {
@@ -666,7 +679,7 @@ func TestApplyCreateTasksGuards(t *testing.T) {
 	})
 	t.Run("赋值修订漂移", func(t *testing.T) {
 		root, m, ctx := recognizedSelectionFixture(t, nil)
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		if _, err := m.SetAssignment(root, "多轨/【作者B】标题2.jpg", SessionAssignment{Title: "识别后新赋值"}); err != nil {
@@ -697,10 +710,10 @@ func removeFile(t *testing.T, path string) error {
 func TestReconcileSplitFileGoneAbortsInVerify(t *testing.T) {
 	t.Run("直驱 emitSelectedWorks：对账文案收流且零发射", func(t *testing.T) {
 		root, h, m, sess := emitFixture(t, []string{"对账甲/x1.jpg", "对账甲/x2.jpg"})
-		works := []*SelectableWork{{
-			WorkID: "d:对账甲", Kind: WorkKindDirTracks, DirRelKey: "对账甲",
-			Files: []string{"对账甲/x1.jpg", "对账甲/x2.jpg"},
-		}}
+		works := []*SelectableWork{
+			{WorkID: "f:对账甲/x1.jpg", DirRelKey: "对账甲", Files: []string{"对账甲/x1.jpg"}},
+			{WorkID: "f:对账甲/x2.jpg", DirRelKey: "对账甲", Files: []string{"对账甲/x2.jpg"}},
+		}
 		if err := removeFile(t, root+"/对账甲/x2.jpg"); err != nil {
 			t.Fatalf("删除所选文件失败: %v", err)
 		}
@@ -721,7 +734,7 @@ func TestReconcileSplitFileGoneAbortsInVerify(t *testing.T) {
 	})
 	t.Run("全链：守卫放行 → verify 中断 → 失败终态且选择集保留", func(t *testing.T) {
 		root, m, ctx := recursiveCreateFixture(t, nil)
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		// 删除所选一轨并复原目录 mtime 至识别时值：目录级游标对账不动（隔离
@@ -752,7 +765,7 @@ func TestReconcileSplitFileGoneAbortsInVerify(t *testing.T) {
 		if err != nil {
 			t.Fatalf("读取会话失败: %v", err)
 		}
-		if len(sess.Selection) != 1 {
+		if len(sess.Selection) != 2 {
 			t.Fatalf("中断后选择集应保留供重试，实际 %v", sess.Selection)
 		}
 	})
@@ -761,7 +774,7 @@ func TestReconcileSplitFileGoneAbortsInVerify(t *testing.T) {
 // —— 守卫段提速锚定（阶段3 退出标准①）—— //
 
 // syntheticLargeSessionFixture 合成大会话夹具：指定目录数×每目录文件数的已识别
-// 快照（全部 identified → 目录聚合作品可选）经 CompleteRecognition 全保存落库
+// 快照（全部 identified → 各文件单文件作品可选）经 CompleteRecognition 全保存落库
 //（真实 gzip 分片载荷），并预演「全景载入完成」形态——缓存条目装填 + 域推导
 // 驻留（真实时序=前端拉取 domain 分节）。DirMtimes 与磁盘 ProfileDigest 刻意
 // 缺席（目录级对账与档案指纹闸门按缺席放行，计时聚焦守卫链自身通路）。
@@ -857,19 +870,22 @@ func TestApplyCreateTasksOrchestration(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, map[string]SessionAssignment{
 		"多轨/【作者C】标题3.jpg": {Title: "手工标题", UpdatedAtMs: 1},
 	})
-	if _, err := m.SetSelection(root, []string{"d:多轨", "d:已识别", "f:序列/前缀名_001.jpg"}); err != nil {
+	if _, err := m.SetSelection(root, []string{
+		"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg",
+		"f:已识别/【作者A】标题1.jpg", "f:序列/前缀名_001.jpg",
+	}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
 	started, err := m.ApplyCreateTasks(root, "")
 	if err != nil || !started {
 		t.Fatalf("创建编排应立即应答已开始创建: started=%v err=%v", started, err)
 	}
-	wantName := fmt.Sprintf("本地导入 · %s · 3 件作品", filepath.Base(root))
+	wantName := fmt.Sprintf("本地导入 · %s · 4 件作品", filepath.Base(root))
 	done := waitForWorkbenchEvent(t, ctx, workbenchEventCreateDone)
 	if !done.Success {
 		t.Fatalf("桩创建应成功收尾，实际: %s", done.Message)
 	}
-	if want := fmt.Sprintf("已创建任务「%s」：3 件作品，共 3 个子任务，用时不足 1 分钟", wantName); done.Message != want {
+	if want := fmt.Sprintf("已创建任务「%s」：4 件作品，共 3 个子任务，用时不足 1 分钟", wantName); done.Message != want {
 		t.Fatalf("createDone 文案应为批次任务形态（默认名兜底），期望 %q 实际 %q", want, done.Message)
 	}
 	if got := ctx.createTaskURL(); got != "local://"+root {
@@ -898,7 +914,7 @@ func TestApplyCreateTasksOrchestration(t *testing.T) {
 // 不走默认名兜底（createDone 文案携带生效名）。
 func TestApplyCreateTasksCustomName(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, nil)
-	if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+	if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
 	started, err := m.ApplyCreateTasks(root, "  我的批次  ")
@@ -1011,7 +1027,9 @@ func collectWorkbenchEvents(t *testing.T, ctx workbenchEventReader) []workbenchF
 func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 	t.Run("成功全链清空选择集", func(t *testing.T) {
 		root, m, ctx := recursiveCreateFixture(t, nil)
-		if _, err := m.SetSelection(root, []string{"d:多轨", "d:已识别"}); err != nil {
+		if _, err := m.SetSelection(root, []string{
+			"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg", "f:已识别/【作者A】标题1.jpg",
+		}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		started, err := m.ApplyCreateTasks(root, "异步批次")
@@ -1022,11 +1040,11 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 		if !done.Success {
 			t.Fatalf("宿主同步递归桩应成功收尾，实际: %s", done.Message)
 		}
-		if !strings.Contains(done.Message, "已创建任务「异步批次」：2 件作品，共 3 个子任务") {
-			t.Fatalf("createDone 文案应携带真实产出计数（2 作品 3 子行），实际 %q", done.Message)
+		if !strings.Contains(done.Message, "已创建任务「异步批次」：3 件作品，共 3 个子任务") {
+			t.Fatalf("createDone 文案应携带真实产出计数（3 作品 3 子行），实际 %q", done.Message)
 		}
-		// 事件序列（阶段4 双计数模型）：createProgress(verify 0/2) 首反馈（甲1：
-		// works 解析完成即发、真分母即刻可见）→ createProgress(verify 2/2) 终值
+		// 事件序列（阶段4 双计数模型）：createProgress(verify 0/3) 首反馈（甲1：
+		// works 解析完成即发、真分母即刻可见）→ createProgress(verify 3/3) 终值
 		//（恒发）→ createProgress(create 3/3)（单批不重叠；重叠期双计数锚定见
 		// create_pipeline_test.go）→ createDone
 		var firstVerifyAt, verifyFinalAt, createAt, doneAt = -1, -1, -1, -1
@@ -1043,11 +1061,11 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 				doneAt = i
 			}
 		}
-		if firstVerifyAt < 0 || firstVerifyEvt.Done != 0 || firstVerifyEvt.Total != 2 {
-			t.Fatalf("首个 createProgress 应为核对相首反馈（0/2，先于一切发射相事件），实际 idx=%d %+v", firstVerifyAt, firstVerifyEvt)
+		if firstVerifyAt < 0 || firstVerifyEvt.Done != 0 || firstVerifyEvt.Total != 3 {
+			t.Fatalf("首个 createProgress 应为核对相首反馈（0/3，先于一切发射相事件），实际 idx=%d %+v", firstVerifyAt, firstVerifyEvt)
 		}
-		if verifyFinalAt < 0 || verifyFinalEvt.Done != 2 || verifyFinalEvt.Total != 2 {
-			t.Fatalf("核对相终值事件应在场且计数=已核对/全部作品（2/2），实际 idx=%d %+v", verifyFinalAt, verifyFinalEvt)
+		if verifyFinalAt < 0 || verifyFinalEvt.Done != 3 || verifyFinalEvt.Total != 3 {
+			t.Fatalf("核对相终值事件应在场且计数=已核对/全部作品（3/3），实际 idx=%d %+v", verifyFinalAt, verifyFinalEvt)
 		}
 		if createAt < 0 || createEvt.Done != 3 || createEvt.Total != 3 {
 			t.Fatalf("创建相事件应在场且计数=已发射/计划子行（3/3），实际 idx=%d %+v", createAt, createEvt)
@@ -1067,7 +1085,7 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 	t.Run("失败保留选择集并携带部分完成信息", func(t *testing.T) {
 		root, m, ctx := recursiveCreateFixture(t, nil)
 		ctx.afterEmitFail = true // 产出消费完毕后宿主回告失败（发射进度已落账 2/2）
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		if _, err := m.ApplyCreateTasks(root, ""); err != nil {
@@ -1087,7 +1105,7 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("读取会话失败: %v", err)
 		}
-		if len(sess.Selection) != 1 {
+		if len(sess.Selection) != 2 {
 			t.Fatalf("失败终态应保留选择集供重试，实际 %v", sess.Selection)
 		}
 	})
@@ -1095,7 +1113,7 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 	t.Run("零产出传输失败走通用失败文案", func(t *testing.T) {
 		root, m, ctx := recursiveCreateFixture(t, nil)
 		ctx.transportFail = true
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		if _, err := m.ApplyCreateTasks(root, ""); err != nil {
@@ -1113,7 +1131,7 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 	t.Run("进行中重复发起以创建进行中拒绝", func(t *testing.T) {
 		block := make(chan struct{})
 		root, m, ctx := recursiveCreateFixture(t, block)
-		if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 			t.Fatalf("写入选择集失败: %v", err)
 		}
 		if started, err := m.ApplyCreateTasks(root, ""); err != nil || !started {
@@ -1129,7 +1147,7 @@ func TestApplyCreateTasksAsyncEventSequence(t *testing.T) {
 			t.Fatalf("放行后创建应成功收尾，实际 %q", done.Message)
 		}
 		// 收尾后运行态闸摘除：再次发起不再被「创建进行中」拒绝
-		if _, err := m.SetSelection(root, []string{"d:已识别"}); err != nil {
+		if _, err := m.SetSelection(root, []string{"f:已识别/【作者A】标题1.jpg"}); err != nil {
 			t.Fatalf("重建选择集失败: %v", err)
 		}
 		ctx.transportFail = true
@@ -1246,7 +1264,7 @@ func TestAssignmentSnapshotSelfContainedAfterSessionDeletion(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, map[string]SessionAssignment{
 		"多轨/【作者C】标题3.jpg": {Title: "手工标题", UpdatedAtMs: 1},
 	})
-	if _, err := m.SetSelection(root, []string{"d:多轨"}); err != nil {
+	if _, err := m.SetSelection(root, []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg"}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
 	resps := collectWorkbenchCreate(t, m, ctx, root, "")
@@ -1286,8 +1304,8 @@ func TestAssignmentSnapshotSelfContainedAfterSessionDeletion(t *testing.T) {
 func TestPredicateConsistencyAcrossDryRunCreateAndRecompute(t *testing.T) {
 	root, m, ctx := recognizedSelectionFixture(t, nil)
 
-	// ① 干跑侧：谓词识别的作品（根目录聚合作品 d:""）在域内可选
-	if _, err := m.SetSelection(root, []string{"d:"}); err != nil {
+	// ① 干跑侧：谓词识别的文件（根目录直挂）在域内可选
+	if _, err := m.SetSelection(root, []string{"f:库内作者名.jpg"}); err != nil {
 		t.Fatalf("谓词识别作品应在干跑结论下可选: %v", err)
 	}
 
@@ -1332,9 +1350,9 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 	ctx.createTaskBlock = make(chan struct{})
 	ctx.mu.Unlock()
 
-	m.HandleFrontendRequest([]byte(`{"seq":41,"action":"setSelection","root":` + jsonQuote(root) + `,"works":["d:多轨","d:已识别"]}`))
+	m.HandleFrontendRequest([]byte(`{"seq":41,"action":"setSelection","root":` + jsonQuote(root) + `,"works":["f:多轨/【作者B】标题2.jpg","f:多轨/【作者C】标题3.jpg","f:已识别/【作者A】标题1.jpg"]}`))
 	resp := ctx.lastResponse(t)
-	if !resp.OK || resp.Decisions != nil || len(resp.Selection) != 2 {
+	if !resp.OK || resp.Decisions != nil || len(resp.Selection) != 3 {
 		t.Fatalf("setSelection 应回告选择集轻量回执（decisions 应剥离），实际 %+v", resp)
 	}
 
@@ -1344,7 +1362,7 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 		t.Fatalf("createTasks 应回告已开始创建（started），实际 %+v", resp)
 	}
 	// 立即应答时创建在途：轻量回执的选择集仍在场（清空随 createDone 成功态发生）
-	if resp.Decisions != nil || len(resp.Selection) != 2 {
+	if resp.Decisions != nil || len(resp.Selection) != 3 {
 		t.Fatalf("createTasks 立即应答应携带在途选择集轻量回执，实际 selection=%v", resp.Selection)
 	}
 
@@ -1364,7 +1382,7 @@ func TestWorkbenchSelectionActionsDispatch(t *testing.T) {
 		t.Fatalf("createDone 成功后选择集应清理，实际 %v", sess.Selection)
 	}
 
-	m.HandleFrontendRequest([]byte(`{"seq":43,"action":"setSelection","root":` + jsonQuote(root) + `,"works":["d:未识别"]}`))
+	m.HandleFrontendRequest([]byte(`{"seq":43,"action":"setSelection","root":` + jsonQuote(root) + `,"works":["f:未识别/随便.txt"]}`))
 	resp = ctx.lastResponse(t)
 	if resp.OK || !strings.Contains(resp.Error, "不可选") {
 		t.Fatalf("不可选作品的 setSelection 应回告错误，实际 %+v", resp)
@@ -1416,7 +1434,7 @@ func TestWorkbenchSelectionActionReplyBound(t *testing.T) {
 	ctx.createTaskBlock = make(chan struct{})
 	ctx.mu.Unlock()
 
-	works := []string{"d:多轨", "d:已识别"}
+	works := []string{"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg", "f:已识别/【作者A】标题1.jpg"}
 	setSelMeasured := 0
 	m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
 		Seq: 51, Action: workbenchActionSetSelection, Root: root, Works: works,
@@ -1504,9 +1522,9 @@ func (c *streamDeathCreateTaskCtx) CreateTask(url string) (*sdkdto.CreateTaskRes
 	return &sdkdto.CreateTaskResult{Succeed: false, Msg: "插件流空闲超时: 1m0s 内未收到数据（测试注入）"}, nil
 }
 
-// streamDeathCreateFixture 宿主流断链测试环境：单目录 25 轨聚合作品（全量识别后
-// 可选，选择集=该作品 → 25 子行），fetcher 单批条数界 1（每子行一批——发射通道
-// 16 缓冲必然填满、释放环阻塞在通道发送处）。
+// streamDeathCreateFixture 宿主流断链测试环境：单目录 25 件单文件作品（全量识别
+// 后可选，选择集=全部作品 → 25 子行），fetcher 单批条数界 1（每子行一批——发射
+// 通道 16 缓冲必然填满、释放环阻塞在通道发送处）。
 func streamDeathCreateFixture(t *testing.T, tracks int) (string, *SessionManager, *streamDeathCreateTaskCtx) {
 	t.Helper()
 	root := t.TempDir()
@@ -1542,7 +1560,11 @@ func streamDeathCreateFixture(t *testing.T, tracks int) (string, *SessionManager
 // 发送处的形态永不落盘）。
 func TestStreamDeathHaltsEmissionAndFreezesCount(t *testing.T) {
 	root, m, ctx := streamDeathCreateFixture(t, 25)
-	if _, err := m.SetSelection(root, []string{"d:聚合目录"}); err != nil {
+	works := make([]string, 0, 25)
+	for i := 0; i < 25; i++ {
+		works = append(works, fmt.Sprintf("f:聚合目录/【作者甲】标题%02d.jpg", i))
+	}
+	if _, err := m.SetSelection(root, works); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
 	}
 	started, err := m.ApplyCreateTasks(root, "流断批次")

@@ -2063,7 +2063,7 @@ func snapFileWireBytes(f SnapFile) int {
 // 投影层预览上限截断后形态估算——与 domain 分节逐条投影的出线形态一致）。
 func selectableWorkWireBytes(w *SelectableWork) int {
 	n := 104
-	n += len(w.WorkID) + len(w.Kind) + len(w.DirRelKey) + len(w.SetKey) + len(w.State)
+	n += len(w.WorkID) + len(w.DirRelKey) + len(w.SetKey) + len(w.State)
 	for _, rel := range previewWireMembers(w.Files) {
 		n += 14 + len(rel)
 	}

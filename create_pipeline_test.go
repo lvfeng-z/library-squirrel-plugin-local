@@ -69,15 +69,14 @@ func newParallelEmitFixture(t *testing.T, dirs, files int, cfg emitDirectCfg) (s
 	var works []*SelectableWork
 	for d := 0; d < dirs; d++ {
 		dirKey := fmt.Sprintf("目录%02d", d)
-		rel := make([]string, 0, files)
 		for f := 0; f < files; f++ {
 			name := fmt.Sprintf("文件%02d.jpg", f)
+			rel := dirKey + "/" + name
 			writeTestFile(t, root+"/"+dirKey+"/"+name, content)
-			rel = append(rel, dirKey+"/"+name)
+			works = append(works, &SelectableWork{
+				WorkID: "f:" + rel, DirRelKey: dirKey, Files: []string{rel},
+			})
 		}
-		works = append(works, &SelectableWork{
-			WorkID: "d:" + dirKey, Kind: WorkKindDirTracks, DirRelKey: dirKey, Files: rel,
-		})
 	}
 	clock := &stepClock{t: time.Now(), step: cfg.clockStep}
 	h := &LocalImportWorkFetcher{
@@ -360,6 +359,7 @@ func TestHashThrottleThreeLayerResolution(t *testing.T) {
 // 且晚于一切中间值；节流中间值按 ≥2s 时钟放行）。
 func TestCreateProgressFirstFeedbackAndTimeThrottle(t *testing.T) {
 	const dirs, files = 6, 2
+	const worksTotal = dirs * files // 每文件一件单文件作品：核对相计数按作品=文件数
 	t.Run("冻结时钟：中间值节流只剩首反馈与终值", func(t *testing.T) {
 		root, h, _, ctx, sess, works := newParallelEmitFixture(t, dirs, files, emitDirectCfg{clockStep: 0})
 		items, reason, cancelled := runEmitDirect(t, h, root, sess, works, sdkdto.NoopHeartbeat{})
@@ -371,18 +371,18 @@ func TestCreateProgressFirstFeedbackAndTimeThrottle(t *testing.T) {
 		}
 		verify := phaseEvents(t, ctx, createPhaseVerify)
 		// 冻结时钟：首反馈 (0,N) → 节流器首放一条中间值 (1,N) → 终值 (N,N) 恒发
-		want := []int{0, 1, dirs}
+		want := []int{0, 1, worksTotal}
 		if len(verify) != len(want) {
 			t.Fatalf("冻结时钟下核对相事件应为 %v，实际 %d 条", want, len(verify))
 		}
 		for i, evt := range verify {
-			if evt.Done != want[i] || evt.Total != dirs {
-				t.Fatalf("第 %d 条核对事件应为 (%d/%d)，实际 (%d/%d)", i, want[i], dirs, evt.Done, evt.Total)
+			if evt.Done != want[i] || evt.Total != worksTotal {
+				t.Fatalf("第 %d 条核对事件应为 (%d/%d)，实际 (%d/%d)", i, want[i], worksTotal, evt.Done, evt.Total)
 			}
 		}
 		final := verify[len(verify)-1]
-		if final.Done != dirs || final.Total != dirs {
-			t.Fatalf("末发应为终值 %d/%d，实际 %+v", dirs, dirs, final)
+		if final.Done != worksTotal || final.Total != worksTotal {
+			t.Fatalf("末发应为终值 %d/%d，实际 %+v", worksTotal, worksTotal, final)
 		}
 	})
 	t.Run("步进时钟：逐值放行、单调递增、终值殿后", func(t *testing.T) {
@@ -391,11 +391,11 @@ func TestCreateProgressFirstFeedbackAndTimeThrottle(t *testing.T) {
 			t.Fatalf("直驱不应中止: %s / %v", reason, cancelled)
 		}
 		verify := phaseEvents(t, ctx, createPhaseVerify)
-		if len(verify) != dirs+1 {
-			t.Fatalf("步进时钟（3s≥2s）下核对相事件应逐值放行共 %d 条，实际 %d", dirs+1, len(verify))
+		if len(verify) != worksTotal+1 {
+			t.Fatalf("步进时钟（3s≥2s）下核对相事件应逐值放行共 %d 条，实际 %d", worksTotal+1, len(verify))
 		}
 		for i, evt := range verify {
-			if evt.Done != i || evt.Total != dirs {
+			if evt.Done != i || evt.Total != worksTotal {
 				t.Fatalf("核对事件应单调递增（第 %d 条 done=%d）", i, evt.Done)
 			}
 		}
@@ -411,6 +411,7 @@ func TestCreateProgressFirstFeedbackAndTimeThrottle(t *testing.T) {
 // phase 分道）。
 func TestOverlappingDualCountProgress(t *testing.T) {
 	const dirs, files = 5, 2
+	const worksTotal = dirs * files // 每文件一件单文件作品：核对相计数按作品=文件数
 	root, h, _, ctx, sess, works := newParallelEmitFixture(t, dirs, files,
 		emitDirectCfg{batchCount: 1, clockStep: 3 * time.Second})
 	items, reason, cancelled := runEmitDirect(t, h, root, sess, works, sdkdto.NoopHeartbeat{})
@@ -434,8 +435,8 @@ func TestOverlappingDualCountProgress(t *testing.T) {
 		}
 	}
 	// 核对相：首反馈 0 → 终值 N（逐值在场）
-	if len(verifyDone) != dirs+1 || verifyDone[0] != 0 || verifyDone[len(verifyDone)-1] != dirs {
-		t.Fatalf("核对行应为 0..%d 全序列，实际 %v", dirs, verifyDone)
+	if len(verifyDone) != worksTotal+1 || verifyDone[0] != 0 || verifyDone[len(verifyDone)-1] != worksTotal {
+		t.Fatalf("核对行应为 0..%d 全序列，实际 %v", worksTotal, verifyDone)
 	}
 	// 发射行：自首批发射起出现、递增、终值=实际子行数（核对终值之后仍在场）
 	if len(createDone) < 2 || createDone[0] == 0 {
@@ -564,8 +565,8 @@ func (c *hookedHostCtx) cancelNow() {
 	c.cancelResps = append(c.cancelResps, requestCreateCancel(c.root))
 }
 
-// newCreateChainFixture 全链环境（样例树+全量识别+宿主桩）：selection=5 作品
-//（d:多轨 2 轨、d:已识别 1 轨、f:序列三成员）→ 6 子行；fetcher 可注入面直改。
+// newCreateChainFixture 全链环境（样例树+全量识别+宿主桩）：selection=6 作品
+//（多轨 2 件、已识别 1 件、f:序列三成员）→ 6 子行；fetcher 可注入面直改。
 func newCreateChainFixture(t *testing.T, onItem func(int), preConsume func(), onDrained func()) (string, *SessionManager, *hookedHostCtx) {
 	t.Helper()
 	root := t.TempDir()
@@ -590,11 +591,11 @@ func newCreateChainFixture(t *testing.T, onItem func(int), preConsume func(), on
 	return root, m, ctx
 }
 
-// selectAllFive 写入 5 作品选择集（6 子行）。
+// selectAllFive 写入 6 作品选择集（6 子行）。
 func selectAllFive(t *testing.T, m *SessionManager, root string) {
 	t.Helper()
 	if _, err := m.SetSelection(root, []string{
-		"d:多轨", "d:已识别",
+		"f:多轨/【作者B】标题2.jpg", "f:多轨/【作者C】标题3.jpg", "f:已识别/【作者A】标题1.jpg",
 		"f:序列/前缀名_001.jpg", "f:序列/前缀名_002.jpg", "f:序列/前缀名_003.jpg",
 	}); err != nil {
 		t.Fatalf("写入选择集失败: %v", err)
@@ -804,7 +805,7 @@ func TestHashFailureWarningAggregated(t *testing.T) {
 			writeTestFile(t, root+"/"+rel, "ok")
 		}
 		works = append(works, &SelectableWork{
-			WorkID: "d:" + dirKey, Kind: WorkKindDirTracks, DirRelKey: dirKey, Files: []string{rel},
+			WorkID: "f:" + rel, DirRelKey: dirKey, Files: []string{rel},
 		})
 	}
 	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx,

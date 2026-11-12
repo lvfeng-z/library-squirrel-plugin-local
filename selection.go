@@ -1,5 +1,5 @@
-// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品、多轨原子；
-// 集=序列群、默认聚合单元），承载选择集的持久化校验、创建编排动作（异步化：
+// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品、每件恰
+// 一文件；集=序列群、默认聚合单元），承载选择集的持久化校验、创建编排动作（异步化：
 // 创建前目录级 mtime 对账〔逐文件存在性核对已并入 verify 哈希循环，见
 // hashWorkFilesAllOrNothing〕→ 一次 CreateTask 走 Create 过滤产出分支 → 选择集
 // 清理，均移独立 goroutine；进度与终态经 createProgress/createDone 事件推送）与
@@ -18,28 +18,11 @@ import (
 	"time"
 )
 
-// —— 作品键与作品类别 ——
+// —— 作品键 ——
 
-// 作品键前缀：区分两类作品键形态，保证键非空且两类键空间无歧义（裸相对路径不是
-// 合法作品键——目录聚合作品的键指向目录而非任何单文件，文件级半选在键形态上
-// 即不可表达）。
-const (
-	// workKeyPrefixSetMember 序列群成员作品：单文件作品，键=前缀+相对路径。
-	workKeyPrefixSetMember = "f:"
-	// workKeyPrefixDirTracks 目录聚合作品：同目录全部落单（未入群）文件合为一件
-	// 多轨作品，键=前缀+目录键（库根直下为裸前缀）。
-	workKeyPrefixDirTracks = "d:"
-)
-
-// 作品类别词汇（作品键的第二段语义，呈现与创建产出分组共用）。
-const (
-	// WorkKindSetMember 序列群成员：集内单文件作品（集=默认聚合单元，集内允许
-	// 作品级显式拆选，每个成员自身完整）。
-	WorkKindSetMember = "setMember"
-	// WorkKindDirTracks 目录聚合作品：同目录落单文件的全部轨道为一件原子作品
-	//（多轨不可拆选——轨道集由作品定义整体持有）。
-	WorkKindDirTracks = "dirTracks"
-)
+// 作品键前缀：保证键非空且与裸相对路径可区分。每件作品恰一文件，键=前缀+该
+// 文件相对路径（序列群成员与落单文件同形，差别仅在是否属集）。
+const workKeyPrefixFile = "f:"
 
 // 作品呈现状态词汇（状态过滤与置灰判定用；worst-of-files 口径）。
 const (
@@ -62,24 +45,23 @@ func splitWorkSetKey(setKey string) (dirRelKey, groupKey string) {
 	return dirRelKey, groupKey
 }
 
-// SelectableWork 可选作品：选择的最小粒度。Files 为作品全部轨道（相对库根的
-// '/' 路径）——选择状态只挂作品键，轨道集随作品整体进出选择集，结构上表达
-// 不了「半作品」。
+// SelectableWork 可选作品：选择的最小粒度。每件作品恰一文件（Files 恒单轨）——
+// 文件的多作品归属（同目录散图是否同一作品的多页/多轨）属识别面结论，识别面
+// 未提供该判定前选择域不虚构聚合；Files 保留轨道集形态，真实作品归属识别落地
+// 后多轨作品经此回归。
 type SelectableWork struct {
-	// WorkID 作品键（两类前缀之一 + 寻址段）。
+	// WorkID 作品键（workKeyPrefixFile + 文件相对路径）。
 	WorkID string `json:"workId"`
-	// Kind 作品类别（WorkKindSetMember / WorkKindDirTracks）。
-	Kind string `json:"kind"`
 	// DirRelKey 所属目录键（'/' 路径，库根直下为空串）。
 	DirRelKey string `json:"dirRelKey"`
-	// Files 作品全部轨道的相对路径（集成员恰一条；目录聚合为该目录全部落单文件）。
+	// Files 作品全部轨道的相对路径（现况恒一条）。
 	Files []string `json:"files"`
-	// SetKey 所属集键（仅集成员非空；目录聚合作品不可拆、不属任何集）。
+	// SetKey 所属集键（仅序列群成员非空；落单文件不属任何集）。
 	SetKey string `json:"setKey,omitempty"`
-	// Selectable 可选=全部文件已识别且无待裁决（未识别与待裁决均不可选——
+	// Selectable 可选=文件已识别且无待裁决（未识别与待裁决均不可选——
 	// 任务数据=识别结论的闭环保持完整）。
 	Selectable bool `json:"selectable"`
-	// State 呈现状态（状态过滤与置灰用，worst-of-files 口径）。
+	// State 呈现状态（状态过滤与置灰用，单文件口径）。
 	State string `json:"state"`
 }
 
@@ -169,10 +151,11 @@ func workVitality(fileByPath map[string]*SnapFile, ignored map[string]bool, file
 	}
 }
 
-// DeriveWorkDomain 从识别全景快照推导选择域：
-//   - GroupKey 非空的文件（规则定群与结构群成员）各自成单文件作品，按
-//     「目录+分组键」归集为集（集内序取快照 GroupSeq）；
-//   - 其余文件按所属目录聚合为一件多轨作品（轨道集=该目录全部落单文件，原子）。
+// DeriveWorkDomain 从识别全景快照推导选择域：每个文件各自成一件单文件作品；
+// GroupKey 非空的文件（规则定群与结构群成员）另按「目录+分组键」归集为集
+//（集内序取快照 GroupSeq）——集=默认聚合单元，集内允许作品级显式拆选。
+// 文件的多作品归属（同目录散图是否同一作品的多页/多轨）属识别面结论，识别面
+// 未提供该判定，选择域不按目录虚构聚合。
 //
 // ignored 为会话已忽略项（相对路径集合，呈现态用；忽略不剥夺可选性——已识别
 // 的忽略项仍可被显式选为任务）。
@@ -186,36 +169,19 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 		fileByPath[snap.Files[i].RelPath] = &snap.Files[i]
 	}
 	setMembers := make(map[string][]*SelectableWork)
-	dirTracks := make(map[string]*SelectableWork)
-	appendWork := func(work *SelectableWork) {
-		domain.Works = append(domain.Works, work)
-		domain.byWork[work.WorkID] = work
-	}
 	for i := range snap.Files {
 		f := &snap.Files[i]
+		work := &SelectableWork{
+			WorkID:    workKeyPrefixFile + f.RelPath,
+			DirRelKey: f.DirRelKey,
+			Files:     []string{f.RelPath},
+		}
+		domain.Works = append(domain.Works, work)
+		domain.byWork[work.WorkID] = work
 		if f.GroupKey != "" {
-			work := &SelectableWork{
-				WorkID:    workKeyPrefixSetMember + f.RelPath,
-				Kind:      WorkKindSetMember,
-				DirRelKey: f.DirRelKey,
-				Files:     []string{f.RelPath},
-				SetKey:    workSetKey(f.DirRelKey, f.GroupKey),
-			}
-			appendWork(work)
+			work.SetKey = workSetKey(f.DirRelKey, f.GroupKey)
 			setMembers[work.SetKey] = append(setMembers[work.SetKey], work)
-			continue
 		}
-		work := dirTracks[f.DirRelKey]
-		if work == nil {
-			work = &SelectableWork{
-				WorkID:    workKeyPrefixDirTracks + f.DirRelKey,
-				Kind:      WorkKindDirTracks,
-				DirRelKey: f.DirRelKey,
-			}
-			dirTracks[f.DirRelKey] = work
-			appendWork(work)
-		}
-		work.Files = append(work.Files, f.RelPath)
 	}
 	for _, work := range domain.Works {
 		work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files)
@@ -306,8 +272,8 @@ func dirMeaningChains(snap *RecognitionSnapshot) map[string][]PathMeaning {
 // —— 选择集持久化（经会话管理器同点串行）——
 
 // SetSelection 全量替换资源选择集（作品键集合）：逐键校验存在于当前选择域且
-// 可选（未识别/含待裁决的作品不可选），键去重后按稳定序落库。作品为原子——
-// 本接口只接受作品键，目录聚合作品的轨道不可单独进出选择集。
+// 可选（未识别/待裁决的作品不可选），键去重后按稳定序落库。作品为原子——
+// 本接口只接受作品键（每件恰一文件）。
 func (m *SessionManager) SetSelection(root string, workIDs []string) (*WorkbenchSession, error) {
 	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
@@ -340,12 +306,9 @@ func (m *SessionManager) SetSelection(root string, workIDs []string) (*Workbench
 	})
 }
 
-// displayOfWork 作品的人话指称（告警与错误文案用）。
+// displayOfWork 作品的人话指称（告警与错误文案用）：单文件作品即指其文件路径。
 func displayOfWork(work *SelectableWork) string {
-	if work.Kind == WorkKindDirTracks {
-		return fmt.Sprintf("「%s」目录聚合作品（%d 轨）", work.DirRelKey, len(work.Files))
-	}
-	return fmt.Sprintf("「%s」", strings.TrimPrefix(work.WorkID, workKeyPrefixSetMember))
+	return fmt.Sprintf("「%s」", strings.TrimPrefix(work.WorkID, workKeyPrefixFile))
 }
 
 // —— 创建前磁盘对账（守卫）——
