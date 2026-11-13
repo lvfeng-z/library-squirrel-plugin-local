@@ -75,6 +75,13 @@ func (c *workbenchTestCtx) Infof(string, ...any) {}
 // 零值不可解引用，测试桩必须显式提供；静默丢弃即可，断言面在专用桩 warnCountingCtx）。
 func (c *workbenchTestCtx) Warnf(string, ...any) {}
 
+// ListResourceTypes 资源类型注册表投影桩（识别轮的类型锚定拉取）：缺省回空
+// 投影——聚合规则按类型悬空停用，既有测试档案无聚合条目、行为零变化；需要
+// 在册类型的聚合锚测试经 RunPipelineWithTypes 直供索引，不经此桩。
+func (c *workbenchTestCtx) ListResourceTypes() (*sdkdto.ListResourceTypesResponse, error) {
+	return &sdkdto.ListResourceTypesResponse{}, nil
+}
+
 // workbenchTestCtx 工作台测试用的插件上下文桩：KV 走内存存储、前端事件发布被
 // 记录供断言；其余方法一旦被调用即 panic 暴露测试缺口。
 type workbenchTestCtx struct {
@@ -552,7 +559,7 @@ func TestProfileReconcileOnActivate(t *testing.T) {
 
 // TestEvaluatorReconcileOnActivate 求值器构建标识对账：快照铸于另一构建标识的
 // 求值器（识别内核换版）时恢复会话提示重识别；同一标识不提示；当前未打标
-//（空串）放行；旧快照未带标识（空串）而当前有值（存量库升级）提示。
+// （空串）放行；旧快照未带标识（空串）而当前有值（存量库升级）提示。
 func TestEvaluatorReconcileOnActivate(t *testing.T) {
 	store := newFakeSessionStore()
 	mgr, ctx := newTestManager(t, store)
@@ -780,7 +787,7 @@ func mustJSON(t *testing.T, req workbenchFrontendRequest) []byte {
 }
 
 // TestGetPanoramaDiffConclusionProjection 护栏四·差异巨表装载瘦身：巨差异轮
-//（复用 TestGetPanoramaOverviewDecisionsDiffBudget 的夹具构造形态：变更 5 万 +
+// （复用 TestGetPanoramaOverviewDecisionsDiffBudget 的夹具构造形态：变更 5 万 +
 // 新增/消失各 5 千，条目带前后结论）overview 差异分节走线上传输投影——每清单
 // 头 panoramaDiffConclusionHead 条保留前后结论、其余仅相对路径。断言面：
 //   - 投影形态：头 32 条含前后结论（含内容抽查）、其余仅路径；路径序列与

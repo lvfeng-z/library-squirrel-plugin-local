@@ -44,14 +44,18 @@ func TestExampleTemplatesSanity(t *testing.T) {
 			if !strings.Contains(tpl.Template, word) {
 				continue
 			}
-			// 占位写法：{词} 整位，或重复段量词变体 {词+} / {词*} / {词+;分隔}
-			//（词根出现且紧跟量词即该词位的合法占位写法）；可选词位 {词?}
-			// 变体（无 ;分隔 变体，须闭括号完整出现）。
-			okForm := strings.Contains(tpl.Template, "{"+word+"}") ||
-				strings.Contains(tpl.Template, "{"+word+"+") ||
-				strings.Contains(tpl.Template, "{"+word+"*") ||
-				strings.Contains(tpl.Template, "{"+word+"?}")
-			if !okForm {
+			// 占位写法核验：剔除全部占位词记号后的字面残余不得再含词根
+			//（出现于占位记号内即占位写法；{作品} 与 {作品号} 一类词根互为
+			// 前缀，记号内的出现不算字面误写）。
+			tokens, err := tokenizeCondx(tpl.Template)
+			if err != nil {
+				t.Fatalf("词条 %q 的模板 %q 词法失败: %v", tpl.Name, tpl.Template, err)
+			}
+			var literal strings.Builder
+			for _, tok := range tokens {
+				literal.WriteString(tok.literal)
+			}
+			if strings.Contains(literal.String(), word) {
 				t.Errorf("词条 %q 的模板 %q 内词 %q 未按 {%s} 占位写法出现", tpl.Name, tpl.Template, word, word)
 			}
 		}

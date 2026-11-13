@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/lvfeng-z/library-squirrel-sdk/contract"
+	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
 // MetadataDimension 为元数据的含义维度：同一份声明值在不同维度下语义不同。
@@ -100,6 +103,24 @@ const (
 	// RuleSourceAdjudication 表示冲突裁决生成的规则（用户对声明冲突裁决后产出的
 	// 组合规则）。
 	RuleSourceAdjudication RuleSource = "adjudication"
+	// RuleSourcePreset 表示预置种子规则：首次档案初始化写入的出厂条目，此后与
+	// 用户条目同权（可见、可启停、可编辑、可复制），「恢复预置」入口兜底误删。
+	RuleSourcePreset RuleSource = "preset"
+)
+
+// RuleCategory 为规则的两级综合类别：同一条件行机制（四种源）上的产出分野。
+type RuleCategory string
+
+const (
+	// RuleCategoryMetadata 表示元数据规则：条件行+元数据产出（既有「条件+提取
+	// 动作」路径的综合命名，求值零改动）。缺省值——旧档与既有条目不带类别
+	// 字段即属此类，零迁移。
+	RuleCategoryMetadata RuleCategory = "metadata"
+	// RuleCategoryAggregate 表示聚合规则：轨行（四种源任选的普通条件行，模板
+	// 可带捕获）+作品标识声明+分轨入口（聚合成作品产出）。轨行是平行选择器
+	// 非布尔组合，求值挂在汇流后的聚合段（见 pipeline.go），不进逐文件求值
+	// 循环。
+	RuleCategoryAggregate RuleCategory = "aggregate"
 )
 
 // MetadataDeclaration 为提取产物：一条带来源载体与出处的元数据声明。
@@ -431,6 +452,52 @@ type SynthesisPolicy struct {
 	Roles []RoleBinding `json:"roles"`
 }
 
+// IdentityPart 为作品标识声明的一个部分：选自「轨行号·捕获名」——文件名捕获
+// 与目录名捕获按行内命名捕获组取值（目录捕获被选=同目录文件共享该值，目录
+// 成组）；序列群键用保留名 identityGroupKeyCapture（非序号捕获按序拼接，每
+// 序列组一作品，聚合规则该行须为序列目标）。多个部分按声明序拼成复合标识。
+type IdentityPart struct {
+	// Row 为轨行号（1 起顶层序号；聚合规则只收普通条件行，顶层序号即先序行号）。
+	Row int `json:"row"`
+	// Capture 为捕获名（英文组名，如 {作品}→work）；保留名 groupKey=取该行
+	// 序列求值写入的群组键。
+	Capture string `json:"capture"`
+}
+
+// TrackAssign 为分轨入口的单行角色分配：轨行→结构角色。
+type TrackAssign struct {
+	// Row 为轨行号（1 起顶层序号）。序列行=集合轨（整序列组=N 存储位）；目录
+	// 行可作标识源或集合轨（子树命中文件共享同一角色）。
+	Row int `json:"row"`
+	// Role 为结构角色（如 video 的 videoMain、subtitle；article 的 document
+	// 与内嵌 image）：必含轨所在行（角色在类型规约中 Min≥1）承载聚合作品的
+	// 主导文件，角色选项按所选类型规约过滤。
+	Role string `json:"role"`
+}
+
+// 处置维度取值：伴随轨行在分轨入口中的处置两值。
+const (
+	// CompanionUseTrack 表示轨道承载：随作品导入成为资源的轨（本批唯一可写值）。
+	CompanionUseTrack = "track"
+	// CompanionUseMetadata 表示纯元数据承载：文件归属作品但无轨、不导入、不
+	// 独立成作品（其内容→元数据的消费随内容解析批次启用）。本批留位不实现：
+	// 档案载入校验拒绝该值（不做半截语义），编辑面不出该选项。
+	CompanionUseMetadata = "metadata"
+)
+
+// AggregateProduction 为聚合规则的分轨入口（聚合成作品产出）：类型先行——
+// 作品类型选自运行时资源类型注册表投影（内置 6 类+插件自定义类型），轨行→
+// 角色分配按所选类型的轨规约过滤。
+type AggregateProduction struct {
+	// WorkType 为作品类型（资源类型值；引用的类型不在册=悬空，档案载入停用
+	// 该条目并告警、识别求值跳过）。
+	WorkType string `json:"workType"`
+	// Tracks 为各轨行的角色分配。
+	Tracks []TrackAssign `json:"tracks"`
+	// CompanionUse 为伴随轨行的处置维度（track|metadata；空串按 track 载入）。
+	CompanionUse string `json:"companionUse,omitempty"`
+}
+
 // RuleEntry 为一条完整规则：模式 + 提取动作 + 合成策略。
 type RuleEntry struct {
 	// ID 为规则唯一标识。
@@ -441,6 +508,16 @@ type RuleEntry struct {
 	Source RuleSource `json:"source"`
 	// Enabled 为启用开关；禁用的规则不参与匹配。
 	Enabled bool `json:"enabled"`
+	// Category 为规则的两级综合类别（metadata|aggregate）：空串即 metadata
+	//（缺省类别，序列化省略——旧档与既有条目零迁移）。聚合规则的产出为聚合
+	// 归属（无提取动作），求值挂汇流后的聚合段。
+	Category RuleCategory `json:"category,omitempty"`
+	// Identity 为作品标识声明（聚合规则专属）：标识的每一部分选自「轨行号·
+	// 捕获名」。元数据规则不得携带（载入拒绝）。
+	Identity []IdentityPart `json:"identity,omitempty"`
+	// Aggregate 为分轨入口（聚合规则专属）：类型先行+轨行角色分配+处置维度。
+	// 元数据规则不得携带（载入拒绝）。
+	Aggregate *AggregateProduction `json:"aggregate,omitempty"`
 	// Refs 为被引用的成员规则 ID 列表（组合规则）：非空即组合规则——求值前提
 	// 为全部成员规则命中，提取动作可经 refCapture 引用成员捕获值。空/缺省=
 	// 普通规则（omitempty 保证旧档零迁移、JSON 往返等价；档案结构版本维持 4）。
@@ -533,15 +610,18 @@ type patternJSON struct {
 // 列表）为唯一语法（pattern 缺席）；pattern（模式树多态中间表示）为 v3 及
 // 更早条目的旧形态，档案版本翻转为仅认 4 后载入侧即拒绝。
 type ruleEntryJSON struct {
-	ID          string             `json:"id"`
-	Description string             `json:"description"`
-	Source      RuleSource         `json:"source"`
-	Enabled     bool               `json:"enabled"`
-	Refs        []string           `json:"refs,omitempty"`
-	Conditions  []CondxRow         `json:"conditions,omitempty"`
-	Pattern     *patternJSON       `json:"pattern,omitempty"`
-	Extractions []ExtractionAction `json:"extractions"`
-	Synthesis   SynthesisPolicy    `json:"synthesis"`
+	ID          string               `json:"id"`
+	Description string               `json:"description"`
+	Source      RuleSource           `json:"source"`
+	Enabled     bool                 `json:"enabled"`
+	Category    RuleCategory         `json:"category,omitempty"`
+	Identity    []IdentityPart       `json:"identity,omitempty"`
+	Aggregate   *AggregateProduction `json:"aggregate,omitempty"`
+	Refs        []string             `json:"refs,omitempty"`
+	Conditions  []CondxRow           `json:"conditions,omitempty"`
+	Pattern     *patternJSON         `json:"pattern,omitempty"`
+	Extractions []ExtractionAction   `json:"extractions"`
+	Synthesis   SynthesisPolicy      `json:"synthesis"`
 }
 
 // ruleProfileJSON 为 RuleProfile 的序列化中间结构。
@@ -826,6 +906,9 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 			Description: rule.Description,
 			Source:      rule.Source,
 			Enabled:     rule.Enabled,
+			Category:    rule.Category,
+			Identity:    rule.Identity,
+			Aggregate:   rule.Aggregate,
 			Refs:        rule.Refs,
 			Conditions:  rule.Conditions,
 			Extractions: rule.Extractions,
@@ -841,6 +924,9 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 		Description: rule.Description,
 		Source:      rule.Source,
 		Enabled:     rule.Enabled,
+		Category:    rule.Category,
+		Identity:    rule.Identity,
+		Aggregate:   rule.Aggregate,
 		Refs:        rule.Refs,
 		Pattern:     pj,
 		Extractions: rule.Extractions,
@@ -850,8 +936,22 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 
 // ruleFromJSON 把规则中间结构构造回 RuleEntry：conditions 形态（v4）编译为
 // 模式树缓存并对提取动作做行引用存在性校验；pattern 形态（旧）走模式树
-// 载入。两形态皆缺或构造校验失败返回中文错误。
+// 载入。两形态皆缺或构造校验失败返回中文错误。载入头部先做两级类别归一
+// （空串→metadata）与聚合声明校验（见 validateAggregateEntry）。
 func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
+	// 类别归一不物化：空串即 metadata（缺省类别），序列化侧 omitempty 省略
+	// ——旧档与既有条目零迁移、往返字节等价不变。
+	if rj.Category != "" && rj.Category != RuleCategoryMetadata && rj.Category != RuleCategoryAggregate {
+		return nil, fmt.Errorf("规则 %q 的类别非法: %q（metadata / aggregate）", rj.ID, string(rj.Category))
+	}
+	if rj.Category != RuleCategoryAggregate && (len(rj.Identity) > 0 || rj.Aggregate != nil) {
+		return nil, fmt.Errorf("规则 %q 为元数据规则，不得携带聚合声明（identity / aggregate）", rj.ID)
+	}
+	if rj.Category == RuleCategoryAggregate {
+		if err := validateAggregateEntry(rj); err != nil {
+			return nil, err
+		}
+	}
 	// 组合规则（refs 非空）的空条件表落档形态：omitempty 序列化把空数组写成
 	// 无 conditions 键（与 pattern 缺席同形），构造时补回空表走同款处理——
 	// 否则空条件组合「可存不可载」（2026-10-26 live-test 抓出的二次缺陷）。
@@ -879,6 +979,9 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 				Description: rj.Description,
 				Source:      rj.Source,
 				Enabled:     rj.Enabled,
+				Category:    rj.Category,
+				Identity:    rj.Identity,
+				Aggregate:   rj.Aggregate,
 				Refs:        rj.Refs,
 				Conditions:  rj.Conditions,
 				Pattern:     And{},
@@ -899,6 +1002,9 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 			Description: rj.Description,
 			Source:      rj.Source,
 			Enabled:     rj.Enabled,
+			Category:    rj.Category,
+			Identity:    rj.Identity,
+			Aggregate:   rj.Aggregate,
 			Refs:        rj.Refs,
 			Conditions:  rj.Conditions,
 			Pattern:     pat,
@@ -921,11 +1027,119 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 		Description: rj.Description,
 		Source:      rj.Source,
 		Enabled:     rj.Enabled,
+		Category:    rj.Category,
+		Identity:    rj.Identity,
+		Aggregate:   rj.Aggregate,
 		Refs:        rj.Refs,
 		Pattern:     pat,
 		Extractions: rj.Extractions,
 		Synthesis:   rj.Synthesis,
 	}, nil
+}
+
+// validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（轨行+作品标识
+// 声明+分轨入口）、与其他机制互斥（组合引用/提取动作/模式树旧形态）、轨行
+// 只收普通条件行（平行选择器——括号子组、行级非、跨行相等值校验均拒绝：
+// 轨行独立求值，相等门引用他行绑定恒不可得）、标识与分轨的行号及捕获名引用
+// 存在、处置维度 metadata 留位值载入即拒（沿未知词条「载入即拒绝」先例——
+// 不实现半截语义）。空串处置维度归一为 track。
+func validateAggregateEntry(rj *ruleEntryJSON) error {
+	if rj.Aggregate == nil {
+		return fmt.Errorf("聚合规则 %q 缺少分轨入口（aggregate）", rj.ID)
+	}
+	if len(rj.Identity) == 0 {
+		return fmt.Errorf("聚合规则 %q 缺少作品标识声明（identity）", rj.ID)
+	}
+	if len(rj.Refs) > 0 {
+		return fmt.Errorf("聚合规则 %q 不得为组合规则（聚合类别与 refs 互斥）", rj.ID)
+	}
+	if len(rj.Extractions) > 0 {
+		return fmt.Errorf("聚合规则 %q 不得携带提取动作（产出为聚合归属，非元数据声明）", rj.ID)
+	}
+	switch rj.Aggregate.CompanionUse {
+	case "", CompanionUseTrack:
+		rj.Aggregate.CompanionUse = CompanionUseTrack
+	case CompanionUseMetadata:
+		return fmt.Errorf("聚合规则 %q 的处置维度 metadata（纯元数据承载）为留位值，暂不支持", rj.ID)
+	default:
+		return fmt.Errorf("聚合规则 %q 的处置维度非法: %q（可用值 track）", rj.ID, rj.Aggregate.CompanionUse)
+	}
+	if rj.Conditions == nil || rj.Pattern != nil {
+		return fmt.Errorf("聚合规则 %q 须为条件行形态（conditions）", rj.ID)
+	}
+	total := len(rj.Conditions)
+	if total == 0 {
+		return fmt.Errorf("聚合规则 %q 的条件行非法: 条件行列表不能为空", rj.ID)
+	}
+	// 轨行间无且/或（平行选择器）：行前连接词在聚合规则中无语义，空串一律
+	// 归一为 and——仅为满足行式底盘的落档语法（非首行须带连接词），求值不
+	// 消费连接词。
+	for i := range rj.Conditions {
+		if i > 0 && rj.Conditions[i].Connector == "" {
+			rj.Conditions[i].Connector = "and"
+		}
+	}
+	for i := range rj.Conditions {
+		row := &rj.Conditions[i]
+		if row.Negated {
+			return fmt.Errorf("聚合规则 %q 第 %d 行带行级非：轨行不支持行级非", rj.ID, i+1)
+		}
+		if row.Condition == nil {
+			return fmt.Errorf("聚合规则 %q 第 %d 行为括号子组：轨行须为普通条件行（平行选择器，无且/或组合）", rj.ID, i+1)
+		}
+		for _, b := range row.Condition.Badges {
+			if b.Kind == CondxBadgeEqual {
+				return fmt.Errorf("聚合规则 %q 第 %d 行携带相等值校验：轨行独立求值，不支持跨行相等", rj.ID, i+1)
+			}
+		}
+	}
+	rowCaptures := make([]map[string]bool, total)
+	for i := range rj.Conditions {
+		caps, _, err := condxCapturesOf(rj.Conditions[i].Condition)
+		if err != nil {
+			return fmt.Errorf("聚合规则 %q 第 %d 行: %w", rj.ID, i+1, err)
+		}
+		set := make(map[string]bool, len(caps))
+		for _, c := range caps {
+			set[c] = true
+		}
+		rowCaptures[i] = set
+	}
+	for i := range rj.Identity {
+		part := &rj.Identity[i]
+		if part.Row < 1 || part.Row > total {
+			return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分行号 %d 越界（共 %d 行）", rj.ID, i+1, part.Row, total)
+		}
+		if part.Capture == "" {
+			return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分缺少捕获名", rj.ID, i+1)
+		}
+		if part.Capture == identityGroupKeyCapture {
+			if rj.Conditions[part.Row-1].Condition.Target != CondxTargetSeq {
+				return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分：序列群键（%s）只能选自序列目标行", rj.ID, i+1, identityGroupKeyCapture)
+			}
+			continue
+		}
+		declared := false
+		for _, set := range rowCaptures {
+			if set[part.Capture] {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分引用的捕获名 %q 未在任何轨行声明", rj.ID, i+1, part.Capture)
+		}
+	}
+	for i := range rj.Aggregate.Tracks {
+		ta := &rj.Aggregate.Tracks[i]
+		if ta.Row < 1 || ta.Row > total {
+			return fmt.Errorf("聚合规则 %q 的分轨入口第 %d 项行号 %d 越界（共 %d 行）", rj.ID, i+1, ta.Row, total)
+		}
+		if ta.Role == "" {
+			return fmt.Errorf("聚合规则 %q 的分轨入口第 %d 项缺少角色", rj.ID, i+1)
+		}
+	}
+	return nil
 }
 
 // knownSourceKinds / knownDimensions 为提取动作构造期校验用的合法取值集。
@@ -1475,6 +1689,9 @@ func validateRuleRefs(rule *RuleEntry, byID map[string]int, all []RuleEntry) err
 		if len(all[idx].Refs) > 0 {
 			return fmt.Errorf("引用的成员规则 %q 自身为组合规则（一期禁止嵌套组合引用）", ref)
 		}
+		if all[idx].Category == RuleCategoryAggregate {
+			return fmt.Errorf("引用的成员规则 %q 自身为聚合规则（轨行为平行选择器，不作组合门成员）", ref)
+		}
 		if err := validateRefRepeatWiring(rule, &all[idx], ref); err != nil {
 			return err
 		}
@@ -1550,4 +1767,181 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// —— 聚合规则的类型锚定与预置种子 ——
+
+// AnchorAggregateRules 聚合规则的类型锚定：引用的作品类型不在资源类型注册表
+// 投影（悬空——自定义类型可随其插件停用/卸载而注销）即停用该条目并返回告警
+// （识别求值随之跳过；沿组合规则悬空成员「跳过+载入告警」先例）。纯函数，
+// 改动只落在内存态档案对象、不回写存储——每次载入按当轮投影重新锚定；类型
+// 索引缺席（查询失败/上下文不可用）时全部聚合规则按悬空处理。
+func AnchorAggregateRules(profile *RuleProfile, types *resourceTypeIndex) []error {
+	if profile == nil {
+		return nil
+	}
+	var warns []error
+	for i := range profile.Rules {
+		rule := &profile.Rules[i]
+		if rule.Category != RuleCategoryAggregate || rule.Aggregate == nil || !rule.Enabled {
+			continue
+		}
+		if types.has(rule.Aggregate.WorkType) {
+			continue
+		}
+		rule.Enabled = false
+		label := rule.Description
+		if label == "" {
+			label = rule.ID
+		}
+		warns = append(warns, fmt.Errorf(
+			"聚合规则『%s』引用的作品类型 %q 不在资源类型注册表（可能已随插件停用或卸载注销），已停用该条目",
+			label, rule.Aggregate.WorkType))
+	}
+	return warns
+}
+
+// presetAggFileRow 构造预置种子的文件轨行：格式模板 + 扩展名谓词（模板对去
+// 扩展名的文件名正文求值，扩展名由 fileExt 终结谓词承载——词汇分工）。
+func presetAggFileRow(tpl, ext string) CondxRow {
+	row := CondxRow{Condition: &Condx{
+		Target: CondxTargetFile,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
+	}}
+	if ext != "" {
+		row.Condition.Attach = []CondxAttach{{Kind: CondxAttachFileExt, Value: ext}}
+	}
+	return row
+}
+
+// 预置种子规则的稳定 ID（恢复预置按 ID 判缺席）。
+const (
+	presetAggVideoSubtitleID    = "preset-agg-video-subtitle"
+	presetAggArticleImageTextID = "preset-agg-article-image-text"
+	presetAggVideoDesc          = "视频+字幕聚合为 video 作品（预置）"
+	presetAggArticleDesc        = "一图一文本聚合为 article 作品（预置）"
+)
+
+// PresetAggregateRules 预置聚合种子规则（两条，无特权机制——就是普通聚合规则）：
+//
+//   - 种子一「视频+字幕→video」：各视频扩展与各字幕扩展各一行（视频轨行的
+//     作业名模板不含扩展名——扩展名由谓词承载；字幕轨行用「{作品}.{任意}」
+//     带锚形态吞掉语言段，如 ep01.zh.srt 的标识取 ep01）；
+//   - 种子二「一图一文本→article」：txt 正文行 + jpg/png/webp 内嵌图行。
+//
+// 首次档案初始化写入（来源=预置），此后与用户条目同权——规则管理面可见、可
+// 启停、可编辑、可复制；「恢复预置」入口兜底（见 RestorePresetRules）。
+func PresetAggregateRules() []RuleEntry {
+	videoExts := []string{".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".flv"}
+	subtitleExts := []string{".srt", ".ass", ".ssa", ".vtt"}
+	videoTracks := make([]TrackAssign, 0, len(videoExts)+len(subtitleExts))
+	rows := make([]CondxRow, 0, len(videoExts)+len(subtitleExts))
+	for _, ext := range videoExts {
+		rows = append(rows, presetAggFileRow("{作品}", ext))
+		videoTracks = append(videoTracks, TrackAssign{Row: len(rows), Role: contract.StoreTypeVideoMain})
+	}
+	for _, ext := range subtitleExts {
+		rows = append(rows, presetAggFileRow("{作品}.{任意}", ext))
+		videoTracks = append(videoTracks, TrackAssign{Row: len(rows), Role: contract.StoreTypeSubtitle})
+	}
+	articleExts := []struct {
+		ext  string
+		role string
+	}{
+		{".txt", contract.StoreTypeDocument},
+		{".jpg", contract.StoreTypeImage}, {".png", contract.StoreTypeImage}, {".webp", contract.StoreTypeImage},
+	}
+	articleRows := make([]CondxRow, 0, len(articleExts))
+	articleTracks := make([]TrackAssign, 0, len(articleExts))
+	for _, e := range articleExts {
+		articleRows = append(articleRows, presetAggFileRow("{作品}", e.ext))
+		articleTracks = append(articleTracks, TrackAssign{Row: len(articleRows), Role: e.role})
+	}
+	return []RuleEntry{
+		{
+			ID:          presetAggVideoSubtitleID,
+			Description: presetAggVideoDesc,
+			Source:      RuleSourcePreset,
+			Enabled:     true,
+			Category:    RuleCategoryAggregate,
+			Conditions:  rows,
+			Identity:    []IdentityPart{{Row: 1, Capture: "work"}},
+			Aggregate: &AggregateProduction{
+				WorkType:     sdkdto.ResourceTypeVideo,
+				Tracks:       videoTracks,
+				CompanionUse: CompanionUseTrack,
+			},
+		},
+		{
+			ID:          presetAggArticleImageTextID,
+			Description: presetAggArticleDesc,
+			Source:      RuleSourcePreset,
+			Enabled:     true,
+			Category:    RuleCategoryAggregate,
+			Conditions:  articleRows,
+			Identity:    []IdentityPart{{Row: 1, Capture: "work"}},
+			Aggregate: &AggregateProduction{
+				WorkType:     sdkdto.ResourceTypeArticle,
+				Tracks:       articleTracks,
+				CompanionUse: CompanionUseTrack,
+			},
+		},
+	}
+}
+
+// EnsurePresetSeeded 首次档案初始化的种子入档：档案键缺席（从未写过档案）时
+// 写入含全部预置种子的档案并返回 true；已有档案（含用户清空后的空档案——
+// 键在场）不动、返回 false。写入走 SaveProfile 常规路径（首次写入不产生
+// 备份）。激活期调用（档案初始化点）。
+func EnsurePresetSeeded(store ProfileStore) (bool, error) {
+	if store == nil {
+		return false, fmt.Errorf("规则档案存储不可用，无法初始化预置种子")
+	}
+	stored, err := store.GetValue(RuleProfileKVKey)
+	if err != nil {
+		return false, fmt.Errorf("读取规则档案（预置种子初始化）失败: %w", err)
+	}
+	if stored != nil && stored.Value != "" {
+		return false, nil
+	}
+	profile := emptyProfile()
+	profile.Rules = append(profile.Rules, PresetAggregateRules()...)
+	if err := SaveProfile(store, profile); err != nil {
+		return false, fmt.Errorf("写入预置种子规则失败: %w", err)
+	}
+	return true, nil
+}
+
+// RestorePresetRules 恢复预置：把档案中缺席的预置种子条目按 ID 补回（误删
+// 兜底），返回补回条数。在场条目——含用户改写过的——一律不动（恢复动作只
+// 补缺席，不覆写用户改造；改坏的条目先删除再恢复即回出厂形态）。档案键
+// 缺席时等同首次初始化（全量入档）。载入逐条告警不在本出口重复上报——它们
+// 由后续每次常规载入再现。
+func RestorePresetRules(store ProfileStore) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("规则档案存储不可用，无法恢复预置")
+	}
+	profile, _ := LoadProfile(store)
+	if profile == nil {
+		return 0, fmt.Errorf("规则档案不可载入，无法恢复预置")
+	}
+	present := make(map[string]bool, len(profile.Rules))
+	for _, rule := range profile.Rules {
+		present[rule.ID] = true
+	}
+	added := 0
+	for _, seed := range PresetAggregateRules() {
+		if present[seed.ID] {
+			continue
+		}
+		profile.Rules = append(profile.Rules, seed)
+		added++
+	}
+	if added == 0 {
+		return 0, nil
+	}
+	if err := SaveProfile(store, profile); err != nil {
+		return 0, fmt.Errorf("写入恢复的预置规则失败: %w", err)
+	}
+	return added, nil
 }

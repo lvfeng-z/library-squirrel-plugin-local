@@ -1,5 +1,6 @@
 // 本地导入解析内核的流水线：按父目录聚合扫描条目并构造匹配输入，先在分组段求值
-// 兄弟群组模式定群，再在提取段依序求值其余规则产出元数据声明；纯函数，无 IO 与日志。
+// 兄弟群组模式定群，再在提取段依序求值其余规则产出元数据声明，最后在汇流后的
+// 聚合段对聚合规则做标识等值并组；纯函数，无 IO 与日志。
 package main
 
 import (
@@ -37,6 +38,11 @@ type FileDecision struct {
 	// ScanNotes 为贪婪识别动作的歧义记录（作者/作品集扫描出多个互异库内值，
 	// 宁缺勿错不产出声明时记此），供上层观察呈现。
 	ScanNotes []ScanNote
+	// AggWorkKey 为聚合段落定的聚合作品键（"f:"+主导文件相对路径；空=无聚合，
+	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）。两字段由
+	// 汇流后的聚合段写入（见 runAggregationStage）——逐文件求值循环不产出。
+	AggWorkKey   string
+	AggTrackRole string
 }
 
 // ScanNote 为一条贪婪识别歧义记录。
@@ -76,7 +82,13 @@ func ancestorChildDirCounts(dirNames []string, childDirsByParent map[string]map[
 	return counts
 }
 
-// RunPipeline 对一批扫描条目执行解析内核流水线，返回与输入同序的单文件结论：
+// RunPipeline 对一批扫描条目执行解析内核流水线（无类型规约形态：聚合段按
+// 类型索引缺席处理，聚合规则跳过）。求值阶段构成见 RunPipelineWithTypes。
+func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileDecision {
+	return RunPipelineWithTypes(files, rules, lib, nil)
+}
+
+// RunPipelineWithTypes 对一批扫描条目执行解析内核流水线，返回与输入同序的单文件结论：
 //  1. 按「父目录」（DirNames 整序列相同）聚合，构造各文件的 MatchInput，
 //     Siblings 为同目录全部文件名（含自身，按输入顺序），并派生各层祖先的
 //     直接子文件/子目录数（v4 目录终结谓词消费）；
@@ -85,30 +97,21 @@ func ancestorChildDirCounts(dirNames []string, childDirsByParent map[string]map[
 //     无任何分组规则命中即独立文件（Group=nil）；
 //  3. 提取段：其余规则按传入顺序对每文件求值 Pattern，命中即记入
 //     MatchedRuleIDs 并依序执行该规则 Extractions 追加声明（声明 RuleID
-//     归属产出规则）；
+//     归属产出规则）；聚合规则整体跳过（不进逐文件求值循环）；
 //  4. 每文件一份 ParseContext，基础字段 DirNames/Depth 按文件预先填入；
-//     分组段写入的群组分析保留在同一 ctx 内，供 FromGroupPrefix 提取消费。
+//     分组段写入的群组分析保留在同一 ctx 内，供 FromGroupPrefix 提取消费；
+//  5. 聚合段：汇流后的独立通道（与分组段同相位、居其后——群归属与元数据
+//     结论已定，聚合只消费既有结论不改写），对聚合规则做标识等值并组并把
+//     聚合归属落回各文件结论（见 runAggregationStage）。
 //
-// 求值自下而上、逐文件进行（反向于「先命中目录或序列实体、再覆盖其下文件」的
-// 常规心智）：不存在实体级命中；每个文件各自构造 MatchInput（文件名、祖先目录
+// 求值自下而上、逐文件进行（反向于「先命中目录或序列实体、再覆盖其下所有文件」
+// 的常规心智）：不存在实体级命中；每个文件各自构造 MatchInput（文件名、祖先目录
 // 链、同目录兄弟），各规则对该文件独立求值，结论回填该文件。目录目标的「整个
 // 子树」与序列目标的「成套」，都是逐文件结论在呈现层的汇出形态。
-func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileDecision {
-	siblingsByDir := make(map[string][]string, len(files))
-	childDirsByParent := make(map[string]map[string]struct{})
-	for _, file := range files {
-		key := dirGroupKey(file.DirNames)
-		siblingsByDir[key] = append(siblingsByDir[key], file.FileName)
-		for d := 0; d+1 < len(file.DirNames); d++ {
-			parentKey := dirGroupKey(file.DirNames[:d+1])
-			set, ok := childDirsByParent[parentKey]
-			if !ok {
-				set = make(map[string]struct{})
-				childDirsByParent[parentKey] = set
-			}
-			set[file.DirNames[d+1]] = struct{}{}
-		}
-	}
+func RunPipelineWithTypes(files []ScanFile, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) []FileDecision {
+	surface := newAggEvalSurface(files, files)
+	siblingsByDir := surface.siblingsByDir
+	childDirsByParent := surface.childDirsByParent
 	decisions := make([]FileDecision, 0, len(files))
 	for _, file := range files {
 		ctx := &ParseContext{DirNames: file.DirNames, Depth: len(file.DirNames)}
@@ -125,7 +128,38 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 		runExtractionStage(&decision, rules, in, lib, ctx)
 		decisions = append(decisions, decision)
 	}
+	runAggregationStage(decisions, surface, rules, lib, types)
 	return decisions
+}
+
+// runAggregationStage 聚合段：汇流后的独立通道（与分组段同相位、居其后）——
+// 群归属与元数据结论在分组段/提取段已定，本段只消费既有结论不改写：对求值面
+// 执行聚合规则的标识等值并组（算法见 aggregateGrouping），把聚合归属（作品键
+// +轨道角色）落回与文件对位序的各条结论。decisions 与 surface.files 按下标
+// 对齐（调用方保证同一清单）。
+func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) {
+	assigns := aggregateGrouping(surface, rules, lib, types)
+	for i := range decisions {
+		if i >= len(assigns) {
+			break
+		}
+		decisions[i].AggWorkKey = assigns[i].WorkKey
+		decisions[i].AggTrackRole = assigns[i].TrackRole
+	}
+}
+
+// metadataRules 过滤出元数据类别的规则序列（保持原序）：聚合规则不表达目录层
+// 含义（其轨行求值属聚合段），目录含义回放等「逐规则求值产出含义」的消费面
+// 先经本过滤再进入。
+func metadataRules(rules []RuleEntry) []RuleEntry {
+	out := make([]RuleEntry, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Category == RuleCategoryAggregate {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
 }
 
 // isGroupingRule 该规则是否为兄弟群定群规则：v3 = 顶层 SiblingPattern；v4 =
@@ -138,6 +172,11 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 // 实测：两行 or 序列规则命中可见而群卡/序列身份缺席，退化为结构群补位）。
 func isGroupingRule(rule *RuleEntry) bool {
 	if rule == nil {
+		return false
+	}
+	// 聚合规则不参与定群：其轨行是平行选择器（无布尔组合语义），序列轨行的
+	// 求值与落轨全部发生在汇流后的聚合段。
+	if rule.Category == RuleCategoryAggregate {
 		return false
 	}
 	if rule.Conditions != nil {
@@ -274,6 +313,11 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 			continue
 		}
 		if isGroupingRule(rule) {
+			continue
+		}
+		// 聚合规则不进逐文件求值循环（红线）：轨行求值与捕获汇集全部发生在
+		// 汇流后的聚合段（runAggregationStage）——此处的求值循环对其整体跳过。
+		if rule.Category == RuleCategoryAggregate {
 			continue
 		}
 		ruleCtx := ctx.ruleScopedContext()
@@ -735,7 +779,7 @@ func Synthesize(decls []MetadataDeclaration, policy SynthesisPolicy) (final []Me
 }
 
 // absorbAlsoRuleID 同值吞并时登记被吞声明的规则出处：被吞声明无规则 ID
-//（内置惯例或纯捕获形态）不记；与保留声明自身同规则（含已登记过的）不重复
+// （内置惯例或纯捕获形态）不记；与保留声明自身同规则（含已登记过的）不重复
 // 记。声明按档案序到达，追加顺序即附属清单顺序。
 func absorbAlsoRuleID(retained *MetadataDeclaration, absorbed MetadataDeclaration) {
 	if absorbed.RuleID == "" || absorbed.RuleID == retained.RuleID {

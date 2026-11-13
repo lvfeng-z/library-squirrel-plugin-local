@@ -18,8 +18,15 @@ func Activate(ctx sdkdto.PluginContext, handler *LocalImportWorkFetcher) {
 	handler.entryConfirm = newEntryConfirmCoordinator(ctx, ctx.GetLogger().Named("Workbench"), entryConfirmWaitLimit)
 	handler.sessions.SetConfirmAnswerHandler(handler.entryConfirm.HandleAnswer)
 
-	// 激活期读档预热与校验观测：坏规则逐条告警（错误携带规则 ID），不阻塞激活；
-	// 加载结果不驻留，Create/CreateWorkInfo 按需各自重读档案
+	// 激活期档案初始化：预置聚合种子首次入档（档案键缺席时写入，与用户条目
+	// 同权；已有档案不动）。随后读档预热与校验观测：坏规则逐条告警（错误携带
+	// 规则 ID），不阻塞激活；加载结果不驻留，Create/CreateWorkInfo 按需各自
+	// 重读档案
+	if seeded, err := EnsurePresetSeeded(NewContextProfileStore(ctx)); err != nil {
+		ctx.Warnf("预置聚合种子入档失败: %v", err)
+	} else if seeded {
+		ctx.Infof("预置聚合种子已首次写入规则档案")
+	}
 	profile, errs := LoadProfile(NewContextProfileStore(ctx))
 	for _, err := range errs {
 		ctx.Warnf("规则档案载入异常: %v", err)

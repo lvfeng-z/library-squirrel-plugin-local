@@ -126,7 +126,7 @@ var attachAllowed = map[CondxTargetKind]map[string]bool{
 	CondxTargetDir: {
 		CondxAttachChildrenAllFormat: true, CondxAttachChildrenAtLeastN: true,
 		CondxAttachChildDirCount: true, CondxAttachChildTypeIs: true,
-		CondxAttachDirLevel: true,
+		CondxAttachDirLevel:     true,
 		CondxAttachParentFormat: true, CondxAttachParentContains: true,
 	},
 	CondxTargetSeq: {
@@ -192,6 +192,7 @@ var condxVocab = map[string]string{
 	"作者": "author", "集名": "setname", "序号": "seq", "标题": "title",
 	"标签": "tag", "作品号": "workid", "日期": "date",
 	"键": "key", "公共段": "key", "任意": "any",
+	"作品": "work",
 }
 
 // condxDigits 为数字类占位词（推导为 [0-9]+）。
@@ -214,8 +215,9 @@ func tailClosingBracket(literal string) rune {
 }
 
 // condxVocabHint 为报错提示用的词表清单（稳定顺序）；旧词「键」合法但不再
-// 鼓励书写，不入提示。
-const condxVocabHint = "作者/集名/序号/标题/标签/作品号/日期/公共段/任意"
+// 鼓励书写，不入提示。{作品} 为聚合标识专用中性取值词根（命名捕获槽可用词，
+// 机制零新增——干名如 ep01 挂标签/作者等元数据语义词别扭）。
+const condxVocabHint = "作者/集名/序号/标题/标签/作品/作品号/日期/公共段/任意"
 
 // deriveOpts 为模板推导选项。
 type deriveOpts struct {
@@ -332,7 +334,7 @@ func hasCondxVariantMark(word string) bool {
 }
 
 // condxOptRoot 报告占位词内容是否 ? 后缀形态：是则返回剥去一个结尾 ? 的词根
-//（{作者?} → 作者、{what??} → what?——可选字面自身以 ? 结尾用双写表达）。
+// （{作者?} → 作者、{what??} → what?——可选字面自身以 ? 结尾用双写表达）。
 // 词法无转义语法且不引入（2026-11-07 终审澄清1）：花括号外的 \ 与 ? 皆为
 // 普通字面，存量模板含 \ 的含义不变；成对花括号文本无法按字面表达属既有边界。
 func condxOptRoot(word string) (string, bool) {

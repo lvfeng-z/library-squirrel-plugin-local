@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lvfeng-z/library-squirrel-sdk/contract"
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
@@ -3457,7 +3458,7 @@ func TestUndercountGuardAutoRefreshDoesNotConsumeOverride(t *testing.T) {
 }
 
 // TestUndercountGuardSkippedWithoutPrevSnapshot prev 为空不设防：首轮识别
-//（无既有结论可保护）即使仅 1 文件也照常完成，簿记不置位。
+// （无既有结论可保护）即使仅 1 文件也照常完成，簿记不置位。
 func TestUndercountGuardSkippedWithoutPrevSnapshot(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newRecognitionFixture(t, root, nil)
@@ -3618,5 +3619,477 @@ func TestProfileChangedSince(t *testing.T) {
 	}
 	if mgr.profileChangedSince(current) {
 		t.Fatal("求值指纹与当前指纹一致应为假")
+	}
+}
+
+// —— 聚合求值内核（标识等值并组）的测试锚 ——
+
+// aggCompiledRule 为手建规则补编译模式缓存（档案载入路径会自动编译，测试内
+// 直构条目须显式补齐——求值器消费 Pattern 缓存）。
+func aggCompiledRule(t *testing.T, rule RuleEntry) RuleEntry {
+	t.Helper()
+	pat, err := CompileRuleConditions(rule.Conditions)
+	if err != nil {
+		t.Fatalf("编译规则 %q 条件行失败: %v", rule.ID, err)
+	}
+	rule.Pattern = pat
+	return rule
+}
+
+// aggScanFiles 从 '/' 相对路径清单构造求值面文件（目录名按层拆分）。
+func aggScanFiles(paths ...string) []ScanFile {
+	files := make([]ScanFile, 0, len(paths))
+	for _, p := range paths {
+		parts := strings.Split(p, "/")
+		files = append(files, ScanFile{
+			FileName: parts[len(parts)-1],
+			DirNames: parts[:len(parts)-1],
+			RelPath:  p,
+		})
+	}
+	return files
+}
+
+// aggDecisionOf 按相对路径取结论。
+func aggDecisionOf(t *testing.T, decisions []FileDecision, relPath string) FileDecision {
+	t.Helper()
+	for i := range decisions {
+		if decisions[i].RelPath == relPath {
+			return decisions[i]
+		}
+	}
+	t.Fatalf("未找到文件 %q 的结论", relPath)
+	return FileDecision{}
+}
+
+// aggConclusionOf 按相对路径取合并求值结论。
+func aggConclusionOf(t *testing.T, conclusions []FileConclusion, relPath string) *FileConclusion {
+	t.Helper()
+	for i := range conclusions {
+		if conclusions[i].RelPath == relPath {
+			return &conclusions[i]
+		}
+	}
+	t.Fatalf("未找到文件 %q 的结论", relPath)
+	return nil
+}
+
+// testAggTypeIndex 聚合锚测试的类型规约投影：video（videoMain 必含单例+
+// subtitle 可选多例）与 article（document 必含+image 可选多例），另含 image
+// （image 必含单例，供序列群键成组锚）。
+func testAggTypeIndex() *resourceTypeIndex {
+	return newResourceTypeIndex([]*sdkdto.ResourceTypeSpec{
+		{ResourceType: sdkdto.ResourceTypeVideo, Roles: []*sdkdto.StoreRoleSpec{
+			{StoreType: sdkdto.StoreRoleVideoMain, Min: 1, Max: 1},
+			{StoreType: contract.StoreTypeSubtitle, Min: 0, Max: 0},
+		}},
+		{ResourceType: sdkdto.ResourceTypeArticle, Roles: []*sdkdto.StoreRoleSpec{
+			{StoreType: sdkdto.StoreRoleDocument, Min: 1, Max: 1},
+			{StoreType: sdkdto.StoreRoleImage, Min: 0, Max: 0},
+		}},
+		{ResourceType: sdkdto.ResourceTypeImage, Roles: []*sdkdto.StoreRoleSpec{
+			{StoreType: sdkdto.StoreRoleImage, Min: 1, Max: 1},
+		}},
+	})
+}
+
+// TestAggregationIdentityValueGrouping 标识等值成组正锚：预置「视频+字幕」
+// 种子对同标识（{作品}=a）的视频与多语言字幕并成一件作品（主导=必含轨
+// videoMain 命中者，作品键 f:{主导相对路径}）；另一标识 b 的单视频成立
+// （非必含轨字幕零命中=轨缺席、作品仍成立）。
+func TestAggregationIdentityValueGrouping(t *testing.T) {
+	files := aggScanFiles("sub/a.mp4", "sub/a.zh.srt", "sub/a.en.srt", "sub/b.mp4")
+	rules := []RuleEntry{PresetAggregateRules()[0]}
+	decisions := RunPipelineWithTypes(files, rules, nil, testAggTypeIndex())
+
+	video := aggDecisionOf(t, decisions, "sub/a.mp4")
+	if video.AggWorkKey != "f:sub/a.mp4" || video.AggTrackRole != sdkdto.StoreRoleVideoMain {
+		t.Fatalf("视频主导文件的聚合归属不符: key=%q role=%q", video.AggWorkKey, video.AggTrackRole)
+	}
+	for _, srt := range []string{"sub/a.zh.srt", "sub/a.en.srt"} {
+		got := aggDecisionOf(t, decisions, srt)
+		if got.AggWorkKey != "f:sub/a.mp4" || got.AggTrackRole != contract.StoreTypeSubtitle {
+			t.Fatalf("字幕轨 %s 的聚合归属不符: key=%q role=%q", srt, got.AggWorkKey, got.AggTrackRole)
+		}
+	}
+	single := aggDecisionOf(t, decisions, "sub/b.mp4")
+	if single.AggWorkKey != "f:sub/b.mp4" || single.AggTrackRole != sdkdto.StoreRoleVideoMain {
+		t.Fatalf("无字幕伴随的单视频应成立为单轨聚合作品: key=%q role=%q", single.AggWorkKey, single.AggTrackRole)
+	}
+}
+
+// TestAggregationRequiredNotExactlyOneAmbiguity 必含轨非恰一歧义锚：同标识两
+// 视频（mp4+mkv 各命中一条必含轨行）→2 单位歧义、该组不成立，成员维持独立
+// 作品；同标识仅字幕无视频→必含轨零命中，同样不成立。
+func TestAggregationRequiredNotExactlyOneAmbiguity(t *testing.T) {
+	files := aggScanFiles("x/a.mp4", "x/a.mkv", "y/a.zh.srt", "y/a.en.srt")
+	rules := []RuleEntry{PresetAggregateRules()[0]}
+	decisions := RunPipelineWithTypes(files, rules, nil, testAggTypeIndex())
+	for _, rel := range []string{"x/a.mp4", "x/a.mkv", "y/a.zh.srt", "y/a.en.srt"} {
+		got := aggDecisionOf(t, decisions, rel)
+		if got.AggWorkKey != "" || got.AggTrackRole != "" {
+			t.Fatalf("歧义组/零必含轨组的成员 %s 应维持独立作品: key=%q role=%q", rel, got.AggWorkKey, got.AggTrackRole)
+		}
+	}
+}
+
+// TestAggregationSequenceGroupKeyGrouping 序列群键成组锚：序列轨行（集合轨）
+// 以群键为标识——同键序列组并成一件作品（整组 N 存储位、必含轨按相异群键计
+// 1 单位）；落单成员（不足成群下限）无轨行命中、不入组。
+func TestAggregationSequenceGroupKeyGrouping(t *testing.T) {
+	files := aggScanFiles("d/p_1.jpg", "d/p_2.jpg", "d/q_1.jpg")
+	rule := RuleEntry{
+		ID:         "agg-seq",
+		Enabled:    true,
+		Category:   RuleCategoryAggregate,
+		Conditions: []CondxRow{{Condition: &Condx{Target: CondxTargetSeq, Format: condxTpl("{公共段}_{序号}")}}},
+		Identity:   []IdentityPart{{Row: 1, Capture: identityGroupKeyCapture}},
+		Aggregate: &AggregateProduction{
+			WorkType: sdkdto.ResourceTypeImage,
+			Tracks:   []TrackAssign{{Row: 1, Role: sdkdto.StoreRoleImage}},
+		},
+	}
+	decisions := RunPipelineWithTypes(files, []RuleEntry{rule}, nil, testAggTypeIndex())
+	first := aggDecisionOf(t, decisions, "d/p_1.jpg")
+	second := aggDecisionOf(t, decisions, "d/p_2.jpg")
+	if first.AggWorkKey != "f:d/p_1.jpg" || second.AggWorkKey != "f:d/p_1.jpg" {
+		t.Fatalf("同群键的序列成员应并成一件作品（主导=首个成员）: %q / %q", first.AggWorkKey, second.AggWorkKey)
+	}
+	if first.AggTrackRole != sdkdto.StoreRoleImage || second.AggTrackRole != sdkdto.StoreRoleImage {
+		t.Fatalf("集合轨成员角色应为 image: %q / %q", first.AggTrackRole, second.AggTrackRole)
+	}
+	if lone := aggDecisionOf(t, decisions, "d/q_1.jpg"); lone.AggWorkKey != "" {
+		t.Fatalf("落单成员（不足成群下限）不应入组: %q", lone.AggWorkKey)
+	}
+}
+
+// TestAggregationDirectoryCaptureGrouping 目录捕获成组锚：目录行做标识源——
+// 同目录文件共享目录捕获值（NovelA 两文件并一件 article；NovelB 单文件独立
+// 成件），文件行的同名捕获不干扰（标识按声明行取目录行绑定）。
+func TestAggregationDirectoryCaptureGrouping(t *testing.T) {
+	files := aggScanFiles("NovelA/a.txt", "NovelA/b.jpg", "NovelB/c.txt")
+	rule := RuleEntry{
+		ID:       "agg-dir",
+		Enabled:  true,
+		Category: RuleCategoryAggregate,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{作品}")}},
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".txt"}}}},
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".jpg"}}}},
+		},
+		Identity: []IdentityPart{{Row: 1, Capture: "work"}},
+		Aggregate: &AggregateProduction{
+			WorkType: sdkdto.ResourceTypeArticle,
+			Tracks: []TrackAssign{
+				{Row: 2, Role: sdkdto.StoreRoleDocument},
+				{Row: 3, Role: sdkdto.StoreRoleImage},
+			},
+		},
+	}
+	decisions := RunPipelineWithTypes(files, []RuleEntry{rule}, nil, testAggTypeIndex())
+	txt := aggDecisionOf(t, decisions, "NovelA/a.txt")
+	img := aggDecisionOf(t, decisions, "NovelA/b.jpg")
+	if txt.AggWorkKey != "f:NovelA/a.txt" || img.AggWorkKey != "f:NovelA/a.txt" {
+		t.Fatalf("同目录文件应共享目录捕获标识并成一件作品: %q / %q", txt.AggWorkKey, img.AggWorkKey)
+	}
+	if txt.AggTrackRole != sdkdto.StoreRoleDocument || img.AggTrackRole != sdkdto.StoreRoleImage {
+		t.Fatalf("目录成组的轨道角色不符: %q / %q", txt.AggTrackRole, img.AggTrackRole)
+	}
+	other := aggDecisionOf(t, decisions, "NovelB/c.txt")
+	if other.AggWorkKey != "f:NovelB/c.txt" {
+		t.Fatalf("异目录标识应独立成件: %q", other.AggWorkKey)
+	}
+}
+
+// TestAggregationScopeConstrainedRow 作用域约束行锚：轨行自身的附加条件
+// （parentContains）限定字幕轨作用域——作用域外的字幕不命中该轨行、无轨不
+// 入组（维持独立作品），作用域内的照常并组。两目录用不同标识（文件名标识
+// 等值跨目录并组——同名即同作品，作用域锚以异名隔离）。
+func TestAggregationScopeConstrainedRow(t *testing.T) {
+	files := aggScanFiles("d1/one.mp4", "d1/one.zh.srt", "subs/two.mp4", "subs/two.en.srt")
+	rule := RuleEntry{
+		ID:       "agg-scope",
+		Enabled:  true,
+		Category: RuleCategoryAggregate,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".mp4"}}}},
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}.{任意}"),
+				Attach: []CondxAttach{
+					{Kind: CondxAttachFileExt, Value: ".srt"},
+					{Kind: CondxAttachParentContains, Word: "subs"},
+				}}},
+		},
+		Identity: []IdentityPart{{Row: 1, Capture: "work"}},
+		Aggregate: &AggregateProduction{
+			WorkType: sdkdto.ResourceTypeVideo,
+			Tracks: []TrackAssign{
+				{Row: 1, Role: sdkdto.StoreRoleVideoMain},
+				{Row: 2, Role: contract.StoreTypeSubtitle},
+			},
+		},
+	}
+	decisions := RunPipelineWithTypes(files, []RuleEntry{rule}, nil, testAggTypeIndex())
+	inScope := aggDecisionOf(t, decisions, "subs/two.en.srt")
+	if inScope.AggWorkKey != "f:subs/two.mp4" || inScope.AggTrackRole != contract.StoreTypeSubtitle {
+		t.Fatalf("作用域内字幕应并组: key=%q role=%q", inScope.AggWorkKey, inScope.AggTrackRole)
+	}
+	outScope := aggDecisionOf(t, decisions, "d1/one.zh.srt")
+	if outScope.AggWorkKey != "" || outScope.AggTrackRole != "" {
+		t.Fatalf("作用域外字幕不应入组: key=%q role=%q", outScope.AggWorkKey, outScope.AggTrackRole)
+	}
+	d1Video := aggDecisionOf(t, decisions, "d1/one.mp4")
+	if d1Video.AggWorkKey != "f:d1/one.mp4" {
+		t.Fatalf("作用域外的视频应独立成件: %q", d1Video.AggWorkKey)
+	}
+}
+
+// TestAggregationStagePhaseAnchor 聚合段相位锚：聚合段挂在汇流后的独立通道、
+// 与分组段同相位居其后——群归属（含定群规则产出的群组分析）与元数据结论
+// （命中规则清单与终选声明）不被聚合改写；聚合只补落聚合归属字段。
+func TestAggregationStagePhaseAnchor(t *testing.T) {
+	files := aggScanFiles("d/ep_1.mp4", "d/ep_1.zh.srt", "d/ep_2.mp4")
+	grouping := aggCompiledRule(t, RuleEntry{
+		ID:         "grp",
+		Enabled:    true,
+		Conditions: []CondxRow{{Condition: &Condx{Target: CondxTargetSeq, Format: condxTpl("{公共段}_{序号}")}}},
+	})
+	rules := []RuleEntry{grouping, PresetAggregateRules()[0]}
+
+	base := MergedRecognition(files, rules, nil, nil)
+	withAgg := MergedRecognition(files, rules, nil, nil)
+	runAggregationOnConclusions(withAgg, files, files, rules, nil, testAggTypeIndex())
+
+	for i := range base {
+		b, w := &base[i], &withAgg[i]
+		if (b.Group == nil) != (w.Group == nil) {
+			t.Fatalf("聚合段不应改写群归属的有无: %s", b.RelPath)
+		}
+		if b.Group != nil {
+			if b.Group.Key != w.Group.Key || b.Group.Seq != w.Group.Seq || b.Group.Size != w.Group.Size {
+				t.Fatalf("聚合段不应改写群组分析: %+v vs %+v", *b.Group, *w.Group)
+			}
+		}
+		if !reflect.DeepEqual(b.MatchedRuleIDs, w.MatchedRuleIDs) {
+			t.Fatalf("聚合段不应改写命中规则清单: %v vs %v", b.MatchedRuleIDs, w.MatchedRuleIDs)
+		}
+		if !reflect.DeepEqual(b.Final, w.Final) {
+			t.Fatalf("聚合段不应改写终选声明: %v vs %v", b.Final, w.Final)
+		}
+		if b.AggWorkKey != "" || b.AggTrackRole != "" {
+			t.Fatalf("未经聚合段的结论不应带聚合归属: %s", b.RelPath)
+		}
+	}
+	video1 := aggConclusionOf(t, withAgg, "d/ep_1.mp4")
+	if video1.AggWorkKey != "f:d/ep_1.mp4" || video1.AggTrackRole != sdkdto.StoreRoleVideoMain {
+		t.Fatalf("聚合段应补落聚合归属: key=%q role=%q", video1.AggWorkKey, video1.AggTrackRole)
+	}
+	if video1.Group == nil || video1.Group.Key != "ep" {
+		t.Fatalf("主导文件应同时保有定群段的群归属（聚合作品整体入集）: %+v", video1.Group)
+	}
+}
+
+// TestAggregationCompanionUseMetadataRejected 处置维度留位锚：CompanionUse 两值
+// 结构在场（track|metadata）；metadata（纯元数据承载）为留位值——档案载入
+// 即拒；空串与 track 载入归一为 track。
+func TestAggregationCompanionUseMetadataRejected(t *testing.T) {
+	if CompanionUseTrack != "track" || CompanionUseMetadata != "metadata" {
+		t.Fatalf("处置维度两值应为 track|metadata: %q|%q", CompanionUseTrack, CompanionUseMetadata)
+	}
+	seed := PresetAggregateRules()[0]
+	bad := seed
+	bad.ID = "agg-metadata-rejected"
+	bad.Aggregate = &AggregateProduction{
+		WorkType:     seed.Aggregate.WorkType,
+		Tracks:       seed.Aggregate.Tracks,
+		CompanionUse: CompanionUseMetadata,
+	}
+	data, err := (&RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{bad}}).MarshalJSON()
+	if err != nil {
+		t.Fatalf("序列化档案失败: %v", err)
+	}
+	profile, errs := ParseProfile(data)
+	if profile == nil || len(profile.Rules) != 0 {
+		t.Fatalf("metadata 处置维度的条目应被载入拒绝: %d 条", len(profile.Rules))
+	}
+	if len(errs) == 0 || !strings.Contains(errs[0].Error(), "留位") {
+		t.Fatalf("metadata 处置维度应产生留位告警: %v", errs)
+	}
+
+	ok := seed
+	ok.Aggregate.CompanionUse = ""
+	dataOK, _ := (&RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{ok}}).MarshalJSON()
+	profileOK, errsOK := ParseProfile(dataOK)
+	if len(errsOK) != 0 || len(profileOK.Rules) != 1 {
+		t.Fatalf("空串处置维度应正常载入: errs=%v rules=%d", errsOK, len(profileOK.Rules))
+	}
+	if profileOK.Rules[0].Aggregate.CompanionUse != CompanionUseTrack {
+		t.Fatalf("空串处置维度应归一为 track: %q", profileOK.Rules[0].Aggregate.CompanionUse)
+	}
+}
+
+// TestAggregationTypeDanglingAnchor 类型悬空停用+告警锚：引用的作品类型不在
+// 注册表投影（悬空）→档案锚定停用该条目并告警；在册条目不受影响；索引缺席
+// （查询失败）时全部聚合规则按悬空处理；悬空条目不参与求值（求值跳过）。
+func TestAggregationTypeDanglingAnchor(t *testing.T) {
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: PresetAggregateRules()}
+	videoOnly := newResourceTypeIndex([]*sdkdto.ResourceTypeSpec{
+		{ResourceType: sdkdto.ResourceTypeVideo},
+	})
+	warns := AnchorAggregateRules(profile, videoOnly)
+	if len(warns) != 1 || !strings.Contains(warns[0].Error(), "article") {
+		t.Fatalf("悬空的 article 聚合规则应产生一条告警: %v", warns)
+	}
+	if profile.Rules[0].Enabled != true || profile.Rules[1].Enabled != false {
+		t.Fatalf("悬空条目应停用、在册条目不受影响: video=%v article=%v", profile.Rules[0].Enabled, profile.Rules[1].Enabled)
+	}
+
+	noIndex := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: PresetAggregateRules()}
+	if warns := AnchorAggregateRules(noIndex, nil); len(warns) != 2 {
+		t.Fatalf("索引缺席时全部聚合规则应按悬空停用: %d 条告警", len(warns))
+	}
+
+	// 求值跳过：悬空停用后 EffectiveRules 出局——article 形态文件零聚合归属。
+	files := aggScanFiles("w/a.txt", "w/a.jpg")
+	decisions := RunPipelineWithTypes(files, EffectiveRules(profile), nil, videoOnly)
+	for _, rel := range []string{"w/a.txt", "w/a.jpg"} {
+		if got := aggDecisionOf(t, decisions, rel); got.AggWorkKey != "" {
+			t.Fatalf("悬空停用的聚合规则不应参与求值: %s → %q", rel, got.AggWorkKey)
+		}
+	}
+}
+
+// TestAggregationPresetSeedFirstInitToggleRestore 预置种子锚：首次档案初始化
+// 入档（键缺席时写入，来源=预置、与用户条目同权）；启停生效（禁用后求值不出
+// 聚合归属）；恢复预置按 ID 补缺席（在场条目不动）；已有档案不再重复初始化。
+func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
+	store := newFakeProfileStore()
+	seeded, err := EnsurePresetSeeded(store)
+	if err != nil || !seeded {
+		t.Fatalf("空档案首次初始化应写入预置种子: seeded=%v err=%v", seeded, err)
+	}
+	profile, errs := LoadProfile(store)
+	if len(errs) != 0 || len(profile.Rules) != 2 {
+		t.Fatalf("初始化后档案应含两条预置种子: errs=%v rules=%d", errs, len(profile.Rules))
+	}
+	for _, rule := range profile.Rules {
+		if rule.Source != RuleSourcePreset || rule.Category != RuleCategoryAggregate || !rule.Enabled {
+			t.Fatalf("预置种子应以预置来源入档并与用户条目同权: %+v", rule)
+		}
+	}
+
+	// 启停生效：禁用视频种子后其形态不再产出聚合归属。
+	files := aggScanFiles("s/a.mp4", "s/a.zh.srt")
+	withSeed := RunPipelineWithTypes(files, EffectiveRules(profile), nil, testAggTypeIndex())
+	if got := aggDecisionOf(t, withSeed, "s/a.mp4"); got.AggWorkKey == "" {
+		t.Fatal("启用中的视频种子应产出聚合归属")
+	}
+	profile.Rules[0].Enabled = false
+	if err := SaveProfile(store, profile); err != nil {
+		t.Fatalf("保存禁用态档案失败: %v", err)
+	}
+	disabled, _ := LoadProfile(store)
+	after := RunPipelineWithTypes(files, EffectiveRules(disabled), nil, testAggTypeIndex())
+	for _, rel := range []string{"s/a.mp4", "s/a.zh.srt"} {
+		if got := aggDecisionOf(t, after, rel); got.AggWorkKey != "" {
+			t.Fatalf("禁用的种子不应参与求值: %s → %q", rel, got.AggWorkKey)
+		}
+	}
+
+	// 恢复预置：删除视频种子后按 ID 补回（article 在场不动）。
+	trimmed := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{disabled.Rules[1]}}
+	if err := SaveProfile(store, trimmed); err != nil {
+		t.Fatalf("保存删减档案失败: %v", err)
+	}
+	added, err := RestorePresetRules(store)
+	if err != nil || added != 1 {
+		t.Fatalf("恢复预置应补回 1 条缺席种子: added=%d err=%v", added, err)
+	}
+	restored, _ := LoadProfile(store)
+	if len(restored.Rules) != 2 {
+		t.Fatalf("恢复后档案应回到两条种子: %d", len(restored.Rules))
+	}
+
+	// 已有档案不再重复初始化。
+	again, err := EnsurePresetSeeded(store)
+	if err != nil || again {
+		t.Fatalf("已有档案不应再次初始化: again=%v err=%v", again, err)
+	}
+}
+
+// TestAggregationSnapshotV3RoundTrip 快照 v3 读写往返+旧快照降级锚：聚合归属
+// 两字段随快照往返保真、结构版本为 3；v2 旧快照（无聚合字段）读入按空聚合
+// 降级。
+func TestAggregationSnapshotV3RoundTrip(t *testing.T) {
+	if recognitionSnapshotSchemaVersion != 3 {
+		t.Fatalf("快照结构版本应为 3: %d", recognitionSnapshotSchemaVersion)
+	}
+	snap := &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		Files: []SnapFile{
+			{RelPath: "a.mp4", FileName: "a.mp4", State: snapStateIdentified,
+				AggWorkKey: "f:a.mp4", AggTrackRole: sdkdto.StoreRoleVideoMain},
+			{RelPath: "a.zh.srt", FileName: "a.zh.srt", State: snapStatePlain,
+				AggWorkKey: "f:a.mp4", AggTrackRole: contract.StoreTypeSubtitle},
+			{RelPath: "b.txt", FileName: "b.txt", State: snapStatePlain},
+		},
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("序列化快照失败: %v", err)
+	}
+	var back RecognitionSnapshot
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("反序列化快照失败: %v", err)
+	}
+	if back.SchemaVersion != 3 || back.Files[0].AggWorkKey != "f:a.mp4" ||
+		back.Files[0].AggTrackRole != sdkdto.StoreRoleVideoMain ||
+		back.Files[1].AggWorkKey != "f:a.mp4" || back.Files[1].AggTrackRole != contract.StoreTypeSubtitle {
+		t.Fatalf("聚合归属两字段应随快照往返保真: %+v", back.Files)
+	}
+	if back.Files[2].AggWorkKey != "" || back.Files[2].AggTrackRole != "" {
+		t.Fatalf("无聚合文件的两字段应为空: %+v", back.Files[2])
+	}
+
+	legacy := []byte(`{"schemaVersion":2,"files":[{"relPath":"a.mp4","fileName":"a.mp4","state":"identified"}]}`)
+	var old RecognitionSnapshot
+	if err := json.Unmarshal(legacy, &old); err != nil {
+		t.Fatalf("旧快照读入失败: %v", err)
+	}
+	if old.Files[0].AggWorkKey != "" || old.Files[0].AggTrackRole != "" {
+		t.Fatalf("v2 旧快照应按空聚合降级: %+v", old.Files[0])
+	}
+}
+
+// TestAggregationPlusSetComposition 聚合+集叠加组合锚：序列群成员各自是
+// 视频+字幕聚合作品——主导文件同时携带集归属（定群段 GroupKey）与聚合归属
+// （聚合段作品键），聚合作品整体入集、伴随轨不单独产作品级结论。
+func TestAggregationPlusSetComposition(t *testing.T) {
+	files := aggScanFiles("d/ep_1.mp4", "d/ep_1.zh.srt", "d/ep_2.mp4", "d/ep_2.en.srt")
+	grouping := aggCompiledRule(t, RuleEntry{
+		ID:         "grp",
+		Enabled:    true,
+		Conditions: []CondxRow{{Condition: &Condx{Target: CondxTargetSeq, Format: condxTpl("{公共段}_{序号}")}}},
+	})
+	rules := []RuleEntry{grouping, PresetAggregateRules()[0]}
+	conclusions := MergedRecognition(files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+
+	for _, lead := range []string{"d/ep_1.mp4", "d/ep_2.mp4"} {
+		c := aggConclusionOf(t, conclusions, lead)
+		if c.Group == nil || c.Group.Key != "ep" {
+			t.Fatalf("聚合作品主导文件应保有集归属（群键 ep）: %+v", c.Group)
+		}
+		if c.AggWorkKey != "f:"+lead || c.AggTrackRole != sdkdto.StoreRoleVideoMain {
+			t.Fatalf("聚合作品主导文件的聚合归属不符: key=%q role=%q", c.AggWorkKey, c.AggTrackRole)
+		}
+	}
+	for _, pair := range [][2]string{{"d/ep_1.zh.srt", "d/ep_1.mp4"}, {"d/ep_2.en.srt", "d/ep_2.mp4"}} {
+		c := aggConclusionOf(t, conclusions, pair[0])
+		if c.AggWorkKey != "f:"+pair[1] || c.AggTrackRole != contract.StoreTypeSubtitle {
+			t.Fatalf("伴随字幕应归属同标识聚合作品: key=%q role=%q", c.AggWorkKey, c.AggTrackRole)
+		}
 	}
 }

@@ -143,6 +143,12 @@ type FileConclusion struct {
 	Final []MetadataDeclaration
 	// Pending 为合成待裁决项（赋值指定维度的冲突随覆盖消解）。
 	Pending []PendingItem
+	// AggWorkKey 为聚合段落定的聚合作品键（"f:"+主导文件相对路径；空=无聚合，
+	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）。两字段由汇流
+	// 后的聚合段写入（识别轮在结论汇流后统一落轨），逐文件求值循环不产出、
+	// 聚合段不改写群归属与元数据结论。
+	AggWorkKey   string
+	AggTrackRole string
 	// rawDecls 为提取段原始声明（合成前中间产物）：预览基座规则相关件的铸造
 	// 原料，快照与呈现不消费（本类型为进程内求值产物，不经序列化）。
 	rawDecls []MetadataDeclaration
@@ -953,8 +959,10 @@ const (
 
 // recognitionSnapshotSchemaVersion 快照结构版本（自管）。v2：成员 Segs 区间
 // → Elements 元素数组（元素级内核 批次二）、候选增 KeyElements 键元素池；旧
-// 快照（v1）反序列化按空元素数组降级——识别重跑即重建。
-const recognitionSnapshotSchemaVersion = 2
+// 快照（v1）反序列化按空元素数组降级——识别重跑即重建。v3：SnapFile 增聚合
+// 归属两字段（aggWorkKey/aggTrackRole，空=无聚合）；旧快照（v2）反序列化按
+// 空聚合降级，识别重跑即重建。
+const recognitionSnapshotSchemaVersion = 3
 
 // RecognitionSnapshot 识别全景快照：识别时点的全景结论缓存（可按「原始路径+档案」
 // 重算），以裁剪形态入会话 KV——只存呈现与增量复用所需字段：不含文件完整路径
@@ -1049,6 +1057,11 @@ type SnapFile struct {
 	StructClues []SnapStructClue `json:"structClues,omitempty"`
 	// Assigned 本文件存在会话赋值（元素7 标记；赋值明细为会话活数据不入快照）。
 	Assigned bool `json:"assigned,omitempty"`
+	// AggWorkKey 聚合归属的作品键（"f:"+主导文件相对路径；空=无聚合，独立
+	// 作品）；AggTrackRole 本文件的轨道角色（空=无聚合）。聚合段标识等值
+	// 并组的落轨结论，消费面=选择域聚合分支与执行面多轨。
+	AggWorkKey   string `json:"aggWorkKey,omitempty"`
+	AggTrackRole string `json:"aggTrackRole,omitempty"`
 }
 
 // SnapDecl 声明的紧凑形态（终选与待裁决候选共用）。
@@ -1186,7 +1199,7 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		RootPath:      in.root,
 		ProfileDigest: in.profileDigest, AssignmentRevision: in.assignRevision,
 		EvaluatorBuildID: in.evaluatorBuildID,
-		DirMtimes: in.enumRes.DirMtimes,
+		DirMtimes:        in.enumRes.DirMtimes,
 		// 序列化契约：快照经 JSON 落会话 KV 并直接驱动前端渲染，切片字段
 		// 一律非 nil（nil 序列化为 null，前端 .length 即崩）；Pending 与
 		// StaleAssignments 带 omitempty（缺席由前端守卫兜底）；标量字符串
@@ -1204,8 +1217,9 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		if dir.Depth > 0 {
 			// 目录链取真实祖先名（RelKey 按 '/' 拆层——目录名不含分隔符）：
 			// 组合规则的门段依赖祖先层求值（如「Artist 壳目录之下」），占位
-			// 空串祖先会令门段保守失败、含义面收窄。
-			node.Meanings, node.MeaningRuleID = dirMeaningReplay(in.enabledRules, strings.Split(dir.RelKey, "/"), in.lib)
+			// 空串祖先会令门段保守失败、含义面收窄。聚合规则先滤除（轨行
+			// 求值属聚合段，不表达目录层含义）。
+			node.Meanings, node.MeaningRuleID = dirMeaningReplay(metadataRules(in.enabledRules), strings.Split(dir.RelKey, "/"), in.lib)
 		}
 		snap.Dirs = append(snap.Dirs, node)
 	}
@@ -1444,6 +1458,7 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIn
 	file := SnapFile{
 		RelPath: c.RelPath, FileName: c.FileName, DirRelKey: c.DirRelKey,
 		MatchedRuleIDs: c.MatchedRuleIDs,
+		AggWorkKey:     c.AggWorkKey, AggTrackRole: c.AggTrackRole,
 	}
 	if resolved := assignIdx.resolveFile(c.RelPath); len(resolved.coveredDimensions()) > 0 {
 		file.Assigned = true
@@ -2413,7 +2428,7 @@ func previewWireMembers[T any](members []T) []T {
 }
 
 // previewSnapGroups 群清单的投影层成员截断：超限条目浅拷贝结构体 + 成员重切
-//（不动存储快照，Size 保持真总数）；全清单未超限时原切片透传。
+// （不动存储快照，Size 保持真总数）；全清单未超限时原切片透传。
 func previewSnapGroups(groups []SnapGroup) []SnapGroup {
 	copied := false
 	for i := range groups {
@@ -2807,6 +2822,12 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 	if d, derr := profileDigestOf(profile); derr == nil {
 		digest = d
 	}
+	// 类型锚定在指纹之后（与整库轮同序——指纹反映落档原文）；悬空的聚合
+	// 规则停用后随 EffectiveRules 出局，本轮重建结论与整库轮同口径。
+	aggTypes := fetchResourceTypeIndex(m.ctx, m.warnf)
+	for _, warn := range AnchorAggregateRules(profile, aggTypes) {
+		m.warnf("规则档案载入告警（赋值增量重算）: %v", warn)
+	}
 	evalBuildID := m.evaluatorBuildID()
 	if digest == "" || prev.ProfileDigest != digest || prev.AssignmentRevision == sess.AssignRevision {
 		return false, nil
@@ -2931,6 +2952,9 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 		Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseEvaluate,
 		Done: total, Total: total,
 	})
+	// 聚合段与整库轮同款（合成重放不含规则求值，聚合归属由本段独立重导）；
+	// 聚合段只消费既有结论（群归属/元数据），不改写合成重放产物。
+	runAggregationOnConclusions(conclusions, files, files, enabledRules, lib, aggTypes)
 	snapshot := aggregatePanorama(aggregateInput{
 		root: root, enumRes: enumerateResultOfSnapshot(prev),
 		enabledRules: enabledRules, allRules: allRulesWithBuiltins(profile), lib: lib,
@@ -2966,7 +2990,7 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 
 // enumerateResultOfSnapshot 上次快照 → 赋值增量重算的枚举产物重建（纯组织）：
 // 目录树（含直接子文件数）、全量文件清单沿用快照序，mtime 游标携带上轮值
-//（磁盘未变时与现场枚举等值；磁盘变更由下一轮识别的现场枚举接住），跳过集
+// （磁盘未变时与现场枚举等值；磁盘变更由下一轮识别的现场枚举接住），跳过集
 // 为空——与「赋值变更后整库全量轮」（闸门三条件失配→全量枚举零跳过）的
 // Stats.SkippedDirs=0 同口径。
 func enumerateResultOfSnapshot(prev *RecognitionSnapshot) *EnumerateResult {
@@ -3018,7 +3042,7 @@ func (m *SessionManager) runFullRecognition(root string) error {
 // 增量资格：上次快照在场且其档案指纹与当前一致——档案外部变更或首次识别一律
 // 全量重算；赋值文件所在目录即使 mtime 未变也强制重算（赋值按维度覆盖结论）。
 // 赋值修订号失配（赋值保存触发的刷新轮）由函数头的赋值增量重算快分支接住
-//（仅赋值变更时秒级重放，见 tryAssignmentIncremental），资格不符回落本整库路径。
+// （仅赋值变更时秒级重放，见 tryAssignmentIncremental），资格不符回落本整库路径。
 func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard bool) error {
 	// 赋值增量重算（阶段5）：「自上次快照以来仅会话赋值变更」的刷新轮走秒级
 	// 合成重放路径（不枚举不重求值）；资格不符（返回 false）继续下方整库路径，
@@ -3035,19 +3059,24 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 		return err
 	}
 
-	// 规则装配：档案载入（坏规则逐条告警跳过，整体不可载入降级仅内置）
+	// 规则装配：档案载入（坏规则逐条告警跳过，整体不可载入降级仅内置）。
+	// 类型锚定在指纹之后（指纹反映落档原文，锚定只改内存态启用位）。
 	profile, errs := LoadProfile(m.store)
 	for _, err := range errs {
 		m.warnf("规则档案载入异常（识别）: %v", err)
 	}
-	enabledRules := EffectiveRules(profile)
+	aggTypes := fetchResourceTypeIndex(m.ctx, m.warnf)
 	allRules := allRulesWithBuiltins(profile)
 	digest := ""
 	if profile != nil {
 		if d, err := profileDigestOf(profile); err == nil {
 			digest = d
 		}
+		for _, warn := range AnchorAggregateRules(profile, aggTypes) {
+			m.warnf("规则档案载入告警: %v", warn)
+		}
 	}
+	enabledRules := EffectiveRules(profile)
 
 	// 增量资格：上次快照的档案指纹与当前一致、且会话赋值修订号未变（赋值
 	// 新增/修改/清除都会改修订号——赋值保存触发的刷新轮由函数头的赋值增量
@@ -3154,6 +3183,9 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 	treeScan := buildScanFiles(enumRes.AllFiles)
 	var harvest evalHarvest
 	conclusions := mergedRecognition(evalScan, treeScan, enabledRules, lib, sess.Assignments, nil, &harvest, publishEvalProgress)
+	// 聚合段（汇流后的独立通道）：群归属与元数据结论已定，聚合只消费既有
+	// 结论不改写——标识等值并组后把聚合归属落回各文件结论。
+	runAggregationOnConclusions(conclusions, evalScan, treeScan, enabledRules, lib, aggTypes)
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseEvaluate,
 		Done: len(conclusions), Total: len(evalFiles),
@@ -3175,7 +3207,7 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 		conclusions: conclusions, prev: prev, prevSkipped: prevSkipped,
 		assigns: sess.Assignments, profileDigest: digest, assignRevision: sess.AssignRevision,
 		evaluatorBuildID: evalBuildID,
-		ignoredTargets: ignoredTargets, confirmedTargets: confirmedTargets,
+		ignoredTargets:   ignoredTargets, confirmedTargets: confirmedTargets,
 		confirmedSetIDs: sess.ConfirmedSetIDs,
 	})
 
@@ -3211,6 +3243,20 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 		ProfileChanged: m.profileChangedSince(digest),
 	})
 	return nil
+}
+
+// runAggregationOnConclusions 识别轮汇流点的聚合段入口（与 pipeline.go 的
+// runAggregationStage 同一算法，作用对象为合并求值结论）：conclusions 与
+// files 按下标对齐（调用方保证同一求值清单），聚合归属直接写入结论字段。
+func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) {
+	assigns := aggregateGrouping(newAggEvalSurface(files, treeFiles), rules, lib, types)
+	for i := range conclusions {
+		if i >= len(assigns) {
+			break
+		}
+		conclusions[i].AggWorkKey = assigns[i].WorkKey
+		conclusions[i].AggTrackRole = assigns[i].TrackRole
+	}
 }
 
 // indexSize 谓词索引的名字总量（进度呈现用；nil 索引为 0）。
