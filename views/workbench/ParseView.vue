@@ -113,7 +113,10 @@
                  创建任务/开始全量识别已移页头 -->
             <h3 class="li-ws-card-title">
               资源清单
-              <template v-if="snapshot"><span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">（可选 {{ selectableWorks.length }} / 共 {{ allWorks.length }}）</span></span></template>
+              <!-- 已选计数按作品（聚合作品=一件）：未选=可选/共（帧1 形态），已选>0=
+                   已选作品文件总数（帧3「已选 1 件作品（3 个文件）」形态，M 个文件=
+                   选择集各作品 files 数求和） -->
+              <template v-if="snapshot"><span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">{{ selectedWorks.size > 0 ? `（${selectedFileCount} 个文件）` : `（可选 ${selectableWorks.length} / 共 ${allWorks.length}）` }}</span></span></template>
               <span v-if="snapshot" class="li-ws-card-stats">文件 {{ snapshot.stats.totalFiles }} · 已识别 {{ snapshot.stats.identified }} · 有线索 {{ snapshot.stats.clueful }} · 无线索 {{ snapshot.stats.plain }} · 序列群 {{ snapshot.stats.groupCount }} · 待裁决 {{ snapshot.stats.pendingFiles }}<template v-if="snapshot.stats.skippedDirs > 0"> · 增量跳过目录 {{ snapshot.stats.skippedDirs }}</template></span>
             </h3>
             <!-- 识别中：流式进度（阶段跃迁 + 计数）；赋值变更后的自动增量重识别共用此状态条 -->
@@ -206,16 +209,21 @@
                 ref="listViewport"
                 class="li-ws-list"
                 @scroll="onListScroll"
+                @mouseleave="hoverAggKey = ''"
               >
                 <div class="li-ws-list-spacer" :style="{ height: `${visibleRange.start * ROW_H}px` }"></div>
-                <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 声明/线索摘要 + 差异标 + 已赋值标；
-                     行点击 = 选中联动右栏（选中键 = 文件相对路径），与复选不互斥 -->
+                <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 自身轨道标（聚合成员，未配对
+                     行无标）+ 声明/线索摘要 + 差异标 + 已赋值标；悬停聚合成员行→同作品
+                     其他成员行整行高亮（aggWorkKey 联动，未配对行无联动）；行点击 =
+                     选中联动右栏（选中键 = 文件相对路径），与复选不互斥 -->
                 <div
                   v-for="row in visibleFiles"
                   :key="row.relPath"
                   class="li-ws-row"
-                  :class="row.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.relPath) ? `is-diff-${diffMark(row.relPath)}` : '')"
+                  :class="[row.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.relPath) ? `is-diff-${diffMark(row.relPath)}` : ''), aggHoverClass(row.aggWorkKey)]"
                   @click="selectFile(row.relPath)"
+                  @mouseenter="hoverAggKey = row.aggWorkKey || ''"
+                  @mouseleave="hoverAggKey = ''"
                 >
                   <el-checkbox
                     class="li-ws-cb"
@@ -227,6 +235,7 @@
                   />
                   <span class="li-ws-row-state" :class="`is-${row.state}`" :title="stateLabel(row.state)">{{ stateDot(row.state) }}</span>
                   <span class="li-ws-row-path" :title="row.relPath">{{ row.relPath }}</span>
+                  <span v-if="aggTrackLabel(row.aggTrackRole)" class="li-ws-row-track">{{ aggTrackLabel(row.aggTrackRole) }}</span>
                   <span v-if="diffMark(row.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.relPath)}`">{{ diffMark(row.relPath) === 'changed' ? 'Δ变更' : diffMark(row.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
                   <span class="li-ws-row-meta">
                     <template v-if="row.final && row.final.length">
@@ -247,7 +256,7 @@
                    目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录解析面板）
                    + 文件数 + 含义覆盖标记；
                    文件行 = 行首作品级复选（勾选/禁用语义同平铺，目录行全选/半选态由选择集派生）+ 平铺同款元数据，点行 = 现有联动 -->
-              <el-scrollbar v-if="listMode === 'tree'" ref="treeViewport" class="li-ws-tree">
+              <el-scrollbar v-if="listMode === 'tree'" ref="treeViewport" class="li-ws-tree" @mouseleave="hoverAggKey = ''">
                 <template v-for="row in treeRows" :key="row.key">
                   <div v-if="row.kind === 'dir' && row.dir" class="li-ws-tree-dir" :style="{ paddingLeft: `${row.depth * 16 + 4}px` }">
                     <button
@@ -274,9 +283,11 @@
                   <div
                     v-else-if="row.kind === 'file' && row.file"
                     class="li-ws-tree-file"
-                    :class="row.file.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.file.relPath) ? `is-diff-${diffMark(row.file.relPath)}` : '')"
+                    :class="[row.file.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.file.relPath) ? `is-diff-${diffMark(row.file.relPath)}` : ''), aggHoverClass(row.file.aggWorkKey)]"
                     :style="{ paddingLeft: `${row.depth * 16 + 30}px` }"
                     @click="selectFile(row.file.relPath)"
+                    @mouseenter="hoverAggKey = row.file.aggWorkKey || ''"
+                    @mouseleave="hoverAggKey = ''"
                   >
                     <!-- H6：行首复选走作品级选择集通路（与平铺行同款），阻止冒泡以免触发行选中联动 -->
                     <el-checkbox
@@ -289,6 +300,7 @@
                     />
                     <span class="li-ws-row-state" :class="`is-${row.file.state}`" :title="stateLabel(row.file.state)">{{ stateDot(row.file.state) }}</span>
                     <span class="li-ws-tree-fname" :title="row.file.relPath">{{ row.file.fileName }}</span>
+                    <span v-if="aggTrackLabel(row.file.aggTrackRole)" class="li-ws-row-track">{{ aggTrackLabel(row.file.aggTrackRole) }}</span>
                     <span v-if="diffMark(row.file.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.file.relPath)}`">{{ diffMark(row.file.relPath) === 'changed' ? 'Δ变更' : diffMark(row.file.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
                     <span class="li-ws-row-meta">
                       <template v-if="row.file.final && row.file.final.length">
@@ -728,8 +740,14 @@
         :placeholder="`默认：${defaultTaskName}`"
       />
       <p class="li-ws-create-dialog-note">
-        一次创建为一个父任务，包含全部 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）；识别出站点归属的文件按站点分组为额外父行（罕见）。创建前经磁盘对账核验；创建后任务为 Created 状态，由任务管理手动开始
+        <!-- 选择集含聚合作品（帧5 形态，聚合作品=一个子任务）：帧式首行 + 逐件明细；
+             纯单文件选择集保持原说明文案（单文件作品行为零变化） -->
+        <template v-if="aggregatedSelectedWorks.length > 0">将创建 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）为 {{ selectedWorks.size }} 个子任务：</template>
+        <template v-else>一次创建为一个父任务，包含全部 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）；识别出站点归属的文件按站点分组为额外父行（罕见）。创建前经磁盘对账核验；创建后任务为 Created 状态，由任务管理手动开始</template>
       </p>
+      <ul v-if="aggregatedSelectedWorks.length > 0" class="li-ws-create-dialog-tracks">
+        <li v-for="w in aggregatedSelectedWorks" :key="w.workId">{{ aggregatedWorkLabel(w) }}（{{ aggregatedTrackSummary(w) }}）</li>
+      </ul>
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="createTasks">创建</el-button>
@@ -858,6 +876,14 @@ interface SnapFile {
   clues?: { kind: string; detail: string }[]
   // 剧本G：结构分段线索集（getPanorama 每文件投影；ParsePanel 线索胶囊区消费）
   structClues?: { ref: string; kind: string; label: string; value: string }[]
+  // 多文件聚合段落的归属（getPanorama files 分节直投识别快照同名字段，json 驼峰
+  // 逐字对齐）：aggWorkKey 聚合作品键（"f:"+主导文件相对路径，空=无聚合、独立
+  // 作品）；aggTrackRole 本文件的轨道角色（空=无聚合，行上不渲染轨道标）；
+  // aggWorkType 聚合作品声明的资源类型（随主导文件结论携带，确认框轨别摘要的
+  // 形态判据）
+  aggWorkKey?: string
+  aggTrackRole?: string
+  aggWorkType?: string
   assigned?: boolean
 }
 
@@ -2326,6 +2352,97 @@ const fileByRel = computed<Map<string, SnapFile>>(() => {
   return index
 })
 
+// —— 多文件聚合呈现（剧本1/剧本2：行自身轨道标 + 悬停同作品联动 + 确认框子任务明细） —— //
+
+// 轨道角色 → 行级轨道标中文名（aggTrackRole 值=SDK StoreType 8 值封闭枚举）。
+// 四主轨为剧本帧文案逐字（视频轨/字幕轨/图片轨/正文轨）；其余角色口径——
+// 缩略图轨/视频原料轨/音频原料轨/音频主体轨（分离流「原料」与可播放「主体」
+// 在行标上以名区分）；未知角色值照原样呈现（不虚构中文）
+const AGG_TRACK_LABELS: Record<string, string> = {
+  videoMain: '视频轨',
+  subtitle: '字幕轨',
+  image: '图片轨',
+  document: '正文轨',
+  thumbnail: '缩略图轨',
+  videoTrack: '视频原料轨',
+  audioTrack: '音频原料轨',
+  audioMain: '音频主体轨'
+}
+
+// 轨道角色 → 确认框轨别摘要短名（行标去「轨」形态，供「主导 + 伴随×N」归并）
+const AGG_TRACK_SHORTS: Record<string, string> = {
+  videoMain: '视频',
+  subtitle: '字幕',
+  image: '图片',
+  document: '正文',
+  thumbnail: '缩略图',
+  videoTrack: '视频原料',
+  audioTrack: '音频原料',
+  audioMain: '音频主体'
+}
+
+// 行级轨道标：未配对行（角色空）返回空串、模板不渲染标记（非空串占位）
+const aggTrackLabel = (role?: string): string => (role ? AGG_TRACK_LABELS[role] || role : '')
+
+// 悬停联动（剧本1 帧2/帧4）：指针悬停聚合成员行时记录其聚合作品键，同键成员行
+// 整行高亮（含指针行，共同表达「这几行是同一件作品」）；未配对行键为空、无联动；
+// 移开即恢复。平铺/目录树两种模式共用同一键（=识别快照 aggWorkKey）
+const hoverAggKey = ref('')
+const aggHoverClass = (key?: string): string => (key && key === hoverAggKey.value ? 'is-agg-hover' : '')
+
+// 选择集中的聚合作品（files 多成员；帧5 确认框逐件列明细——聚合作品=一个子任务）
+const aggregatedSelectedWorks = computed<SelectableWorkView[]>(() => {
+  const out: SelectableWorkView[] = []
+  for (const id of selectedWorks.value) {
+    const w = workIndex.value.get(id)
+    if (w && w.files && w.files.length > 1) out.push(w)
+  }
+  return out
+})
+
+// 聚合作品显示名（帧5「inner world · ep01」形态）：主导文件目录键 + 去扩展名
+// 主导文件名（库根直下文件无目录段，仅文件名）
+const aggregatedWorkLabel = (w: SelectableWorkView): string => {
+  const lead = w.files && w.files.length > 0 ? w.files[0] : ''
+  const base = lead.includes('/') ? lead.slice(lead.lastIndexOf('/') + 1) : lead
+  const cut = base.lastIndexOf('.')
+  const stem = cut > 0 ? base.slice(0, cut) : base
+  return w.dirRelKey ? `${w.dirRelKey} · ${stem}` : stem
+}
+
+// 确认框轨别摘要（按 role 归并，清单序）：article 形态=「图文」（帧文案逐字）；
+// 其余形态=主导角色短名 + 伴随角色×N 通用式（video 形态据此自然产出
+// 「视频 + 字幕×2」，无伴随=仅主导短名如「视频」）
+const aggregatedTrackSummary = (w: SelectableWorkView): string => {
+  const files = w.files || []
+  const roleOf = (rel: string): string => {
+    const f = fileByRel.value.get(rel)
+    return f && f.aggTrackRole ? f.aggTrackRole : ''
+  }
+  const leadFile = files.length > 0 ? fileByRel.value.get(files[0]) : null
+  if (leadFile && leadFile.aggWorkType === 'article') return '图文'
+  const shortOf = (role: string): string => AGG_TRACK_SHORTS[role] || role
+  const parts: string[] = []
+  const order: string[] = []
+  const counts = new Map<string, number>()
+  for (const rel of files.slice(1)) {
+    const role = roleOf(rel)
+    if (!role) continue
+    const name = shortOf(role)
+    if (!counts.has(name)) {
+      order.push(name)
+      counts.set(name, 0)
+    }
+    counts.set(name, (counts.get(name) || 0) + 1)
+  }
+  for (const name of order) {
+    const n = counts.get(name) || 0
+    parts.push(n > 1 ? `${name}×${n}` : name)
+  }
+  const lead = files.length > 0 ? shortOf(roleOf(files[0])) : ''
+  return parts.length > 0 ? `${lead} + ${parts.join(' + ')}` : lead
+}
+
 const isWorkSelected = (id: string): boolean => selectedWorks.value.has(id)
 
 function toggleWork(id: string): void {
@@ -3550,6 +3667,16 @@ onUnmounted(() => {
   color: var(--app-text-primary);
 }
 
+/* 自身轨道标（多文件聚合成员行，帧1/帧4：每文件行标自己的轨道；未配对行不渲染） */
+.li-ws-row-track {
+  flex: none;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: var(--app-radius-sm);
+  background: var(--app-tag-neutral-bg);
+  color: var(--app-text-regular);
+}
+
 /* 重识别差异高亮：变更/新增行底色标记（消失行不在当前清单，经差异条计数呈现） */
 .li-ws-row.is-diff-changed {
   background: var(--app-tag-warning-bg);
@@ -3721,6 +3848,13 @@ onUnmounted(() => {
 
 .li-ws-tree-file:hover {
   background: rgba(128, 128, 128, 0.08);
+}
+
+/* 悬停联动（剧本1 帧2/帧4）：指针悬停聚合成员行→同 aggWorkKey 成员行整行高亮
+   （含指针行，主色淡底；置于原生 :hover 之后同特异性覆盖灰底）；未配对行无联动 */
+.li-ws-row.is-agg-hover,
+.li-ws-tree-file.is-agg-hover {
+  background: color-mix(in srgb, var(--app-color-primary) 12%, transparent);
 }
 
 .li-ws-tree-file.is-selected {
@@ -4224,6 +4358,18 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.6;
   color: var(--app-text-secondary);
+}
+
+/* 创建确认框·聚合作品子任务明细（帧5「inner world · ep01（视频 + 字幕×2）」逐件
+   清单；长选择集弹窗内滚动，不撑破 420px 对话框） */
+.li-ws-create-dialog-tracks {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-text-regular);
 }
 
 /* —— 右栏解析面板卡（高度由主体 stretch 链锁定，卡内滚动） —— */
