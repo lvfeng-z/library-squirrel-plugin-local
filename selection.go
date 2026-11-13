@@ -1,5 +1,6 @@
-// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品、每件恰
-// 一文件；集=序列群、默认聚合单元），承载选择集的持久化校验、创建编排动作（异步化：
+// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品；聚合
+// 规则落轨的成员按聚合作品键并成一件多成员作品、其余每文件一件单文件作品；
+// 集=序列群、默认聚合单元），承载选择集的持久化校验、创建编排动作（异步化：
 // 创建前目录级 mtime 对账〔逐文件存在性核对已并入 verify 哈希循环，见
 // hashWorkFilesAllOrNothing〕→ 一次 CreateTask 走 Create 过滤产出分支 → 选择集
 // 清理，均移独立 goroutine；进度与终态经 createProgress/createDone 事件推送）与
@@ -20,8 +21,9 @@ import (
 
 // —— 作品键 ——
 
-// 作品键前缀：保证键非空且与裸相对路径可区分。每件作品恰一文件，键=前缀+该
-// 文件相对路径（序列群成员与落单文件同形，差别仅在是否属集）。
+// 作品键前缀：保证键非空且与裸相对路径可区分。单文件作品键=前缀+该文件相对
+// 路径；聚合作品键=前缀+主导文件相对路径（键前缀维持单一，前端作品索引按成员
+// 循环天然兼容）。序列群成员与落单文件同形，差别仅在是否属集。
 const workKeyPrefixFile = "f:"
 
 // 作品呈现状态词汇（状态过滤与置灰判定用；worst-of-files 口径）。
@@ -45,16 +47,17 @@ func splitWorkSetKey(setKey string) (dirRelKey, groupKey string) {
 	return dirRelKey, groupKey
 }
 
-// SelectableWork 可选作品：选择的最小粒度。每件作品恰一文件（Files 恒单轨）——
-// 文件的多作品归属（同目录散图是否同一作品的多页/多轨）属识别面结论，识别面
-// 未提供该判定前选择域不虚构聚合；Files 保留轨道集形态，真实作品归属识别落地
-// 后多轨作品经此回归。
+// SelectableWork 可选作品：选择的最小粒度。单文件作品恒一文件；聚合作品=同
+// 聚合作品键的成员并成一件（Files 多成员、首位=主导文件——作品级结论〔集归属/
+// 呈现态/创建链元数据〕按主导文件结论取值）。Files 保留轨道集形态承载两类
+// 作品。
 type SelectableWork struct {
-	// WorkID 作品键（workKeyPrefixFile + 文件相对路径）。
+	// WorkID 作品键（workKeyPrefixFile + 文件相对路径；聚合作品=主导文件相对路径）。
 	WorkID string `json:"workId"`
-	// DirRelKey 所属目录键（'/' 路径，库根直下为空串）。
+	// DirRelKey 所属目录键（'/' 路径，库根直下为空串；聚合作品=主导文件目录键）。
 	DirRelKey string `json:"dirRelKey"`
-	// Files 作品全部轨道的相对路径（现况恒一条）。
+	// Files 作品全部轨道的相对路径（单文件作品恒一条；聚合作品=成员清单，首位
+	//=主导文件，余按快照序）。
 	Files []string `json:"files"`
 	// SetKey 所属集键（仅序列群成员非空；落单文件不属任何集）。
 	SetKey string `json:"setKey,omitempty"`
@@ -151,11 +154,17 @@ func workVitality(fileByPath map[string]*SnapFile, ignored map[string]bool, file
 	}
 }
 
-// DeriveWorkDomain 从识别全景快照推导选择域：每个文件各自成一件单文件作品；
-// GroupKey 非空的文件（规则定群与结构群成员）另按「目录+分组键」归集为集
-//（集内序取快照 GroupSeq）——集=默认聚合单元，集内允许作品级显式拆选。
-// 文件的多作品归属（同目录散图是否同一作品的多页/多轨）属识别面结论，识别面
-// 未提供该判定，选择域不按目录虚构聚合。
+// DeriveWorkDomain 从识别全景快照推导选择域：每个文件各自成一件单文件作品，
+// 聚合归属非空的成员按聚合作品键并成一件聚合作品（不再逐文件成件）；GroupKey
+// 非空的文件（规则定群与结构群成员）另按「目录+分组键」归集为集（集内序取快照
+// GroupSeq）——集=默认聚合单元，集内允许作品级显式拆选，集视图以作品为成员
+// （聚合作品整体入集、整件为一成员）。
+//
+// 聚合作品的键=主导文件 f:{相对路径}（聚合段落定的作品键原样沿用，键前缀维持
+// 单一）；Files 首位恒为主导文件（快照序先见伴随成员时入组后对位挪前），目录键、
+// 集归属与可选性/呈现态都按主导文件结论取值——作品级结论=主导文件结论，伴随轨
+// 不单独产结论（未识别的伴随轨〔如字幕〕不拉低作品，否则纯轨道伴随恒 plain、
+// 聚合作品结构性不可选）。
 //
 // ignored 为会话已忽略项（相对路径集合，呈现态用；忽略不剥夺可选性——已识别
 // 的忽略项仍可被显式选为任务）。
@@ -168,9 +177,39 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 	for i := range snap.Files {
 		fileByPath[snap.Files[i].RelPath] = &snap.Files[i]
 	}
+	// 单过扫描：聚合成员并入其聚合作品（作品位=首成员快照序），无聚合归属的
+	// 文件走原逐文件分支各自成件——两类作品在 Works 中保持快照序（确定序），
+	// 单文件作品路径零变化。
 	setMembers := make(map[string][]*SelectableWork)
+	aggByWork := make(map[string]*SelectableWork)
 	for i := range snap.Files {
 		f := &snap.Files[i]
+		if f.AggWorkKey != "" {
+			work := aggByWork[f.AggWorkKey]
+			if work == nil {
+				work = &SelectableWork{
+					WorkID:    f.AggWorkKey,
+					DirRelKey: f.DirRelKey,
+					Files:     []string{f.RelPath},
+				}
+				aggByWork[f.AggWorkKey] = work
+				domain.Works = append(domain.Works, work)
+				domain.byWork[work.WorkID] = work
+				continue
+			}
+			work.Files = append(work.Files, f.RelPath)
+			if f.RelPath == strings.TrimPrefix(f.AggWorkKey, workKeyPrefixFile) {
+				// 主导文件=作品键对位成员：先见伴随成员时，主导文件挪至 Files
+				// 首位并以其目录键为作品目录键（后续集归属/呈现态按 Files 首位
+				// 取值）。
+				work.DirRelKey = f.DirRelKey
+				for j := len(work.Files) - 1; j > 0; j-- {
+					work.Files[j] = work.Files[j-1]
+				}
+				work.Files[0] = f.RelPath
+			}
+			continue
+		}
 		work := &SelectableWork{
 			WorkID:    workKeyPrefixFile + f.RelPath,
 			DirRelKey: f.DirRelKey,
@@ -184,6 +223,16 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 		}
 	}
 	for _, work := range domain.Works {
+		if _, aggregated := aggByWork[work.WorkID]; aggregated {
+			// 聚合作品：作品级结论=主导文件（Files 首位）——集归属按主导文件
+			// 群键整体入集，可选性/呈现态只看主导文件。
+			work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files[:1])
+			if lead := fileByPath[work.Files[0]]; lead != nil && lead.GroupKey != "" {
+				work.SetKey = workSetKey(lead.DirRelKey, lead.GroupKey)
+				setMembers[work.SetKey] = append(setMembers[work.SetKey], work)
+			}
+			continue
+		}
 		work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files)
 	}
 	for _, setKey := range sortedKeys(setMembers) {
@@ -315,29 +364,62 @@ func displayOfWork(work *SelectableWork) string {
 
 // ReconcileSelectionDisk 选择集对磁盘现状复核（守卫链仅目录级）：所涉目录的
 // mtime 与识别快照游标比对（识别后有新增/删除/移动即目录 mtime 漂移、阻断），
-// 阻断文案提示重新识别受影响子树。
+// 阻断文案提示重新识别受影响子树。目录键集=各作品成员文件所属目录（聚合作品
+// 成员可跨目录，逐成员核对；单文件作品恒=作品自身目录键，与既有路径逐键等价）。
 //
 // 逐文件存在性核对已并入 verify 哈希循环（守卫链与会话瘦身四刀之四：全库
 // 选择集 15 万级文件的守卫链串行 Stat 是 27.7s 的主要构成——文件级核对移至
 // hashWorkFilesAllOrNothing 的 Stat，失败即整次创建中断、对账文案经中止原因
 // 收流；守卫链只留目录级游标抽查，真实库约 6,210 目录，秒级）。
 func ReconcileSelectionDisk(root string, snap *RecognitionSnapshot, works []*SelectableWork) error {
+	fileByPath := make(map[string]*SnapFile)
+	if snap != nil {
+		for i := range snap.Files {
+			fileByPath[snap.Files[i].RelPath] = &snap.Files[i]
+		}
+	}
 	seenDir := make(map[string]bool, len(works))
-	for _, work := range works {
-		if seenDir[work.DirRelKey] {
-			continue
+	checkDir := func(dirRelKey string) error {
+		if seenDir[dirRelKey] {
+			return nil
 		}
-		seenDir[work.DirRelKey] = true
-		want, ok := snap.DirMtimes[work.DirRelKey]
+		seenDir[dirRelKey] = true
+		want, ok := snap.DirMtimes[dirRelKey]
 		if !ok {
-			continue
+			return nil
 		}
-		fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(work.DirRelKey)))
+		fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(dirRelKey)))
 		if err != nil {
-			return fmt.Errorf("磁盘对账未通过：所选目录 %s 不可访问，请重新识别后再创建", displayDirKey(work.DirRelKey))
+			return fmt.Errorf("磁盘对账未通过：所选目录 %s 不可访问，请重新识别后再创建", displayDirKey(dirRelKey))
 		}
 		if fi.ModTime().UnixNano() != want {
-			return fmt.Errorf("磁盘对账未通过：目录 %s 在识别后有变动（新增、删除或移动过文件），请重新识别后再创建", displayDirKey(work.DirRelKey))
+			return fmt.Errorf("磁盘对账未通过：目录 %s 在识别后有变动（新增、删除或移动过文件），请重新识别后再创建", displayDirKey(dirRelKey))
+		}
+		return nil
+	}
+	for _, work := range works {
+		if len(work.Files) <= 1 {
+			if err := checkDir(work.DirRelKey); err != nil {
+				return err
+			}
+			continue
+		}
+		// 多成员作品：逐成员取目录键（快照记录缺席的成员回退作品目录键）。
+		checked := 0
+		for _, rel := range work.Files {
+			dirRelKey := work.DirRelKey
+			if f := fileByPath[rel]; f != nil {
+				dirRelKey = f.DirRelKey
+			}
+			if err := checkDir(dirRelKey); err != nil {
+				return err
+			}
+			checked++
+		}
+		if checked == 0 {
+			if err := checkDir(work.DirRelKey); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -420,12 +502,17 @@ func (m *SessionManager) takeCreateBatchSummary(root string) createBatchSummary 
 
 // createBatchSummary 一次工作台创建的批次摘要（emitSelectedWorks 产出完成
 // 时记录、编排动作在宿主 CreateTask 返回后读取）：子行总数与非 local 子行的
-// 归属分布供通知文案的归属附注。
+// 归属分布供通知文案的归属附注，整件放弃计数与样本供放弃附注。
 type createBatchSummary struct {
 	// total 产出的子行总数。
 	total int
 	// nonLocalBySite 非 local 子行的归属分布（站点展示名→件数，站点按首见序）。
 	nonLocalBySite []siteFileCount
+	// dropped 整件放弃的件数（聚合作品成员对账失败——任一成员缺失/哈希不可读，
+	// 放弃半径=作品级；单文件作品的哈希失败同计）；dropSample 首件样本的呈现名
+	//（相对路径），通知文案「放弃 N 件」的数据面。
+	dropped    int
+	dropSample string
 }
 
 // siteFileCount 单站点的非 local 子行计数（批次内归属同一真实域站点的子行数）。
@@ -461,6 +548,9 @@ func buildCreateTasksMessage(taskName string, works, tasks int, elapsed time.Dur
 	}
 	if len(parts) > 0 {
 		message += "；其中 " + strings.Join(parts, "、")
+	}
+	if summary.dropped > 0 {
+		message += fmt.Sprintf("；放弃 %d 件（样本 %s：成员文件已变化或不可读，请重扫后重选）", summary.dropped, summary.dropSample)
 	}
 	return message
 }

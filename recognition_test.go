@@ -3716,6 +3716,13 @@ func TestAggregationIdentityValueGrouping(t *testing.T) {
 	if single.AggWorkKey != "f:sub/b.mp4" || single.AggTrackRole != sdkdto.StoreRoleVideoMain {
 		t.Fatalf("无字幕伴随的单视频应成立为单轨聚合作品: key=%q role=%q", single.AggWorkKey, single.AggTrackRole)
 	}
+	// 声明作品类型随归属落轨：成组行携带选中规则 AggregateProduction.WorkType
+	//（创建链子行 ResourceType 的声明值来源）
+	for _, rel := range []string{"sub/a.mp4", "sub/a.zh.srt", "sub/a.en.srt", "sub/b.mp4"} {
+		if got := aggDecisionOf(t, decisions, rel); got.AggWorkType != sdkdto.ResourceTypeVideo {
+			t.Fatalf("成组行 %s 的声明作品类型应为规则声明值 video，实际 %q", rel, got.AggWorkType)
+		}
+	}
 }
 
 // TestAggregationRequiredNotExactlyOneAmbiguity 必含轨非恰一歧义锚：同标识两
@@ -4020,8 +4027,8 @@ func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
 }
 
 // TestAggregationSnapshotV3RoundTrip 快照 v3 读写往返+旧快照降级锚：聚合归属
-// 两字段随快照往返保真、结构版本为 3；v2 旧快照（无聚合字段）读入按空聚合
-// 降级。
+// （作品键/轨道角色/声明作品类型）随快照往返保真、结构版本为 3；v2 旧快照
+// （无聚合字段）读入按空聚合降级。
 func TestAggregationSnapshotV3RoundTrip(t *testing.T) {
 	if recognitionSnapshotSchemaVersion != 3 {
 		t.Fatalf("快照结构版本应为 3: %d", recognitionSnapshotSchemaVersion)
@@ -4030,9 +4037,9 @@ func TestAggregationSnapshotV3RoundTrip(t *testing.T) {
 		SchemaVersion: recognitionSnapshotSchemaVersion,
 		Files: []SnapFile{
 			{RelPath: "a.mp4", FileName: "a.mp4", State: snapStateIdentified,
-				AggWorkKey: "f:a.mp4", AggTrackRole: sdkdto.StoreRoleVideoMain},
+				AggWorkKey: "f:a.mp4", AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
 			{RelPath: "a.zh.srt", FileName: "a.zh.srt", State: snapStatePlain,
-				AggWorkKey: "f:a.mp4", AggTrackRole: contract.StoreTypeSubtitle},
+				AggWorkKey: "f:a.mp4", AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
 			{RelPath: "b.txt", FileName: "b.txt", State: snapStatePlain},
 		},
 	}
@@ -4049,8 +4056,11 @@ func TestAggregationSnapshotV3RoundTrip(t *testing.T) {
 		back.Files[1].AggWorkKey != "f:a.mp4" || back.Files[1].AggTrackRole != contract.StoreTypeSubtitle {
 		t.Fatalf("聚合归属两字段应随快照往返保真: %+v", back.Files)
 	}
-	if back.Files[2].AggWorkKey != "" || back.Files[2].AggTrackRole != "" {
-		t.Fatalf("无聚合文件的两字段应为空: %+v", back.Files[2])
+	if back.Files[0].AggWorkType != sdkdto.ResourceTypeVideo || back.Files[1].AggWorkType != sdkdto.ResourceTypeVideo {
+		t.Fatalf("声明作品类型应随快照往返保真: %+v", back.Files)
+	}
+	if back.Files[2].AggWorkKey != "" || back.Files[2].AggTrackRole != "" || back.Files[2].AggWorkType != "" {
+		t.Fatalf("无聚合文件的聚合字段应为空: %+v", back.Files[2])
 	}
 
 	legacy := []byte(`{"schemaVersion":2,"files":[{"relPath":"a.mp4","fileName":"a.mp4","state":"identified"}]}`)
@@ -4058,7 +4068,7 @@ func TestAggregationSnapshotV3RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(legacy, &old); err != nil {
 		t.Fatalf("旧快照读入失败: %v", err)
 	}
-	if old.Files[0].AggWorkKey != "" || old.Files[0].AggTrackRole != "" {
+	if old.Files[0].AggWorkKey != "" || old.Files[0].AggTrackRole != "" || old.Files[0].AggWorkType != "" {
 		t.Fatalf("v2 旧快照应按空聚合降级: %+v", old.Files[0])
 	}
 }

@@ -26,9 +26,11 @@ import (
 // currentPluginDataVersion 当前插件支持的 task PluginData 格式版本
 // v2：FilePluginData 增加可选归属字段（siteKey/siteWorkId，扫描期归属裁决结果）；
 // v3：FilePluginData 增加任务级赋值快照（assignment，工作台创建时固化的会话赋值，
-// 执行期重算优先消费）；v0/v1/v2 旧数据无对应字段，读侧按零值走既有路径
-// （无归属=local 回退、无赋值快照=纯档案求值）
-const currentPluginDataVersion = 3
+// 执行期重算优先消费）；v4：FilePluginData 增加成员轨道清单（tracks，聚合作品
+// 子行——一件聚合作品一个子行多轨，清单序=轨道发射序）；v0/v1/v2/v3 旧数据无
+// 对应字段，读侧按零值走既有路径（无归属=local 回退、无赋值快照=纯档案求值、
+// 无轨道清单=单文件作品）
+const currentPluginDataVersion = 4
 
 // checkPluginDataVersion 校验 task PluginData 格式版本：
 // 0(旧数据，引入版本约定前写入)与当前支持版本走现有逻辑；高于当前=由更新版本插件写入，拒绝执行防静默数据损坏。
@@ -40,9 +42,21 @@ func checkPluginDataVersion(v int) error {
 	return nil
 }
 
+// TrackEntry 聚合作品成员轨道清单条目（PluginData v4）：成员文件的身份（路径/
+// 哈希/大小）与其结构角色（如 video 的 videoMain/subtitle、article 的
+// document/image）。清单序=轨道发射序（首位=主导文件），同角色多轨的续传序号
+// （store_seq）按本清单内同角色出现序编号——Start 与 Resume 按同一序对位。
+type TrackEntry struct {
+	FullPath string `json:"fullPath"`
+	RelPath  string `json:"relPath"`
+	Hash     string `json:"hash"`
+	Size     int64  `json:"size,omitempty"`
+	Role     string `json:"role"`
+}
+
 // FilePluginData 文件级 PluginData
 type FilePluginData struct {
-	SchemaVersion int           `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=引入版本约定，2=增加归属字段，3=增加任务级赋值快照
+	SchemaVersion int           `json:"schemaVersion,omitempty"` // plugin_data 格式版本；0=旧数据(引入版本约定前写入)，1=引入版本约定，2=增加归属字段，3=增加任务级赋值快照，4=增加成员轨道清单
 	FullPath      string        `json:"fullPath"`
 	RelPath       string        `json:"relPath"`
 	Hash          string        `json:"hash"`
@@ -56,6 +70,12 @@ type FilePluginData struct {
 	//（插件自有字段，零契约）。执行期重算优先按它做「档案∪赋值」合并求值的
 	// 赋值覆盖——已建任务自包含，会话删除或赋值清理不影响在途任务的元数据。
 	Assignment *SessionAssignment `json:"assignment,omitempty"`
+	// Tracks 聚合作品成员轨道清单（v4，聚合作品子行专属）：主导文件结论承载于
+	// 顶层字段（FullPath/Hash/Assignment 等均=主导文件——作品级元数据=主导
+	// 文件结论），清单携带全部成员（含主导文件）。空=单文件作品（既有路径），
+	// 文件数与角色构成（确认呈现「N 个文件」「视频 + 字幕×N」类文案的数据面）
+	// 由本清单直接可得。
+	Tracks []TrackEntry `json:"tracks,omitempty"`
 }
 
 // hasRealAttribution PluginData 是否携带真实域归属（裁决出真实站点与页级作品 ID）
@@ -74,7 +94,10 @@ type DirPluginData struct {
 type LocalImportWorkFetcher struct {
 	ctx        sdkdto.PluginContext
 	classifier *PathClassifier
-	readers    sync.Map // taskID → *os.File
+	readers    sync.Map // taskID → *os.File（单文件作品主资源句柄）
+	// multiReaders 聚合作品多轨任务的已开句柄（taskID → []*os.File）：Start/Resume
+	// 按轨道清单逐轨开文件，Pause/Stop 经 closeReader 一并关闭。
+	multiReaders sync.Map
 
 	siteKeyMu   sync.Mutex
 	siteKeyByID map[int64]string // 站点 DB 行 id → 站点键（ListSites 注册表投影一次拉取的缓存）
@@ -622,6 +645,14 @@ func (h *LocalImportWorkFetcher) childrenBatchBounds() (byteTarget, countLimit i
 // 其余收尾形态合并保留——见函数内 defer）。
 func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchSession, works []*SelectableWork, taskName string, ch chan<- *sdkdto.CreateStreamItem, reporter sdkdto.HeartbeatReporter) (reason string, cancelled bool) {
 	chains := dirMeaningChains(sess.Snapshot)
+	// 快照文件反查表：聚合归属（作品键/轨道角色）随文件行携带，聚合单元的判定
+	// 与成员角色取值都经此查照（快照与域推导同源，派生域只携作品结构）。
+	snapFileByPath := make(map[string]*SnapFile)
+	if sess.Snapshot != nil {
+		for i := range sess.Snapshot.Files {
+			snapFileByPath[sess.Snapshot.Files[i].RelPath] = &sess.Snapshot.Files[i]
+		}
+	}
 
 	// 进度推送（createProgress）：经会话管理器发布事件（上下文不可用静默）；发射
 	// 相进度同时在 noteBatch 内逐批落运行态进度槽（失败路径部分完成信息源）
@@ -699,11 +730,14 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 
 	// 域序单元序列（乙1 作品粒度消费面）：目录序内先落单作品后集成员
 	//（集成员按上方集内序）——与串行基准同一序，单元只携计划素材（哈希在
-	// worker 池内做，归属裁决与子行构造在放行侧做，保序不变量锚定放行序）
+	// worker 池内做，归属裁决与子行构造在放行侧做，保序不变量锚定放行序）。
+	// aggKey 非空=聚合作品（成员文件携带聚合归属，Files 首位=主导文件）——产出
+	// 形态分叉：单子行（不再逐文件扁平），成员对账失败降为整件放弃。
 	type emitUnit struct {
 		work              *SelectableWork
 		metadata          []PathMeaning
 		classifiedSiteKey string
+		aggKey            string
 	}
 	units := make([]emitUnit, 0, len(works))
 	for _, dirKey := range dirOrder {
@@ -713,10 +747,26 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		// 目录问答产生，会话模式问答不可达，此处恒走文件名形态归属裁决）
 		classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
 		for _, work := range plan.loneWorks {
-			units = append(units, emitUnit{work: work, metadata: metadata, classifiedSiteKey: classifiedSiteKey})
+			units = append(units, emitUnit{work: work, metadata: metadata, classifiedSiteKey: classifiedSiteKey, aggKey: aggKeyOf(snapFileByPath, work)})
 		}
 		for _, member := range plan.setMembers {
-			units = append(units, emitUnit{work: member, metadata: metadata, classifiedSiteKey: classifiedSiteKey})
+			units = append(units, emitUnit{work: member, metadata: metadata, classifiedSiteKey: classifiedSiteKey, aggKey: aggKeyOf(snapFileByPath, member)})
+		}
+	}
+
+	// 聚合作品的类型锚定数据面：任一聚合单元在场时一次拉取资源类型注册表投影
+	//（声明作品类型的在册校验用——类型悬空=整件放弃；纯单文件批次零拉取——
+	// 既有路径零额外 IPC）。拉取失败（索引缺席）按信任声明值放行，宿主写入侧
+	// 严格校验兜底；上下文缺席同按缺席索引处理。
+	aggTypes := (*resourceTypeIndex)(nil)
+	for _, u := range units {
+		if u.aggKey != "" {
+			var warnAggTypes func(string, ...any)
+			if h.ctx != nil {
+				warnAggTypes = h.ctx.Warnf
+			}
+			aggTypes = fetchResourceTypeIndex(h.ctx, warnAggTypes)
+			break
 		}
 	}
 
@@ -785,6 +835,13 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 				defer wg.Done()
 				defer sem.release()
 				outcome := h.hashWorkFilesAllOrNothing(runCtx, root, unit.work, throttle, hcache)
+				// 聚合作品的成员对账失败降为整件放弃（放弃半径=作品级）：成员
+				// Stat 缺失（文件被移动/删除）不再整次创建中断——宁可不导不导
+				// 半件，样本随哈希失败样本聚合上报；取消哨兵不在此转换之列。
+				if outcome.err != nil && unit.aggKey != "" &&
+					!errors.Is(outcome.err, errCreateCancelled) && !errors.Is(outcome.err, context.Canceled) {
+					outcome = unitHashOutcome{dropErr: outcome.err}
+				}
 				select {
 				case results <- indexedUnitOutcome{idx: idx, unitHashOutcome: outcome}:
 				case <-runCtx.Done():
@@ -803,10 +860,14 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 	pipelined := h.hostContractVersion() >= createChildrenBatchMinHostContract
 	byteTarget, countLimit := h.childrenBatchBounds()
 
-	// 计划子行总数上界（发射行 total 的初值=全部轨道数；整件放弃时递减修正，
-	// 终值收敛到实际产出）
+	// 计划子行总数上界（发射行 total 的初值；整件放弃时递减修正，终值收敛到
+	// 实际产出）：单文件作品=文件数（逐文件扁平），聚合作品=1（单子行）。
 	plannedTotal := 0
 	for _, u := range units {
+		if u.aggKey != "" {
+			plannedTotal++
+			continue
+		}
 		plannedTotal += len(u.work.Files)
 	}
 	var allItems []batchFileItem     // 子行素材全集（集序记录面）
@@ -837,6 +898,11 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 	// 节拍上报（甲4，SDK 上报器内置 20s 限频）
 	releaseOne := func(out indexedUnitOutcome) (string, bool) {
 		unit := units[out.idx]
+		// 单元计划子行数：单文件作品=文件数（逐文件扁平），聚合作品=1（单子行）
+		rowsOfUnit := len(unit.work.Files)
+		if unit.aggKey != "" {
+			rowsOfUnit = 1
+		}
 		if out.err != nil {
 			if errors.Is(out.err, errCreateCancelled) || errors.Is(out.err, context.Canceled) {
 				return "", true
@@ -844,9 +910,60 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			return out.err.Error(), false
 		}
 		if !out.ok {
-			// 整件放弃：计划总数修正 + 样本聚合（风险6：不逐件告警）
-			plannedTotal -= len(unit.work.Files)
+			// 整件放弃：计划总数修正 + 样本聚合（风险6：不逐件告警）——聚合作品
+			// 的成员对账失败（缺失/不可读）经哈希 worker 已降为同一形态
+			plannedTotal -= rowsOfUnit
 			dropSamples = append(dropSamples, hashDropSample{workID: unit.work.WorkID, err: out.dropErr})
+		} else if unit.aggKey != "" {
+			// 聚合作品=单子行：成员按轨道清单（哈希序=Files 序，首位=主导文件）
+			// 构造 v4 载荷——作品身份/归属/赋值快照/目录含义链均按主导文件结论，
+			// ResourceType=快照声明的作品类型（识别期聚合段落轨的规则声明值，
+			// 不做推断）。类型悬空（注册表已拉到而声明类型不在册）=整件放弃
+			//（宁可不导不错型）；注册表拉取失败（索引缺席）信任声明值直发，
+			// 宿主写入侧严格校验兜底。
+			workType := aggTypeOf(snapFileByPath, unit.work)
+			var typeDrop string
+			switch {
+			case workType == "":
+				typeDrop = "聚合作品类型声明缺席（识别结论可能过期），请重新识别后再创建"
+			case aggTypes != nil && !aggTypes.has(workType):
+				typeDrop = fmt.Sprintf("作品类型 %s 已不可用（资源类型注册表无此类型），请检查类型定义后重试", workType)
+			}
+			if typeDrop != "" {
+				plannedTotal -= rowsOfUnit
+				dropSamples = append(dropSamples, hashDropSample{workID: unit.work.WorkID, err: errors.New(typeDrop)})
+			} else {
+				members := make([]aggTrackMember, 0, len(out.files))
+				for _, f := range out.files {
+					role := ""
+					if rec := snapFileByPath[f.RelPath]; rec != nil {
+						role = rec.AggTrackRole
+					}
+					members = append(members, aggTrackMember{entry: f, role: role})
+				}
+				attr := resolveWorkAttribution(filepath.Base(out.files[0].FullPath), unit.classifiedSiteKey)
+				child := buildAggregatedChildResponse(members, attr, unit.metadata, sess.Assignments, workType)
+				if child == nil {
+					// 构造期成员 Stat 失败（哈希刚完成的窄窗竞态）——同整件放弃半径
+					plannedTotal -= rowsOfUnit
+					dropSamples = append(dropSamples, hashDropSample{workID: unit.work.WorkID, err: fmt.Errorf("成员文件构造期不可访问")})
+				} else {
+					// 集序记录面按作品身份落一条（主导文件条目——身份键与子行同源同值）
+					allItems = append(allItems, batchFileItem{af: attributedFile{entry: out.files[0], attr: attr}, metadata: unit.metadata})
+					totalBuilt++
+					if child.SiteKey != "" {
+						nonLocalSiteKeys = append(nonLocalSiteKeys, child.SiteKey)
+					}
+					if pipelined {
+						pipeline.add(child) // 双界满批即发（内部含取消检查）
+						if pipeline.aborted {
+							return "", true
+						}
+					} else {
+						degradedChildren = append(degradedChildren, child)
+					}
+				}
+			}
 		} else {
 			// 逐文件裁决归属后按原序扁平进批次（目录序内先落单作品后集成
 			// 员——同目录文件不按归属重排）
@@ -909,9 +1026,10 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 	}
 
 	// 哈希失败聚合上报（风险6）：并行下逐件告警会并发洪泛日志，聚合成批一次上报
+	//（聚合作品的成员缺失同样整件放弃并计入——放弃半径=作品级）
 	if len(dropSamples) > 0 && h.ctx != nil {
 		sample := dropSamples[0]
-		h.ctx.Warnf("所选文件哈希失败，已跳过其所属作品 %d 件（样本 %s: %v；完整清单见逐件排查）",
+		h.ctx.Warnf("所选作品核对失败（成员缺失或哈希失败），已跳过其所属作品 %d 件（样本 %s: %v；完整清单见逐件排查）",
 			len(dropSamples), sample.workID, sample.err)
 	}
 
@@ -956,10 +1074,15 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 	}
 
 	// 批次摘要：按实际产出子行的 siteKey 统计归属分布——local 子行键空（继承
-	// 语义）、真实域子行键=归属站点，与产出形态严格一致
+	// 语义）、真实域子行键=归属站点，与产出形态严格一致；整件放弃计数与样本
+	// 同记（通知文案「放弃 N 件」的数据面）
 	summary := createBatchSummary{total: totalBuilt}
 	for _, siteKey := range nonLocalSiteKeys {
 		summary.addNonLocal(siteDisplayName(siteKey))
+	}
+	if len(dropSamples) > 0 {
+		summary.dropped = len(dropSamples)
+		summary.dropSample = strings.TrimPrefix(dropSamples[0].workID, workKeyPrefixFile)
 	}
 	h.sessions.recordCreateBatchSummary(root, summary)
 	return "", false
@@ -1158,6 +1281,101 @@ func buildBatchParentResponse(parentID, taskName, parentURL, siteKey string, chi
 		SiteKey:      siteKey,
 		ResourceType: "", // 有 children 时由各 child 声明(parent 不声明)
 		Children:     children,
+	}
+}
+
+// —— 聚合作品子行（单子行形态）与执行面轨道清单 ——
+
+// aggKeyOf 作品的聚合作品键：聚合作品=成员文件携带聚合归属（Files 首位查照，
+// 主导文件键=作品键），单文件作品无聚合归属恒空串。
+func aggKeyOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
+	if len(work.Files) == 0 {
+		return ""
+	}
+	if rec := fileByPath[work.Files[0]]; rec != nil {
+		return rec.AggWorkKey
+	}
+	return ""
+}
+
+// aggTrackMember 聚合作品的成员轨道：哈希完成的文件条目+该成员的结构角色
+// （快照文件行的聚合轨道角色）。
+type aggTrackMember struct {
+	entry FileEntry
+	role  string
+}
+
+// aggTypeOf 聚合作品的声明作品类型：随成员文件行携带（选中规则声明的
+// AggregateProduction.WorkType，聚合段落轨时写入），主导文件行（Files 首位）
+// 查照；空=声明缺席（求值器产物不含该声明的过期形态）。
+func aggTypeOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
+	if len(work.Files) == 0 {
+		return ""
+	}
+	if rec := fileByPath[work.Files[0]]; rec != nil {
+		return rec.AggWorkType
+	}
+	return ""
+}
+
+// buildAggregatedChildResponse 聚合作品的子行构造：一件聚合作品恰一个子行
+// （不再逐文件扁平）——ResourceType=workType（识别期聚合段落轨的规则声明
+// 作品类型，调用方自快照成员行取值并完成悬空校验）；PluginData=v4 轨道清单
+// 形态（顶层字段=主导文件结论：路径/哈希/赋值快照/目录含义链，Tracks=全部
+// 成员的角色清单）；作品身份/归属键与单文件子行同构（真实域=页级作品 ID、
+// local 回退=主导文件内容哈希）。成员 Stat 失败（构造期窄窗竞态）返回 nil，
+// 调用方按整件放弃处理。
+func buildAggregatedChildResponse(members []aggTrackMember, attr workAttribution, metadata []PathMeaning, assigns map[string]SessionAssignment, workType string) *sdkdto.TaskCreateChildResponse {
+	if len(members) == 0 {
+		return nil
+	}
+	tracks := make([]TrackEntry, 0, len(members))
+	for _, m := range members {
+		fi, err := os.Stat(m.entry.FullPath)
+		if err != nil {
+			return nil
+		}
+		tracks = append(tracks, TrackEntry{
+			FullPath: m.entry.FullPath,
+			RelPath:  m.entry.RelPath,
+			Hash:     m.entry.Hash,
+			Size:     fi.Size(),
+			Role:     m.role,
+		})
+	}
+	lead := &members[0]
+	fp := &FilePluginData{
+		SchemaVersion: currentPluginDataVersion,
+		FullPath:      lead.entry.FullPath,
+		RelPath:       lead.entry.RelPath,
+		Hash:          lead.entry.Hash,
+		Size:          tracks[0].Size,
+		Metadata:      metadata,
+		Tracks:        tracks,
+	}
+	// 作品身份：真实域=解析出的页级作品 ID，local 回退=主导文件内容哈希
+	workID := lead.entry.Hash
+	childSiteKey := ""
+	if attr.isReal() {
+		workID = attr.PageWorkID
+		childSiteKey = attr.SiteKey
+		fp.SiteKey = attr.SiteKey
+		fp.SiteWorkId = attr.PageWorkID
+	}
+	// 任务级赋值快照：主导文件的会话赋值就近解析后固化（作品级元数据=主导
+	// 文件结论——伴随文件不单独产结论）
+	if assign := resolveFileAssignment(assigns, lead.entry.RelPath); len(assign.coveredDimensions()) > 0 {
+		snapshot := assign
+		fp.Assignment = &snapshot
+	}
+	fpJSON, _ := json.Marshal(fp)
+	return &sdkdto.TaskCreateChildResponse{
+		TaskName:     filepath.Base(lead.entry.FullPath),
+		SiteWorkId:   workID,
+		Url:          "local://" + lead.entry.FullPath,
+		PluginData:   string(fpJSON),
+		ResourceType: workType,
+		SiteKey:      childSiteKey,
 	}
 }
 
@@ -1388,7 +1606,9 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	return resp, nil
 }
 
-// Start 打开文件,按 storeRoles 选择性返回 StoreSpec 流集合(主资源 downloaded + 缩略图 derived)与作品信息
+// Start 打开文件,按 storeRoles 选择性返回 StoreSpec 流集合(主资源 downloaded + 缩略图 derived)与作品信息。
+// 聚合作品（PluginData v4 携带成员轨道清单）走多轨形态：按清单逐轨发 specs
+// （主导轨+伴随轨×N）另加缩略图轨，每轨独立期望哈希——见 startAggregated。
 func (h *LocalImportWorkFetcher) Start(ctx context.Context, task *sdkdto.TaskDTO, storeRoles []string) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if task.PluginData == nil {
 		return nil, nil, fmt.Errorf("pluginData 为空")
@@ -1400,6 +1620,9 @@ func (h *LocalImportWorkFetcher) Start(ctx context.Context, task *sdkdto.TaskDTO
 	}
 	if err := checkPluginDataVersion(fp.SchemaVersion); err != nil {
 		return nil, nil, err
+	}
+	if len(fp.Tracks) > 0 {
+		return h.startAggregated(ctx, task, storeRoles, &fp)
 	}
 
 	ext := filepath.Ext(fp.FullPath)
@@ -1476,6 +1699,85 @@ func wantsRole(storeRoles []string, role string) bool {
 	return slices.Contains(storeRoles, role)
 }
 
+// startAggregated 聚合作品的 Start 多轨形态：按成员轨道清单（清单序=发射序，
+// 首位=主导文件）逐轨开本地文件流——每轨独立声明扫描期哈希（任一成员在导入前
+// 被改动即触发主程序侧资源完整性校验失败，与单文件主资源轨同一防静默语义）；
+// 同角色多轨的 store_seq 由主程序按本序编号（subtitle×N 等）。缩略图轨由主导
+// 文件生成（作品级缩略图，与单文件路径同一生成器分派）。已开句柄登记
+// multiReaders（Pause/Stop 一并关闭）；任一轨打开失败时已开句柄全部回收。
+func (h *LocalImportWorkFetcher) startAggregated(ctx context.Context, task *sdkdto.TaskDTO, storeRoles []string, fp *FilePluginData) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
+	taskID := fmt.Sprintf("%d", task.Id)
+	var specs []*sdkdto.StoreSpec
+	var opened []*os.File
+	closeOpened := func() {
+		for _, f := range opened {
+			f.Close()
+		}
+	}
+	for i := range fp.Tracks {
+		track := &fp.Tracks[i]
+		if !wantsRole(storeRoles, track.Role) {
+			continue
+		}
+		f, err := os.Open(track.FullPath)
+		if err != nil {
+			closeOpened()
+			return nil, nil, fmt.Errorf("打开成员文件失败(%s): %w", track.RelPath, err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			closeOpened()
+			return nil, nil, fmt.Errorf("获取成员文件信息失败(%s): %w", track.RelPath, err)
+		}
+		opened = append(opened, f)
+		specs = append(specs, &sdkdto.StoreSpec{
+			Role:        track.Role,
+			Generation:  sdkdto.GenerationDownloaded,
+			ReadCloser:  f,
+			Format:      filepath.Ext(track.FullPath),
+			Size:        fi.Size(),
+			Continuable: new(true),
+			// 期望哈希声明:逐轨独立(各成员文件各自核对,不因聚合混流)
+			ExpectedSha256: expectedSha256Of(track.Hash),
+		})
+	}
+
+	// 缩略图(derived):按主导文件扩展名生成;无生成器或不适用则不产出该轨
+	if wantsRole(storeRoles, sdkdto.StoreRoleThumbnail) {
+		if thumbData, thumbFormat, _ := generateThumbnail(fp.Tracks[0].FullPath); len(thumbData) > 0 {
+			if thumbFormat == "" {
+				thumbFormat = "jpg"
+			}
+			specs = append(specs, &sdkdto.StoreSpec{
+				Role:        sdkdto.StoreRoleThumbnail,
+				Generation:  sdkdto.GenerationDerived,
+				ReadCloser:  io.NopCloser(bytes.NewReader(thumbData)),
+				Format:      thumbFormat,
+				Size:        int64(len(thumbData)),
+				Continuable: new(false),
+				// 生成产物轨对内存字节直接算哈希声明,与下载轨声明形态统一
+				ExpectedSha256: new(sha256Hex(thumbData)),
+			})
+		}
+	}
+
+	if len(specs) == 0 {
+		return nil, nil, fmt.Errorf("所选资源角色 %v 均无可产出 store", storeRoles)
+	}
+	if len(opened) > 0 {
+		h.multiReaders.Store(taskID, opened)
+	}
+
+	workName := stripExt(filepath.Base(fp.Tracks[0].FullPath))
+	resp := &sdkdto.WorkResponse{
+		Work: &sdkdto.WorkDTO{
+			SiteWorkName: &workName,
+		},
+	}
+	return specs, resp, nil
+}
+
 // Retry 委托到 Start
 func (h *LocalImportWorkFetcher) Retry(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
 	return nil, fmt.Errorf("retry 不支持，请使用 start")
@@ -1492,7 +1794,8 @@ func (h *LocalImportWorkFetcher) Stop(param *sdkdto.TaskResParam) error {
 }
 
 // Resume 恢复下载:按 TaskResumeParam.StreamOffsets 续传未完成的主资源轨
-// 缩略图(derived)为一次性产物,暂停的任务意味着其已完成,故 Resume 不再产出
+// 缩略图(derived)为一次性产物,暂停的任务意味着其已完成,故 Resume 不再产出。
+// 聚合作品（PluginData v4 轨道清单）按（角色,store_seq）逐轨续传——见 resumeAggregated。
 func (h *LocalImportWorkFetcher) Resume(ctx context.Context, param *sdkdto.TaskResumeParam) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
 	if param.Task == nil || param.Task.PluginData == nil {
 		return nil, nil, fmt.Errorf("task 或 pluginData 为空")
@@ -1504,6 +1807,9 @@ func (h *LocalImportWorkFetcher) Resume(ctx context.Context, param *sdkdto.TaskR
 	}
 	if err := checkPluginDataVersion(fp.SchemaVersion); err != nil {
 		return nil, nil, err
+	}
+	if len(fp.Tracks) > 0 {
+		return h.resumeAggregated(ctx, param, &fp)
 	}
 
 	// 主资源 role 按文件类型派生(与 Start 一致)
@@ -1554,15 +1860,128 @@ func (h *LocalImportWorkFetcher) Resume(ctx context.Context, param *sdkdto.TaskR
 	return []*sdkdto.StoreSpec{spec}, resp, nil
 }
 
+// resumeAggregated 聚合作品的 Resume 多轨形态：按（角色,store_seq）对位轨道
+// 清单逐轨续传——store_seq=清单内同角色出现序（与 Start 发射序一致，主程序按
+// spec 顺序为同角色轨编号），返回序=清单序（对位关系跨 Start/Resume 稳定）。
+// 每轨从磁盘已落盘偏移处续读并声明 ResumeWriteOffset（多轨同发先例=分离流/
+// 内嵌图续传）；偏移已达轨完整大小时 seek 落在 EOF、读取立即收尾（满轨形态）。
+// StreamOffsets 无待续轨（清单内角色无未完成偏移）时返回空过——主程序经
+// Start 重产。
+func (h *LocalImportWorkFetcher) resumeAggregated(ctx context.Context, param *sdkdto.TaskResumeParam, fp *FilePluginData) ([]*sdkdto.StoreSpec, *sdkdto.WorkResponse, error) {
+	type offsetKey struct {
+		role string
+		seq  int
+	}
+	pending := make(map[offsetKey]int64)
+	for _, ro := range param.StreamOffsets {
+		if ro == nil || ro.Role == "" {
+			continue
+		}
+		pending[offsetKey{ro.Role, int(ro.StoreSeq)}] = ro.Offset
+	}
+	if len(pending) == 0 {
+		return nil, nil, nil
+	}
+	// 清单序展开：角色内出现序=store_seq，命中的待续轨才产出
+	type resumeTrack struct {
+		entry  *TrackEntry
+		offset int64
+	}
+	seqOfRole := make(map[string]int, len(fp.Tracks))
+	var resumes []resumeTrack
+	for i := range fp.Tracks {
+		track := &fp.Tracks[i]
+		seq := seqOfRole[track.Role]
+		seqOfRole[track.Role] = seq + 1
+		offset, ok := pending[offsetKey{track.Role, seq}]
+		if !ok {
+			continue
+		}
+		resumes = append(resumes, resumeTrack{entry: track, offset: offset})
+	}
+	if len(resumes) == 0 {
+		return nil, nil, nil
+	}
+	taskID := fmt.Sprintf("%d", param.Task.Id)
+	var specs []*sdkdto.StoreSpec
+	var opened []*os.File
+	closeOpened := func() {
+		for _, f := range opened {
+			f.Close()
+		}
+	}
+	for _, rt := range resumes {
+		f, err := os.Open(rt.entry.FullPath)
+		if err != nil {
+			closeOpened()
+			return nil, nil, fmt.Errorf("打开成员文件失败(%s): %w", rt.entry.RelPath, err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			closeOpened()
+			return nil, nil, fmt.Errorf("获取成员文件信息失败(%s): %w", rt.entry.RelPath, err)
+		}
+		// 从已下载位置继续
+		if rt.offset > 0 {
+			if _, err := f.Seek(rt.offset, io.SeekStart); err != nil {
+				f.Close()
+				closeOpened()
+				return nil, nil, fmt.Errorf("seek 到偏移量 %d 失败(%s): %w", rt.offset, rt.entry.RelPath, err)
+			}
+		}
+		if ctx.Err() != nil {
+			f.Close()
+			closeOpened()
+			return nil, nil, ctx.Err()
+		}
+		opened = append(opened, f)
+		offset := rt.offset
+		specs = append(specs, &sdkdto.StoreSpec{
+			Role:        rt.entry.Role,
+			Generation:  sdkdto.GenerationDownloaded,
+			ReadCloser:  f,
+			Format:      filepath.Ext(rt.entry.FullPath),
+			Size:        fi.Size(), // 完整大小(进度条总量;与 Start 同轨同源)
+			Continuable: new(true),
+			// 与 Start 各轨同声明(扫描期哈希);续写偏移显式声明——多轨对位不依赖
+			// 主程序侧单轨推断
+			ExpectedSha256:    expectedSha256Of(rt.entry.Hash),
+			ResumeWriteOffset: &offset,
+		})
+	}
+	if len(opened) > 0 {
+		h.multiReaders.Store(taskID, opened)
+	}
+
+	workName := stripExt(filepath.Base(fp.Tracks[0].FullPath))
+	resp := &sdkdto.WorkResponse{
+		Work: &sdkdto.WorkDTO{
+			SiteWorkName: &workName,
+		},
+	}
+	return specs, resp, nil
+}
+
+// closeReader 关闭任务的已开文件句柄（单文件主资源句柄与聚合多轨句柄一并回收；
+// 聚合多轨任务在 Pause/Stop 后经 Resume 重开待续轨）。
 func (h *LocalImportWorkFetcher) closeReader(param *sdkdto.TaskResParam) error {
 	if param.Task == nil {
 		return nil
 	}
 	taskID := fmt.Sprintf("%d", param.Task.Id)
+	var firstErr error
 	if v, ok := h.readers.LoadAndDelete(taskID); ok {
-		return v.(*os.File).Close()
+		firstErr = v.(*os.File).Close()
 	}
-	return nil
+	if v, ok := h.multiReaders.LoadAndDelete(taskID); ok {
+		for _, f := range v.([]*os.File) {
+			if err := f.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
 
 // boolPtr 返回 bool 值的指针

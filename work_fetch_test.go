@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/lvfeng-z/library-squirrel-sdk/contract"
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
@@ -582,6 +585,434 @@ func TestStartThumbnailDeclaresSha256(t *testing.T) {
 	want := hex.EncodeToString(sum[:])
 	if specs[0].ExpectedSha256 == nil || *specs[0].ExpectedSha256 != want {
 		t.Fatalf("③缩略图轨 ExpectedSha256 应为生成字节 sha256(%q)，实得 %v", want, specs[0].ExpectedSha256)
+	}
+}
+
+// —— 聚合作品全链（选择域聚合分支→单子行→执行面多轨）—— //
+
+// aggTestTypeSpecs 资源类型注册表测试投影（镜像主仓 video/article/image/document
+// 内置规约的角色基数；聚合作品类型派生与宿主完整性校验同一容纳口径）。
+func aggTestTypeSpecs() []*sdkdto.ResourceTypeSpec {
+	return []*sdkdto.ResourceTypeSpec{
+		{
+			ResourceType: sdkdto.ResourceTypeVideo,
+			Roles: []*sdkdto.StoreRoleSpec{
+				{StoreType: sdkdto.StoreRoleVideoMain, Min: 1, Max: 1},
+				{StoreType: sdkdto.StoreRoleVideoTrack, Min: 0, Max: 1},
+				{StoreType: sdkdto.StoreRoleAudioTrack, Min: 0, Max: 1},
+				{StoreType: contract.StoreTypeSubtitle, Min: 0, Max: 0},
+				{StoreType: sdkdto.StoreRoleThumbnail, Min: 0, Max: 1},
+			},
+		},
+		{
+			ResourceType: sdkdto.ResourceTypeArticle,
+			Roles: []*sdkdto.StoreRoleSpec{
+				{StoreType: sdkdto.StoreRoleDocument, Min: 1, Max: 1},
+				{StoreType: sdkdto.StoreRoleImage, Min: 0, Max: 0},
+				{StoreType: sdkdto.StoreRoleThumbnail, Min: 0, Max: 1},
+			},
+		},
+		{
+			ResourceType: sdkdto.ResourceTypeImage,
+			Roles: []*sdkdto.StoreRoleSpec{
+				{StoreType: sdkdto.StoreRoleImage, Min: 1, Max: 1},
+				{StoreType: sdkdto.StoreRoleThumbnail, Min: 0, Max: 1},
+			},
+		},
+		{
+			ResourceType: sdkdto.ResourceTypeDocument,
+			Roles: []*sdkdto.StoreRoleSpec{
+				{StoreType: sdkdto.StoreRoleDocument, Min: 1, Max: 1},
+				{StoreType: sdkdto.StoreRoleThumbnail, Min: 0, Max: 1},
+			},
+		},
+	}
+}
+
+// aggTypesStubCtx 带资源类型注册表投影的桩上下文（聚合作品类型在册校验的拉取
+// 面）：stubPluginCtx 未实现 ListResourceTypes（调用即 panic 暴露缺口），聚合
+// 链测试经本桩供在册类型。
+type aggTypesStubCtx struct {
+	stubPluginCtx
+	types []*sdkdto.ResourceTypeSpec
+}
+
+// ListResourceTypes 注册表投影桩：回预置类型集。
+func (c aggTypesStubCtx) ListResourceTypes() (*sdkdto.ListResourceTypesResponse, error) {
+	return &sdkdto.ListResourceTypesResponse{Items: c.types}, nil
+}
+
+// aggRegistryCtx 注册表桩的可控变体：fail 真=拉取失败（信任声明值路径的面），
+// types 可注入任意在册集；Warnf 记录调用（整件放弃样本文案的断言面）。
+type aggRegistryCtx struct {
+	stubPluginCtx
+	types []*sdkdto.ResourceTypeSpec
+	fail  bool
+	mu    sync.Mutex
+	warns []string
+}
+
+// ListResourceTypes 按 fail/types 应答。
+func (c *aggRegistryCtx) ListResourceTypes() (*sdkdto.ListResourceTypesResponse, error) {
+	if c.fail {
+		return nil, errors.New("测试注入的注册表拉取失败")
+	}
+	return &sdkdto.ListResourceTypesResponse{Items: c.types}, nil
+}
+
+// Warnf 记录告警文案（聚合放弃样本断言用）。
+func (c *aggRegistryCtx) Warnf(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warns = append(c.warns, fmt.Sprintf(format, args...))
+}
+
+// aggEmitFixture 聚合链直驱夹具：按快照行（含聚合归属与声明类型）落盘文件并
+// 推导选择域，返回直驱 emitSelectedWorks 的全部句柄（ctx 供注册表投影桩）。
+func aggEmitFixture(t *testing.T, files []SnapFile) (string, *LocalImportWorkFetcher, *SessionManager, *WorkbenchSession, []*SelectableWork) {
+	t.Helper()
+	return aggEmitFixtureWithCtx(t, files, aggTypesStubCtx{stubPluginCtx: stubPluginCtx{kv: make(map[string]string)}, types: aggTestTypeSpecs()})
+}
+
+// aggEmitFixtureWithCtx 指定插件上下文的聚合链直驱夹具（注册表桩变体注入面）。
+func aggEmitFixtureWithCtx(t *testing.T, files []SnapFile, ctx sdkdto.PluginContext) (string, *LocalImportWorkFetcher, *SessionManager, *WorkbenchSession, []*SelectableWork) {
+	t.Helper()
+	root := t.TempDir()
+	for i := range files {
+		writeTestFile(t, root+"/"+files[i].RelPath, "内容-"+files[i].RelPath)
+	}
+	sess := &WorkbenchSession{Snapshot: &RecognitionSnapshot{Files: files}}
+	works := DeriveWorkDomain(sess.Snapshot, nil).Works
+	m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
+	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx, hostContractFn: func() uint32 { return createChildrenBatchMinHostContract }}
+	return root, h, m, sess, works
+}
+
+// TestCreateAggregatedWorksSingleChildAndTracks 聚合作品=单子行：一件聚合作品恰
+// 一个子行（不再逐文件扁平），ResourceType=快照声明的作品类型（聚合段落落轨的
+// 规则声明值——video/article，不做推断）；PluginData v4 携带成员轨道清单（各
+// 文件路径/哈希/角色，首位=主导文件=顶层字段结论），文件数与角色构成（确认呈
+// 现「N 个文件」「视频 + 字幕×N」的数据面）由清单直接可得；作品身份 local 回退
+// =主导文件内容哈希。
+func TestCreateAggregatedWorksSingleChildAndTracks(t *testing.T) {
+	videoKey := "f:剧集/ep01.mp4"
+	articleKey := "f:图文/手记.txt"
+	root, h, m, sess, works := aggEmitFixture(t, []SnapFile{
+		{RelPath: "剧集/ep01.en.srt", FileName: "ep01.en.srt", DirRelKey: "剧集", State: snapStatePlain,
+			AggWorkKey: videoKey, AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+		{RelPath: "剧集/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "剧集", State: snapStateIdentified,
+			AggWorkKey: videoKey, AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
+		{RelPath: "剧集/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "剧集", State: snapStatePlain,
+			AggWorkKey: videoKey, AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+		{RelPath: "图文/手记.txt", FileName: "手记.txt", DirRelKey: "图文", State: snapStateIdentified,
+			AggWorkKey: articleKey, AggTrackRole: sdkdto.StoreRoleDocument, AggWorkType: sdkdto.ResourceTypeArticle},
+		{RelPath: "图文/配图.jpg", FileName: "配图.jpg", DirRelKey: "图文", State: snapStatePlain,
+			AggWorkKey: articleKey, AggTrackRole: sdkdto.StoreRoleImage, AggWorkType: sdkdto.ResourceTypeArticle},
+	})
+	hashOf := func(rel string) string {
+		hash, err := ComputeFileHash(root + "/" + rel)
+		if err != nil {
+			t.Fatalf("计算测试文件哈希失败: %v", err)
+		}
+		return hash
+	}
+
+	if len(works) != 2 {
+		t.Fatalf("快照 5 文件应并成 2 件聚合作品，实际 %d: %+v", len(works), works)
+	}
+	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "聚合批次"))
+	if len(resps) != 1 {
+		t.Fatalf("纯 local 聚合批次应为单应答单父，实得 %d 个", len(resps))
+	}
+	children := resps[0].Children
+	if len(children) != 2 {
+		t.Fatalf("2 件聚合作品应各产 1 个子行（单子行形态），实得 %d: %v", len(children), responseChildNames(resps[0]))
+	}
+
+	// 子行一：视频聚合作品（主导 mp4+双语字幕）→ ResourceType=video、v4 轨道清单
+	video := children[0]
+	if video.TaskName != "ep01.mp4" || video.ResourceType != sdkdto.ResourceTypeVideo {
+		t.Fatalf("视频聚合子行应为 mp4 主导+ResourceType=video，实际 %q/%q", video.TaskName, video.ResourceType)
+	}
+	var vfp FilePluginData
+	if err := json.Unmarshal([]byte(video.PluginData), &vfp); err != nil {
+		t.Fatalf("解析聚合子行 PluginData 失败: %v", err)
+	}
+	if vfp.SchemaVersion != 4 || len(vfp.Tracks) != 3 {
+		t.Fatalf("聚合子行 PluginData 应为 v4 三轨清单，实际 schema=%d tracks=%+v", vfp.SchemaVersion, vfp.Tracks)
+	}
+	if vfp.RelPath != "剧集/ep01.mp4" || vfp.Hash != hashOf("剧集/ep01.mp4") {
+		t.Fatalf("v4 顶层字段应为主导文件结论，实际 relPath=%q hash 有无=%v", vfp.RelPath, vfp.Hash == hashOf("剧集/ep01.mp4"))
+	}
+	wantTracks := []struct {
+		rel  string
+		role string
+	}{
+		{"剧集/ep01.mp4", sdkdto.StoreRoleVideoMain},
+		{"剧集/ep01.en.srt", contract.StoreTypeSubtitle},
+		{"剧集/ep01.zh.srt", contract.StoreTypeSubtitle},
+	}
+	for i, want := range wantTracks {
+		track := vfp.Tracks[i]
+		if track.RelPath != want.rel || track.Role != want.role || track.Hash != hashOf(want.rel) {
+			t.Fatalf("轨道 %d 应为 %s/%s（哈希=文件内容哈希），实际 %s/%s", i, want.rel, want.role, track.RelPath, track.Role)
+		}
+	}
+	if video.SiteKey != "" || video.SiteWorkId != hashOf("剧集/ep01.mp4") {
+		t.Fatalf("local 回退聚合子行应键空+主导文件哈希身份，实际 %q/%q", video.SiteKey, video.SiteWorkId)
+	}
+
+	// 子行二：图文聚合作品（主导 txt+内嵌图）→ ResourceType=article
+	article := children[1]
+	if article.TaskName != "手记.txt" || article.ResourceType != sdkdto.ResourceTypeArticle {
+		t.Fatalf("图文聚合子行应为 txt 主导+ResourceType=article，实际 %q/%q", article.TaskName, article.ResourceType)
+	}
+	var afp FilePluginData
+	if err := json.Unmarshal([]byte(article.PluginData), &afp); err != nil {
+		t.Fatalf("解析聚合子行 PluginData 失败: %v", err)
+	}
+	if len(afp.Tracks) != 2 || afp.Tracks[0].Role != sdkdto.StoreRoleDocument || afp.Tracks[1].Role != sdkdto.StoreRoleImage {
+		t.Fatalf("图文聚合轨道清单应为 document+image，实际 %+v", afp.Tracks)
+	}
+
+	// 批次摘要：2 件聚合作品=2 子行
+	if summary := m.takeCreateBatchSummary(root); summary.total != 2 {
+		t.Fatalf("批次摘要 total 应为 2（聚合作品单子行），实际 %+v", summary)
+	}
+}
+
+// TestCreateAggregatedDanglingTypeDropped 声明作品类型的悬空处置：注册表已拉到
+// 而声明类型不在册（类型已下架/自定义类型注销）=整件放弃+样本上报（宁可不导
+// 不错型）；声明值缺席（过期求值器产物）同整件放弃并提示重扫；在册声明照常
+// 产出。注册表拉取失败（索引缺席）=信任声明值直发（宿主写入侧严格校验兜底）。
+func TestCreateAggregatedDanglingTypeDropped(t *testing.T) {
+	t.Run("悬空与声明缺席整件放弃，在册照常产出", func(t *testing.T) {
+		ctx := &aggRegistryCtx{stubPluginCtx: stubPluginCtx{kv: make(map[string]string)}, types: aggTestTypeSpecs()}
+		root, h, m, sess, works := aggEmitFixtureWithCtx(t, []SnapFile{
+			// 悬空：声明类型 manga 不在注册表投影（域序在首——聚合放弃样本的采样位）
+			{RelPath: "漫画卷/卷一.db", FileName: "卷一.db", DirRelKey: "漫画卷", State: snapStateIdentified,
+				AggWorkKey: "f:漫画卷/卷一.db", AggTrackRole: sdkdto.StoreRoleDocument, AggWorkType: "manga"},
+			{RelPath: "漫画卷/卷一.png", FileName: "卷一.png", DirRelKey: "漫画卷", State: snapStatePlain,
+				AggWorkKey: "f:漫画卷/卷一.db", AggTrackRole: sdkdto.StoreRoleImage, AggWorkType: "manga"},
+			// 在册：video 声明照常单子行产出
+			{RelPath: "剧集/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "剧集", State: snapStateIdentified,
+				AggWorkKey: "f:剧集/ep01.mp4", AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
+			{RelPath: "剧集/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "剧集", State: snapStatePlain,
+				AggWorkKey: "f:剧集/ep01.mp4", AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+			// 声明缺席：过期求值器产物形态
+			{RelPath: "无型/手记.txt", FileName: "手记.txt", DirRelKey: "无型", State: snapStateIdentified,
+				AggWorkKey: "f:无型/手记.txt", AggTrackRole: sdkdto.StoreRoleDocument},
+		}, ctx)
+		items, reason, cancelled := collectEmittedWithReason(t, h, root, sess, works, "悬空批次")
+		if reason != "" || cancelled {
+			t.Fatalf("类型悬空应整件放弃而非中止创建: reason=%s cancelled=%v", reason, cancelled)
+		}
+		var children []*sdkdto.TaskCreateChildResponse
+		for _, item := range items {
+			if task := item.Task(); task != nil {
+				children = append(children, task.Children...)
+			} else if batch := item.ChildrenBatch(); batch != nil {
+				children = append(children, batch.Items...)
+			}
+		}
+		if len(children) != 1 || children[0].TaskName != "ep01.mp4" || children[0].ResourceType != sdkdto.ResourceTypeVideo {
+			t.Fatalf("仅在册声明的作品应产出（ResourceType=声明值），实际 %d 子行: %+v", len(children), children)
+		}
+		summary := m.takeCreateBatchSummary(root)
+		if summary.total != 1 || summary.dropped != 2 || summary.dropSample != "漫画卷/卷一.db" {
+			t.Fatalf("悬空+缺席应各整件放弃（计 2、样本=域序首位），实际 %+v", summary)
+		}
+		ctx.mu.Lock()
+		warns := append([]string(nil), ctx.warns...)
+		ctx.mu.Unlock()
+		if len(warns) == 0 || !strings.Contains(warns[0], "2 件") || !strings.Contains(warns[0], "作品类型 manga 已不可用") {
+			t.Fatalf("放弃样本应说明悬空类型名，实际 %v", warns)
+		}
+	})
+	t.Run("注册表拉取失败信任声明值直发", func(t *testing.T) {
+		ctx := &aggRegistryCtx{stubPluginCtx: stubPluginCtx{kv: make(map[string]string)}, fail: true}
+		root, h, m, sess, works := aggEmitFixtureWithCtx(t, []SnapFile{
+			{RelPath: "剧集/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "剧集", State: snapStateIdentified,
+				AggWorkKey: "f:剧集/ep01.mp4", AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
+			{RelPath: "剧集/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "剧集", State: snapStatePlain,
+				AggWorkKey: "f:剧集/ep01.mp4", AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+		}, ctx)
+		items, reason, cancelled := collectEmittedWithReason(t, h, root, sess, works, "信任批次")
+		if reason != "" || cancelled {
+			t.Fatalf("注册表拉取失败不应中止创建: reason=%s cancelled=%v", reason, cancelled)
+		}
+		resps := emittedTasks(items)
+		if len(resps) != 1 || len(resps[0].Children) != 1 ||
+			resps[0].Children[0].ResourceType != sdkdto.ResourceTypeVideo {
+			t.Fatalf("拉取失败应信任声明值直发（ResourceType=video），实际 %+v", resps)
+		}
+		if summary := m.takeCreateBatchSummary(root); summary.total != 1 || summary.dropped != 0 {
+			t.Fatalf("信任路径应零放弃，实际 %+v", summary)
+		}
+	})
+}
+
+// TestWorkFetchAggregatedStartMultiTrackSpecs 聚合作品 Start 多轨：按轨道清单发
+// specs（videoMain+subtitle×N）另加缩略图轨（主导文件生成，derived），每轨独立
+// ExpectedSha256（=各自成员扫描期哈希）；storeRoles 过滤按角色生效。
+func TestWorkFetchAggregatedStartMultiTrackSpecs(t *testing.T) {
+	dir := t.TempDir()
+	mp4 := writeFile(t, filepath.Join(dir, "clip.mp4"), "mp4-payload")
+	zh := writeFile(t, filepath.Join(dir, "clip.zh.srt"), "zh-sub")
+	en := writeFile(t, filepath.Join(dir, "clip.en.srt"), "en-sub")
+	hashOf := func(path string) string {
+		hash, err := ComputeFileHash(path)
+		if err != nil {
+			t.Fatalf("计算测试文件哈希失败: %v", err)
+		}
+		return hash
+	}
+	fp := FilePluginData{
+		SchemaVersion: currentPluginDataVersion,
+		FullPath:      filepath.ToSlash(mp4), RelPath: "clip.mp4", Hash: hashOf(mp4), Size: 10,
+		Tracks: []TrackEntry{
+			{FullPath: filepath.ToSlash(mp4), RelPath: "clip.mp4", Hash: hashOf(mp4), Role: sdkdto.StoreRoleVideoMain},
+			{FullPath: filepath.ToSlash(zh), RelPath: "clip.zh.srt", Hash: hashOf(zh), Role: contract.StoreTypeSubtitle},
+			{FullPath: filepath.ToSlash(en), RelPath: "clip.en.srt", Hash: hashOf(en), Role: contract.StoreTypeSubtitle},
+		},
+	}
+	fpJSON, _ := json.Marshal(fp)
+	task := &sdkdto.TaskDTO{Id: 21, PluginData: new(string(fpJSON))}
+
+	old := extensionGenerators[".mp4"]
+	extensionGenerators[".mp4"] = stubThumbGenerator{}
+	defer func() { extensionGenerators[".mp4"] = old }()
+
+	h := &LocalImportWorkFetcher{}
+	specs, _, err := h.Start(context.Background(), task, nil)
+	if err != nil {
+		t.Fatalf("聚合 Start 不应报错: %v", err)
+	}
+	// 轨序断言：主导轨+伴随轨×N（清单序）+缩略图轨
+	roles := make([]string, len(specs))
+	for i, s := range specs {
+		roles[i] = s.Role
+	}
+	if want := []string{sdkdto.StoreRoleVideoMain, contract.StoreTypeSubtitle, contract.StoreTypeSubtitle, sdkdto.StoreRoleThumbnail}; strings.Join(roles, ",") != strings.Join(want, ",") {
+		t.Fatalf("聚合轨序应为 %v，实际 %v", want, roles)
+	}
+	// 每轨独立期望哈希：逐轨声明各自成员的扫描期哈希
+	for i, track := range fp.Tracks {
+		spec := specs[i]
+		if spec.ExpectedSha256 == nil || *spec.ExpectedSha256 != track.Hash {
+			t.Fatalf("轨 %d（%s）ExpectedSha256 应独立声明该成员哈希，实际 %v", i, track.Role, spec.ExpectedSha256)
+		}
+		if spec.Generation != sdkdto.GenerationDownloaded || spec.Continuable == nil || !*spec.Continuable {
+			t.Fatalf("成员轨 %d 应为 downloaded 可续传，实际 %+v", i, spec)
+		}
+	}
+	sum := sha256.Sum256([]byte("stub-thumbnail-bytes"))
+	if specs[3].ExpectedSha256 == nil || *specs[3].ExpectedSha256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("缩略图轨应为生成字节 sha256，实际 %v", specs[3].ExpectedSha256)
+	}
+	if err := h.Stop(&sdkdto.TaskResParam{Task: task}); err != nil {
+		t.Fatalf("关闭成员文件句柄失败: %v", err)
+	}
+
+	// 角色过滤：仅选 subtitle → 只发两条字幕轨
+	subSpecs, _, err := h.Start(context.Background(), task, []string{contract.StoreTypeSubtitle})
+	if err != nil {
+		t.Fatalf("仅选字幕角色不应报错: %v", err)
+	}
+	if len(subSpecs) != 2 || subSpecs[0].Role != contract.StoreTypeSubtitle || subSpecs[1].Role != contract.StoreTypeSubtitle {
+		t.Fatalf("仅选 subtitle 应产两条字幕轨，实际 %d 条", len(subSpecs))
+	}
+	if err := h.Stop(&sdkdto.TaskResParam{Task: task}); err != nil {
+		t.Fatalf("关闭成员文件句柄失败: %v", err)
+	}
+}
+
+// TestWorkFetchAggregatedResumePerRoleOffset 聚合作品 Resume 按角色偏移续传：
+// StreamOffsets 按（角色,store_seq）对位轨道清单（store_seq=清单内同角色出现
+// 序），返回序=清单序（与 Start 发射序一致——同角色轨编号对位稳定）；每轨从
+// 磁盘已落盘偏移处续读（读取内容=源文件偏移后余段）并声明 ResumeWriteOffset
+// 与该轨期望哈希。无待续轨返回空过。
+func TestWorkFetchAggregatedResumePerRoleOffset(t *testing.T) {
+	dir := t.TempDir()
+	mp4 := writeFile(t, filepath.Join(dir, "clip.mp4"), "v-payload")
+	zh := writeFile(t, filepath.Join(dir, "clip.zh.srt"), "zh-sub")
+	en := writeFile(t, filepath.Join(dir, "clip.en.srt"), "en-sub")
+	hashOf := func(path string) string {
+		hash, err := ComputeFileHash(path)
+		if err != nil {
+			t.Fatalf("计算测试文件哈希失败: %v", err)
+		}
+		return hash
+	}
+	fp := FilePluginData{
+		SchemaVersion: currentPluginDataVersion,
+		FullPath:      filepath.ToSlash(mp4), RelPath: "clip.mp4", Hash: hashOf(mp4), Size: 8,
+		Tracks: []TrackEntry{
+			{FullPath: filepath.ToSlash(mp4), RelPath: "clip.mp4", Hash: hashOf(mp4), Role: sdkdto.StoreRoleVideoMain},
+			{FullPath: filepath.ToSlash(zh), RelPath: "clip.zh.srt", Hash: hashOf(zh), Role: contract.StoreTypeSubtitle},
+			{FullPath: filepath.ToSlash(en), RelPath: "clip.en.srt", Hash: hashOf(en), Role: contract.StoreTypeSubtitle},
+		},
+	}
+	fpJSON, _ := json.Marshal(fp)
+	task := &sdkdto.TaskDTO{Id: 22, PluginData: new(string(fpJSON))}
+
+	h := &LocalImportWorkFetcher{}
+	// 偏移乱序给（subtitle/1 在前）：返回序仍按清单序对位
+	specs, _, err := h.Resume(context.Background(), &sdkdto.TaskResumeParam{
+		Task: task,
+		StreamOffsets: []*sdkdto.StoreResumeOffset{
+			{Role: contract.StoreTypeSubtitle, StoreSeq: 1, Offset: 3},
+			{Role: sdkdto.StoreRoleVideoMain, StoreSeq: 0, Offset: 2},
+			{Role: contract.StoreTypeSubtitle, StoreSeq: 0, Offset: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("聚合 Resume 不应报错: %v", err)
+	}
+	if len(specs) != 3 {
+		t.Fatalf("应按待续偏移产 3 条续传轨，实得 %d", len(specs))
+	}
+	type wantTrack struct {
+		role   string
+		offset int64
+		hash   string
+		rest   string
+	}
+	wants := []wantTrack{
+		{sdkdto.StoreRoleVideoMain, 2, hashOf(mp4), "payload"},
+		{contract.StoreTypeSubtitle, 2, hashOf(zh), "-sub"},
+		{contract.StoreTypeSubtitle, 3, hashOf(en), "sub"},
+	}
+	for i, want := range wants {
+		spec := specs[i]
+		if spec.Role != want.role {
+			t.Fatalf("续传轨 %d 角色应为 %s，实际 %s", i, want.role, spec.Role)
+		}
+		if spec.ResumeWriteOffset == nil || *spec.ResumeWriteOffset != want.offset {
+			t.Fatalf("续传轨 %d ResumeWriteOffset 应为 %d，实际 %v", i, want.offset, spec.ResumeWriteOffset)
+		}
+		if spec.ExpectedSha256 == nil || *spec.ExpectedSha256 != want.hash {
+			t.Fatalf("续传轨 %d 期望哈希应为该成员哈希，实际 %v", i, spec.ExpectedSha256)
+		}
+		rest, err := io.ReadAll(spec.ReadCloser)
+		if err != nil {
+			t.Fatalf("读取续传轨 %d 失败: %v", i, err)
+		}
+		if string(rest) != want.rest {
+			t.Fatalf("续传轨 %d 应自偏移 %d 处续读（余段 %q），实际 %q", i, want.offset, want.rest, string(rest))
+		}
+	}
+	if err := h.Stop(&sdkdto.TaskResParam{Task: task}); err != nil {
+		t.Fatalf("关闭成员文件句柄失败: %v", err)
+	}
+
+	// 无待续轨：清单内角色均无未完成偏移 → 空过（主程序经 Start 重产）
+	none, _, err := h.Resume(context.Background(), &sdkdto.TaskResumeParam{Task: task})
+	if err != nil {
+		t.Fatalf("无待续轨 Resume 不应报错: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("无待续轨应空过，实际 %d 条", len(none))
 	}
 }
 

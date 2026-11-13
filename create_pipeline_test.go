@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lvfeng-z/library-squirrel-sdk/contract"
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
@@ -846,6 +847,55 @@ func (c *warnCountingCtx) Warnf(format string, args ...any) {
 	c.warnMu.Lock()
 	defer c.warnMu.Unlock()
 	c.warns = append(c.warns, fmt.Sprintf(format, args...))
+}
+
+// TestCreateAggregatedReconcileFailureDropsWholeWork 聚合作品成员对账失败=整件
+// 放弃（放弃半径=作品级）：任一成员缺失/不可读时视频与字幕都不导入（宁可不导
+// 不导半件），不整次中断创建——其余作品照常产出，放弃计数与样本随批次摘要进
+// 创建结果文案（帧6 语义的数据面）；主导文件完好也不得产出半件。
+func TestCreateAggregatedReconcileFailureDropsWholeWork(t *testing.T) {
+	healthyKey := "f:剧集甲/ep01.mp4"
+	brokenKey := "f:剧集乙/ep02.mp4"
+	root, h, m, sess, works := aggEmitFixture(t, []SnapFile{
+		{RelPath: "剧集甲/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "剧集甲", State: snapStateIdentified,
+			AggWorkKey: healthyKey, AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
+		{RelPath: "剧集甲/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "剧集甲", State: snapStatePlain,
+			AggWorkKey: healthyKey, AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+		{RelPath: "剧集乙/ep02.mp4", FileName: "ep02.mp4", DirRelKey: "剧集乙", State: snapStateIdentified,
+			AggWorkKey: brokenKey, AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
+		{RelPath: "剧集乙/ep02.zh.srt", FileName: "ep02.zh.srt", DirRelKey: "剧集乙", State: snapStatePlain,
+			AggWorkKey: brokenKey, AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+	})
+	// 创建前字幕被移走：坏作品的成员缺失（主导 mp4 完好）
+	if err := removeFile(t, root+"/剧集乙/ep02.zh.srt"); err != nil {
+		t.Fatalf("移除成员文件失败: %v", err)
+	}
+
+	items, reason, cancelled := runEmitDirect(t, h, root, sess, works, sdkdto.NoopHeartbeat{})
+	if reason != "" || cancelled {
+		t.Fatalf("聚合成员缺失应整件放弃而非中止创建: reason=%s cancelled=%v", reason, cancelled)
+	}
+	var names []string
+	var children []*sdkdto.TaskCreateChildResponse
+	for _, item := range items {
+		if task := item.Task(); task != nil {
+			children = append(children, task.Children...)
+		} else if batch := item.ChildrenBatch(); batch != nil {
+			children = append(children, batch.Items...)
+		}
+	}
+	for _, child := range children {
+		names = append(names, child.TaskName)
+	}
+	// 好作品单子行产出；坏作品零子行（主导 mp4 完好也不导出半件）
+	if len(children) != 1 || names[0] != "ep01.mp4" {
+		t.Fatalf("坏作品应整件放弃（无 ep02 子行），好作品单子行，实际子行 %v", names)
+	}
+	// 批次摘要携带放弃计数与样本（创建结果「放弃 1 件」的数据面）
+	summary := m.takeCreateBatchSummary(root)
+	if summary.total != 1 || summary.dropped != 1 || summary.dropSample != "剧集乙/ep02.mp4" {
+		t.Fatalf("批次摘要应为 1 产出+1 放弃（样本=坏作品主导文件），实际 %+v", summary)
+	}
 }
 
 // cancelCreate 工作台动作分派（甲3）：受理三态应答面。

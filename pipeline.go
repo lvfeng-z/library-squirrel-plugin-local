@@ -39,10 +39,13 @@ type FileDecision struct {
 	// 宁缺勿错不产出声明时记此），供上层观察呈现。
 	ScanNotes []ScanNote
 	// AggWorkKey 为聚合段落定的聚合作品键（"f:"+主导文件相对路径；空=无聚合，
-	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）。两字段由
-	// 汇流后的聚合段写入（见 runAggregationStage）——逐文件求值循环不产出。
+	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）；AggWorkType 为
+	// 选中规则声明的作品类型（聚合定义的作品类型，创建链子行 ResourceType 的
+	// 声明值来源）。三字段由汇流后的聚合段写入（见 runAggregationStage）——
+	// 逐文件求值循环不产出。
 	AggWorkKey   string
 	AggTrackRole string
+	AggWorkType  string
 }
 
 // ScanNote 为一条贪婪识别歧义记录。
@@ -145,6 +148,7 @@ func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rule
 		}
 		decisions[i].AggWorkKey = assigns[i].WorkKey
 		decisions[i].AggTrackRole = assigns[i].TrackRole
+		decisions[i].AggWorkType = assigns[i].WorkType
 	}
 }
 

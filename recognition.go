@@ -144,11 +144,13 @@ type FileConclusion struct {
 	// Pending 为合成待裁决项（赋值指定维度的冲突随覆盖消解）。
 	Pending []PendingItem
 	// AggWorkKey 为聚合段落定的聚合作品键（"f:"+主导文件相对路径；空=无聚合，
-	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）。两字段由汇流
-	// 后的聚合段写入（识别轮在结论汇流后统一落轨），逐文件求值循环不产出、
-	// 聚合段不改写群归属与元数据结论。
+	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）；AggWorkType 为
+	// 选中规则声明的作品类型（聚合定义的作品类型，创建链子行 ResourceType 的
+	// 声明值来源）。三字段由汇流后的聚合段写入（识别轮在结论汇流后统一落轨），
+	// 逐文件求值循环不产出、聚合段不改写群归属与元数据结论。
 	AggWorkKey   string
 	AggTrackRole string
+	AggWorkType  string
 	// rawDecls 为提取段原始声明（合成前中间产物）：预览基座规则相关件的铸造
 	// 原料，快照与呈现不消费（本类型为进程内求值产物，不经序列化）。
 	rawDecls []MetadataDeclaration
@@ -1058,10 +1060,12 @@ type SnapFile struct {
 	// Assigned 本文件存在会话赋值（元素7 标记；赋值明细为会话活数据不入快照）。
 	Assigned bool `json:"assigned,omitempty"`
 	// AggWorkKey 聚合归属的作品键（"f:"+主导文件相对路径；空=无聚合，独立
-	// 作品）；AggTrackRole 本文件的轨道角色（空=无聚合）。聚合段标识等值
-	// 并组的落轨结论，消费面=选择域聚合分支与执行面多轨。
+	// 作品）；AggTrackRole 本文件的轨道角色（空=无聚合）；AggWorkType 选中
+	// 规则声明的作品类型（聚合定义的作品类型，创建链子行 ResourceType 的声明
+	// 值）。聚合段标识等值并组的落轨结论，消费面=选择域聚合分支与执行面多轨。
 	AggWorkKey   string `json:"aggWorkKey,omitempty"`
 	AggTrackRole string `json:"aggTrackRole,omitempty"`
+	AggWorkType  string `json:"aggWorkType,omitempty"`
 }
 
 // SnapDecl 声明的紧凑形态（终选与待裁决候选共用）。
@@ -1458,7 +1462,7 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIn
 	file := SnapFile{
 		RelPath: c.RelPath, FileName: c.FileName, DirRelKey: c.DirRelKey,
 		MatchedRuleIDs: c.MatchedRuleIDs,
-		AggWorkKey:     c.AggWorkKey, AggTrackRole: c.AggTrackRole,
+		AggWorkKey:     c.AggWorkKey, AggTrackRole: c.AggTrackRole, AggWorkType: c.AggWorkType,
 	}
 	if resolved := assignIdx.resolveFile(c.RelPath); len(resolved.coveredDimensions()) > 0 {
 		file.Assigned = true
@@ -3256,6 +3260,7 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 		}
 		conclusions[i].AggWorkKey = assigns[i].WorkKey
 		conclusions[i].AggTrackRole = assigns[i].TrackRole
+		conclusions[i].AggWorkType = assigns[i].WorkType
 	}
 }
 

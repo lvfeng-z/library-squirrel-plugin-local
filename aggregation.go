@@ -302,10 +302,12 @@ func (h aggFileRowHits) hitsRequiredRow(required map[int]bool) bool {
 
 // aggAssignment 单文件的聚合归属结论：WorkKey 为聚合作品键（"f:"+主导文件
 // 相对路径，与选择域的作品键同形——键前缀维持单一）；TrackRole 为本文件的
-// 轨道角色；两字段皆空=无聚合（独立作品）。
+// 轨道角色；WorkType 为选中规则声明的作品类型（聚合定义的作品类型，消费面=
+// 创建链子行 ResourceType）；WorkKey 空=无聚合（独立作品，其余字段同空）。
 type aggAssignment struct {
 	WorkKey   string
 	TrackRole string
+	WorkType  string
 }
 
 // aggregateGrouping 标识等值并组（纯函数、输入序确定）：
@@ -406,8 +408,9 @@ func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryI
 				continue
 			}
 			workKey := "f:" + surface.files[lead].RelPath
+			workType := plan.rule.Aggregate.WorkType
 			for _, i := range g.members {
-				out[i] = aggAssignment{WorkKey: workKey, TrackRole: hits[i].trackRoleOf(plan.tracks)}
+				out[i] = aggAssignment{WorkKey: workKey, TrackRole: hits[i].trackRoleOf(plan.tracks), WorkType: workType}
 			}
 		}
 	}

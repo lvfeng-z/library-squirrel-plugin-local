@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lvfeng-z/library-squirrel-sdk/contract"
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
@@ -243,6 +244,104 @@ func TestDeriveWorkDomain(t *testing.T) {
 	// 待裁决呈现态
 	if byID["f:冲突/AB.jpg"].State != workStatePending {
 		t.Fatalf("f:冲突/AB.jpg 呈现态应为 pending，实际 %s", byID["f:冲突/AB.jpg"].State)
+	}
+}
+
+// TestDeriveWorkDomainAggregatedWorksMerge 选择域聚合分支：同聚合作品键的成员
+// 并成一件 SelectableWork（Files 多成员、作品键=主导文件 f:{相对路径}——键前缀
+// 维持单一）；伴随成员不再各自成件；Files 首位恒为主导文件（快照序先见伴随成员
+// 时对位挪前）；作品目录键/集归属/可选性按主导文件结论——未识别的伴随轨不拉低
+// 作品（纯轨道伴随恒 plain，若连坐则聚合作品结构性不可选）；聚合作品整体入集、
+// 整件为一集成员。无聚合归属的文件维持每文件一件单文件作品。
+func TestDeriveWorkDomainAggregatedWorksMerge(t *testing.T) {
+	aggKey := "f:剧集/ep01.mp4"
+	snap := &RecognitionSnapshot{
+		Files: []SnapFile{
+			// 快照序伴随成员在前（字幕字典序先于视频）、主导文件殿后
+			{RelPath: "剧集/ep01.en.srt", FileName: "ep01.en.srt", DirRelKey: "剧集", State: snapStatePlain,
+				AggWorkKey: aggKey, AggTrackRole: contract.StoreTypeSubtitle},
+			{RelPath: "剧集/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "剧集", State: snapStateIdentified,
+				Final:    []SnapDecl{{Dimension: string(DimTitle), Value: "inner world"}},
+				GroupKey: "第一季", GroupSeq: 2,
+				AggWorkKey: aggKey, AggTrackRole: sdkdto.StoreRoleVideoMain},
+			{RelPath: "剧集/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "剧集", State: snapStatePlain,
+				AggWorkKey: aggKey, AggTrackRole: contract.StoreTypeSubtitle},
+			{RelPath: "落单/readme.txt", FileName: "readme.txt", DirRelKey: "落单", State: snapStatePlain},
+		},
+	}
+	domain := DeriveWorkDomain(snap, nil)
+
+	if len(domain.Works) != 2 {
+		t.Fatalf("三聚合成员并一件+落单一件应共 2 件作品（伴随成员不各自成件），实际 %d: %+v", len(domain.Works), domain.Works)
+	}
+	agg := domain.Work("f:剧集/ep01.mp4")
+	if agg == nil {
+		t.Fatalf("缺少聚合作品 f:剧集/ep01.mp4（works: %+v）", domain.Works)
+	}
+	// Files：首位=主导文件（快照序先见伴随成员时挪前），余按快照序
+	want := []string{"剧集/ep01.mp4", "剧集/ep01.en.srt", "剧集/ep01.zh.srt"}
+	if !reflect.DeepEqual(agg.Files, want) {
+		t.Fatalf("聚合作品 Files 应为主导文件在首的多成员清单，期望 %v 实际 %v", want, agg.Files)
+	}
+	if agg.DirRelKey != "剧集" {
+		t.Fatalf("聚合作品目录键应为主导文件目录键，实际 %q", agg.DirRelKey)
+	}
+	// 可选性/呈现态只看主导文件：已识别主导+未识别伴随 → 可选 identified
+	if !agg.Selectable || agg.State != workStateIdentified {
+		t.Fatalf("聚合作品应按主导文件可选（identified），实际 selectable=%v state=%s", agg.Selectable, agg.State)
+	}
+	// 集归属=主导文件群键，聚合作品整体入集、整件为一集成员
+	if agg.SetKey != workSetKey("剧集", "第一季") {
+		t.Fatalf("聚合作品集归属应为主导文件群键，实际 %q", agg.SetKey)
+	}
+	if len(domain.Sets) != 1 || len(domain.Sets[0].Members) != 1 || domain.Sets[0].Members[0] != agg.WorkID {
+		t.Fatalf("集视图应以聚合作品为单成员，实际 sets: %+v", domain.Sets)
+	}
+	// 落单文件：每文件一件单文件作品的既有路径零变化
+	lone := domain.Work("f:落单/readme.txt")
+	if lone == nil || len(lone.Files) != 1 || lone.Selectable || lone.SetKey != "" {
+		t.Fatalf("落单文件应为不可选的无集单文件作品，实际 %+v", lone)
+	}
+}
+
+// TestCreateReconcileAggregatedMemberDirs 创建前目录级对账的聚合分支：多成员
+// 作品的目录键集=各成员文件所属目录（成员可跨目录，逐成员核对）；任一成员目录
+// mtime 漂移即阻断。单文件作品恒=作品自身目录键（既有路径等价，由既有用例锚定）。
+func TestCreateReconcileAggregatedMemberDirs(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root+"/甲/lead.mp4", "v")
+	writeTestFile(t, root+"/乙/sub.zh.srt", "s")
+	mtimes := map[string]int64{}
+	for _, dir := range []string{"甲", "乙"} {
+		fi, err := os.Stat(root + "/" + dir)
+		if err != nil {
+			t.Fatalf("读取目录失败: %v", err)
+		}
+		mtimes[dir] = fi.ModTime().UnixNano()
+	}
+	snap := &RecognitionSnapshot{
+		Files: []SnapFile{
+			{RelPath: "甲/lead.mp4", FileName: "lead.mp4", DirRelKey: "甲", State: snapStateIdentified},
+			{RelPath: "乙/sub.zh.srt", FileName: "sub.zh.srt", DirRelKey: "乙", State: snapStatePlain},
+		},
+		DirMtimes: mtimes,
+	}
+	work := &SelectableWork{WorkID: "f:甲/lead.mp4", DirRelKey: "甲", Files: []string{"甲/lead.mp4", "乙/sub.zh.srt"}}
+	if err := ReconcileSelectionDisk(root, snap, []*SelectableWork{work}); err != nil {
+		t.Fatalf("成员目录无漂移时对账应通过，实际 %v", err)
+	}
+	// 伴随成员目录漂移：即使主导目录未动也阻断（对账文案指认漂移目录）
+	fi, err := os.Stat(root + "/乙")
+	if err != nil {
+		t.Fatalf("读取目录失败: %v", err)
+	}
+	drift := fi.ModTime().Add(time.Second)
+	if err := os.Chtimes(root+"/乙", drift, drift); err != nil {
+		t.Fatalf("漂移目录 mtime 失败: %v", err)
+	}
+	err = ReconcileSelectionDisk(root, snap, []*SelectableWork{work})
+	if err == nil || !strings.Contains(err.Error(), "乙") || !strings.Contains(err.Error(), "识别后有变动") {
+		t.Fatalf("伴随成员目录漂移应阻断并指认该目录，实际 %v", err)
 	}
 }
 
@@ -1179,6 +1278,23 @@ func TestBuildCreateTasksMessageAttributionNote(t *testing.T) {
 	})
 	if want := "已创建任务「多站点批次」：4 件作品，共 4 个子任务，用时 14 分钟；其中 2 件归属 pixiv、1 件归属 bilibili"; multiSite != want {
 		t.Fatalf("多站点归属附注应逐站点分别列出，期望 %q 实际 %q", want, multiSite)
+	}
+}
+
+// TestCreateTasksMessageDropNote 通知文案的放弃附注：整件放弃（聚合作品成员对账
+// 失败/单文件哈希失败）计数与样本随摘要进文案——创建结果数据面（放弃 N 件+
+// 样本+重扫指引），零放弃不追加。
+func TestCreateTasksMessageDropNote(t *testing.T) {
+	dropped := buildCreateTasksMessage("放弃批次", 3, 2, 0, createBatchSummary{
+		total: 2, dropped: 1, dropSample: "剧集/ep02.mp4",
+	})
+	if !strings.Contains(dropped, "放弃 1 件") || !strings.Contains(dropped, "剧集/ep02.mp4") ||
+		!strings.Contains(dropped, "请重扫后重选") {
+		t.Fatalf("放弃附注应含件数/样本/重扫指引，实际 %q", dropped)
+	}
+	clean := buildCreateTasksMessage("常规批次", 2, 2, 0, createBatchSummary{total: 2})
+	if strings.Contains(clean, "；放弃") {
+		t.Fatalf("零放弃不应追加放弃附注，实际 %q", clean)
 	}
 }
 
