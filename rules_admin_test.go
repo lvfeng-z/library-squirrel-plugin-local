@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
 // adminRuleJSON 构造一条 manual 规则条目的 JSON（ruleEntryJSON 形态）：模式为
@@ -429,5 +431,144 @@ func TestRulesActionDispatch(t *testing.T) {
 	resp = ctx.lastResponse(t)
 	if !resp.OK || len(resp.RulesView.Rules) != 0 {
 		t.Fatalf("删除规则应答不符: %+v", resp.RulesView)
+	}
+}
+
+// adminAggTypesCtx 带资源类型投影桩的工作台测试上下文：ListResourceTypes 回
+// 预置类型集（其余面沿用 workbenchTestCtx 桩）。
+type adminAggTypesCtx struct {
+	*workbenchTestCtx
+	types []*sdkdto.ResourceTypeSpec
+}
+
+func (c *adminAggTypesCtx) ListResourceTypes() (*sdkdto.ListResourceTypesResponse, error) {
+	return &sdkdto.ListResourceTypesResponse{Items: c.types}, nil
+}
+
+// adminAggregateRuleJSON 构造一条聚合规则条目的 JSON（轨行 {作品}.mp4 /
+// {作品}.{任意}.srt + 标识 {作品} + 分轨 video），workType 可指定悬空类型。
+func adminAggregateRuleJSON(id, workType string) []byte {
+	return []byte(`{
+		"id": "` + id + `", "description": "视频+字幕（手写）", "source": "manual", "enabled": true,
+		"category": "aggregate",
+		"conditions": [
+			{"condition": {"target": "file", "format": {"mode": "template", "tpl": "{作品}"}, "attach": [{"kind": "fileExt", "value": ".mp4"}]}},
+			{"connector": "and", "condition": {"target": "file", "format": {"mode": "template", "tpl": "{作品}.{任意}"}, "attach": [{"kind": "fileExt", "value": ".srt"}]}}
+		],
+		"identity": [{"row": 1, "capture": "work"}],
+		"aggregate": {"workType": "` + workType + `", "tracks": [{"row": 1, "role": "videoMain"}, {"row": 2, "role": "subtitle"}]},
+		"extractions": [],
+		"synthesis": {"dimPolicies": [], "roles": []}
+	}`)
+}
+
+// TestAggregateRulesAdminAnchoringAndPreset 管理面的聚合规则类型锚定（阶段3
+// 遗留接线锚：悬空类型的聚合条目在管理视图呈现为停用+告警——与求值侧
+// AnchorAggregateRules 同口径，不再显示为启用）+ 预置来源条目可编辑保存 +
+// 恢复预置补回缺席种子。
+func TestAggregateRulesAdminAnchoringAndPreset(t *testing.T) {
+	store := newFakeSessionStore()
+	_, base := newTestManager(t, store)
+	ctx := &adminAggTypesCtx{workbenchTestCtx: base, types: []*sdkdto.ResourceTypeSpec{
+		{ResourceType: "video", Roles: []*sdkdto.StoreRoleSpec{
+			{StoreType: "videoMain", Min: 1, Max: 1}, {StoreType: "subtitle"},
+		}},
+		{ResourceType: "article", Roles: []*sdkdto.StoreRoleSpec{
+			{StoreType: "document", Min: 1, Max: 1}, {StoreType: "image"},
+		}},
+	}}
+	mgr := NewSessionManagerWithStore(ctx, nil, store)
+
+	// 在册类型的手写聚合条目：保存成功、呈现为启用、无锚定告警
+	view, err := mgr.ApplySaveRule(adminAggregateRuleJSON("agg-ok", "video"))
+	if err != nil {
+		t.Fatalf("在册类型聚合条目保存失败: %v", err)
+	}
+	if len(view.Rules) != 1 || !view.Rules[0].Enabled || view.Rules[0].Category != RuleCategoryAggregate {
+		t.Fatalf("在册类型聚合条目应呈现为启用: %+v", view.Rules)
+	}
+	if len(view.Warnings) != 0 {
+		t.Fatalf("在册类型聚合条目不应产生告警: %v", view.Warnings)
+	}
+	if len(view.ResourceTypes) != 2 {
+		t.Fatalf("管理视图应携带类型投影（分轨入口类型清单数据源），实际 %d 条", len(view.ResourceTypes))
+	}
+
+	// 悬空类型的聚合条目：保存成功（悬空=运行期状态），管理视图锚定为停用+告警
+	view, err = mgr.ApplySaveRule(adminAggregateRuleJSON("agg-dangling", "ghost-type"))
+	if err != nil {
+		t.Fatalf("悬空类型聚合条目保存失败: %v", err)
+	}
+	var dangling *ruleEntryJSON
+	for _, r := range view.Rules {
+		if r.ID == "agg-dangling" {
+			dangling = r
+		}
+	}
+	if dangling == nil || dangling.Enabled {
+		t.Fatalf("悬空类型聚合条目应在管理视图呈现为停用: %+v", dangling)
+	}
+	warnHit := false
+	for _, w := range view.Warnings {
+		if strings.Contains(w, "不在资源类型注册表") {
+			warnHit = true
+		}
+	}
+	if !warnHit {
+		t.Fatalf("悬空类型聚合条目应产生锚定告警: %v", view.Warnings)
+	}
+
+	// 预置种子与用户条目同权：预置来源条目可编辑保存（档案首档初始化入档的
+	// 语义锚见 TestAggregationPresetSeedFirstInitToggleRestore，此处直取种子
+	// 构造条目走保存通路）
+	seeds := PresetAggregateRules()
+	var seedJSON []byte
+	for i := range seeds {
+		if seeds[i].ID != presetAggVideoSubtitleID {
+			continue
+		}
+		rj, rerr := ruleToJSON(seeds[i])
+		if rerr != nil {
+			t.Fatalf("预置条目转编辑形态失败: %v", rerr)
+		}
+		data, merr := json.Marshal(rj)
+		if merr != nil {
+			t.Fatalf("序列化预置条目失败: %v", merr)
+		}
+		seedJSON = data
+	}
+	if seedJSON == nil {
+		t.Fatalf("预置种子表应有 %q", presetAggVideoSubtitleID)
+	}
+	if _, err := mgr.ApplySaveRule(seedJSON); err != nil {
+		t.Fatalf("预置来源条目编辑保存应被接受（与用户条目同权）: %v", err)
+	}
+
+	// 恢复预置：删除种子后补回（档案此前无种子——两条预置均缺席，一次补 2 条；
+	// 在场条目不覆写）
+	if _, err := mgr.ApplyDeleteRule(presetAggVideoSubtitleID); err != nil {
+		t.Fatalf("删除预置种子失败: %v", err)
+	}
+	added, view, err := mgr.ApplyRestorePresetRules()
+	if err != nil {
+		t.Fatalf("恢复预置失败: %v", err)
+	}
+	if added != 2 {
+		t.Fatalf("应补回 2 条预置种子，实际 %d", added)
+	}
+	for _, want := range []string{presetAggVideoSubtitleID, presetAggArticleImageTextID} {
+		found := false
+		for _, r := range view.Rules {
+			if r.ID == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("恢复后视图应含预置种子 %q", want)
+		}
+	}
+	// 再恢复：均在档，补 0 条
+	if added, _, err := mgr.ApplyRestorePresetRules(); err != nil || added != 0 {
+		t.Fatalf("预置均在档时恢复应补 0 条: added=%d err=%v", added, err)
 	}
 }

@@ -1650,6 +1650,7 @@ const (
 	workbenchActionReorderRules       = "reorderRules"       // 规则全序重排（全量 ID 新序清单；多重集校验一致后重排数组一次覆写）
 	workbenchActionSetBuiltinDisabled = "setBuiltinDisabled" // 内置规则禁用/启用（档案禁用清单）
 	workbenchActionRollbackProfile    = "rollbackProfile"    // 档案回退一代（写前备份）
+	workbenchActionRestorePresetRules = "restorePresetRules" // 恢复预置种子（缺席的预置聚合规则按稳定 ID 补回；在场条目不覆写）
 )
 
 // getPanorama 的分节分页拉取词汇（大载荷分页方案·设计 A）。无 section 的
@@ -1867,6 +1868,9 @@ type workbenchFrontendResponse struct {
 	RulePreview *rulesPreviewResult `json:"rulePreview,omitempty"`
 	// RolledBack rollbackProfile 的回退结论（真=已回退一代）。
 	RolledBack bool `json:"rolledBack,omitempty"`
+	// RestoredCount restorePresetRules 补回的预置种子条数（0=预置均在档，
+	// 未补任何条目）。
+	RestoredCount int `json:"restoredCount,omitempty"`
 }
 
 // workbenchPageReceipt getPanorama 分节分页回执。generation=快照世代
@@ -2836,6 +2840,7 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
+		m.attachRuleHitCounts(view, req.Root)
 		resp.RulesView = view
 	case workbenchActionPreviewRule:
 		preview, err := m.PreviewRule(req.Root, req.Rule)
@@ -2850,6 +2855,7 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
+		m.attachRuleHitCounts(view, req.Root)
 		resp.RulesView = view
 	case workbenchActionDeleteRule:
 		view, err := m.ApplyDeleteRule(req.RuleID)
@@ -2857,6 +2863,7 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
+		m.attachRuleHitCounts(view, req.Root)
 		resp.RulesView = view
 	case workbenchActionSetRuleEnabled:
 		view, err := m.ApplySetRuleEnabled(req.RuleID, req.Enabled)
@@ -2864,6 +2871,7 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
+		m.attachRuleHitCounts(view, req.Root)
 		resp.RulesView = view
 	case workbenchActionReorderRules:
 		view, err := m.ApplyReorderRules(req.RuleIDs)
@@ -2871,6 +2879,7 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
+		m.attachRuleHitCounts(view, req.Root)
 		resp.RulesView = view
 	case workbenchActionSetBuiltinDisabled:
 		view, err := m.ApplySetBuiltinDisabled(req.BuiltinID, req.Disabled)
@@ -2885,8 +2894,18 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
+		m.attachRuleHitCounts(view, req.Root)
 		resp.RulesView = view
 		resp.RolledBack = true
+	case workbenchActionRestorePresetRules:
+		added, view, err := m.ApplyRestorePresetRules()
+		if err != nil {
+			resp.OK, resp.Error = false, err.Error()
+			break
+		}
+		m.attachRuleHitCounts(view, req.Root)
+		resp.RulesView = view
+		resp.RestoredCount = added
 	default:
 		resp.OK, resp.Error = false, fmt.Sprintf("未知的工作台请求动作 %q", req.Action)
 	}

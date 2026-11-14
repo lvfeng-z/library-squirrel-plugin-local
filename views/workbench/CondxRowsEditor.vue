@@ -133,6 +133,8 @@
         :root-rows="rootRows || rows"
         :occur-drift="occurDrift"
         :extractions-json-mode="extractionsJsonMode"
+        :add-label="addLabel"
+        :agg-mode="aggMode"
         @edit-row="(r, no) => emit('editRow', r, no)"
         @moved="emit('moved', $event)"
         @emptied="onGroupEmptied(row)"
@@ -141,8 +143,9 @@
   </template>
   <div class="li-condx-cards-foot">
     <!-- 新增条件亦经条件编辑弹窗（新增态首步为条件种类选择）——先追加空行再上抛
-         editRow（空行在树内=行号/校验上下文真实；取消由主视图移除该行） -->
-    <el-button size="small" text @click="addCondxRow">+ 加条件</el-button>
+         editRow（空行在树内=行号/校验上下文真实；取消由主视图移除该行）；
+         聚合轨行区经 addLabel 换「+ 加轨」文案（同一弹窗同一链路） -->
+    <el-button size="small" text @click="addCondxRow">{{ addLabel }}</el-button>
   </div>
   <!-- 删整组确认（带确认弹窗）：〔取消〕=什么都不变；〔删除〕=组与组内全部条件行消失 -->
   <AutoHeightDialog
@@ -212,8 +215,13 @@ const props = withDefaults(
     // 禁用+悬停提示——JSON 文本里的行号引用无法可靠重映射，放行会静默失同步；
     // 组内换位同样要改写主弹窗提取引用，禁用口径与顶层一致
     extractionsJsonMode?: boolean
+    // 底部新增按钮文案（聚合轨行区换「+ 加轨」，与元数据规则同一弹窗链路）
+    addLabel?: string
+    // 聚合轨行区形态：卡片模板文本尾接扩展名谓词取值（模板对去扩展名的文件名
+    // 正文求值，轨行整体形态=模板+扩展名，如 {作品}.{任意}+.srt）
+    aggMode?: boolean
   }>(),
-  { rootRows: null, extractionsJsonMode: false }
+  { rootRows: null, extractionsJsonMode: false, addLabel: '+ 加条件', aggMode: false }
 )
 
 const emit = defineEmits<{
@@ -231,10 +239,11 @@ const emit = defineEmits<{
 // 卡片序号（全局先序行号，空叶子行占号——与捕获清单「第 N 行」同口径；顶层基数 0）
 const cardNos = computed(() => condxRowNos(rows.value, props.baseNo ?? 0))
 
-// 卡片摘要字段（纯函数派生：序号+目标词+模板文本截断+复杂度徽标计数+接词）
+// 卡片摘要字段（纯函数派生：序号+目标词+模板文本截断+复杂度徽标计数+接词）；
+// 聚合形态（aggMode）模板文本尾接扩展名谓词取值
 function cardView(i: number) {
   const row = rows.value[i]
-  return condxRowCardView(row || { condition: null }, cardNos.value[i] ?? i + 1)
+  return condxRowCardView(row || { condition: null }, cardNos.value[i] ?? i + 1, { appendExt: props.aggMode })
 }
 
 // 全局先序展平（行级校验用）：顶层=本容器即全树；组框内经 rootRows 传顶层行表

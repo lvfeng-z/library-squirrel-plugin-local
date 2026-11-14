@@ -22,14 +22,38 @@
           <el-switch v-model="enabledInput" active-text="启用" inactive-text="停用" />
         </div>
 
-        <!-- 上半「识别规则」（卡片总览）：引用行卡+条件卡列表（序号/目标/模板摘要/
-             复杂度徽标/接词，恒定高度）；逐条件编辑经条件编辑弹窗（三步漏斗=目标
-             四卡〔文件名/目录名/序列/引用规则〕→格式模板→附加条件+值校验）；括号
-             子组页内直显（组框缩进承载成员卡，嵌套封顶 3 层）；引用行恒置条件行
-             上方、独立编号「引用 N」、不占条件行「第 N 行」（W4 规则组合引用） -->
+        <!-- 规则类别选择（新建首步·剧本3 帧2）：两级综合类别——[元数据规则]（既有
+             编辑面原样）|[聚合规则]（轨行+作品标识+分轨入口）。仅新建可选（既有
+             条目类别固定）；选中态=主色按钮 -->
+        <div v-if="rule && rule.isNew" class="li-red-cat">
+          <span class="li-red-label">规则类别</span>
+          <el-button
+            size="small"
+            :type="categoryInput === 'metadata' ? 'primary' : ''"
+            @click="switchCategory('metadata')"
+          >[元数据规则]</el-button>
+          <el-button
+            size="small"
+            :type="categoryInput === 'aggregate' ? 'primary' : ''"
+            @click="switchCategory('aggregate')"
+          >[聚合规则]</el-button>
+          <span class="li-red-cat-note">{{ categoryInput === 'aggregate' ? '轨行+作品标识+分轨入口（聚合成作品）' : '条件行+元数据产出（既有形态）' }}</span>
+        </div>
+        <p class="li-red-hint">
+          新建先选类别：[元数据规则] [聚合规则]——前者=条件行+元数据产出（既有形态），后者=轨行+作品标识+分轨入口（聚合成作品）；两类共用同一条件行机制（四种源任选），选定后仍可加轨/改模板
+        </p>
+
+        <!-- 上半（元数据=识别规则 / 聚合=轨行区）：卡片总览——条件卡与轨行卡同款
+             （CondxRowsEditor，序号/目标/模板摘要/复杂度徽标/接词，恒定高度）；
+             逐条件编辑经条件编辑弹窗（三步漏斗=目标四卡〔文件名/目录名/序列/引用
+             规则〕→格式模板→附加条件+值校验）；括号子组页内直显（组框缩进承载
+             成员卡，嵌套封顶 3 层）；引用行恒置条件行上方、独立编号「引用 N」、
+             不占条件行「第 N 行」（W4 规则组合引用；聚合规则与 refs 互斥，不
+             出引用行） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
-            <h4 class="li-red-sec-title">识别规则<span class="li-red-sec-note">上半 · 决定规则命中哪些文件</span></h4>
+            <h4 v-if="!isAggregate" class="li-red-sec-title">识别规则<span class="li-red-sec-note">上半 · 决定规则命中哪些文件</span></h4>
+            <h4 v-else class="li-red-sec-title">聚合规则 · 轨行区<span class="li-red-sec-note">上半 · 轨行=普通条件行，四种源任选</span></h4>
             <el-button size="small" text @click="toggleCondxJson">
               {{ condxJsonMode ? '切回结构化编辑' : '高级（JSON）' }}
             </el-button>
@@ -47,8 +71,10 @@
                  逐条件编辑经条件编辑弹窗（editRow 开窗，组内成员卡同一链路）、
                  提取区 JSON 模式经 extractionsJsonMode 下传（移动按钮禁用） -->
             <div class="li-red-zone-head">
-              <span class="li-red-zone-title">条件（{{ condxCardCount }}）</span>
+              <span class="li-red-zone-title">{{ isAggregate ? `轨行（${condxCardCount}）` : `条件（${condxCardCount}）` }}</span>
             </div>
+            <!-- 引用行卡（W4 组合引用；聚合规则与 refs 互斥不出） -->
+            <template v-if="!isAggregate">
             <div
               v-for="(r, i) in refRows"
               :key="`ref${i}`"
@@ -94,14 +120,17 @@
                 </template>
               </div>
             </div>
+            </template>
             <CondxRowsEditor
               v-model:rows="condxRows"
               :occur-drift="occurDrift"
               :extractions-json-mode="extractionsJsonMode"
+              :add-label="isAggregate ? '+ 加轨' : '+ 加条件'"
+              :agg-mode="isAggregate"
               @edit-row="openCondxRowEdit"
               @moved="onCondxRowsMoved"
             />
-            <!-- 占位词捕获清单（行号+词）：提取段引用的唯一来源 -->
+            <!-- 占位词捕获清单（行号+词）：提取段/作品标识引用的唯一来源 -->
             <div v-if="captureList.length" class="li-red-caps">
               <span class="li-red-label">占位词捕获清单</span>
               <div v-for="(c, i) in captureList" :key="`${c.row}/${c.word}/${i}`" class="li-red-cap-row">
@@ -113,7 +142,9 @@
               </p>
             </div>
             <p v-else class="li-red-hint">
-              尚无可引用的占位词——在行模板中写入 {作者}/{标题} 等词条后，提取段才能引用其捕获值
+              {{ isAggregate
+                ? '尚无可选的占位词——在轨行模板中写入 {作品} 等词条后，作品标识才能引用其捕获值'
+                : '尚无可引用的占位词——在行模板中写入 {作者}/{标题} 等词条后，提取段才能引用其捕获值' }}
             </p>
           </template>
 
@@ -133,8 +164,9 @@
           </template>
         </section>
 
-        <!-- 下半「提取规则」：逐维度行 = 维度 ← 来源 + 条件勾选；行可增删 -->
-        <section class="li-red-sec">
+        <!-- 下半（元数据=提取规则）：逐维度行 = 维度 ← 来源 + 条件勾选；行可增删；
+             聚合规则的下半为「标识与分轨」（紧随本节），提取动作与聚合类别互斥 -->
+        <section v-if="!isAggregate" class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">提取规则<span class="li-red-sec-note">下半 · 命中后取值声明到维度</span></h4>
             <el-button size="small" text @click="toggleExtractionsJson">
@@ -283,8 +315,82 @@
           </template>
         </section>
 
-        <!-- 合成策略（随旧表单随迁）：角色绑定 + 维度策略 -->
-        <section class="li-red-sec">
+        <!-- 下半（聚合=标识与分轨·剧本3 帧3）：作品标识声明（候选=各轨行捕获汇集）
+             + 分轨入口（产出区「聚合成作品」行——〔编辑〕开分轨入口弹窗：类型先行
+             →可用轨亮出→轨行→角色分配；弹窗确定就地回写产出卡摘要） -->
+        <section v-if="isAggregate" class="li-red-sec">
+          <div class="li-red-sec-head">
+            <h4 class="li-red-sec-title">聚合规则 · 标识与分轨<span class="li-red-sec-note">下半 · 标识值相等即并组，按分轨入口聚合成作品</span></h4>
+          </div>
+
+          <!-- 作品标识声明：从轨行捕获中选（文件名捕获/目录名捕获/序列群键） -->
+          <div class="li-red-agg-identity">
+            <span class="li-red-label">作品标识:</span>
+            <template v-for="(part, pi) in identityRows" :key="pi">
+              <el-select
+                :model-value="part.capture ? `${part.row}/${part.capture}` : ''"
+                size="small"
+                class="li-red-agg-ident"
+                placeholder="选占位词捕获"
+                @update:model-value="setIdentityPart(pi, $event)"
+              >
+                <el-option-group v-for="g in identityGroups" :key="g.row" :label="`轨${g.row}`">
+                  <el-option
+                    v-for="c in g.candidates"
+                    :key="`${g.row}/${c.group}`"
+                    :label="`{${c.word}}`"
+                    :value="`${g.row}/${c.group}`"
+                  />
+                </el-option-group>
+                <!-- 失效捕获残影选项：轨行模板改写后原引用不在声明中——仅供呈现，
+                     不可重选（保存闸门拦） -->
+                <el-option
+                  v-for="o in identityStaleOptions"
+                  :key="`stale-${o.value}`"
+                  :label="o.label"
+                  :value="o.value"
+                  disabled
+                />
+              </el-select>
+              <el-button
+                size="small"
+                text
+                type="danger"
+                :disabled="identityRows.length <= 1"
+                @click="identityRows.splice(pi, 1)"
+              >删</el-button>
+            </template>
+            <el-button size="small" text @click="addIdentityPart">+ 加一部分</el-button>
+          </div>
+          <p class="li-red-hint">
+            （候选=各轨行捕获：轨1·{作品}、轨2·{作品}…；目录轨行的目录捕获、序列轨行的群键同样可选）
+          </p>
+          <p v-if="!identityRows.length" class="li-red-row-hint">
+            尚未选择作品标识——多文件按标识值相等并成一件作品；多个部分按声明序拼成复合标识
+          </p>
+
+          <!-- 分轨入口（产出区「聚合成作品」行）：无产出=加入口按钮；有产出=产出卡
+               摘要（〔编辑〕开分轨入口弹窗） -->
+          <div class="li-red-zone-head">
+            <span class="li-red-zone-title">分轨 · 聚合成作品</span>
+          </div>
+          <div v-if="aggProduction" class="li-out-card" :class="{ 'is-invalid': aggErrors.length > 0 }">
+            <div class="li-condx-card-line">
+              <span class="li-out-mark">▸</span>
+              <span class="li-condx-card-tpl" :title="aggCardText">{{ aggCardText }}</span>
+              <el-button size="small" text @click="openTrackDialog">[编辑]</el-button>
+            </div>
+          </div>
+          <el-button v-else size="small" text @click="openTrackDialog">+ 聚合成作品</el-button>
+          <p class="li-red-hint">
+            类型先行：作品类型选自运行时注册表投影（内置+插件自定义类型）→可用轨亮出→轨行→角色分配，角色按类型规约过滤
+          </p>
+          <!-- 聚合面保存闸门错误清单（保存被拦时逐条在场） -->
+          <p v-for="(e, ei) in aggErrors" :key="ei" class="li-red-row-hint">{{ e }}</p>
+        </section>
+
+        <!-- 合成策略（随旧表单随迁）：角色绑定 + 维度策略；聚合规则无元数据产出不出 -->
+        <section v-if="!isAggregate" class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">合成策略<span class="li-red-sec-note">该规则产出声明的合成方式</span></h4>
           </div>
@@ -332,6 +438,79 @@
           @cancel="onCondxRowEditCancel"
           @to-ref="onRowToRef"
         />
+
+        <!-- 分轨入口弹窗（剧本3 帧3）：类型先行〔清单含插件自定义类型〕→类型「X」
+             的可用轨亮出→轨行→角色分配（角色下拉按类型规约过滤、必含角色带
+             「（必含）」标记）。深拷贝草稿编辑、〔完成〕就地回写产出卡；footer
+             恒两按钮（高度静态）；常驻挂载、开关纯由 state 控制 -->
+        <AutoHeightDialog
+          v-model:state="trackDialogState"
+          width="min(680px, 94vw)"
+          :close-on-click-modal="false"
+          :close-on-press-escape="false"
+          :show-close="false"
+        >
+          <template #header>
+            <div class="li-red-header">
+              <span class="li-red-title">分轨 · 聚合成作品</span>
+            </div>
+          </template>
+          <div v-if="trackDraft" class="li-red-body li-red-track-body">
+            <p class="li-red-agg-step">第一步·作品类型:</p>
+            <div v-if="trackTypeOptions.length" class="li-red-types">
+              <button
+                v-for="t in trackTypeOptions"
+                :key="t.value"
+                type="button"
+                class="li-red-type-card"
+                :class="{ 'is-active': trackDraft.workType === t.value }"
+                :title="aggAvailableTracksText(t.spec)"
+                @click="chooseTrackType(t.value)"
+              >{{ t.label }}</button>
+            </div>
+            <p v-else class="li-red-error">
+              类型清单不可用（资源类型注册表查询失败或为空）——无法分配轨道；可关闭弹窗稍后重试
+            </p>
+            <p class="li-red-hint">
+              选定类型后亮出该类型的可用轨清单（如：类型「视频」的可用轨：视频主体（必含）· 视频轨 · 音频轨 · 字幕轨 · 缩略图），再把各轨行分到其中的角色
+            </p>
+            <template v-if="trackSpec">
+              <p class="li-red-summary">{{ aggAvailableTracksText(trackSpec) }}</p>
+              <p class="li-red-agg-step">第二步·轨道分配:</p>
+              <div v-for="t in trackAssignRows" :key="t.no" class="li-red-agg-track">
+                <span class="li-condx-card-no">轨 {{ t.no }}</span>
+                <span class="li-condx-card-tpl" :title="t.text">（{{ t.text }}）</span>
+                <span class="li-red-arrow">→</span>
+                <el-select
+                  :model-value="trackRoleOf(t.no)"
+                  size="small"
+                  class="li-red-agg-role"
+                  placeholder="未分配"
+                  clearable
+                  @update:model-value="setTrackRole(t.no, $event)"
+                  @clear="setTrackRole(t.no, '')"
+                >
+                  <el-option
+                    v-for="r in trackRoleOptions"
+                    :key="r"
+                    :label="aggRoleDisplay(trackSpec, r)"
+                    :value="r"
+                  />
+                </el-select>
+              </div>
+              <p class="li-red-hint">
+                必含轨所在行承载聚合作品的主导文件（每组恰一命中，否则该组不成立）；未分配的轨行只作标识源、其命中文件不入轨
+              </p>
+            </template>
+            <p v-if="trackDialogError" class="li-red-row-hint">{{ trackDialogError }}</p>
+          </div>
+          <template #footer>
+            <div class="li-cred-actions">
+              <el-button @click="trackDialogState = false">取消</el-button>
+              <el-button type="primary" @click="confirmTrackDialog">完成</el-button>
+            </div>
+          </template>
+        </AutoHeightDialog>
       </template>
 
       <!-- ================= 入口②：集规则调整（SetRulePanel「调整规则」，剧本E 语义随迁） ================= -->
@@ -441,6 +620,13 @@
 //      来源下拉〔捕获组只列上半声明的组/目录名/群组前缀/常量〕+条件勾选〔仅序列
 //      成员产出等，逐行〕；行可增删；行级就地校验）；合成策略随旧
 //      表单随迁。保存载荷经 emit 交父组件走既有 saveRule RPC。
+//      聚合类别（两级类别·剧本3）：新建先选类别〔[元数据规则]|[聚合规则]〕——
+//      聚合形态上半=轨行区（同一 CondxRowsEditor 条件卡，模板可带捕获、禁括号
+//      子组/行级非/跨行相等/组合引用），下半=标识与分轨（作品标识候选=各轨行
+//      捕获汇集；分轨入口=产出区「聚合成作品」行，〔编辑〕开分轨入口弹窗：
+//      类型先行〔运行时注册表投影〕→可用轨亮出→轨行→角色分配，角色按类型规约
+//      过滤、必含角色带（必含）标记）。保存校验=ruleFormModel 纯函数闸门
+//      （aggFormErrors），载入校验在插件 Go 侧 validateAggregateEntry。
 //   ② setAdjust（SetRulePanel「调整规则」）：上半=草稿识别形态（只读呈现），
 //      下半=指派行——剧本E 全部语义随迁：线索三族（序列 seqKey/目录段/文件名段）
 //      作为来源选项、默认指派预填、目录段多段连续勾选、互斥校验「一个维度只能有
@@ -486,11 +672,25 @@ import {
   condxComboSentence,
   condxShapeSummary,
   condxDirLevelNote,
+  condxRowExtSuffix,
+  aggTypeOptions,
+  aggTypeSpecOf,
+  aggAvailableTracksText,
+  aggRoleDisplay,
+  aggRoleRequired,
+  aggProductionSummary,
+  aggIdentityCandidates,
+  aggIdentityWordOf,
+  aggFormErrors,
   type CondxRowForm,
   type CondxRowNoMap,
   type CondxCaptureDecl,
   type CondxOccEntry,
-  type ExtractionActionJSON
+  type ExtractionActionJSON,
+  type IdentityPartForm,
+  type AggregateProductionForm,
+  type AggTypeSpec,
+  type AggIdentityCandidate
 } from './ruleFormModel'
 
 // —— 入口载荷形态（父组件组装的普通对象） ——
@@ -508,13 +708,17 @@ interface RuleArchiveItem {
 
 // rule 模式初始档案条目（SubpageRules 的 RuleEntryView 投影；conditions 为
 // v4 条件行列表——v4 档案条目唯一条件载体，模式树不再落档；refs 为 W4 组合
-// 引用的成员规则 ID 列表——非组合规则缺省空）。
+// 引用的成员规则 ID 列表——非组合规则缺省空；category/identity/aggregate 为
+// 聚合规则的三件声明（两级类别·阶段6 编辑面镜像的对端））。
 interface RuleInput {
   id: string
   description: string
   source: string
   enabled: boolean
   isNew: boolean
+  category?: string
+  identity?: { row: number; capture: string }[] | null
+  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
   refs?: string[] | null
   conditions?: unknown
   extractions: unknown
@@ -555,6 +759,9 @@ const props = defineProps<{
   initialMemberOnly?: boolean
   // 档案全量规则列表（W4：引用行候选与成员占位词声明的数据源，SubpageRules 传入）
   allRules?: RuleArchiveItem[] | null
+  // 资源类型注册表投影（聚合规则分轨入口的类型清单：内置 6 类+插件自定义类型，
+  // SubpageRules 自规则管理视图透传；缺席=类型步不可用）
+  aggTypes?: AggTypeSpec[] | null
   // 父组件回填的保存失败文案（后端构造期校验拒绝等）：弹窗内呈现、不关窗
   saveError?: string
   saving?: boolean
@@ -571,12 +778,16 @@ const props = defineProps<{
 
 // rule 模式保存载荷（完整规则条目 JSON——父组件原样进 saveRule；conditions
 // 为 v4 条件行，pattern 不再发送；refs 为 W4 引用行成员列表，随载荷原样走
-// 既有 saveRule）。
+// 既有 saveRule；category/identity/aggregate 为聚合规则的类别与两件声明
+// （元数据规则三者缺省——omitempty 落档零残留））。
 interface RuleSavePayload {
   id: string
   description: string
   source: string
   enabled: boolean
+  category?: string
+  identity?: { row: number; capture: string }[]
+  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
   refs: string[]
   conditions: unknown
   extractions: unknown
@@ -627,7 +838,10 @@ const sourceLabels: Record<string, string> = {
 }
 
 const headerTitle = computed((): string => {
-  if (props.mode === 'rule') return props.rule && props.rule.isNew ? '新建规则' : '编辑规则'
+  if (props.mode === 'rule') {
+    if (props.rule && props.rule.isNew) return '新建规则 · 选类别'
+    return props.rule && isAggregate.value ? '编辑聚合规则' : '编辑规则'
+  }
   return '调整规则'
 })
 
@@ -680,13 +894,195 @@ const condxRowEditNo = ref(1)
 const condxRowEditMode = ref<'edit' | 'add'>('edit')
 const condxRowEditAllowRef = ref(true)
 
+// —— 聚合规则编辑态（两级类别·剧本3）：类别、作品标识声明与分轨入口 ——
+
+// 规则类别（metadata|aggregate）：既有条目按档案类别固定；新建经类别选择步切换
+const categoryInput = ref<'metadata' | 'aggregate'>('metadata')
+const isAggregate = computed((): boolean => categoryInput.value === 'aggregate')
+
+// 作品标识声明（IdentityPart 表单形态）：每部分=轨行号+捕获名（序列群键保留名
+// groupKey 只在序列轨行候选中出现）
+const identityRows = ref<IdentityPartForm[]>([])
+
+// 分轨入口（AggregateProduction 表单形态；null=尚未加「聚合成作品」产出）
+const aggProduction = ref<AggregateProductionForm | null>(null)
+
+// 新建类别切换：轨行/条件行同机制原样保留；类别专属面各自复位——聚合（refs 与
+// 类别互斥、提取动作与类别互斥）清引用行与提取行，元数据恢复缺省提取样例
+function switchCategory(cat: 'metadata' | 'aggregate'): void {
+  if (categoryInput.value === cat) return
+  categoryInput.value = cat
+  identityRows.value = []
+  aggProduction.value = null
+  trackDialogState.value = false
+  trackDraft.value = null
+  if (cat === 'aggregate') {
+    // 新建未改动的缺省样例行不带入聚合形态（轨行区从「+ 加轨」起步）
+    if (props.rule && props.rule.isNew && condxRows.value.length === 1) {
+      const only = condxRows.value[0]
+      if (only && !only.group && only.condition && only.condition.format.tpl === '【{作者}】{标题}') {
+        condxRows.value = []
+      }
+    }
+    refRows.value = []
+    extractionRows.value = []
+    extractionsJsonMode.value = false
+    extractionsError.value = ''
+    return
+  }
+  if (!extractionRows.value.length && !extractionsJsonMode.value) {
+    extractionRows.value = (cloneJSON(NEW_EXTRACTIONS_SAMPLE) as ExtractionActionJSON[]).map(actionToRow)
+  }
+}
+
+// 标识候选分组（按轨行号）：文件名捕获/目录行捕获/序列行群键同列
+const identityGroups = computed<{ row: number; candidates: AggIdentityCandidate[] }[]>(() => {
+  const out: { row: number; candidates: AggIdentityCandidate[] }[] = []
+  for (const c of aggIdentityCandidates(activeCondxRows.value)) {
+    const last = out[out.length - 1]
+    if (last && last.row === c.row) last.candidates.push(c)
+    else out.push({ row: c.row, candidates: [c] })
+  }
+  return out
+})
+
+// 失效捕获残影选项（轨行模板改写后原引用不在声明中）：仅供行上呈现、不可重选
+const identityStaleOptions = computed<{ value: string; label: string }[]>(() => {
+  const declared = new Set(identityGroups.value.flatMap((g) => g.candidates.map((c) => `${g.row}/${c.group}`)))
+  const out: { value: string; label: string }[] = []
+  const seen = new Set<string>()
+  for (const p of identityRows.value) {
+    const key = `${p.row}/${p.capture}`
+    if (!p.capture || declared.has(key) || seen.has(key)) continue
+    seen.add(key)
+    out.push({ value: key, label: `轨${p.row}·{${aggIdentityWordOf(p.capture)}}` })
+  }
+  return out
+})
+
+// 标识部分取值拆装（值编码 行号/捕获名，从左拆一刀）
+function setIdentityPart(pi: number, value: string): void {
+  const idx = value.indexOf('/')
+  if (idx < 0) return
+  const part = identityRows.value[pi]
+  if (!part) return
+  part.row = Number(value.slice(0, idx)) || 1
+  part.capture = value.slice(idx + 1)
+}
+
+// 加一部分：缺省选中首个候选（无候选时空选、行级闸门提示）
+function addIdentityPart(): void {
+  const first = aggIdentityCandidates(activeCondxRows.value)[0]
+  identityRows.value.push(first ? { row: first.row, capture: first.group } : { row: 1, capture: '' })
+}
+
+// 聚合面保存闸门错误（纯函数派生；保存与预览共用）
+const aggErrors = computed((): string[] =>
+  aggFormErrors(activeCondxRows.value, identityRows.value, aggProduction.value, props.aggTypes || [])
+)
+
+// 产出卡摘要（「聚合成作品 · 视频（主体+字幕轨）」）
+const aggCardText = computed((): string => aggProductionSummary(props.aggTypes || [], aggProduction.value))
+
+// —— 分轨入口弹窗（类型先行→可用轨→轨行→角色） ——
+
+const trackDialogState = ref(false)
+const trackDraft = ref<AggregateProductionForm | null>(null)
+
+// 类型按钮清单（滤除无结构角色类型；投影缺席=空清单→类型步不可用提示）
+const trackTypeOptions = computed(() => aggTypeOptions(props.aggTypes || []))
+
+// 草稿当前类型的规约（未选类型=null）
+const trackSpec = computed((): AggTypeSpec | null =>
+  trackDraft.value && trackDraft.value.workType ? aggTypeSpecOf(props.aggTypes || [], trackDraft.value.workType) : null
+)
+
+// 角色下拉条目（类型规约序——可用轨清单同序呈现）
+const trackRoleOptions = computed((): string[] => {
+  const spec = trackSpec.value
+  if (!spec) return []
+  return (spec.roles || []).map((r) => (r ? r.storeType : '')).filter((s) => s)
+})
+
+// 轨道分配行：各轨行（模板+扩展名谓词的整体形态）与其当前角色
+const trackAssignRows = computed<{ no: number; text: string }[]>(() => {
+  const out: { no: number; text: string }[] = []
+  for (const f of condxFlatRows(activeCondxRows.value)) {
+    const tpl = f.condx.format.mode === 'contains'
+      ? `含「${f.condx.format.word || '?'}」`
+      : condxNormalizeTpl(f.condx.format.tpl || '')
+    out.push({ no: f.row, text: `${tpl}${condxRowExtSuffix(f.condx)}` })
+  }
+  return out
+})
+
+// 弹窗级错误（类型未选/未覆盖必含角色——完成闸门呈现）
+const trackDialogError = computed((): string => {
+  const draft = trackDraft.value
+  if (!draft) return ''
+  if (!draft.workType) return '作品类型未选择（类型先行：类型规约决定可用轨与角色基数）'
+  const spec = aggTypeSpecOf(props.aggTypes || [], draft.workType)
+  if (!spec) return `作品类型「${draft.workType}」不在资源类型注册表（可能已随插件停用或卸载注销）`
+  const covered = (draft.tracks || []).some((ta) => ta && aggRoleRequired(spec, ta.role))
+  if (!covered) return '分轨入口未覆盖必含角色（类型规约 Min≥1 的角色）——主导文件无从判定，请把某轨行分到必含轨'
+  return ''
+})
+
+// 开窗（产出卡〔编辑〕/「+ 聚合成作品」）：深拷贝草稿编辑，完成才回写
+function openTrackDialog(): void {
+  trackDraft.value = aggProduction.value
+    ? cloneJSON(aggProduction.value)
+    : { workType: '', tracks: [], companionUse: 'track' }
+  trackDialogState.value = true
+}
+
+// 类型选定：清轨道分配并把首个必含角色自动落给轨 1（帧3「轨1 自动落必含轨」；
+// 用户随后可逐轨改选——下拉只出该类型可用轨）
+function chooseTrackType(type: string): void {
+  const draft = trackDraft.value
+  if (!draft) return
+  draft.workType = type
+  const spec = aggTypeSpecOf(props.aggTypes || [], type)
+  const required = (spec && spec.roles ? spec.roles : []).find((r) => r && r.min >= 1)
+  draft.tracks = required ? [{ row: 1, role: required.storeType }] : []
+}
+
+// 单轨行角色改选（清空=移除分配：该轨行只作标识源、不入轨）
+function trackRoleOf(no: number): string {
+  const draft = trackDraft.value
+  const hit = draft && draft.tracks ? draft.tracks.find((t) => t && t.row === no) : undefined
+  return hit ? hit.role : ''
+}
+
+function setTrackRole(no: number, role: string): void {
+  const draft = trackDraft.value
+  if (!draft) return
+  if (!draft.tracks) draft.tracks = []
+  const idx = draft.tracks.findIndex((t) => t && t.row === no)
+  if (!role) {
+    if (idx >= 0) draft.tracks.splice(idx, 1)
+    return
+  }
+  if (idx >= 0) draft.tracks[idx] = { row: no, role }
+  else draft.tracks.push({ row: no, role })
+}
+
+// 〔完成〕：草稿过类型/必含闸门后就地回写产出卡；不过不关窗（错误行内在场）
+function confirmTrackDialog(): void {
+  if (trackDialogError.value) return
+  if (!trackDraft.value) return
+  aggProduction.value = cloneJSON(trackDraft.value)
+  trackDialogState.value = false
+}
+
 // 条件卡〔编辑〕/〔+ 加条件〕开窗（顶层卡与组框内成员卡同一链路——成员卡经组框
 // 内编辑器逐层上浮至此）：空行按新增态开（首步条件种类选择）、已设内容按编辑态直达
 function openCondxRowEdit(row: CondxRowForm, no: number): void {
   condxRowEditTarget.value = row
   condxRowEditNo.value = no
   condxRowEditMode.value = row.condition ? 'edit' : 'add'
-  condxRowEditAllowRef.value = condxRows.value.indexOf(row) >= 0
+  // 聚合规则与 refs 互斥：目标卡不出「引用规则」（顶层行同禁）
+  condxRowEditAllowRef.value = condxRows.value.indexOf(row) >= 0 && !isAggregate.value
   condxRowDialogState.value = true
 }
 
@@ -1049,9 +1445,10 @@ function onCondxRowsMoved(map: CondxRowNoMap): void {
 }
 
 // 条件行完整性（W4）：引用行在场时空条件表合法——组合可仅由成员门控（帧5→帧6
-// 删光自身条件行后摘要为「引用 N 条成员规则；（无条件行）」且可保存）
+// 删光自身条件行后摘要为「引用 N 条成员规则；（无条件行）」且可保存）；聚合规则
+// 与 refs 互斥（引用行恒空）、空轨行表仍拒
 function condxRowsErrorWithRefs(rows: CondxRowForm[]): string {
-  if (!condxFlatRows(rows).length && refRows.value.length) return ''
+  if (!isAggregate.value && !condxFlatRows(rows).length && refRows.value.length) return ''
   return condxRowsError(rows)
 }
 
@@ -1441,6 +1838,25 @@ function initFromProps(): void {
     // 内容，本组件 setup 态跨开关存留——每个字段都须重置后再按初值分支）
     condxJsonMode.value = false
     condxText.value = ''
+    // 聚合编辑态复位：类别按档案（新建缺省元数据；复制条目携类别与内容）；标识
+    // 与分轨从档案条目镜像
+    categoryInput.value = rule && rule.category === 'aggregate' ? 'aggregate' : 'metadata'
+    const initIdentity = rule && Array.isArray(rule.identity) ? rule.identity : []
+    identityRows.value = initIdentity
+      .filter((p): p is { row: number; capture: string } => !!p && typeof p.row === 'number' && typeof p.capture === 'string')
+      .map((p) => ({ row: p.row || 1, capture: p.capture }))
+    const initAgg = rule && rule.aggregate ? rule.aggregate : null
+    aggProduction.value = initAgg
+      ? {
+          workType: initAgg.workType || '',
+          tracks: (Array.isArray(initAgg.tracks) ? initAgg.tracks : [])
+            .filter((t): t is { row: number; role: string } => !!t && typeof t.row === 'number' && typeof t.role === 'string')
+            .map((t) => ({ row: t.row, role: t.role })),
+          companionUse: initAgg.companionUse || 'track'
+        }
+      : null
+    trackDialogState.value = false
+    trackDraft.value = null
     // 引用行复位（W4）：档案 refs（组合规则成员）逐条转为引用行；坏档非字符串项滤除
     const initRefs = rule && Array.isArray(rule.refs) ? rule.refs : []
     refRows.value = initRefs.filter((id): id is string => typeof id === 'string').map((id) => ({ ruleId: id }))
@@ -1452,11 +1868,11 @@ function initFromProps(): void {
         group: null
       }
     ]
-    if (!rule || rule.isNew) {
+    if (!rule || (rule.isNew && !Array.isArray(rule.conditions))) {
       condxRows.value = defaultRows()
     } else if (Array.isArray(rule.conditions)) {
       // 旧档 {键} 模板归一显示为 {公共段}（与保存载荷构造同一归一函数——
-      // 弹窗所见即保存所得）
+      // 弹窗所见即保存所得）；复制条目（isNew+携内容）同路装载
       condxRows.value = condxNormalizeRows(cloneJSON(rule.conditions)) as CondxRowForm[]
     } else if (rule.conditions != null) {
       // 历史坏档（conditions 非数组）：原文进 JSON 高级模式，避免结构化缺省
@@ -1489,7 +1905,12 @@ function initFromProps(): void {
     occurDrift.value = {}
     extractionsJsonMode.value = false
     extractionsText.value = ''
-    const rawExtractions: unknown = !rule || rule.isNew ? NEW_EXTRACTIONS_SAMPLE : rule.extractions
+    // 复制条目（isNew+携提取数组）装载其内容；新建缺省样例起步
+    const rawExtractions: unknown = !rule
+      ? NEW_EXTRACTIONS_SAMPLE
+      : rule.isNew && !Array.isArray(rule.extractions)
+        ? NEW_EXTRACTIONS_SAMPLE
+        : rule.extractions
     if (Array.isArray(rawExtractions)) {
       extractionRows.value = (cloneJSON(rawExtractions) as ExtractionActionJSON[]).map(actionToRow)
     } else {
@@ -1533,6 +1954,38 @@ function buildRulePayload(): RuleSavePayload | null {
   // JSON 合法性闸门：识别/提取任一停在 JSON 模式且解析不过 → 不关窗不保存
   if (condxJsonMode.value) {
     if (condxError.value || !condxParsed.value) return null
+  }
+  // 聚合规则载荷（类别专属闸门）：轨行结构/标识/分轨校验不过 → 标识与分轨区已
+  // 逐条标红，此处拦住不保存；refs 与提取动作与聚合类别互斥、恒空数组落档
+  if (isAggregate.value) {
+    if (!condxJsonMode.value) {
+      const rowErr = condxRowsErrorWithRefs(condxRows.value)
+      if (rowErr) {
+        condxError.value = rowErr
+        return null
+      }
+    }
+    if (aggErrors.value.length) return null
+    const rule = props.rule
+    return {
+      id: rule && !rule.isNew ? rule.id : '',
+      description: descInput.value,
+      source: (rule && rule.source) || 'manual',
+      enabled: enabledInput.value,
+      category: 'aggregate',
+      identity: identityRows.value.map((p) => ({ row: p.row, capture: p.capture })),
+      aggregate: aggProduction.value
+        ? {
+            workType: aggProduction.value.workType,
+            tracks: aggProduction.value.tracks.map((t) => ({ row: t.row, role: t.role })),
+            companionUse: 'track'
+          }
+        : null,
+      refs: [],
+      conditions: condxNormalizeRows(condxJsonMode.value ? condxParsed.value ?? [] : condxRows.value),
+      extractions: [],
+      synthesis: { dimPolicies: [], roles: [] }
+    }
   }
   // 引用行完整性闸门（W4）：未选成员的引用行 → 行内已标红，此处拦住不保存
   if (refRows.value.some((r) => !r.ruleId)) return null
@@ -2321,5 +2774,95 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   font-size: 12px;
   line-height: 1.7;
   color: var(--app-text-secondary);
+}
+
+/* —— 聚合规则编辑面（两级类别·剧本3）—— */
+
+/* 类别选择行（新建首步）：[元数据规则] [聚合规则] 两枚可选按钮+类别说明小字 */
+.li-red-cat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.li-red-cat-note {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* 作品标识声明行：「作品标识:」标签+各部分下拉+删/加按钮（帧3 单行形态） */
+.li-red-agg-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.li-red-agg-ident {
+  width: 200px;
+}
+
+/* 分轨入口弹窗：步骤标签（第一步·作品类型:/第二步·轨道分配:） */
+.li-red-agg-step {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+/* 类型按钮区（第一步）：等宽卡片按钮，选中态主色描边（条件编辑弹窗目标卡同款
+   形态——本组件 scoped 样式不跨组件，故本地同名再造） */
+.li-red-types {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.li-red-type-card {
+  flex: 1;
+  min-width: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  border-radius: var(--app-radius);
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+.li-red-type-card.is-active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+
+/* 轨道分配行：「轨 N（模板+扩展名）→ 角色下拉」（帧3） */
+.li-red-agg-track {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.li-red-agg-role {
+  width: 180px;
+  flex: none;
+}
+
+/* 分轨入口弹窗体：纵向承载两步内容（弹窗壳高度封顶内滚） */
+.li-red-track-body {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+/* 分轨入口弹窗 footer 按钮行（恒两按钮、高度静态） */
+.li-cred-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

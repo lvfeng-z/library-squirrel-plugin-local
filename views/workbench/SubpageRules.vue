@@ -52,7 +52,10 @@
                   小字标记——由全列表 refs 统计） -->
             <section class="li-rules-card">
               <div class="li-rules-card-head">
-                <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条</span></h3>
+                <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条 · 元数据与聚合两类同列</span></h3>
+                <!-- 恢复预置（帧1）：缺席的预置聚合种子按稳定 ID 补回（在场条目不覆写，
+                     误删/改坏兜底——改坏的先删除再恢复即回出厂形态） -->
+                <el-button size="small" :disabled="acting" @click="doRestorePreset">恢复预置</el-button>
                 <el-button type="primary" size="small" @click="openNew">新建规则…</el-button>
               </div>
               <!-- 排序（剧本一帧1）：卡头顺序语义说明小字 -->
@@ -82,7 +85,14 @@
                   ><el-icon><SortDown /></el-icon></el-button>
                 </span>
                 <div class="li-rules-row-main">
-                  <div class="li-rules-row-desc" :title="r.description">{{ r.description || '（无描述）' }}</div>
+                  <div class="li-rules-row-desc" :title="r.description">
+                    <!-- 类别标记（帧1）：[聚合]|[元数据] 两类同列同权 -->
+                    <span class="li-rules-row-cat" :class="{ 'is-agg': isAggregateRule(r) }">{{ isAggregateRule(r) ? '[聚合]' : '[元数据]' }}</span>
+                    {{ r.description || '（无描述）' }}
+                  </div>
+                  <!-- 来源与命中小字（帧1「来源:预置 · 命中 3 件」）：命中段取最近识别
+                       快照统计，无会话/无快照时缺席 -->
+                  <div class="li-rules-row-src">来源:{{ sourceLabel(r.source) }}{{ hitCountOf(r) != null ? ` · 命中 ${hitCountOf(r)} 件` : '' }}</div>
                   <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
                   <div v-else-if="comboRefCount(r.id) > 0" class="li-rules-row-refnote">被 {{ comboRefCount(r.id) }} 条组合引用</div>
                   <!-- 范围小字（B2）：组合行=直译句（与编辑弹窗同函数）；普通行=「类别 · N 形态」（目录行带层级锚时尾缀「· 第 N 级」） -->
@@ -91,9 +101,9 @@
                   <div v-if="isComboRule(r) && hasDisabledMember(r)" class="li-rules-row-combo-off">成员已停用——本组合不产出</div>
                   <div class="li-rules-row-id" :title="r.id">{{ r.id }}</div>
                 </div>
-                <el-tag size="small" :type="sourceTagType(r.source)">{{ sourceLabel(r.source) }}</el-tag>
                 <span class="li-rules-row-side">
                   <el-button size="small" @click="openEdit(r)">编辑</el-button>
+                  <el-button size="small" @click="openCopy(r)">复制</el-button>
                   <el-button size="small" type="danger" @click="doDeleteRule(r)">删除</el-button>
                 </span>
               </div>
@@ -107,9 +117,10 @@
               </div>
               <p class="li-rules-hint">
                 例子模板是 v4 条件格式的写法参考（不参与求值、不入档案）：新建/编辑规则时在格式步点词条区同名 chips
-                可一步预填；占位词词表为封闭集（作者/集名/序号/标题/标签/作品号/日期/公共段/任意），其中 标签/作者/集名
-                可带量词（{标签+} 至少一组、{标签*} 可零组，重复段为多值产出）；分隔记号写作「;分隔」紧跟量词（如 {标签+;_}，
-                裸词必须指定分隔、包裹括号成段可不写）
+                可一步预填；占位词词表为封闭集（作者/集名/序号/标题/标签/作品/作品号/日期/公共段/任意），其中
+                {作品} 为聚合标识专用取值词根、标签/作者/集名
+                可带量词（{标签+} 至少一组、{标签*} 可零组，重复段为多值产出）；分隔记号写作「;分隔」紧跟量词（如
+                {标签+;_}，裸词必须指定分隔、包裹括号成段可不写）
               </p>
               <div v-for="ex in examples" :key="ex.name" class="li-rules-row">
                 <div class="li-rules-row-main">
@@ -145,6 +156,7 @@
         mode="rule"
         :rule="dialogRule"
         :all-rules="rules"
+        :agg-types="resourceTypes"
         :saving="savingRule"
         :save-error="dialogSaveError"
         :preview-available="previewAvailable"
@@ -209,12 +221,16 @@ interface DimPolicyView {
 
 // 档案规则条目（ruleEntryJSON 形态：conditions / extractions 即 JSON 片段源——
 // v4 档案条件只落 conditions，模式树为编译缓存不落档；refs 为 W4 组合引用的
-// 成员规则 ID 列表——非组合规则缺省空）
+// 成员规则 ID 列表——非组合规则缺省空；category/identity/aggregate 为聚合规则
+// 的类别与两件声明——元数据规则三者缺省）
 interface RuleEntryView {
   id: string
   description: string
   source: string
   enabled: boolean
+  category?: string
+  identity?: { row: number; capture: string }[] | null
+  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
   refs?: string[]
   conditions?: unknown
   extractions?: unknown
@@ -229,11 +245,21 @@ interface ExampleTemplateView {
   description: string
 }
 
+// 资源类型投影条目（分轨入口的类型清单数据源，ListResourceTypes 应答条目投影；
+// storeStandards 为各角色文件标准——文件轨行尾部扩展名白名单的并集来源）。
+interface ResourceTypeView {
+  resourceType: string
+  roles: { storeType: string; min: number; max: number }[]
+  storeStandards?: Record<string, { formats?: string[] }>
+}
+
 interface RulesAdminView {
   schemaVersion: number
   rules: RuleEntryView[]
   warnings?: string[]
   examples?: ExampleTemplateView[]
+  resourceTypes?: ResourceTypeView[]
+  hitCounts?: Record<string, number>
   backupAvailable: boolean
 }
 
@@ -261,6 +287,7 @@ interface WorkbenchResponse {
   rulesView?: RulesAdminView
   rulePreview?: RulePreviewView
   rolledBack?: boolean
+  restoredCount?: number
 }
 
 // Wails 将 []byte 载荷以 base64 或 JSON 文本送达，双路解码
@@ -296,6 +323,10 @@ const rules = ref<RuleEntryView[]>([])
 const examples = ref<ExampleTemplateView[]>([])
 const warnings = ref<string[]>([])
 const backupAvailable = ref(false)
+// 资源类型注册表投影（聚合编辑面分轨入口的类型清单；查询失败为空）
+const resourceTypes = ref<ResourceTypeView[]>([])
+// 规则命中统计（规则 ID → 命中件数；无会话/无快照时缺席）
+const hitCounts = ref<Record<string, number>>({})
 
 function targetLabel(target: string): string {
   // 例子模板表词条 Target 取后端常量值（filename / dirname / seq）；
@@ -363,6 +394,11 @@ function parseRoute(): string {
   return `${ROUTE_BASE}workbench-parse?root=${encodeURIComponent(root)}`
 }
 
+// 规则管理族请求携带的库根（命中统计按会话识别快照取数；无会话=空串缺席）
+function sessionRoot(): string {
+  return session.value ? session.value.rootPath : ''
+}
+
 async function restoreSession(): Promise<boolean> {
   const root = rootFromHash()
   if (!root) return true
@@ -382,10 +418,12 @@ function applyRulesView(view: RulesAdminView | undefined | null): void {
   examples.value = view.examples || []
   warnings.value = view.warnings || []
   backupAvailable.value = view.backupAvailable === true
+  resourceTypes.value = view.resourceTypes || []
+  hitCounts.value = view.hitCounts || {}
 }
 
 async function loadRules(): Promise<void> {
-  const resp = await request('getRules')
+  const resp = await request('getRules', { root: sessionRoot() })
   if (!resp.ok) {
     actionError.value = resp.error || '读取规则档案失败'
     return
@@ -418,7 +456,7 @@ async function doToggleRule(rule: RuleEntryView, enable: boolean): Promise<void>
 async function doToggleRuleConfirmed(rule: RuleEntryView, enable: boolean): Promise<void> {
   acting.value = true
   actionError.value = ''
-  const resp = await request('setRuleEnabled', { ruleId: rule.id, enabled: enable })
+  const resp = await request('setRuleEnabled', { ruleId: rule.id, enabled: enable, root: sessionRoot() })
   acting.value = false
   if (!resp.ok) {
     actionError.value = resp.error || '启停规则失败'
@@ -440,7 +478,7 @@ async function doDeleteRule(rule: RuleEntryView): Promise<void> {
 async function doDeleteRuleConfirmed(rule: RuleEntryView): Promise<void> {
   acting.value = true
   actionError.value = ''
-  const resp = await request('deleteRule', { ruleId: rule.id })
+  const resp = await request('deleteRule', { ruleId: rule.id, root: sessionRoot() })
   acting.value = false
   if (!resp.ok) {
     actionError.value = resp.error || '删除规则失败'
@@ -465,7 +503,7 @@ async function doMoveRule(index: number, delta: -1 | 1): Promise<void> {
   moved[index] = list[target]
   moved[target] = list[index]
   rules.value = moved
-  const resp = await request('reorderRules', { ruleIds: moved.map((r) => r.id) })
+  const resp = await request('reorderRules', { ruleIds: moved.map((r) => r.id), root: sessionRoot() })
   acting.value = false
   if (!resp.ok) {
     // 回滚本地换位（档案以后端为准，下次全量刷新自然纠偏）
@@ -544,13 +582,17 @@ async function onRuleConfirmProceed(): Promise<void> {
 
 // 弹窗初始载荷（RuleEditDialog rule 模式入参的结构投影；conditions/extractions
 // 即档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑；refs 为 W4 组合
-// 引用成员列表）
+// 引用成员列表；category/identity/aggregate 为聚合规则三件声明——复制条目时
+// 内容随载、id 置空 source 归 manual（复制件=用户手写条目））
 interface RuleDialogInput {
   id: string
   description: string
   source: string
   enabled: boolean
   isNew: boolean
+  category?: string
+  identity?: { row: number; capture: string }[] | null
+  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
   refs?: string[] | null
   conditions?: unknown
   extractions: unknown
@@ -611,18 +653,25 @@ const sourceLabels: Record<string, string> = {
   builtin: '内置',
   manual: '手写',
   qna: '泛化',
-  adjudication: '裁决'
+  adjudication: '裁决',
+  preset: '预置'
 }
 
 function sourceLabel(source: string): string {
   return sourceLabels[source] || source
 }
 
-function sourceTagType(source: string): 'info' | 'success' | 'warning' | 'danger' {
-  if (source === 'manual') return 'success'
-  if (source === 'qna') return 'warning'
-  if (source === 'adjudication') return 'danger'
-  return 'info'
+// —— 两级类别与命中统计（帧1：类别标记同列 + 「来源:预置 · 命中 3 件」小字） ——
+
+// 聚合规则=档案条目 category=aggregate（缺省/空=元数据——旧档与既有条目零迁移）
+function isAggregateRule(rule: RuleEntryView): boolean {
+  return rule.category === 'aggregate'
+}
+
+// 规则命中件数（最近识别快照统计；无会话/无快照/规则未入统计时缺席）
+function hitCountOf(rule: RuleEntryView): number | null {
+  const n = hitCounts.value[rule.id]
+  return typeof n === 'number' ? n : null
 }
 
 // —— W4 列表引用标记（帧10）：组合行「组合·引用 N 条」、被引用行「被 N 条组合引用」 ——
@@ -666,7 +715,7 @@ function shapeSummaryOf(rule: RuleEntryView): string {
 }
 
 // 新建：空载荷入弹窗（v4 缺省样例〔【{作者}】{标题} 行 + 作者/标题提取行〕
-// 由弹窗侧缺省带入）
+// 由弹窗侧缺省带入；类别选择步在弹窗内——缺省元数据、可选聚合）
 function openNew(): void {
   dialogRule.value = {
     id: '',
@@ -674,6 +723,9 @@ function openNew(): void {
     source: 'manual',
     enabled: true,
     isNew: true,
+    category: '',
+    identity: null,
+    aggregate: null,
     refs: null,
     conditions: null,
     extractions: null,
@@ -685,14 +737,18 @@ function openNew(): void {
   actionError.value = ''
 }
 
-function openEdit(rule: RuleEntryView): void {
+// 档案条目 → 弹窗载荷的公共投影（编辑与复制共用：内容镜像、按途定 id/isNew/source）
+function ruleToDialogInput(rule: RuleEntryView, asCopy: boolean): RuleDialogInput {
   const synth = rule.synthesis || {}
-  dialogRule.value = {
-    id: rule.id,
-    description: rule.description,
-    source: rule.source,
+  return {
+    id: asCopy ? '' : rule.id,
+    description: asCopy ? `${rule.description || rule.id}（副本）` : rule.description,
+    source: asCopy ? 'manual' : rule.source,
     enabled: rule.enabled,
-    isNew: false,
+    isNew: asCopy,
+    category: rule.category || '',
+    identity: rule.identity ?? null,
+    aggregate: rule.aggregate ?? null,
     refs: rule.refs ?? null,
     conditions: rule.conditions ?? null,
     extractions: rule.extractions ?? [],
@@ -701,6 +757,20 @@ function openEdit(rule: RuleEntryView): void {
       roles: ((synth.roles || []) as RoleBindingView[]).map((r) => ({ source: r.source, roleName: r.roleName }))
     }
   }
+}
+
+function openEdit(rule: RuleEntryView): void {
+  dialogRule.value = ruleToDialogInput(rule, false)
+  dialogSaveError.value = ''
+  resetDialogPreview()
+  dialogVisible.value = true
+  actionError.value = ''
+}
+
+// 复制（帧1：预置与用户条目同权可复制）：内容整体镜像、id 置空保存时生成新 ID、
+// 来源归手写
+function openCopy(rule: RuleEntryView): void {
+  dialogRule.value = ruleToDialogInput(rule, true)
   dialogSaveError.value = ''
   resetDialogPreview()
   dialogVisible.value = true
@@ -712,7 +782,7 @@ function openEdit(rule: RuleEntryView): void {
 async function onDialogSave(payload: Record<string, unknown>): Promise<void> {
   savingRule.value = true
   dialogSaveError.value = ''
-  const resp = await request('saveRule', { rule: payload })
+  const resp = await request('saveRule', { rule: payload, root: sessionRoot() })
   savingRule.value = false
   if (!resp.ok) {
     dialogSaveError.value = resp.error || '保存规则失败'
@@ -733,7 +803,7 @@ async function onDialogSave(payload: Record<string, unknown>): Promise<void> {
 async function doRollback(): Promise<void> {
   acting.value = true
   actionError.value = ''
-  const resp = await request('rollbackProfile')
+  const resp = await request('rollbackProfile', { root: sessionRoot() })
   acting.value = false
   if (!resp.ok) {
     actionError.value = resp.error || '档案回退失败'
@@ -741,6 +811,23 @@ async function doRollback(): Promise<void> {
   }
   applyRulesView(resp.rulesView)
   notice.value = '档案已回退一代（当前档案换位进备份，再点一次即撤销回退）'
+}
+
+// —— 五、恢复预置（帧1）：缺席的预置聚合种子按稳定 ID 补回 ——
+
+async function doRestorePreset(): Promise<void> {
+  acting.value = true
+  actionError.value = ''
+  const resp = await request('restorePresetRules', { root: sessionRoot() })
+  acting.value = false
+  if (!resp.ok) {
+    actionError.value = resp.error || '恢复预置失败'
+    return
+  }
+  applyRulesView(resp.rulesView)
+  notice.value = resp.restoredCount
+    ? `已恢复 ${resp.restoredCount} 条预置规则（在场条目不覆写；改坏的条目先删除再恢复即回出厂形态）`
+    : '预置规则均在档，未补任何条目'
 }
 
 onMounted(() => {
@@ -933,6 +1020,24 @@ onUnmounted(() => {
 
 /* W4 引用标记小字（帧10）：组合·引用 N 条 / 被 N 条组合引用 */
 .li-rules-row-refnote {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* 两级类别标记（帧1）：[聚合]|[元数据] 行首小标——聚合主色、元数据灰 */
+.li-rules-row-cat {
+  margin-right: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-secondary);
+}
+
+.li-rules-row-cat.is-agg {
+  color: var(--app-color-primary);
+}
+
+/* 来源与命中小字（帧1「来源:预置 · 命中 3 件」） */
+.li-rules-row-src {
   font-size: 12px;
   color: var(--app-text-secondary);
 }

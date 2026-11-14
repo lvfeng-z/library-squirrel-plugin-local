@@ -1037,12 +1037,51 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	}, nil
 }
 
+// knownFileExtsForTplTail 为文件轨行「模板尾部误写扩展名」的识别白名单（小写
+// 带点形）：文件主体模板对去扩展名的文件名求值（FileSubjectPattern 的词汇
+// 分工——扩展名由 fileExt 终结谓词承载），尾字面以本表扩展名收尾即恒不命中
+// 形态，载入拒收并指引用户改走谓词。白名单外的点段（如 .part1）是文件名正文
+// 内的合法点段，不拦。
+var knownFileExtsForTplTail = map[string]bool{
+	".mp4": true, ".mkv": true, ".avi": true, ".mov": true, ".wmv": true,
+	".m4v": true, ".webm": true, ".flv": true, ".ts": true, ".m2ts": true,
+	".srt": true, ".ass": true, ".ssa": true, ".sub": true, ".vtt": true,
+	".txt": true, ".md": true, ".xml": true, ".nfo": true, ".rtf": true,
+	".odt": true, ".pdf": true, ".doc": true, ".docx": true, ".epub": true,
+	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".gif": true,
+	".bmp": true, ".avif": true, ".heic": true, ".tiff": true,
+	".mp3": true, ".flac": true, ".wav": true, ".m4a": true, ".ogg": true,
+	".aac": true, ".mka": true, ".opus": true,
+	".zip": true, ".rar": true, ".7z": true, ".tar": true, ".gz": true,
+	".bz2": true, ".cbz": true, ".cbr": true,
+}
+
+// condxTplTailKnownExt 报告模板尾字面段是否以白名单扩展名收尾：尾字面段取
+// 词法切分的末段（最后一个占位词之后的字面文本；无占位词即整条模板），其自
+// 最后一个点起的小写后缀命中白名单时返回该扩展名（带点形）。模板以占位词
+// 收尾（无尾字面）或点段不在白名单时第二个返回值为 false。
+func condxTplTailKnownExt(tpl string) (string, bool) {
+	tokens, err := tokenizeCondx(tpl)
+	if err != nil || len(tokens) == 0 {
+		return "", false
+	}
+	tail := tokens[len(tokens)-1].literal
+	dot := strings.LastIndexByte(tail, '.')
+	if dot < 0 || dot == len(tail)-1 {
+		return "", false
+	}
+	ext := strings.ToLower(tail[dot:])
+	return ext, knownFileExtsForTplTail[ext]
+}
+
 // validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（轨行+作品标识
 // 声明+分轨入口）、与其他机制互斥（组合引用/提取动作/模式树旧形态）、轨行
 // 只收普通条件行（平行选择器——括号子组、行级非、跨行相等值校验均拒绝：
 // 轨行独立求值，相等门引用他行绑定恒不可得）、标识与分轨的行号及捕获名引用
 // 存在、处置维度 metadata 留位值载入即拒（沿未知词条「载入即拒绝」先例——
-// 不实现半截语义）。空串处置维度归一为 track。
+// 不实现半截语义）、文件轨行模板尾字面误写扩展名拒收（模板对去扩展名的文件
+// 名求值，该形态恒不命中——见 knownFileExtsForTplTail）。空串处置维度归一为
+// track。
 func validateAggregateEntry(rj *ruleEntryJSON) error {
 	if rj.Aggregate == nil {
 		return fmt.Errorf("聚合规则 %q 缺少分轨入口（aggregate）", rj.ID)
@@ -1090,6 +1129,13 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 		for _, b := range row.Condition.Badges {
 			if b.Kind == CondxBadgeEqual {
 				return fmt.Errorf("聚合规则 %q 第 %d 行携带相等值校验：轨行独立求值，不支持跨行相等", rj.ID, i+1)
+			}
+		}
+		// 文件轨行模板尾字面误写扩展名（仅 file 目标行；dir/seq 目标名不去
+		// 扩展名，模板带点尾合法）：载入即拒并指路 fileExt 终结谓词。
+		if row.Condition.Target == CondxTargetFile && row.Condition.Format.Mode != CondxFormatContains {
+			if ext, hit := condxTplTailKnownExt(row.Condition.Format.Tpl); hit {
+				return fmt.Errorf("聚合规则 %q 第 %d 行的文件轨行模板尾部误写扩展名 %s：模板只匹配去扩展名的文件名，该形态恒不命中，请删除模板尾部的 %s，改用「扩展名是」附加条件承载扩展名", rj.ID, i+1, ext, ext)
 			}
 		}
 	}

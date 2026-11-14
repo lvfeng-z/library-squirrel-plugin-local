@@ -209,10 +209,12 @@ export interface CondxRowForm {
   group?: CondxRowForm[] | null
 }
 
-// 占位词词表（与内核 condxVocab 同源九词）：digit=数字类（[0-9]+）；
+// 占位词词表（与内核 condxVocab 同源十词）：digit=数字类（[0-9]+）；
 // refable=false 仅 {任意}（吞位词：非捕获、可重复、不可被提取引用）；
 // note 为词条说明（chips 提示）。{公共段}=序列成套成员模板的公共相同部分
-// （英文组名 key，与旧词 {键} 同组同义）。
+// （英文组名 key，与旧词 {键} 同组同义）。{作品}=聚合标识专用中性取值词根
+// （机制零新增的普通命名捕获槽——干名如 ep01 挂标签/作者等元数据语义词别扭，
+// 聚合轨行模板用它捕获标识值）。
 // 量词变体（重复段，与内核 parseCondxVariant 同口径）：标签/作者/集名 三词位
 // 可带量词——{词+}=至少一组、{词*}=可零组；分隔记号写作「;分隔」紧跟量词
 // （如 {标签+;_}，分隔字面=首个分号起的全部、含分号本身）。变体词为多值产出，
@@ -222,6 +224,7 @@ export const CONDX_VOCAB: { word: string; group: string; digit: boolean; refable
   { word: '集名', group: 'setname', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合；可带量词 +/*（{集名*} 一类重复段）' },
   { word: '标题', group: 'title', digit: false, refable: true, note: '贪婪取词' },
   { word: '标签', group: 'tag', digit: false, refable: true, note: '贪婪取词；可带量词 +/*（{标签+} 一类重复段）' },
+  { word: '作品', group: 'work', digit: false, refable: true, note: '聚合标识专用取值词根（普通命名捕获槽）：聚合轨行模板用它捕获标识值，如 {作品}.{任意} 配扩展名谓词 .srt' },
   { word: '序号', group: 'seq', digit: true, refable: true, note: '数字类（[0-9]+）' },
   { word: '作品号', group: 'workid', digit: true, refable: true, note: '数字类（pixiv 作品号等）' },
   { word: '日期', group: 'date', digit: true, refable: true, note: '数字类（YYYYMMDD 等）' },
@@ -306,7 +309,8 @@ export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 
   { name: '任意段吞位', template: '{标题}_{任意}', target: 'file', description: '{任意} 吞掉标题之后的一切' },
   { name: '可选分隔', template: '[{作者}]{ ?}{集名}', target: 'file', description: '可选分隔字面 { ?} 表示可缺席的字面空格：一条规则通吃 [{作者}]{集名} 与 [{作者}] {集名} 两形态（两侧至少一侧须有字面锚）' },
   { name: '可选作者组', template: '[{作者?}] {集名}', target: 'file', description: '可选词位：{作者?} 的方括号组整组可缺席、在场时单值可引用；缺席形态需保留包裹组后的字面空格' },
-  { name: '多处标签', template: '({标签})[{作者}]{集名}{ ?}[{标签+}]', target: 'file', description: '同占位词多次出现（位次分立）：圆括号内为位1「标签」、尾部方括号组为位2「标签·第2处」（重复段多值），各处独立产出与引用' }
+  { name: '多处标签', template: '({标签})[{作者}]{集名}{ ?}[{标签+}]', target: 'file', description: '同占位词多次出现（位次分立）：圆括号内为位1「标签」、尾部方括号组为位2「标签·第2处」（重复段多值），各处独立产出与引用' },
+  { name: '聚合标识（带锚形态）', template: '{作品}.{任意}', target: 'file', description: '聚合规则的轨行示例：{作品} 为聚合标识专用取值词根（命名捕获槽可用词），`.` 字面锚+{任意} 吞掉语言段——配扩展名谓词 .srt 时轨行整体呈 {作品}.{任意}.srt 形态（ep01.zh.srt 的标识取 ep01）。须写带锚形态而非裸 {作品}（无锚时语言段并进标识、同作不同名不可并组）；扩展名由扩展名谓词承载、不写进模板（{作品}.srt 一类把扩展名写进模板的形态不命中）' }
 ]
 
 // 模板解析为 chips（literal/word 交替）：未闭合 { 报错（与内核同口径）。
@@ -818,7 +822,7 @@ export function condxVariantOfWord(word: string): { variant?: CondxRepeatVariant
   }
   const v = condxVocabOf(root)
   if (!v) {
-    return { error: `模板占位词 {${word}} 的词根 {${root}} 不在词表（作者/集名/序号/标题/标签/作品号/日期/公共段/任意）` }
+    return { error: `模板占位词 {${word}} 的词根 {${root}} 不在词表（作者/集名/序号/标题/标签/作品/作品号/日期/公共段/任意）` }
   }
   if (CONDX_REPEAT_ROOTS.indexOf(root) < 0) {
     return { error: `模板占位词 {${word}} 的词根 {${root}} 不可重复：仅 标签/作者/集名 可带量词（+ 或 *）` }
@@ -1121,7 +1125,7 @@ export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq')
       continue
     }
     const v = condxVocabOf(c.text)
-    if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品号/日期/公共段/任意）`
+    if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品/作品号/日期/公共段/任意）`
     if (!v.refable) continue
     // 位次分立：三词位（标签/作者/集名）多次出现放行、位次独立；其余词根重复
     // 维持既有报错文案（{标签2} 词表外报错由上一行维持）。
@@ -1404,7 +1408,23 @@ export interface CondxRowCardView {
   levelNote: string
 }
 
-export function condxRowCardView(row: CondxRowForm, no: number): CondxRowCardView {
+// 卡片摘要选项：appendExt=模板文本尾接扩展名谓词取值（聚合轨行卡呈现——模板对
+// 去扩展名的文件名正文求值、扩展名由 fileExt 谓词承载，拼接后卡片按轨行整体
+// 形态呈现，如模板 {作品}.{任意} 配谓词 .srt 显示为 {作品}.{任意}.srt）。
+export interface CondxRowCardOpts {
+  appendExt?: boolean
+}
+
+// 行的扩展名谓词取值依序拼接（扩展名自带前导点；无扩展名谓词为空串）。
+export function condxRowExtSuffix(condx: CondxForm): string {
+  let out = ''
+  for (const a of condx.attach || []) {
+    if (a && a.kind === 'fileExt' && a.value) out += a.value
+  }
+  return out
+}
+
+export function condxRowCardView(row: CondxRowForm, no: number, opts?: CondxRowCardOpts): CondxRowCardView {
   const condx = row.condition
   if (!condx) {
     return {
@@ -1420,9 +1440,10 @@ export function condxRowCardView(row: CondxRowForm, no: number): CondxRowCardVie
     }
   }
   const target = CONDX_TARGETS.find((t) => t.value === condx.target)
-  const raw = condx.format.mode === 'contains'
+  const base = condx.format.mode === 'contains'
     ? `含「${condx.format.word || '?'}」`
     : condxNormalizeTpl(condx.format.tpl || '')
+  const raw = opts && opts.appendExt ? `${base}${condxRowExtSuffix(condx)}` : base
   return {
     no,
     targetLabel: target ? target.label : String(condx.target),
@@ -1484,4 +1505,345 @@ export function extractionCardView(row: ExtractionCardSource, refLabelOf?: (rule
   if (row.roleName) suffix.push(`角色 ${row.roleName}`)
   if (row.seqOnly) suffix.push('仅序列成员')
   return { dimLabel: dim ? dim.label : row.dimension, fromText, roleSuffix: suffix.length ? ` · ${suffix.join(' · ')}` : '' }
+}
+
+// —— 聚合规则表单模型（两级类别·聚合声明镜像）——
+// 纯函数与常量：作品标识声明（IdentityPart）、分轨入口（AggregateProduction/
+// TrackAssign）的表单形态、类型投影消费（类型标签/角色标签/可用轨清单）与保存
+// 闸门校验。载入侧校验在插件 Go 侧 validateAggregateEntry（前后双校验的另一面）。
+
+// 序列群键保留捕获名（与内核 identityGroupKeyCapture 同值）：标识声明的专用取值
+// ——取该行序列求值写入的群组键，只在序列目标行上可声明。
+export const AGG_GROUP_KEY_CAPTURE = 'groupKey'
+
+// 作品标识声明的一个部分（表单形态；落 JSON 字段 row/capture 与内核同形）。
+export interface IdentityPartForm {
+  row: number
+  capture: string
+}
+
+// 分轨入口的单行角色分配（落 JSON 字段 row/role 与内核同形）。
+export interface TrackAssignForm {
+  row: number
+  role: string
+}
+
+// 分轨入口表单形态（companionUse 处置维度本批唯一可写值 track，随载荷落档）。
+export interface AggregateProductionForm {
+  workType: string
+  tracks: TrackAssignForm[]
+  companionUse: string
+}
+
+// 类型投影条目（ListResourceTypes 应答条目的前端投影：结构角色与基数）。投影缺席
+// （查询失败/无会话）时清单为空——分轨入口类型步呈现不可用态。
+export interface AggRoleSpec {
+  storeType: string
+  min: number
+  max: number
+}
+
+// 角色文件标准（类型投影 storeStandards 条目的前端投影：formats 为该角色的
+// 标准扩展名清单，小写带点形——文件轨行尾部扩展名白名单的并集来源之一）。
+export interface AggStandardSpec {
+  formats?: string[]
+}
+
+export interface AggTypeSpec {
+  resourceType: string
+  roles: AggRoleSpec[]
+  storeStandards?: Record<string, AggStandardSpec>
+}
+
+// 内置类型标签（分轨入口第一步的类型按钮文案）；unknown 无结构约束（roles 空）
+// 不参与聚合、不出按钮，自定义类型照类型值原样呈现。
+export const AGG_TYPE_LABELS: Record<string, string> = {
+  image: '图片',
+  video: '视频',
+  article: '图文',
+  document: '文档',
+  audio: '音频'
+}
+
+// 分轨入口的角色标签（未知角色值照原样呈现，不虚构中文）。
+export const AGG_ROLE_LABELS: Record<string, string> = {
+  videoMain: '视频主体',
+  videoTrack: '视频轨',
+  audioTrack: '音频轨',
+  audioMain: '音频主体',
+  subtitle: '字幕轨',
+  image: '图片',
+  document: '正文',
+  thumbnail: '缩略图'
+}
+
+export function aggTypeLabel(type: string): string {
+  return AGG_TYPE_LABELS[type] || type
+}
+
+export function aggRoleLabel(role: string): string {
+  return AGG_ROLE_LABELS[role] || role
+}
+
+// 类型清单（分轨入口第一步的按钮清单）：滤除无结构角色的类型（unknown），返回
+// 标签与规约；投影缺席返回空清单。
+export function aggTypeOptions(types: AggTypeSpec[]): { value: string; label: string; spec: AggTypeSpec }[] {
+  const out: { value: string; label: string; spec: AggTypeSpec }[] = []
+  for (const t of types || []) {
+    if (!t || !t.resourceType || !(t.roles || []).length) continue
+    out.push({ value: t.resourceType, label: aggTypeLabel(t.resourceType), spec: t })
+  }
+  return out
+}
+
+export function aggTypeSpecOf(types: AggTypeSpec[], type: string): AggTypeSpec | null {
+  return (types || []).find((t) => t && t.resourceType === type) || null
+}
+
+// 角色是否必含（类型规约 Min≥1）：必含轨所在行承载聚合作品的主导文件与作品级
+// 结论，并组判定要求该行每组恰一命中。
+export function aggRoleRequired(spec: AggTypeSpec, role: string): boolean {
+  for (const r of (spec && spec.roles) || []) {
+    if (r && r.storeType === role) return r.min >= 1
+  }
+  return false
+}
+
+// 角色呈现（可用轨清单与下拉条目共用）：标签+必含标记。
+export function aggRoleDisplay(spec: AggTypeSpec, role: string): string {
+  return aggRoleRequired(spec, role) ? `${aggRoleLabel(role)}（必含）` : aggRoleLabel(role)
+}
+
+// 类型可用轨清单行：「类型「X」的可用轨：a（必含）· b · c」（角色按规约序）。
+export function aggAvailableTracksText(spec: AggTypeSpec): string {
+  const roles = (spec.roles || []).map((r) => (r ? aggRoleDisplay(spec, r.storeType) : '')).filter((s) => s)
+  return `类型「${aggTypeLabel(spec.resourceType)}」的可用轨：${roles.join(' · ')}`
+}
+
+// 产出卡摘要：「聚合成作品 · 视频（主体+字幕轨）」——必含角色的轨行归并为「主体」，
+// 其余角色按首现序各一条（多轨行同角色 ×N 缀尾）。类型缺席（悬空）按类型值原样。
+export function aggProductionSummary(types: AggTypeSpec[], prod: AggregateProductionForm | null): string {
+  if (!prod || !prod.workType) return '聚合成作品 · （未选类型）'
+  const spec = aggTypeSpecOf(types, prod.workType)
+  const segs: string[] = []
+  const seen = new Set<string>()
+  let hasRequired = false
+  for (const ta of prod.tracks || []) {
+    if (!ta || !ta.role) continue
+    if (spec && aggRoleRequired(spec, ta.role)) {
+      hasRequired = true
+      continue
+    }
+    if (seen.has(ta.role)) continue
+    seen.add(ta.role)
+    const n = (prod.tracks || []).filter((t) => t && t.role === ta.role).length
+    segs.push(n > 1 ? `${aggRoleLabel(ta.role)}×${n}` : aggRoleLabel(ta.role))
+  }
+  if (hasRequired) segs.unshift('主体')
+  return `聚合成作品 · ${aggTypeLabel(prod.workType)}（${segs.join('+')}）`
+}
+
+// 标识候选（各轨行捕获汇集）：全部条件行的命名捕获（按行号序；重复段位多值
+// 禁引剔除）+ 序列目标行的群键保留名。目录轨行的目录捕获即目录行的普通捕获，
+// 天然在列。
+export interface AggIdentityCandidate {
+  row: number
+  word: string
+  group: string
+}
+
+export function aggIdentityCandidates(rows: CondxRowForm[]): AggIdentityCandidate[] {
+  const out: AggIdentityCandidate[] = []
+  for (const f of condxFlatRows(rows)) {
+    for (const p of condxRowPlaceholders(f.condx)) {
+      out.push({ row: f.row, word: p.word, group: p.group })
+    }
+    if (f.condx.target === 'seq') {
+      out.push({ row: f.row, word: '群键', group: AGG_GROUP_KEY_CAPTURE })
+    }
+  }
+  return out
+}
+
+// 标识部分的下拉显示词：群键保留名显示「群键」，其余按组名反查词条（含位次化
+// 组名「词·第N处」）。
+export function aggIdentityWordOf(capture: string): string {
+  return capture === AGG_GROUP_KEY_CAPTURE ? '群键' : condxGroupWordOf(capture)
+}
+
+// 常见扩展名集（小写带点形）：文件轨行「模板尾部误写扩展名」识别白名单的基底
+// ——与插件 Go 侧 knownFileExtsForTplTail 同源清单，前端另并入类型投影各角色
+// 文件标准（storeStandards）的扩展名并集。
+const COMMON_FILE_EXTS: string[] = [
+  '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.m4v', '.webm', '.flv', '.ts', '.m2ts',
+  '.srt', '.ass', '.ssa', '.sub', '.vtt', '.txt', '.md', '.xml', '.nfo', '.rtf',
+  '.odt', '.pdf', '.doc', '.docx', '.epub', '.jpg', '.jpeg', '.png', '.webp',
+  '.gif', '.bmp', '.avif', '.heic', '.tiff', '.mp3', '.flac', '.wav', '.m4a',
+  '.ogg', '.aac', '.mka', '.opus', '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2',
+  '.cbz', '.cbr'
+]
+
+// 扩展名记号归一（小写带点形）：容忍无点写法（"jpg"→".jpg"）；非「字母数字
+// 串」记号（空串等）返回空串不入集。
+function normalizeFileExtToken(raw: string): string {
+  const m = /^\.?([A-Za-z0-9]+)$/.exec((raw || '').trim())
+  return m ? `.${m[1].toLowerCase()}` : ''
+}
+
+// 文件轨行尾部扩展名识别白名单：常见扩展名集 ∪ 类型投影各角色文件标准
+//（storeStandards）的扩展名并集。投影缺席（查询失败）时退化为常见扩展名集。
+function aggFileExtWhitelist(types: AggTypeSpec[]): Set<string> {
+  const out = new Set(COMMON_FILE_EXTS)
+  for (const t of types || []) {
+    const standards = (t && t.storeStandards) || {}
+    for (const key of Object.keys(standards)) {
+      for (const f of (standards[key] && standards[key].formats) || []) {
+        const ext = normalizeFileExtToken(f)
+        if (ext) out.add(ext)
+      }
+    }
+  }
+  return out
+}
+
+// 模板尾字面段（最后一个占位词之后的字面文本；无占位词即整条模板）以白名单
+// 扩展名收尾时返回该扩展名（小写带点形），否则空串。文件主体模板对去扩展名的
+// 文件名求值，尾字面 .ext 恒不命中——白名单外的点段（如 .part1）是文件名正文
+// 内的合法点段，不拦。chips 解析失败（空模板等，行级校验另报）返回空串。
+function condxTplTailKnownExt(tpl: string, known: Set<string>): string {
+  const chips = condxTemplateChips(tpl).chips
+  if (!chips || !chips.length) return ''
+  const last = chips[chips.length - 1]
+  if (last.ph) return ''
+  const dot = last.text.lastIndexOf('.')
+  if (dot < 0 || dot === last.text.length - 1) return ''
+  const ext = last.text.slice(dot).toLowerCase()
+  return known.has(ext) ? ext : ''
+}
+
+// 聚合表单保存闸门（纯函数）：轨行结构限制（平行选择器——括号子组/行级非/跨行
+// 相等均拒绝，与内核 validateAggregateEntry 同口径）+ 文件轨行模板尾部误写
+// 扩展名拒绝（模板只匹配去扩展名的文件名，该形态恒不命中——与内核同口径）+
+// 标识声明（行号界内、捕获在轨行声明、群键只选自序列行）+ 分轨入口（类型
+// 在册、角色∈类型规约、行号界内、必含角色被至少一轨行覆盖）。返回错误清单
+// （空=通过）；文案为编辑面锚文案。
+export function aggFormErrors(
+  rows: CondxRowForm[],
+  identity: IdentityPartForm[],
+  prod: AggregateProductionForm | null,
+  types: AggTypeSpec[]
+): string[] {
+  const errs: string[] = []
+  const flat = condxFlatRows(rows)
+  const total = flat.length
+  if (!flat.length) {
+    errs.push('轨行区条件行列表不能为空（聚合规则须至少一行轨行）')
+  }
+  const knownExts = aggFileExtWhitelist(types)
+  let n = 0
+  const walkShape = (list: CondxRowForm[]): void => {
+    for (const row of list) {
+      if (row.group) {
+        walkShape(row.group)
+        continue
+      }
+      n += 1
+      if (!row.condition) continue
+      if (row.negated) {
+        errs.push(`第 ${n} 行带行级非：轨行不支持行级非`)
+      }
+      for (const b of row.condition.badges || []) {
+        if (b && b.kind === 'equal') {
+          errs.push(`第 ${n} 行携带相等值校验：轨行独立求值，不支持跨行相等`)
+        }
+      }
+      // 文件轨行模板尾部误写扩展名（仅 file 目标行；dir/seq 目标名不去扩展名，
+      // 模板带点尾合法）：拒绝并指路 fileExt 谓词（「扩展名是」）。
+      if (row.condition.target === 'file' && row.condition.format.mode !== 'contains') {
+        const ext = condxTplTailKnownExt(row.condition.format.tpl || '', knownExts)
+        if (ext) {
+          errs.push(
+            `第 ${n} 行模板尾部误写扩展名 ${ext}：文件轨行模板只匹配去扩展名的文件名，该形态恒不命中，请删除模板尾部的 ${ext}，改用「扩展名是」附加条件承载扩展名`
+          )
+        }
+      }
+    }
+  }
+  walkShape(rows)
+  // 括号子组按最外层组计一次错（组行行号=组内首行序号，与行号口径一致）。
+  let m = 0
+  for (const row of rows) {
+    if (row.group) {
+      errs.push(`第 ${m + 1} 行为括号子组：轨行须为普通条件行（平行选择器，无且/或组合）`)
+      m += condxFlatRows(row.group).length
+      continue
+    }
+    m += 1
+  }
+  if (!identity.length) {
+    errs.push('缺少作品标识声明——标识值相等即并组，请从各轨行捕获中选择标识')
+  }
+  const candidates = new Set(aggIdentityCandidates(rows).map((c) => `${c.row}/${c.group}`))
+  const anyRowCaptures = new Set(aggIdentityCandidates(rows).map((c) => c.group))
+  const rowByNo = new Map(flat.map((f) => [f.row, f.condx]))
+  for (let i = 0; i < (identity || []).length; i++) {
+    const part = identity[i]
+    if (!part) continue
+    if (part.row < 1 || part.row > total) {
+      errs.push(`标识第 ${i + 1} 部分行号 ${part.row} 越界（共 ${total} 行）`)
+      continue
+    }
+    if (!part.capture) {
+      errs.push(`标识第 ${i + 1} 部分缺少捕获名`)
+      continue
+    }
+    if (part.capture === AGG_GROUP_KEY_CAPTURE) {
+      const target = rowByNo.get(part.row)
+      if (!target || target.target !== 'seq') {
+        errs.push(`标识第 ${i + 1} 部分：序列群键只能选自序列目标行`)
+      }
+      continue
+    }
+    if (!candidates.has(`${part.row}/${part.capture}`)) {
+      errs.push(
+        anyRowCaptures.has(part.capture)
+          ? `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选轨行汇集候选中的同词位）`
+          : `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何轨行声明`
+      )
+    }
+  }
+  if (!prod) {
+    errs.push('缺少分轨入口——产出区请加「聚合成作品」并选类型分配轨道')
+  } else {
+    if (!prod.workType) {
+      errs.push('作品类型未选择（类型先行：类型规约决定可用轨与角色基数）')
+    } else {
+      const spec = aggTypeSpecOf(types, prod.workType)
+      if (!spec) {
+        errs.push(`作品类型「${aggTypeLabel(prod.workType)}」不在资源类型注册表（可能已随插件停用或卸载注销）`)
+      } else {
+        const legalRoles = new Set((spec.roles || []).map((r) => (r ? r.storeType : '')))
+        for (let i = 0; i < (prod.tracks || []).length; i++) {
+          const ta = prod.tracks[i]
+          if (!ta) continue
+          if (ta.row < 1 || ta.row > total) {
+            errs.push(`分轨第 ${i + 1} 项行号 ${ta.row} 越界（共 ${total} 行）`)
+            continue
+          }
+          if (!ta.role) {
+            errs.push(`分轨第 ${i + 1} 项缺少角色`)
+            continue
+          }
+          if (!legalRoles.has(ta.role)) {
+            errs.push(`分轨第 ${i + 1} 项角色「${aggRoleLabel(ta.role)}」不在类型「${aggTypeLabel(prod.workType)}」的规约（下拉只出该类型可用轨）`)
+          }
+        }
+        const covered = (prod.tracks || []).some((ta) => ta && legalRoles.has(ta.role) && aggRoleRequired(spec, ta.role))
+        if (!covered) {
+          errs.push('分轨入口未覆盖必含角色（类型规约 Min≥1 的角色）——主导文件无从判定，请把某轨行分到必含轨')
+        }
+      }
+    }
+  }
+  return errs
 }
