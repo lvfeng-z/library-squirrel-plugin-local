@@ -572,3 +572,101 @@ func TestAggregateRulesAdminAnchoringAndPreset(t *testing.T) {
 		t.Fatalf("预置均在档时恢复应补 0 条: added=%d err=%v", added, err)
 	}
 }
+
+// TestRulesAdminSkippedEntryErrorRowAndDelete 载入跳过条目的管理面死锁出口
+// （防呆闸门拒收的死形态条目从列表「消失」只剩告警、无删除出口）：
+// ① 死形态条目（文件轨行模板尾扩展名）在管理视图呈错误态行——id/描述/跳过
+//
+//	原因在场，合法条目渲染不受影响，顶部告警不再重复列「跳过规则」文本；
+//
+// ② 对死形态 ID 删除作用于档案存储层原文——档案无此条、重载告警零、其余
+//
+//	条目（另一死条目与合法条目）无损，再删同 ID 报错。
+func TestRulesAdminSkippedEntryErrorRowAndDelete(t *testing.T) {
+	store := newFakeSessionStore()
+	_, base := newTestManager(t, store)
+	ctx := &adminAggTypesCtx{workbenchTestCtx: base, types: []*sdkdto.ResourceTypeSpec{
+		{ResourceType: "video", Roles: []*sdkdto.StoreRoleSpec{
+			{StoreType: "videoMain", Min: 1, Max: 1}, {StoreType: "subtitle"},
+		}},
+	}}
+	mgr := NewSessionManagerWithStore(ctx, nil, store)
+
+	// 档案原文直写：两条死形态（不同 ID）夹一条合法聚合条目
+	deadMp4 := aggTailExtEntry("agg-dead-mp4", CondxTargetFile, "{任意} - {任意}({标题}).mp4", nil, "title")
+	deadSrt := aggTailExtEntry("agg-dead-srt", CondxTargetFile, "{作品}.{任意}.srt", nil, "work")
+	good := aggTailExtEntry("agg-split", CondxTargetFile, "{作品}.{任意}",
+		[]CondxAttach{{Kind: CondxAttachFileExt, Value: ".srt"}}, "work")
+	data, mErr := json.Marshal(&ruleProfileJSON{SchemaVersion: CurrentSchemaVersion, Rules: []ruleEntryJSON{*deadMp4, *good, *deadSrt}})
+	if mErr != nil {
+		t.Fatalf("序列化档案失败: %v", mErr)
+	}
+	store.values[RuleProfileKVKey] = string(data)
+
+	// ① 错误态行：死形态条目成行（id/描述/原因在场），合法条目照常渲染
+	view, err := mgr.RulesAdminView()
+	if err != nil {
+		t.Fatalf("管理视图载入失败: %v", err)
+	}
+	if len(view.Rules) != 1 || view.Rules[0].ID != "agg-split" || !view.Rules[0].Enabled {
+		t.Fatalf("合法条目渲染不应受影响: %+v", view.Rules)
+	}
+	if len(view.Skipped) != 2 {
+		t.Fatalf("两条死形态条目应各成错误态行，实际 %d 行: %+v", len(view.Skipped), view.Skipped)
+	}
+	row := view.Skipped[0]
+	if row.ID != "agg-dead-mp4" || row.Description != deadMp4.Description ||
+		!strings.Contains(row.Reason, "模板尾部误写扩展名 .mp4") {
+		t.Fatalf("错误态行应携带 id/描述/跳过原因: %+v", row)
+	}
+	if view.Skipped[1].ID != "agg-dead-srt" || !strings.Contains(view.Skipped[1].Reason, "模板尾部误写扩展名 .srt") {
+		t.Fatalf("第二条错误态行应携带 id 与跳过原因: %+v", view.Skipped[1])
+	}
+	for _, w := range view.Warnings {
+		if strings.Contains(w, "跳过规则") {
+			t.Fatalf("跳过条目已成行，顶部告警不应双报: %v", view.Warnings)
+		}
+	}
+
+	// ② 删除出口：按死形态 ID 删除——档案原文无此条、重载告警零、其余条目无损
+	view2, err := mgr.ApplyDeleteRule("agg-dead-mp4")
+	if err != nil {
+		t.Fatalf("删除死形态条目失败: %v", err)
+	}
+	if len(view2.Warnings) != 0 {
+		t.Fatalf("删除后重载告警应清零: %v", view2.Warnings)
+	}
+	if len(view2.Skipped) != 1 || view2.Skipped[0].ID != "agg-dead-srt" {
+		t.Fatalf("另一死形态条目应无损保留为错误态行: %+v", view2.Skipped)
+	}
+	if len(view2.Rules) != 1 || view2.Rules[0].ID != "agg-split" {
+		t.Fatalf("合法条目应无损保留: %+v", view2.Rules)
+	}
+	// 档案原文层核验：被删条目不在档、其余条目照常载入（文本告警口径经
+	// ParseProfile 保持——日志消费面不变）
+	profile, errs := ParseProfile([]byte(store.values[RuleProfileKVKey]))
+	if profile == nil || len(profile.Rules) != 1 || profile.Rules[0].ID != "agg-split" {
+		t.Fatalf("删除后档案应仅剩合法条目: %+v", profile)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), `跳过规则 "agg-dead-srt"`) {
+		t.Fatalf("剩余死条目应照常产生文本告警: %v", errs)
+	}
+
+	// 再删同 ID：不在档报错（不静默）
+	if _, err := mgr.ApplyDeleteRule("agg-dead-mp4"); err == nil {
+		t.Fatalf("删除已不存在的死形态条目应报错")
+	}
+
+	// 剩余死条目同样可删：删除后档案零死条目、视图错误态行清空
+	if _, err := mgr.ApplyDeleteRule("agg-dead-srt"); err != nil {
+		t.Fatalf("删除剩余死形态条目失败: %v", err)
+	}
+	view3, err := mgr.RulesAdminView()
+	if err != nil {
+		t.Fatalf("管理视图重载失败: %v", err)
+	}
+	if len(view3.Skipped) != 0 || len(view3.Warnings) != 0 || len(view3.Rules) != 1 {
+		t.Fatalf("死条目全删后应零错误态行零告警且合法条目在场: skipped=%d warnings=%d rules=%d",
+			len(view3.Skipped), len(view3.Warnings), len(view3.Rules))
+	}
+}

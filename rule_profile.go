@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -1512,6 +1513,21 @@ func (p *RuleProfile) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// skippedRuleEntry 载入时被跳过的档案条目（结构化形态）：规则管理面错误态行
+// 的数据源——跳过条目对用户可见、可按 ID 删除（跳过条目无编辑出口的死锁收口），
+// 跳过原因就地呈现。
+type skippedRuleEntry struct {
+	// ID 为条目原文的规则 ID（管理面删除寻址）。
+	ID string
+	// Description 为条目原文的描述。
+	Description string
+	// Reason 为跳过原因：不含「跳过规则/组合规则」外层包装的原始校验错误文本。
+	Reason string
+	// Message 为完整告警文本：与既有告警渠道（ParseProfile 返回的 errs）逐字
+	// 同源，供需要文本形态的调用方复用。
+	Message string
+}
+
 // ParseProfile 从 JSON 数据载入规则档案：反序列化 + 逐条构造校验。
 // 结构版本不是当前版本（v4）的档案**整体拒载**——v1..v3 旧档已停用（机器
 // 规则一律由新一代生产方直出 v4，旧机器规则对用户无保留价值）；拒载档
@@ -1524,9 +1540,21 @@ func (p *RuleProfile) UnmarshalJSON(data []byte) error {
 // / 自引用 / 嵌套组合引用）同挂该出口——逐规则构造完成后对全部已构造规则
 // 统一校验，违规条目同样跳过并返回带规则 ID 的错误。无错误时错误列表为空。
 func ParseProfile(data []byte) (*RuleProfile, []error) {
+	profile, skips, errs := parseProfile(data)
+	for _, s := range skips {
+		errs = append(errs, errors.New(s.Message))
+	}
+	return profile, errs
+}
+
+// parseProfile 载入主体（ParseProfile 的结构化变体）：被跳过的条目（逐条构造
+// 失败与组合规则跨引用违规两处出口）以 skippedRuleEntry 结构化返回，errs 不含
+// 其告警文本——呈现形态由调用方决定：ParseProfile 回填文本告警保持既有口径
+// （日志等文本消费面不变），规则管理视图以错误态行呈现（不双报）。
+func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 	var in ruleProfileJSON
 	if err := json.Unmarshal(data, &in); err != nil {
-		return nil, []error{fmt.Errorf("规则档案反序列化失败: %w", err)}
+		return nil, nil, []error{fmt.Errorf("规则档案反序列化失败: %w", err)}
 	}
 	var errs []error
 	switch {
@@ -1537,7 +1565,7 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 	case in.SchemaVersion != CurrentSchemaVersion:
 		// v1..v3 旧档整体停用：零迁移拒载（含可兼容升格的历史版本——机器
 		// 规则对用户无保留价值，重置后由新一代生产方重新生成）。
-		return nil, []error{fmt.Errorf(
+		return nil, nil, []error{fmt.Errorf(
 			"规则档案结构版本为 %d（当前 %d），旧档案已停用",
 			in.SchemaVersion, CurrentSchemaVersion)}
 	}
@@ -1549,20 +1577,29 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 	// 管线编译校验。
 	migrateLegacyStripRules(in.Rules)
 	// 第一遍：逐规则构造（模式/条件行编译 + 提取动作校验，含 refCapture 的
-	// refRule∈refs、captureName 必填）。失败条目跳过并告警。
+	// refRule∈refs、captureName 必填）。失败条目结构化跳过（原文条目携带
+	// ID/描述，管理面错误态行与删除出口的数据源）。
+	var skips []*skippedRuleEntry
 	constructed := make([]RuleEntry, 0, len(in.Rules))
 	for i := range in.Rules {
 		rj := &in.Rules[i]
 		rule, err := ruleFromJSON(rj)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("跳过规则 %q（%s）: %w", rj.ID, rj.Description, err))
+			skips = append(skips, &skippedRuleEntry{
+				ID:          rj.ID,
+				Description: rj.Description,
+				Reason:      err.Error(),
+				Message:     fmt.Sprintf("跳过规则 %q（%s）: %v", rj.ID, rj.Description, err),
+			})
 			continue
 		}
 		constructed = append(constructed, *rule)
 	}
 	// 第二遍：组合规则跨规则引用校验（悬空 / 自引用 / 嵌套组合引用）。以
 	// 第一遍已构造规则集为「本档案规则集」——被逐条构造拒收的规则不在场，
-	// 指向它的引用即按悬空处理。违规条目同走坏条目出口（跳过 + 带 ID 告警）。
+	// 指向它的引用即按悬空处理。违规条目同走坏条目出口（结构化跳过，告警
+	// 点名组合规则——描述优先，缺失退回 ID；剧本二·帧5 文案＝组合规则
+	// 『<描述>』引用的成员规则 <成员ID> 不存在，已跳过）。
 	byID := make(map[string]int, len(constructed))
 	for i := range constructed {
 		if _, seen := byID[constructed[i].ID]; !seen {
@@ -1573,20 +1610,22 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 		rule := &constructed[i]
 		if len(rule.Refs) > 0 {
 			if err := validateRuleRefs(rule, byID, constructed); err != nil {
-				// 告警点名组合规则（描述优先，缺失退回 ID）：前端「档案载入告警」
-				// 逐条呈现，剧本二·帧5 文案＝组合规则『<描述>』引用的成员规则
-				// <成员ID> 不存在，已跳过。
 				label := rule.Description
 				if label == "" {
 					label = rule.ID
 				}
-				errs = append(errs, fmt.Errorf("组合规则『%s』%w", label, err))
+				skips = append(skips, &skippedRuleEntry{
+					ID:          rule.ID,
+					Description: rule.Description,
+					Reason:      err.Error(),
+					Message:     fmt.Sprintf("组合规则『%s』%v", label, err),
+				})
 				continue
 			}
 		}
 		profile.Rules = append(profile.Rules, *rule)
 	}
-	return profile, errs
+	return profile, skips, errs
 }
 
 // migrateLegacyStripRules 存量档案剥壳字段（stripPrefix / stripSuffix，反序列

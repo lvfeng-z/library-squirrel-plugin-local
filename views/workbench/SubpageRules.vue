@@ -34,14 +34,15 @@
             <el-alert v-if="notice" class="li-rules-banner" type="success" :closable="false" show-icon :title="notice" />
             <el-alert v-if="actionError" class="li-rules-banner" type="error" :closable="false" show-icon :title="actionError" />
 
-            <!-- 档案载入告警：坏条目被跳过等（核对档案的透出入口） -->
+            <!-- 档案载入告警：跳过条目已另行成错误态行（原因就地呈现），此处仅
+                 呈现其余类型告警（聚合类型锚定悬停等，核对档案的透出入口） -->
             <el-alert
               v-if="warnings.length"
               class="li-rules-banner"
               type="warning"
               :closable="false"
               show-icon
-              :title="`档案载入告警 ${warnings.length} 条（对应规则已被跳过、不参与求值）`"
+              :title="`规则档案告警 ${warnings.length} 条`"
             >
               <ul class="li-rules-warnlist">
                 <li v-for="(w, i) in warnings" :key="i">{{ w }}</li>
@@ -52,7 +53,7 @@
                   小字标记——由全列表 refs 统计） -->
             <section class="li-rules-card">
               <div class="li-rules-card-head">
-                <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条 · 元数据与聚合两类同列</span></h3>
+                <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条 · 元数据与聚合两类同列<template v-if="skipped.length"> · 载入失败 {{ skipped.length }} 条</template></span></h3>
                 <!-- 恢复预置（帧1）：缺席的预置聚合种子按稳定 ID 补回（在场条目不覆写，
                      误删/改坏兜底——改坏的先删除再恢复即回出厂形态） -->
                 <el-button size="small" :disabled="acting" @click="doRestorePreset">恢复预置</el-button>
@@ -60,7 +61,7 @@
               </div>
               <!-- 排序（剧本一帧1）：卡头顺序语义说明小字 -->
               <p class="li-rules-order-note">顺序＝识别优先级：靠前的规则先被采用</p>
-              <p v-if="!rules.length" class="li-rules-empty">档案为空：可从手动解析页泛化生成，或在此新建手写规则</p>
+              <p v-if="!rules.length && !skipped.length" class="li-rules-empty">档案为空：可从手动解析页泛化生成，或在此新建手写规则</p>
               <div v-for="(r, i) in rules" :key="r.id" class="li-rules-row">
                 <span class="li-rules-row-pos">{{ `第${i + 1}位` }}</span>
                 <el-switch
@@ -105,6 +106,20 @@
                   <el-button size="small" @click="openEdit(r)">编辑</el-button>
                   <el-button size="small" @click="openCopy(r)">复制</el-button>
                   <el-button size="small" type="danger" @click="doDeleteRule(r)">删除</el-button>
+                </span>
+              </div>
+              <!-- 载入失败条目（错误态行）：档案原文在场但载入校验拒收的死条目
+                   （如聚合规则文件轨行模板尾部误写扩展名）——不参与求值，不可
+                   启用/编辑/复制，仅可删除（带确认）；跳过原因就地呈现 -->
+              <div v-for="s in skipped" :key="`skip-${s.id}`" class="li-rules-row li-rules-row-skipped">
+                <span class="li-rules-row-skip-badge">载入失败</span>
+                <div class="li-rules-row-main">
+                  <div class="li-rules-row-desc" :title="s.description">{{ s.description || '（无描述）' }}</div>
+                  <div class="li-rules-row-skip-reason">{{ s.reason }}</div>
+                  <div class="li-rules-row-id" :title="s.id">{{ s.id }}</div>
+                </div>
+                <span class="li-rules-row-side">
+                  <el-button size="small" type="danger" :disabled="acting" @click="doDeleteSkipped(s)">删除</el-button>
                 </span>
               </div>
               <p class="li-rules-hint">删除立即覆写档案（写前自动备份一代，误删可在下方「档案备份」回退）</p>
@@ -184,6 +199,23 @@
           </el-button>
         </template>
       </el-dialog>
+      <!-- 载入失败条目删除确认框：错误态行的唯一出口——〔取消〕= 关闭、零变化，
+           〔仍要删除〕走既有 deleteRule RPC（删除作用于档案原文层） -->
+      <el-dialog
+        v-model="skippedConfirmVisible"
+        title="删除载入失败的规则？"
+        width="460px"
+        append-to-body
+      >
+        <p class="li-rules-confirm-body" v-if="skippedConfirmTarget">
+          『{{ skippedConfirmTarget.description || skippedConfirmTarget.id }}』载入即被拒（已跳过、不参与求值）：{{ skippedConfirmTarget.reason }}。
+          删除后该条目从档案移除，可在下方「档案备份」回退一代找回。
+        </p>
+        <template #footer>
+          <el-button @click="cancelSkippedDelete">取消</el-button>
+          <el-button type="danger" @click="onSkippedDeleteProceed">仍要删除</el-button>
+        </template>
+      </el-dialog>
     </template>
   </BaseView>
 </template>
@@ -253,10 +285,20 @@ interface ResourceTypeView {
   storeStandards?: Record<string, { formats?: string[] }>
 }
 
+// 载入失败条目（错误态行）：档案原文在场但载入校验拒收的死条目——不进
+// rules（不在已载入集），不可启用/编辑/复制，仅可删除；reason 为跳过原因
+// 全文（后端校验错误原文）。
+interface SkippedEntryView {
+  id: string
+  description: string
+  reason: string
+}
+
 interface RulesAdminView {
   schemaVersion: number
   rules: RuleEntryView[]
   warnings?: string[]
+  skipped?: SkippedEntryView[]
   examples?: ExampleTemplateView[]
   resourceTypes?: ResourceTypeView[]
   hitCounts?: Record<string, number>
@@ -320,6 +362,8 @@ const actionError = ref('')
 const acting = ref(false)
 
 const rules = ref<RuleEntryView[]>([])
+// 载入失败条目（错误态行）：档案原文在场、载入校验拒收——仅可删除
+const skipped = ref<SkippedEntryView[]>([])
 const examples = ref<ExampleTemplateView[]>([])
 const warnings = ref<string[]>([])
 const backupAvailable = ref(false)
@@ -415,6 +459,7 @@ async function restoreSession(): Promise<boolean> {
 function applyRulesView(view: RulesAdminView | undefined | null): void {
   if (!view) return
   rules.value = view.rules || []
+  skipped.value = view.skipped || []
   examples.value = view.examples || []
   warnings.value = view.warnings || []
   backupAvailable.value = view.backupAvailable === true
@@ -486,6 +531,40 @@ async function doDeleteRuleConfirmed(rule: RuleEntryView): Promise<void> {
   }
   applyRulesView(resp.rulesView)
   notice.value = `规则「${rule.description || rule.id}」已删除（可在档案备份回退一代找回）`
+}
+
+// —— 一·补零、载入失败条目（错误态行）删除：先确认后删，走既有 deleteRule
+// RPC（后端删除作用于档案原文层——死条目不在已载入集，按 ID 原文删除） ——
+
+const skippedConfirmVisible = ref(false)
+const skippedConfirmTarget = ref<SkippedEntryView | null>(null)
+
+function doDeleteSkipped(entry: SkippedEntryView): void {
+  skippedConfirmTarget.value = entry
+  skippedConfirmVisible.value = true
+  actionError.value = ''
+}
+
+// 取消：只关框，零变化
+function cancelSkippedDelete(): void {
+  skippedConfirmVisible.value = false
+}
+
+// 仍要删除：关框后走既有 deleteRule RPC，成功套用应答视图（行与告警随消）
+async function onSkippedDeleteProceed(): Promise<void> {
+  const target = skippedConfirmTarget.value
+  skippedConfirmVisible.value = false
+  if (!target) return
+  acting.value = true
+  actionError.value = ''
+  const resp = await request('deleteRule', { ruleId: target.id, root: sessionRoot() })
+  acting.value = false
+  if (!resp.ok) {
+    actionError.value = resp.error || '删除规则失败'
+    return
+  }
+  applyRulesView(resp.rulesView)
+  notice.value = `规则「${target.description || target.id}」已删除（可在档案备份回退一代找回）`
 }
 
 // —— 一·补、列表操作：行级排序（规则管理列表·排序操作 剧本一） ——
@@ -1053,6 +1132,30 @@ onUnmounted(() => {
 .li-rules-row-combo-off {
   font-size: 12px;
   color: var(--app-text-secondary);
+}
+
+/* 载入失败条目（错误态行）：fail 色系行——徽标与原因同色源，与任务失败态一致 */
+.li-rules-row-skipped .li-rules-row-desc {
+  color: var(--app-status-fail-text, var(--app-text-primary));
+}
+
+.li-rules-row-skip-badge {
+  flex: none;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-status-fail-text, #f56c6c);
+  background: var(--app-status-fail-bg, transparent);
+  border: 1px solid var(--app-status-fail-border, transparent);
+  border-radius: var(--app-radius, 4px);
+  white-space: nowrap;
+}
+
+.li-rules-row-skip-reason {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-status-fail-text, var(--app-text-secondary));
+  word-break: break-all;
 }
 
 /* W5 确认框正文（剧本二·帧2/帧4）：后果清单整段呈现 */

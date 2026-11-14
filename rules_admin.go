@@ -33,8 +33,32 @@ type rulesAdminView struct {
 	// HitCounts 规则命中统计（会话识别快照 ruleStats 的 ID→命中件数投影；
 	// 无会话/无快照时缺省——呈现层按缺席省略命中段）。
 	HitCounts map[string]int `json:"hitCounts,omitempty"`
+	// Skipped 载入跳过的条目（错误态行）：可见（ID/描述/跳过原因就地呈现）、
+	// 仅可删除——不进 Rules（不在已载入集，不可启用/编辑/复制）；顶部 Warnings
+	// 不再重复列对应「跳过规则」告警（其余类型告警保持）。
+	Skipped []*skippedRuleJSON `json:"skipped,omitempty"`
 	// BackupAvailable 写前备份键是否有可回退的一代档案。
 	BackupAvailable bool `json:"backupAvailable"`
+}
+
+// skippedRuleJSON 规则管理视图的载入跳过条目行（错误态）：仅携带呈现与删除
+// 寻址所需字段（id/描述/跳过原因）。
+type skippedRuleJSON struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Reason      string `json:"reason"`
+}
+
+// skippedRulesAdminJSON 结构化跳过条目批量转 JSON 视图形态（nil 条目跳过）。
+func skippedRulesAdminJSON(skips []*skippedRuleEntry) []*skippedRuleJSON {
+	out := make([]*skippedRuleJSON, 0, len(skips))
+	for _, s := range skips {
+		if s == nil {
+			continue
+		}
+		out = append(out, &skippedRuleJSON{ID: s.ID, Description: s.Description, Reason: s.Reason})
+	}
+	return out
 }
 
 // resourceTypeSpecJSON 规则管理视图的资源类型投影 JSON 形态：SDK proto 结构体
@@ -141,12 +165,12 @@ func (m *SessionManager) adminTypeProjection() ([]*sdkdto.ResourceTypeSpec, *res
 	return resp.Items, newResourceTypeIndex(resp.Items)
 }
 
-// RulesAdminView 载入规则管理视图：档案（坏条目跳过并转告警透出）+ 聚合规则
-// 类型锚定（悬空停用+告警，与识别求值侧一致——否则悬空条目在管理面显示为启用
-// 而求值已停用）+ 类型清单投影 + 写前备份在场。档案不可载入（损坏/版本不符）
+// RulesAdminView 载入规则管理视图：档案（坏条目跳过并结构化转错误态行）+ 聚合
+// 规则类型锚定（悬空停用+告警，与识别求值侧一致——否则悬空条目在管理面显示为
+// 启用而求值已停用）+ 类型清单投影 + 写前备份在场。档案不可载入（损坏/版本不符）
 // 时返回错误。只读，不加写锁；锚定只改内存态视图对象、不回写存储。
 func (m *SessionManager) RulesAdminView() (*rulesAdminView, error) {
-	profile, errs := LoadProfile(m.store)
+	profile, skips, errs := LoadProfileWithSkips(m.store)
 	if profile == nil {
 		return nil, fmt.Errorf("规则档案不可载入: %w", errors.Join(errs...))
 	}
@@ -157,6 +181,7 @@ func (m *SessionManager) RulesAdminView() (*rulesAdminView, error) {
 	if err != nil {
 		return nil, err
 	}
+	view.Skipped = skippedRulesAdminJSON(skips)
 	view.ResourceTypes = resourceTypesAdminJSON(items)
 	view.BackupAvailable = ProfileBackupExists(m.store)
 	return view, nil
@@ -267,23 +292,20 @@ func validateCaptureExtractionDeclared(rule *RuleEntry) error {
 	return nil
 }
 
-// ApplyDeleteRule 删除档案条目：按 ID 寻址，未命中报错。写前备份照常产生——误删
-// 可经回退一代恢复。返回删除后的规则管理视图。
+// ApplyDeleteRule 删除档案条目：按 ID 寻址，作用于档案存储层原文——载入跳过
+// 的死条目不在已载入集内（按已载入集删即无出口），按原文删除后重载告警随消；
+// 其余条目（含其他死条目与未知字段）字节原样保留。未命中报错。写前备份照常
+// 产生——误删可经回退一代恢复。返回删除后的规则管理视图。
 func (m *SessionManager) ApplyDeleteRule(ruleID string) (*rulesAdminView, error) {
 	if ruleID == "" {
 		return nil, fmt.Errorf("删除规则缺少规则 ID")
 	}
-	if err := m.UpdateProfile(ArchiveWriteRuleEdit, func(p *RuleProfile) error {
-		for i := range p.Rules {
-			if p.Rules[i].ID == ruleID {
-				p.Rules = append(p.Rules[:i], p.Rules[i+1:]...)
-				return nil
-			}
-		}
-		return fmt.Errorf("档案中不存在规则 %q，可能已被删除", ruleID)
-	}); err != nil {
-		return nil, err
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := deleteRuleEntryFromStore(m.store, ruleID); err != nil {
+		return nil, fmt.Errorf("档案变更被中止（入口 %s）: %w", ArchiveWriteRuleEdit, err)
 	}
+	m.logf("规则档案已更新（入口 %s）: 删除规则 %q", ArchiveWriteRuleEdit, ruleID)
 	return m.RulesAdminView()
 }
 
