@@ -1,254 +1,149 @@
 <template>
-  <div v-for="(row, i) in rows" :key="i" class="li-condx-row" :class="{ 'is-invalid': !!condxRowHint(i) }">
-    <div class="li-condx-row-head">
-      <!-- 弹窗内行头全局行号小字（帧3/帧4）：「第 N 行」=condxRowNos 全局先序号
-           （组行=组内首行序号），与捕获清单「第 N 行·{词}」对齐；顶层不带（baseNo
-           缺省） -->
-      <span v-if="rowNoLabel(i)" class="li-condx-rowno">{{ rowNoLabel(i) }}</span>
-      <el-select v-if="i > 0" v-model="row.connector" size="small" class="li-condx-conn">
-        <el-option label="且（都命中）" value="and" />
-        <el-option label="或（任一命中）" value="or" />
-      </el-select>
-      <label class="li-condx-neg"><input v-model="row.negated" type="checkbox"><span>非</span></label>
-      <!-- 叶子行「括号」开关：开=本行收进括号子组；空行与深度封顶层（第 3 层）禁用 -->
-      <label v-if="!row.group" class="li-condx-neg" :class="{ 'is-locked': bracketLocked(i) }">
-        <input type="checkbox" :checked="false" :disabled="bracketLocked(i)" @change="onBracketOn(i)">
-        <span>括号</span>
-      </label>
-      <!-- 深层怪态（>3 层，JSON 手写合法形态）：只读占位一行（剧本三帧4）——完整
-           内容请用「高级（JSON）」，可〔删行〕（删整组带确认）；保存原样带过；
-           组行（含深层只读占位形态）可移动——内容整块换位（边界条件） -->
-      <template v-else-if="groupBeyondDepth(i)">
-        <span class="li-condx-neg is-locked">—</span>
-        <div class="li-condx-groupcard">括号子组（深层嵌套）——完整内容请用「高级（JSON）」</div>
-      </template>
-      <!-- 括号子组紧凑卡：☑括号（单成员可拆、多成员禁用）+成员摘要（删整组带确认） -->
-      <template v-else>
-        <label class="li-condx-neg" :class="{ 'is-locked': row.group.length !== 1 }">
+  <template v-for="(row, i) in rows" :key="i">
+    <!-- 叶子行卡（恒定一行高：序号+目标词+模板摘要+复杂度徽标+接词+行操作） -->
+    <div v-if="!row.group" class="li-condx-card" :class="{ 'is-invalid': !!cardErrText(i) }">
+      <div class="li-condx-card-line">
+        <span class="li-condx-card-no">{{ cardNos[i] }}</span>
+        <!-- 目标词+模板摘要+复杂度徽标（附加×N/校验×N/非/多值——复杂度只进
+             徽标不进正文，总览密度不随规则复杂度退化） -->
+        <span class="li-condx-card-target">[{{ cardView(i).targetLabel }}]</span>
+        <span class="li-condx-card-tpl" :title="cardView(i).templateText">{{ cardView(i).templateText }}</span>
+        <span v-if="cardView(i).levelNote" class="li-condx-card-note">· {{ cardView(i).levelNote }}</span>
+        <span v-if="cardView(i).attachCount" class="li-condx-card-note">· 附加×{{ cardView(i).attachCount }}</span>
+        <span v-if="cardView(i).badgeCount" class="li-condx-card-note">· 校验×{{ cardView(i).badgeCount }}</span>
+        <span v-if="cardView(i).negated" class="li-condx-card-flag">非</span>
+        <span v-if="cardView(i).multiValue" class="li-condx-card-flag">多值</span>
+        <!-- 位次漂移徽标（详情与复核提示在条件编辑弹窗内呈现） -->
+        <span v-if="cardDriftText(i)" class="li-condx-card-flag is-warn" :title="cardDriftText(i)">⚠</span>
+        <!-- 行级校验徽标（红边+✗；完整文案在条件编辑弹窗内/保存闸门呈现） -->
+        <span v-if="cardErrText(i)" class="li-condx-card-flag is-err" :title="cardErrText(i)">✗</span>
+        <!-- 接词（首行无）：与行操作一起收在卡片行尾 -->
+        <el-select v-if="i > 0" v-model="row.connector" size="small" class="li-condx-conn">
+          <el-option label="且（都命中）" value="and" />
+          <el-option label="或（任一命中）" value="or" />
+        </el-select>
+        <!-- 「括号」开关：开=本行收进括号子组；空行与深度封顶层（第 3 层）禁用
+             （禁用态提示经 title 悬浮——卡片高度恒定不落第二行） -->
+        <label class="li-condx-neg" :class="{ 'is-locked': bracketLocked(i) }" :title="bracketLockHint(i) || '收进括号子组'">
+          <input type="checkbox" :checked="false" :disabled="bracketLocked(i)" @change="onBracketOn(i)">
+          <span>括号</span>
+        </label>
+        <!-- 换位组（靠右成组）：上移/下移图标按钮（SortUp/SortDown，宿主全局注册按名
+             直用）——首行上移/末行下移禁用（单行列表双禁用，无提示，BC 同款）；相等门
+             阻断方向禁用+悬停说明（文案=condxMoveBlockReason 返回值）；提取区
+             「高级（JSON）」模式整体禁用+悬停提示。禁用按钮外包一层 span 接管悬浮 -->
+        <span class="li-condx-move">
+          <el-tooltip :disabled="!moveTip(i, 'up')" :content="moveTip(i, 'up')" placement="top">
+            <span class="li-condx-move-btn">
+              <el-button size="small" text :disabled="moveLocked(i, 'up')" aria-label="上移" @click="onMoveRow(i, 'up')">
+                <el-icon><SortUp /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-tooltip :disabled="!moveTip(i, 'down')" :content="moveTip(i, 'down')" placement="top">
+            <span class="li-condx-move-btn">
+              <el-button size="small" text :disabled="moveLocked(i, 'down')" aria-label="下移" @click="onMoveRow(i, 'down')">
+                <el-icon><SortDown /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+        </span>
+        <el-divider direction="vertical" class="li-condx-move-sep" />
+        <!-- 叶子行〔编辑〕=开条件编辑弹窗（组框内成员卡同一弹窗） -->
+        <el-button size="small" text @click="emitEditRow(row, i)">[编辑]</el-button>
+        <el-button size="small" text type="danger" class="li-condx-del" @click="condxRemoveRow(rows, i)">删行</el-button>
+      </div>
+    </div>
+    <!-- 深层怪态组卡（>3 层，JSON 手写合法形态）：只读占位一行（可删整组带确认、
+         可移动；结构化不提供编辑，保存原样带过） -->
+    <div v-else-if="groupBeyondDepth(i)" class="li-condx-card">
+      <div class="li-condx-card-line">
+        <span class="li-condx-card-no">{{ cardNos[i] }}</span>
+        <span class="li-condx-card-target">[括号]</span>
+        <span class="li-condx-card-tpl">括号子组（深层嵌套）——完整内容请用「高级（JSON）」</span>
+        <el-select v-if="i > 0" v-model="row.connector" size="small" class="li-condx-conn">
+          <el-option label="且（都命中）" value="and" />
+          <el-option label="或（任一命中）" value="or" />
+        </el-select>
+        <span class="li-condx-neg is-locked" title="括号子组嵌套超过 3 层——完整内容请用「高级（JSON）」">—</span>
+        <span class="li-condx-move">
+          <el-tooltip :disabled="!moveTip(i, 'up')" :content="moveTip(i, 'up')" placement="top">
+            <span class="li-condx-move-btn">
+              <el-button size="small" text :disabled="moveLocked(i, 'up')" aria-label="上移" @click="onMoveRow(i, 'up')">
+                <el-icon><SortUp /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-tooltip :disabled="!moveTip(i, 'down')" :content="moveTip(i, 'down')" placement="top">
+            <span class="li-condx-move-btn">
+              <el-button size="small" text :disabled="moveLocked(i, 'down')" aria-label="下移" @click="onMoveRow(i, 'down')">
+                <el-icon><SortDown /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+        </span>
+        <el-divider direction="vertical" class="li-condx-move-sep" />
+        <el-button size="small" text type="danger" class="li-condx-del" @click="askDeleteGroup(i)">删行</el-button>
+      </div>
+    </div>
+    <!-- 括号子组组框（页内直显）：组框头=左缘「（」+组内接词语义标注+组级操作
+         （接词切换/拆组/换位/删整组）；成员卡缩进于框内、与顶层同款恒高卡；嵌套
+         组=组框再缩进一层（封顶 3 层维持，超出走高级 JSON 的只读占位卡） -->
+    <div v-else class="li-condx-group">
+      <div class="li-condx-group-head">
+        <span class="li-condx-group-mark">（</span>
+        <span v-if="groupWordText(i)" class="li-condx-group-word" title="括号内成员行间的接词">{{ groupWordText(i) }}</span>
+        <span v-if="row.negated" class="li-condx-card-flag" title="括号子组整体取非（「高级（JSON）」模式可改）">非</span>
+        <el-select v-if="i > 0" v-model="row.connector" size="small" class="li-condx-conn">
+          <el-option label="且（都命中）" value="and" />
+          <el-option label="或（任一命中）" value="or" />
+        </el-select>
+        <!-- 组行「括号」开关：单成员组可拆（☑ 状态）、多成员禁用（拆括号须先减到
+             一行——组内成员卡〔删行〕） -->
+        <label class="li-condx-neg" :class="{ 'is-locked': row.group.length !== 1 }" :title="bracketLockHint(i) || '拆掉括号恢复普通行'">
           <input type="checkbox" :checked="true" :disabled="row.group.length !== 1" @change="onBracketOff(i)">
           <span>括号</span>
         </label>
-        <div class="li-condx-groupcard">{{ groupCardText(i) }}</div>
-      </template>
-      <!-- 行头换位组（决策1/2，靠右成组）：上移/下移图标按钮（SortUp/SortDown，
-           宿主全局注册按名直用）——首行上移/末行下移禁用（单行列表双禁用，无提示，
-           BC 同款）；相等门阻断方向禁用+悬停说明（文案=condxMoveBlockReason 返回值，
-           剧本二帧1 逐字锚）；提取区「高级（JSON）」模式整体禁用+悬停提示（自决2）。
-           禁用按钮外包一层 span 接管悬浮（禁用原生按钮不派发鼠标事件，tooltip 先例） -->
-      <span class="li-condx-move">
-        <el-tooltip :disabled="!moveTip(i, 'up')" :content="moveTip(i, 'up')" placement="top">
-          <span class="li-condx-move-btn">
-            <el-button size="small" text :disabled="moveLocked(i, 'up')" aria-label="上移" @click="onMoveRow(i, 'up')">
-              <el-icon><SortUp /></el-icon>
-            </el-button>
-          </span>
-        </el-tooltip>
-        <el-tooltip :disabled="!moveTip(i, 'down')" :content="moveTip(i, 'down')" placement="top">
-          <span class="li-condx-move-btn">
-            <el-button size="small" text :disabled="moveLocked(i, 'down')" aria-label="下移" @click="onMoveRow(i, 'down')">
-              <el-icon><SortDown /></el-icon>
-            </el-button>
-          </span>
-        </el-tooltip>
-      </span>
-      <!-- 换位组与行操作按钮的竖分隔线（2026-11-10 审片修订）：叶子行=〔↑〕〔↓〕│〔删行〕、
-           子组紧凑卡=〔↑〕〔↓〕│〔编辑〕〔删行〕 -->
-      <el-divider direction="vertical" class="li-condx-move-sep" />
-      <el-button v-if="row.group && !groupBeyondDepth(i)" size="small" text @click="onEditGroup(row)">编辑</el-button>
-      <el-button v-if="row.group" size="small" text type="danger" class="li-condx-del" @click="askDeleteGroup(i)">删行</el-button>
-      <el-button v-else size="small" text type="danger" class="li-condx-del" @click="condxRemoveRow(rows, i)">删行</el-button>
-    </div>
-    <!-- 「括号」开关禁用态提示：深度封顶 / 多成员组减行引导 -->
-    <p v-if="bracketLockHint(i)" class="li-ref-notice">{{ bracketLockHint(i) }}</p>
-    <template v-if="!row.group">
-      <!-- Step 1 目标四卡（一次点选；第四卡＝W4 引用规则，帧3） -->
-      <div class="li-condx-targets">
-        <button
-          v-for="t in CONDX_TARGETS"
-          :key="t.value"
-          type="button"
-          class="li-condx-card"
-          :class="{ 'is-active': row.condition && row.condition.target === t.value }"
-          :title="t.note"
-          @click="setRowTarget(row, t.value)"
-        >
-          <span class="li-condx-card-label">{{ t.label }}</span>
-          <span class="li-condx-card-note">{{ t.note }}</span>
-        </button>
-        <!-- 引用规则卡：弹窗内复用时隐藏（引用是规则级字段+求值门段，结构上不可能
-             成为括号内条件行——决策4核验关闭） -->
-        <button
-          v-if="allowRefRow"
-          type="button"
-          class="li-condx-card"
-          :title="CONDX_TARGET_REF_NOTE"
-          @click="setRowToRef(row)"
-        >
-          <span class="li-condx-card-label">引用规则</span>
-          <span class="li-condx-card-note">{{ CONDX_TARGET_REF_NOTE }}</span>
-        </button>
+        <span class="li-condx-move">
+          <el-tooltip :disabled="!moveTip(i, 'up')" :content="moveTip(i, 'up')" placement="top">
+            <span class="li-condx-move-btn">
+              <el-button size="small" text :disabled="moveLocked(i, 'up')" aria-label="上移" @click="onMoveRow(i, 'up')">
+                <el-icon><SortUp /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-tooltip :disabled="!moveTip(i, 'down')" :content="moveTip(i, 'down')" placement="top">
+            <span class="li-condx-move-btn">
+              <el-button size="small" text :disabled="moveLocked(i, 'down')" aria-label="下移" @click="onMoveRow(i, 'down')">
+                <el-icon><SortDown /></el-icon>
+              </el-button>
+            </span>
+          </el-tooltip>
+        </span>
+        <el-divider direction="vertical" class="li-condx-move-sep" />
+        <el-button size="small" text type="danger" class="li-condx-del" @click="askDeleteGroup(i)">删行</el-button>
       </div>
-      <template v-if="row.condition">
-        <!-- Step 2 格式模板：目录双问法 + 模板输入 + 词条点选 + 例子模板 -->
-        <div class="li-condx-fmt">
-          <el-select
-            v-if="row.condition.target === 'dir'"
-            :model-value="row.condition.format.mode"
-            size="small"
-            class="li-condx-mode"
-            @update:model-value="setRowFormatMode(row, $event)"
-          >
-            <el-option label="整条按模板" value="template" />
-            <el-option label="含这个词" value="contains" />
-          </el-select>
-          <el-input
-            v-if="row.condition.format.mode === 'contains'"
-            v-model="row.condition.format.word"
-            size="small"
-            placeholder="包含词（纯文字，不含占位词）"
-          />
-          <textarea
-            v-else
-            v-model="row.condition.format.tpl"
-            class="li-condx-tpl"
-            rows="2"
-            spellcheck="false"
-            :placeholder="'如 【{作者}】{标题} / {公共段}_{序号}（点下方词条插入光标处）'"
-            @blur="onTplSelection(i, $event.target.selectionStart)"
-            @keyup="onTplSelection(i, $event.target.selectionStart)"
-            @click="onTplSelection(i, $event.target.selectionStart)"
-          />
-        </div>
-        <!-- 模板词元切分预览（位次角标）：同词根多位各自成 chip，位≥2 带
-             「第N处」角标（data-pos，复用可选 chip 的 ::after 角标样式
-             先例）；悬浮注记位次与寻址组名、重复段位的多值禁引 -->
-        <div v-if="tplTokChips(row.condition).length" class="li-condx-toks">
-          <template v-for="(t, ti) in tplTokChips(row.condition)" :key="ti">
-            <span v-if="!t.ph" class="li-condx-tok-lit">{{ t.text }}</span>
-            <span
-              v-else
-              class="li-condx-tok"
-              :data-pos="t.occur && t.occur > 1 ? `第${t.occur}处` : null"
-              :title="tplTokTitle(t) || undefined"
-            >{{ '{' + t.text + '}' }}</span>
-          </template>
-        </div>
-        <div v-if="row.condition.format.mode === 'template'" class="li-condx-chips">
-          <button
-            v-for="v in CONDX_VOCAB"
-            :key="v.word"
-            type="button"
-            class="li-condx-chip"
-            :title="v.note"
-            @click="insertWordAtCursor(row, v.word)"
-          >{{ '{' + v.word + '}' }}</button>
-          <span class="li-condx-chips-sep">｜</span>
-          <button
-            v-for="ex in CONDX_EXAMPLES"
-            :key="ex.name"
-            type="button"
-            :class="['li-condx-chip is-example', { 'is-optional': ex.template.indexOf('?') >= 0 }]"
-            :title="`${ex.template}（${ex.description}）`"
-            @click="applyExample(row, ex)"
-          >{{ ex.name }}</button>
-        </div>
-        <!-- Step 3 附加条件（终结谓词，按目标封闭集）+ 值校验 -->
-        <div class="li-condx-extra">
-          <div class="li-condx-extra-head">
-            <span class="li-condx-label">附加条件（终结谓词）</span>
-            <el-select
-              v-if="rowAttachOptions(row).length"
-              :model-value="''"
-              size="small"
-              class="li-condx-addsel"
-              placeholder="+ 加一条"
-              @update:model-value="addRowAttach(row, $event)"
-            >
-              <el-option v-for="o in rowAttachOptions(row)" :key="o.value" :label="o.label" :value="o.value" />
-            </el-select>
-          </div>
-          <div v-for="(a, ai) in row.condition.attach" :key="ai" class="li-condx-inline">
-            <span class="li-condx-inline-label">{{ attachLabelOf(row, a.kind) }}</span>
-            <textarea
-              v-if="attachNeeds(a, 'tpl')"
-              v-model="a.tpl"
-              class="li-condx-minitpl"
-              rows="1"
-              spellcheck="false"
-              placeholder="迷你模板（如 {序号}）"
-            />
-            <el-input v-if="attachNeeds(a, 'word')" v-model="a.word" size="small" placeholder="包含词" class="li-condx-mini" />
-            <el-input-number v-if="attachNeeds(a, 'count')" v-model="a.minCount" :min="1" size="small" controls-position="right" class="li-condx-num" />
-            <el-select v-if="attachNeeds(a, 'types')" v-model="a.types" size="small" multiple placeholder="类型" class="li-condx-mini">
-              <el-option v-for="t in CONDX_TYPE_OPTIONS" :key="t" :label="t" :value="t" />
-            </el-select>
-            <el-input v-if="attachNeeds(a, 'value')" v-model="a.value" size="small" placeholder=".jpg" class="li-condx-mini" />
-            <el-button size="small" text type="danger" @click="row.condition!.attach!.splice(ai, 1)">删</el-button>
-          </div>
-          <div class="li-condx-extra-head">
-            <span class="li-condx-label">值校验（占位词上的断言）</span>
-            <el-select
-              v-if="condxRowPlaceholders(row.condition).length"
-              :model-value="''"
-              size="small"
-              class="li-condx-addsel"
-              placeholder="+ 加一枚"
-              @update:model-value="addRowBadge(row, $event)"
-            >
-              <el-option v-for="k in CONDX_BADGE_KINDS" :key="k.value" :label="k.label" :value="k.value" />
-            </el-select>
-          </div>
-          <div v-for="(b, bi) in row.condition.badges" :key="bi" class="li-condx-inline">
-            <!-- 词位下拉位次化：取值=位次化组名（行内唯一）、条目按位出
-                 （位≥2 显示「词·第N处」）；选中回写词根+位次（位1 不落
-                 occur，与内核 omitempty 同口径=存量档案零变化） -->
-            <el-select
-              :model-value="badgePhKey(row.condition, b)"
-              size="small"
-              class="li-condx-mini"
-              @update:model-value="setBadgePh(row.condition, b, $event)"
-            >
-              <el-option v-for="p in condxRowPlaceholders(row.condition)" :key="p.group" :label="`{${p.word}}`" :value="p.group" />
-            </el-select>
-            <span class="li-condx-dot">●</span>
-            <el-select :model-value="b.kind" size="small" class="li-condx-mini" @update:model-value="setBadgeKind(b, $event)">
-              <el-option v-for="k in CONDX_BADGE_KINDS" :key="k.value" :label="k.label" :value="k.value" />
-            </el-select>
-            <el-select v-if="badgeNeeds(b, 'dim')" v-model="b.dim" size="small" placeholder="名单维度" class="li-condx-mini">
-              <el-option v-for="d in CONDX_BADGE_DIMS" :key="d" :label="dimNameOf(d)" :value="d" />
-            </el-select>
-            <label v-if="badgeNeeds(b, 'dim')" class="li-condx-fold"><input v-model="b.fold" type="checkbox"><span>形变归一</span></label>
-            <template v-if="badgeNeeds(b, 'againstRow')">
-              <el-select v-model="b.againstRow" size="small" placeholder="对方行" class="li-condx-mini">
-                <el-option v-for="f in earlierFlatRows(i)" :key="f.row" :label="`第 ${f.row} 行`" :value="f.row" />
-              </el-select>
-              <!-- 相等类别的对方词下拉按对方行位次出条目（含「·第N处」） -->
-              <el-select
-                :model-value="againstPhKey(b)"
-                size="small"
-                placeholder="对方占位词"
-                class="li-condx-mini"
-                @update:model-value="setBadgeAgainstPh(b, $event)"
-              >
-                <el-option v-for="p in againstEntries(b)" :key="p.group" :label="`{${p.word}}`" :value="p.group" />
-              </el-select>
-            </template>
-            <el-input v-if="badgeNeeds(b, 'value')" v-model="b.value" size="small" placeholder="常量值" class="li-condx-mini" />
-            <el-button size="small" text type="danger" @click="row.condition!.badges!.splice(bi, 1)">删</el-button>
-          </div>
-          <!-- 位次漂移提示（值校验面）：占位词位次/相等对方词位次落在受
-               影响组名上时报出，请复核指向 -->
-          <p v-if="badgeDriftNotice(i)" class="li-ref-notice">{{ badgeDriftNotice(i) }}</p>
-        </div>
-        <!-- 位次漂移提示（模板面）：编辑会话内模板变更前后位次表 diff 出
-             「位次号变化/指向变化」的组名（主形态=在已有出现之前插入同
-             词根新出现→后续位次整体 +1），报出受影响词位 -->
-        <p v-if="rowOccurDriftNotice(i)" class="li-ref-notice">{{ rowOccurDriftNotice(i) }}</p>
-      </template>
-    </template>
-    <p v-if="condxRowHint(i)" class="li-red-row-hint">{{ condxRowHint(i) }}</p>
+      <!-- 组内成员：本组件递归（成员卡与顶层同款恒高卡、点〔编辑〕开同一条件编辑
+           弹窗）；事件逐层上浮主视图（editRow/moved 同一消费），组内删空经
+           emptied 拆掉本组框（链式再拆由各层自行接住） -->
+      <CondxRowsEditor
+        v-model:rows="row.group"
+        :depth="(depth || 1) + 1"
+        :base-no="groupBaseNo(i)"
+        :root-rows="rootRows || rows"
+        :occur-drift="occurDrift"
+        :extractions-json-mode="extractionsJsonMode"
+        @edit-row="(r, no) => emit('editRow', r, no)"
+        @moved="emit('moved', $event)"
+        @emptied="onGroupEmptied(row)"
+      />
+    </div>
+  </template>
+  <div class="li-condx-cards-foot">
+    <!-- 新增条件亦经条件编辑弹窗（新增态首步为条件种类选择）——先追加空行再上抛
+         editRow（空行在树内=行号/校验上下文真实；取消由主视图移除该行） -->
+    <el-button size="small" text @click="addCondxRow">+ 加条件</el-button>
   </div>
-  <el-button size="small" text @click="addCondxRow">+ 加一行</el-button>
   <!-- 删整组确认（带确认弹窗）：〔取消〕=什么都不变；〔删除〕=组与组内全部条件行消失 -->
   <AutoHeightDialog
     v-model:state="delGroupState"
@@ -268,118 +163,107 @@
 </template>
 
 <script setup lang="ts">
-// 条件行编辑器：规则编辑弹窗「识别规则」上半的条件行区块（行渲染模板+行级校验+
-// 词条点选+位次角标等全部行为）。行表经 v-model:rows 由父组件传入同一 reactive
-// 数组——就地编辑、无拷贝（顶层与括号子组弹窗复用同一实现，编辑实时生效）。
-// 行转引用行（目标卡「引用规则」）涉引用行表，经 toRef 事件上抛父组件处理；
-// 位次漂移快照与全量漂移查询留在父组件（提取行漂移提示共用），行内漂移提示经
-// occurDrift prop 读父组件刷新结果。
-import { ref } from 'vue'
+// 条件卡片列表（规则编辑面总览）：每条件一行恒定高度摘要卡（序号+目标词+模板摘要+
+// 复杂度徽标+接词）。三步漏斗编辑（目标卡/格式模板/词条/附加条件/值校验/漂移提示）
+// 整体迁入条件编辑弹窗（CondxRowEditDialog）——叶子卡〔编辑〕/〔+ 加条件〕经
+// editRow 事件上抛主视图（RuleEditDialog）开窗。括号子组页内直显：组行渲染为
+// 组框（组框头=接词语义标注+组级操作），成员卡由本组件递归渲染（与顶层同款
+// 恒高卡，嵌套组=组框再缩进一层、封顶 3 层），无面包屑下钻弹窗。行表经
+// v-model:rows 由父组件传入同一 reactive 数组——结构性操作（接词/括号开关/
+// 换位/删行）仍在本组件就地生效；组内成员的 editRow/moved 逐层上浮（事件源
+// 收敛到主视图，RuleEditDialog 同一消费）。
+import { computed, ref, watch } from 'vue'
 import {
-  DIMENSION_OPTIONS,
-  CONDX_TARGETS,
-  CONDX_TARGET_REF_NOTE,
-  CONDX_VOCAB,
-  CONDX_ATTACH_OPTIONS,
-  CONDX_TYPE_OPTIONS,
-  CONDX_BADGE_KINDS,
-  CONDX_BADGE_DIMS,
-  CONDX_EXAMPLES,
   CONDX_GROUP_MAX_DEPTH,
   condxFlatRows,
-  condxRowPlaceholders,
-  condxPosName,
-  condxVocabOf,
-  condxTplOccurChips,
-  condxRowError,
   condxGroupBeyondDepth,
-  condxGroupBrief,
-  condxRowNos,
+  condxConnLabel,
   condxWrapRow,
   condxUnwrapRow,
   condxRemoveRow,
-  condxGroupEditEntry,
   condxMoveSwapRows,
   condxMoveRowNoMap,
   condxMoveBlockReason,
+  condxRowCardView,
+  condxRowError,
+  condxRowNos,
   type CondxRowForm,
   type CondxMoveDir,
-  type CondxRowNoMap,
-  type CondxForm,
-  type CondxBadgeForm,
-  type CondxAttachForm,
-  type CondxOccEntry,
-  type CondxTplTok
+  type CondxRowNoMap
 } from './ruleFormModel'
 
 const rows = defineModel<CondxRowForm[]>('rows', { required: true })
 
-// 弹窗内复用形态（顶层=不传 baseNo/rootRows/depth，与 RuleEditDialog 既有接线一致）
+// 组框内复用形态（顶层=不传 baseNo/rootRows/depth，与 RuleEditDialog 既有接线一致）
 const props = withDefaults(
   defineProps<{
-    // 位次漂移结果（全局行号→受影响组名+显示词），父组件随模板变更刷新；弹窗内
-    // 复用时不传（漂移快照与刷新在 RuleEditDialog，行内漂移提示留顶层呈现）
+    // 位次漂移结果（全局行号→受影响组名+显示词），父组件随模板变更刷新；卡片「⚠」
+    // 徽标读取（详情在条件编辑弹窗内呈现）
     occurDrift?: Record<number, { group: string; word: string }[]>
-    // 所在括号嵌套层（顶层=1，弹窗内逐层下传）；达到 CONDX_GROUP_MAX_DEPTH 的层内
-    // 行不再提供「括号」开关（封顶禁用+提示，剧本二帧3）
+    // 所在括号嵌套层（顶层=1，组框内逐层 +1 下传）；达到 CONDX_GROUP_MAX_DEPTH 的层内
+    // 行不再提供「括号」开关（封顶禁用+悬浮提示）
     depth?: number
-    // 全局行号基数（弹窗内复用时传入）：行头带「第 N 行」小字、紧凑卡成员行号
-    // 按全局先序号（condxRowNos/condxGroupBrief 的 base）；顶层缺省不带
+    // 全局行号基数（组框内复用时传入）：卡片序号按全局先序号（condxRowNos 的 base）
     baseNo?: number
-    // 全树行表（弹窗内复用时传顶层行表）：行级校验与值校验对方行候选按全局先序
-    // 展平（对方行可跨组引用——全局行号+「须早于本行」约束，边界条件表零改动
-    // 口径）；顶层缺省=本容器即全树
+    // 全树行表（组框内复用时传顶层行表）：行级校验按全局先序展平（对方行可跨组
+    // 引用——全局行号+「须早于本行」约束）；顶层缺省=本容器即全树
     rootRows?: CondxRowForm[] | null
-    // 是否提供目标卡「引用规则」（缺省提供；弹窗内复用时传 false——引用行不进
-    // 括号子组，决策4核验关闭）
-    allowRefRow?: boolean
-    // 是否把紧凑卡〔编辑〕的组行写入 condxGroupEditEntry 侧信道（缺省写——顶层
-    // 编辑器开窗需要；弹窗内复用时传 false，下钻由 CondxGroupDialog 接 editGroup
-    // 事件自行 push，不覆写开窗入口的组行引用）
-    recordEntry?: boolean
-    // 提取区「高级（JSON）」模式（RuleEditDialog 下传、CondxGroupDialog 透传）：
-    // 移动按钮整体禁用+悬停提示（自决2——JSON 文本里的行号引用无法可靠重映射，
-    // 放行会静默失同步；子组内换位同样要改写主弹窗提取引用，禁用口径与顶层一致）
+    // 提取区「高级（JSON）」模式（RuleEditDialog 下传、组框内透传）：移动按钮整体
+    // 禁用+悬停提示——JSON 文本里的行号引用无法可靠重映射，放行会静默失同步；
+    // 组内换位同样要改写主弹窗提取引用，禁用口径与顶层一致
     extractionsJsonMode?: boolean
   }>(),
-  { allowRefRow: true, rootRows: null, recordEntry: true, extractionsJsonMode: false }
+  { rootRows: null, extractionsJsonMode: false }
 )
 
 const emit = defineEmits<{
-  // 行转引用行：父组件把该行从条件行表移入引用行表
-  toRef: [row: CondxRowForm]
-  // 紧凑卡〔编辑〕上抛（组行同时记入 condxGroupEditEntry 侧信道）：顶层由
-  // RuleEditDialog 接住开窗；弹窗内由 CondxGroupDialog 接住下钻切层
-  editGroup: [row: CondxRowForm]
-  // 行换位落地上抛（携「旧行号→新行号」全量映射，技术要点3）：行表已在编辑器内
-  // 就地内容交换，RuleEditDialog 接住按映射改写提取行与条件树草稿态的三类行号
-  // 引用（决策3）；弹窗内复用时由 CondxGroupDialog 透传（剧本三帧1-2）
+  // 叶子卡〔编辑〕/〔+ 加条件〕上抛（携行对象与全局先序行号）：主视图接住开条件
+  // 编辑弹窗；组框内成员卡逐层透传至主视图（同一弹窗）
+  editRow: [row: CondxRowForm, no: number]
+  // 行换位落地上抛（携「旧行号→新行号」全量映射）：行表已在编辑器内就地内容
+  // 交换，RuleEditDialog 接住按映射改写提取行与条件树草稿态的三类行号引用；
+  // 组框内换位逐层透传（同一消费）
   moved: [rowNoMap: CondxRowNoMap]
+  // 组内行删空（组框内复用形态=depth>1）：渲染组框的父层接住移除组行（自动拆组）
+  emptied: []
 }>()
 
-// 结构化模式的行级校验提示
-const condxRowHint = (i: number): string => {
-  const list = rows.value
-  const row = list[i]
-  if (!row) return ''
-  const flat = flatRowsGlobal()
-  if (row.group) return ''
-  const hit = flat.find((f) => f.condx === row.condition)
-  if (!hit) return '行内容不完整'
-  return condxRowError(hit.row, row.condition, flat)
+// 卡片序号（全局先序行号，空叶子行占号——与捕获清单「第 N 行」同口径；顶层基数 0）
+const cardNos = computed(() => condxRowNos(rows.value, props.baseNo ?? 0))
+
+// 卡片摘要字段（纯函数派生：序号+目标词+模板文本截断+复杂度徽标计数+接词）
+function cardView(i: number) {
+  const row = rows.value[i]
+  return condxRowCardView(row || { condition: null }, cardNos.value[i] ?? i + 1)
 }
 
-// 全局先序展平（行号=全局口径，行级校验与值校验对方行候选共用）：顶层=本容器
-// 即全树；弹窗内经 rootRows 传顶层行表（对方行可跨组引用——全局先序行号+「须
-// 早于本行」约束自动覆盖，边界条件表零改动口径）。
-function flatRowsGlobal(): { row: number; condx: CondxForm }[] {
+// 全局先序展平（行级校验用）：顶层=本容器即全树；组框内经 rootRows 传顶层行表
+function flatRowsGlobal(): { row: number; condx: NonNullable<CondxRowForm['condition']> }[] {
   return condxFlatRows(props.rootRows || rows.value)
 }
 
-// —— 「括号」开关与括号子组紧凑卡（帧1/帧2/帧5、剧本三帧1-帧3） ——
+// 行级校验文案（卡片红边+✗ 徽标与保存闸门同函数；完整提示在条件编辑弹窗内呈现）
+function cardErrText(i: number): string {
+  const row = rows.value[i]
+  if (!row || row.group) return ''
+  if (!row.condition) return '行内容不完整'
+  return condxRowError(cardNos.value[i] ?? i + 1, row.condition, flatRowsGlobal())
+}
+
+// 位次漂移徽标文案（详情在条件编辑弹窗内呈现）
+function cardDriftText(i: number): string {
+  const row = rows.value[i]
+  if (!row || row.group) return ''
+  const drift = (props.occurDrift || {})[cardNos.value[i] ?? i + 1]
+  if (!drift || !drift.length) return ''
+  const words = drift.map((d) => `{${d.word}}`).join('、')
+  return `⚠ 模板位次已变化：${words} 的指向可能已漂移——点〔编辑〕查看详情与复核指向`
+}
+
+// —— 「括号」开关与括号子组组框（页内直显） ——
 
 // 叶子行开关禁用态：空行（无可入组的内容）或所在层达到深度封顶（顶层=第 1 层）。
-// 组行开关禁用态：多成员（拆括号须先在括号编辑里减到一行）。
+// 组行开关禁用态：多成员（拆括号须先在组框内减到一行）。
 function bracketLocked(i: number): boolean {
   const row = rows.value[i]
   if (!row) return true
@@ -387,75 +271,81 @@ function bracketLocked(i: number): boolean {
   return !row.condition || (props.depth || 1) >= CONDX_GROUP_MAX_DEPTH
 }
 
-// 开关禁用态提示：封顶层（更深的组合走高级 JSON）/多成员组（减行引导）。
+// 开关禁用态悬浮提示：封顶层（更深的组合走高级 JSON）/多成员组（减行引导）。
 function bracketLockHint(i: number): string {
   const row = rows.value[i]
   if (!row) return ''
-  if (row.group && row.group.length > 1) return '↳ 括号内多于一行——在括号编辑里减到一行才能拆'
+  if (row.group && row.group.length > 1) return '↳ 括号内多于一行——在组框内减到一行才能拆'
   if (!row.group && (props.depth || 1) >= CONDX_GROUP_MAX_DEPTH) {
     return '↳ 最多套 3 层——更深的组合请用「高级（JSON）」'
   }
   return ''
 }
 
-// 开关「开」：本行收进括号子组（原行去接词入组、组行继承原接词与「非」；外层
-// 其余行不动）。
+// 开关「开」：本行收进括号子组（原行去接词入组、组行继承原接词；外层其余行不动）。
 function onBracketOn(i: number): void {
   const row = rows.value[i]
   if (!row || !row.condition) return
   condxWrapRow(row)
 }
 
-// 开关「关」（单成员组）：拆括号恢复普通行，内容原样。
+// 开关「关」（单成员组）：拆括号恢复普通行，内容原样（行级「非」双重否定相消）。
 function onBracketOff(i: number): void {
   const row = rows.value[i]
   if (!row || !row.group || row.group.length !== 1) return
   condxUnwrapRow(row)
 }
 
-// 紧凑卡文案：「括号子组 · N 行：…」——N=组内条件行数（递归计）；概要=单成员
-// 内容概要、多成员全局行号以接词相连（帧2/帧5；弹窗内复用时 baseNo 平移到全局
-// 行号口径）。
-function groupCardText(i: number): string {
-  const list = rows.value
-  const row = list[i]
-  if (!row || !row.group) return ''
-  const count = condxFlatRows(row.group).length
-  const base = condxFlatRows(list.slice(0, i)).length + (props.baseNo || 0)
-  return `括号子组 · ${count} 行：${condxGroupBrief(row.group, base)}`
+// 组框头接词语义标注：组内成员行间接词统一时的语义词（且/或）、混合=「且/或」、
+// 单成员组无组内接词（空串不渲染）。
+function groupWordText(i: number): string {
+  const group = rows.value[i]?.group
+  if (!group) return ''
+  const words = new Set(group.filter((_, idx) => idx > 0).map((m) => condxConnLabel(m.connector)))
+  if (!words.size) return ''
+  return words.size === 1 ? [...words][0] : '且/或'
 }
 
-// 弹窗内行头全局行号小字（帧3/帧4）：「第 N 行」——N=condxRowNos 先序号（叶子行=
-// 自身序号、组行=组内首行序号）；顶层（baseNo 缺省）不带行号。
-function rowNoLabel(i: number): string {
-  if (props.baseNo == null) return ''
-  const no = condxRowNos(rows.value, props.baseNo)[i]
-  return no == null ? '' : `第 ${no} 行`
+// 组框内递归编辑器的全局行号基数：组行的全局先序号 - 1（组行行号=组内首行序号，
+// 与 condxRowNos 的组行占号口径一致）。
+function groupBaseNo(i: number): number {
+  return (cardNos.value[i] ?? i + 1) - 1
 }
 
-// 深层怪态（>3 层，JSON 手写合法形态）：组内子树放进所在层会超深度封顶——
-// 结构化不提供编辑，只读占位一行（剧本三帧4）。
+// 组内删空自动拆组：组框内成员删到 0 行（删行/条件编辑弹窗取消移除等任一路径）
+// 时移除所在组行（规整移除——组行居 0 位时新首行接词清零）；父层若因此也删空则
+// 经 emptied 链式再拆。按行对象引用定位，重复触发时行已不在表内即无操作。
+function onGroupEmptied(row: CondxRowForm): void {
+  const idx = rows.value.indexOf(row)
+  if (idx < 0) return
+  const target = rows.value[idx]
+  if (!target.group || target.group.length) return
+  condxRemoveRow(rows.value, idx)
+}
+
+// 组内行表长度监听（组框内复用形态=depth>1）：删空即上抛 emptied（渲染前触发，
+// 空组框不落地渲染）；顶层空行表合法（引用行在场组合/保存闸门口径），不上抛。
+watch(
+  () => rows.value.length,
+  (len) => {
+    if (len === 0 && (props.depth || 1) > 1) emit('emptied')
+  }
+)
+
+// 深层怪态（>3 层，JSON 手写合法形态）：组内子树放进所在层会超深度封顶——结构化
+// 不提供编辑，卡片只读占位（可删整组带确认、可移动；保存原样带过）。
 function groupBeyondDepth(i: number): boolean {
   const row = rows.value[i]
   return !!row && !!row.group && condxGroupBeyondDepth(row.group, props.depth || 1)
 }
 
-// 紧凑卡〔编辑〕：上抛（弹窗内由 CondxGroupDialog 接住下钻切层——同窗不开新窗，
-// 剧本二帧1→帧2）；顶层编辑器（recordEntry）同时把组行与所在行表记入侧信道——
-// RuleEditDialog 的 edit-group 接线只开窗不带行，CondxGroupDialog 开窗时经侧信道
-// 取组行建导航栈首层。
-function onEditGroup(row: CondxRowForm): void {
-  if (props.recordEntry) condxGroupEditEntry.value = { row, rows: rows.value }
-  emit('editGroup', row)
-}
+// —— 行头换位（上移/下移与相邻行内容交换，连接词留位） ——
 
-// —— 行头换位（决策1/2：上移/下移与相邻行内容交换，连接词留位） ——
-
-// 提取区「高级（JSON）」模式的移动禁用提示（自决2，固定文案）：JSON 文本里的
-// 行号引用无法可靠重映射（手工改写会毁掉用户手排格式），放行则引用静默失同步。
+// 提取区「高级（JSON）」模式的移动禁用提示（固定文案）：JSON 文本里的行号引用
+// 无法可靠重映射（手工改写会毁掉用户手排格式），放行则引用静默失同步。
 const MOVE_JSON_TIP = '提取区为「高级（JSON）」模式，不能移动——请切回结构化编辑'
 
-// 换位全树（行号映射与相等门判定的基准）：顶层=本容器行表；弹窗内=rootRows 顶层表
+// 换位全树（行号映射与相等门判定的基准）：顶层=本容器行表；组框内=rootRows 顶层表
 function moveRootRows(): CondxRowForm[] {
   return props.rootRows || rows.value
 }
@@ -465,16 +355,16 @@ function moveAtEdge(i: number, dir: CondxMoveDir): boolean {
   return dir === 'up' ? i <= 0 : i >= rows.value.length - 1
 }
 
-// 换位禁用态：① 边界（无提示，BC 同款）；② 相等门阻断方向（决策4——模拟换位后
-// 「与另一行相等」校验引用的行会晚于本行）；③ 提取区 JSON 模式整体禁用（自决2）。
+// 换位禁用态：① 边界（无提示，BC 同款）；② 相等门阻断方向（模拟换位后「与另一行
+// 相等」校验引用的行会晚于本行）；③ 提取区 JSON 模式整体禁用。
 function moveLocked(i: number, dir: CondxMoveDir): boolean {
   if (moveAtEdge(i, dir)) return true
   if (props.extractionsJsonMode) return true
   return condxMoveBlockReason(moveRootRows(), rows.value, i, dir) !== ''
 }
 
-// 禁用态悬停说明（空串=不弹）：边界禁用自明无提示（BC 同款）；相等门=拦截文案
-//（condxMoveBlockReason 返回值，剧本二帧1 逐字锚）；提取区 JSON 模式=固定提示。
+// 禁用态悬停说明（空串=不弹）：边界禁用自明无提示；相等门=拦截文案；提取区 JSON
+// 模式=固定提示。
 function moveTip(i: number, dir: CondxMoveDir): string {
   if (moveAtEdge(i, dir)) return ''
   if (props.extractionsJsonMode) return MOVE_JSON_TIP
@@ -482,10 +372,10 @@ function moveTip(i: number, dir: CondxMoveDir): string {
 }
 
 // 换位落地：先按换位前形态取「旧行号→新行号」全量映射（调用顺序契约——映射必须在
-// SwapRows 落位之前），再内容交换换位（连接词留位、布尔骨架不动，决策2）；成功上抛
-// moved 携映射（顶层由 RuleEditDialog 改写提取行与条件树的三类行号引用，决策3）。
-// 阻断方向在禁用态已拦（moveLocked），此处再核一次防御。移动不触发保存、无确认
-// 弹窗（自决4）。
+// SwapRows 落位之前），再内容交换换位（连接词留位、布尔骨架不动）；成功上抛 moved
+// 携映射（组框内换位逐层上浮，顶层由 RuleEditDialog 改写提取行与条件树的三类行号
+// 引用——组行整块与组内行都由同一映射覆盖）。阻断方向在禁用态已拦，此处再核一次
+// 防御。移动不触发保存、无确认弹窗。
 function onMoveRow(i: number, dir: CondxMoveDir): void {
   if (moveLocked(i, dir)) return
   const map = condxMoveRowNoMap(moveRootRows(), rows.value, i, dir)
@@ -515,255 +405,145 @@ function doDeleteGroup(): void {
   delGroupIndex.value = -1
 }
 
-// —— 行编辑辅助（目标卡/格式/词条插入/例子模板/附加/值校验） ——
+// —— 新增与编辑入口（均经条件编辑弹窗） ——
 
+// 叶子卡〔编辑〕：上抛行对象与全局先序行号（主视图接住开条件编辑弹窗）
+function emitEditRow(row: CondxRowForm, i: number): void {
+  emit('editRow', row, cardNos.value[i] ?? i + 1)
+}
+
+// 〔+ 加条件〕：先追加空行（行号/校验上下文真实），随即上抛 editRow（主视图以
+// 新增态开条件编辑弹窗——首步条件种类选择；取消时移除该行）；组框内=向本组追加
+// 成员行
 function addCondxRow(): void {
   rows.value.push({ connector: rows.value.length ? 'and' : '', negated: false, condition: null, group: null })
-}
-
-// 目标三卡点选：首次进入带默认格式（template + 空模板），切换目标保留格式段
-function setRowTarget(row: CondxRowForm, target: 'file' | 'dir' | 'seq'): void {
-  if (!row.condition) {
-    row.condition = { target, format: { mode: 'template', tpl: '' }, badges: [], attach: [] }
-    return
-  }
-  row.condition.target = target
-  if (target !== 'dir' && row.condition.format.mode === 'contains') {
-    row.condition.format = { mode: 'template', tpl: '' }
-  }
-  // 序列默认形态一步到位（{公共段}_{序号}）
-  if (target === 'seq' && row.condition.format.mode === 'template' && !(row.condition.format.tpl || '').trim()) {
-    row.condition.format.tpl = '{公共段}_{序号}'
-  }
-  row.condition.attach = (row.condition.attach || []).filter((a) => rowAttachValues(target).indexOf(a.kind) >= 0)
-}
-
-function setRowFormatMode(row: CondxRowForm, mode: string): void {
-  if (!row.condition) return
-  row.condition.format = mode === 'contains' ? { mode: 'contains', word: '' } : { mode: 'template', tpl: '' }
-}
-
-// 行转引用行（目标卡「引用规则」）：涉引用行表，上抛父组件处理
-function setRowToRef(row: CondxRowForm): void {
-  emit('toRef', row)
-}
-
-// 词条点选插入光标处（记录 textarea 选区；无选区追加到末尾）
-const tplSelections = new Map<number, number>()
-function onTplSelection(rowIdx: number, sel: number): void {
-  tplSelections.set(rowIdx, sel)
-}
-function insertWordAtCursor(row: CondxRowForm, word: string): void {
-  if (!row.condition || row.condition.format.mode !== 'template') return
-  const tpl = row.condition.format.tpl || ''
-  const idx = rows.value.indexOf(row)
-  const pos = tplSelections.get(idx)
-  const piece = `{${word}}`
-  if (pos == null || pos < 0 || pos > tpl.length) {
-    row.condition.format.tpl = tpl + piece
-    return
-  }
-  row.condition.format.tpl = tpl.slice(0, pos) + piece + tpl.slice(pos)
-  tplSelections.set(idx, pos + piece.length)
-}
-
-function applyExample(row: CondxRowForm, ex: { template: string; target: 'file' | 'dir' | 'seq' }): void {
-  setRowTarget(row, ex.target)
-  if (row.condition) row.condition.format = { mode: 'template', tpl: ex.template }
-}
-
-// 附加谓词（按目标封闭集）
-function rowAttachValues(target: string): string[] {
-  return (CONDX_ATTACH_OPTIONS[target] || []).map((o) => o.value)
-}
-function rowAttachOptions(row: CondxRowForm): { value: string; label: string }[] {
-  const target = row.condition ? row.condition.target : ''
-  return (CONDX_ATTACH_OPTIONS[target] || []).map((o) => ({ value: o.value, label: o.label }))
-}
-function attachLabelOf(row: CondxRowForm, kind: string): string {
-  const target = row.condition ? row.condition.target : ''
-  const hit = (CONDX_ATTACH_OPTIONS[target] || []).find((o) => o.value === kind)
-  return hit ? hit.label : kind
-}
-function attachNeeds(a: CondxAttachForm, need: string): boolean {
-  const target = (rows.value.find((r) => r.condition && (r.condition.attach || []).indexOf(a) >= 0)?.condition?.target) || ''
-  const hit = (CONDX_ATTACH_OPTIONS[target] || []).find((o) => o.value === a.kind)
-  return !!hit && hit.needs.indexOf(need) >= 0
-}
-function addRowAttach(row: CondxRowForm, kind: string): void {
-  if (!row.condition) return
-  if (!row.condition.attach) row.condition.attach = []
-  row.condition.attach.push({ kind })
-}
-
-// 值校验
-function addRowBadge(row: CondxRowForm, kind: string): void {
-  if (!row.condition) return
-  if (!row.condition.badges) row.condition.badges = []
-  const first = condxRowPlaceholders(row.condition)[0]
-  // 词位缺省=首个可引用位；occur 仅在位≥2 落 JSON（位1 裸组名=存量档案零变化，
-  // 与内核 omitempty 同口径）。
-  row.condition.badges.push(
-    first
-      ? { placeholder: first.baseWord, occur: first.occur > 1 ? first.occur : undefined, kind: kind as CondxBadgeForm['kind'] }
-      : { placeholder: '', kind: kind as CondxBadgeForm['kind'] }
-  )
-}
-// 模板词元切分 chips（位次角标呈现）：解析失败（未闭合 { 等）静默不显示——
-// 行级校验已报错。
-function tplTokChips(condx: CondxForm): CondxTplTok[] {
-  if (!condx || condx.format.mode !== 'template') return []
-  return condxTplOccurChips(condx.format.tpl || '').chips || []
-}
-
-// 占位词 chip 的悬浮说明：位≥2 注记位次与寻址组名；重复段位注记多值禁引。
-function tplTokTitle(t: CondxTplTok): string {
-  if (t.occur && t.occur > 1) {
-    return `同词根第 ${t.occur} 处出现：独立产出与引用（寻址组名 ${t.posName}）${t.repeat ? '；重复段词（多值产出）仅提取段可引用' : ''}`
-  }
-  if (t.repeat) return '重复段词（多值产出）：提取段可引用，暂不能用于生效条件/值校验/组合接线'
-  return ''
-}
-
-// equal 对方行候选（全局先序行号早于本行的 condition 行——弹窗内含组外更早行）
-function earlierFlatRows(rowIndex: number): { row: number; condx: CondxForm }[] {
-  const list = rows.value
-  const flat = flatRowsGlobal()
-  const row = list[rowIndex]
-  if (!row || !row.condition) return []
-  const self = flat.find((f) => f.condx === row.condition)
-  if (!self) return []
-  return flat.filter((f) => f.row < self.row)
-}
-// 值校验词位选择的取值键：位次化组名（行内唯一）；旧档无 occur=位1 裸组名。
-function badgePhKey(condx: CondxForm, b: CondxBadgeForm): string {
-  const v = condxVocabOf(b.placeholder || '')
-  return v ? condxPosName(v.group, b.occur || 1) : b.placeholder || ''
-}
-function setBadgePh(condx: CondxForm, b: CondxBadgeForm, group: string): void {
-  const hit = condxRowPlaceholders(condx).find((p) => p.group === group)
-  if (!hit) return
-  b.placeholder = hit.baseWord
-  b.occur = hit.occur > 1 ? hit.occur : undefined
-}
-function setBadgeKind(b: CondxBadgeForm, kind: string): void {
-  b.kind = kind as CondxBadgeForm['kind']
-  b.dim = undefined
-  b.fold = undefined
-  b.againstRow = undefined
-  b.againstPh = undefined
-  b.againstOccur = undefined
-  b.value = undefined
-}
-function badgeNeeds(b: CondxBadgeForm, need: string): boolean {
-  const hit = CONDX_BADGE_KINDS.find((k) => k.value === b.kind)
-  return !!hit && hit.needs.indexOf(need) >= 0
-}
-// equal 相等类别的对方词下拉：按对方行位次出条目（含「·第N处」）。
-function earlierFlatRowsForBadge(b: CondxBadgeForm): CondxForm | null {
-  const flat = flatRowsGlobal()
-  const hit = flat.find((f) => f.row === b.againstRow)
-  return hit ? hit.condx : null
-}
-function againstEntries(b: CondxBadgeForm): CondxOccEntry[] {
-  const hit = earlierFlatRowsForBadge(b)
-  return hit ? condxRowPlaceholders(hit) : []
-}
-function againstPhKey(b: CondxBadgeForm): string {
-  const v = condxVocabOf(b.againstPh || '')
-  return v ? condxPosName(v.group, b.againstOccur || 1) : b.againstPh || ''
-}
-function setBadgeAgainstPh(b: CondxBadgeForm, group: string): void {
-  const condx = earlierFlatRowsForBadge(b)
-  const hit = condx ? condxRowPlaceholders(condx).find((p) => p.group === group) : undefined
-  if (!hit) return
-  b.againstPh = hit.baseWord
-  b.againstOccur = hit.occur > 1 ? hit.occur : undefined
-}
-function dimNameOf(dim: string): string {
-  const hit = DIMENSION_OPTIONS.find((d) => d.value === dim)
-  return hit ? hit.label : dim
-}
-
-// —— 位次漂移提示（行内呈现；快照与刷新在父组件，经 occurDrift prop 读结果） ——
-
-// 本行模板的位次漂移提示：受影响词位按行报出，指向复核（提取/生效条件/值校验/
-// 组合接线）。
-function rowOccurDriftNotice(i: number): string {
-  const row = rows.value[i]
-  if (!row || !row.condition) return ''
-  const flat = flatRowsGlobal()
-  const self = flat.find((f) => f.condx === row.condition)
-  if (!self) return ''
-  const drift = (props.occurDrift || {})[self.row]
-  if (!drift || !drift.length) return ''
-  const words = drift.map((d) => `{${d.word}}`).join('、')
-  return `⚠ 模板位次已变化：${words} 的指向可能已漂移（插入同词根新出现会使后续位次整体 +1）——引用它的提取/生效条件/值校验/组合接线行需复核`
-}
-
-// 本行值校验的漂移提示：占位词位次或相等对方词位次落在受影响组名上。
-function badgeDriftNotice(i: number): string {
-  const row = rows.value[i]
-  if (!row || !row.condition || !(row.condition.badges || []).length) return ''
-  const flat = flatRowsGlobal()
-  const self = flat.find((f) => f.condx === row.condition)
-  if (!self) return ''
-  const ownDrift = (props.occurDrift || {})[self.row] || []
-  const hits: string[] = []
-  for (const b of row.condition.badges || []) {
-    const v = condxVocabOf(b.placeholder || '')
-    if (v && ownDrift.some((d) => d.group === condxPosName(v.group, b.occur || 1))) {
-      hits.push(`{${b.placeholder || '?'}${b.occur && b.occur > 1 ? `·第${b.occur}处` : ''}}`)
-    }
-    if (b.kind === 'equal' && b.againstRow) {
-      const av = condxVocabOf(b.againstPh || '')
-      const againstDrift = (props.occurDrift || {})[b.againstRow] || []
-      if (av && againstDrift.some((d) => d.group === condxPosName(av.group, b.againstOccur || 1))) {
-        hits.push(`第 ${b.againstRow} 行 {${b.againstPh || '?'}${b.againstOccur && b.againstOccur > 1 ? `·第${b.againstOccur}处` : ''}}`)
-      }
-    }
-  }
-  if (!hits.length) return ''
-  return `⚠ 值校验引用的占位词位次已漂移：${hits.join('、')}——请复核指向`
+  const idx = rows.value.length - 1
+  emit('editRow', rows.value[idx], cardNos.value[idx] ?? idx + 1)
 }
 </script>
 
 <style scoped>
-/* 行容器与行头：与父组件引用行区块共用同名词（引用行侧留父级样式，此处条件行
-   自带一份同声明——scoped 作用域互不渗透，两份保持同值） */
-.li-condx-row {
+/* 条件卡片（总览）：容器纵向承载恒定高度的主行；卡片主行显式固定高——复杂度只进
+   徽标计数，卡片高度不随条件内部复杂度增长（总览密度守恒） */
+.li-condx-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  /* 2026-10-28 行区域标识·左缘色条（第三版，用户裁决「换方案」）：识别条件行
-     左缘主色 3px 竖条——不动任何底色（行/分区透明复原，行内组件配色环境即原
-     白底设计），逐行成块且与提取行（success 绿条）色彩分野；前两版（行级淡底/
-     分区淡底+白卡行）均因观感被否 */
+  /* 识别条件行左缘主色 3px 竖条（与提取行 success 绿条色彩分野，行区域标识） */
   border-left: 3px solid var(--el-color-primary);
   border-radius: var(--app-radius);
-  padding: 10px;
+  padding: 0 10px;
 }
 
-.li-condx-row.is-invalid {
+.li-condx-card.is-invalid {
   border-color: var(--el-color-danger);
 }
 
-.li-condx-row-head {
+/* 卡片主行：恒定一行高（高度显式约束）+单行截断——徽标/按钮不换行 */
+.li-condx-card-line {
+  height: 40px;
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex: none;
+}
+
+.li-condx-card-no {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-secondary);
+}
+
+.li-condx-card-target {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-color-primary);
+}
+
+/* 模板摘要：单行截断（悬浮 title 看全文） */
+.li-condx-card-tpl {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--app-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 复杂度徽标段（「· 附加×N」「· 校验×N」「· 第N级」）：正文外收纳 */
+.li-condx-card-note {
+  flex: none;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  white-space: nowrap;
+}
+
+/* 独立徽标（非/多值/⚠/✗）：小色块 */
+.li-condx-card-flag {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: var(--app-radius);
+  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  color: var(--app-text-secondary);
+  white-space: nowrap;
+}
+
+.li-condx-card-flag.is-warn {
+  color: var(--app-color-warning, var(--app-text-secondary));
+  border-color: var(--app-color-warning, var(--app-border-color-light));
+}
+
+.li-condx-card-flag.is-err {
+  color: var(--app-color-danger);
+  border-color: var(--app-color-danger);
+}
+
+/* 括号子组组框（页内直显）：框内边距=成员卡相对顶层的缩进，嵌套组=框中框自然
+   再缩进一层；左缘竖条与条件卡同款（识别条件行区域标识） */
+.li-condx-group {
+  margin: 4px 0;
+  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  border-left: 3px solid var(--el-color-primary);
+  border-radius: var(--app-radius);
+  padding: 0 10px 8px;
+  min-width: 0;
+}
+
+/* 组框头：恒定一行高（比成员卡矮一档，框界与内容分野）；「（」+组内接词语义
+   标注在左、组级操作（接词/拆组/换位/删整组）靠右 */
+.li-condx-group-head {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.li-condx-group-mark {
+  flex: none;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--app-color-primary);
+}
+
+/* 组内接词语义标注（成员行间接词统一=该词；混合=「且/或」） */
+.li-condx-group-word {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-color-primary);
 }
 
 .li-condx-conn {
   width: 130px;
-}
-
-/* 弹窗内行头全局行号小字（帧3/帧4）：「第 N 行」——次级文字、不换行 */
-.li-condx-rowno {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-  white-space: nowrap;
+  flex: none;
 }
 
 .li-condx-neg {
@@ -772,6 +552,7 @@ function badgeDriftNotice(i: number): string {
   gap: 4px;
   font-size: 12px;
   color: var(--app-text-secondary);
+  white-space: nowrap;
 }
 
 /* 「非」/「括号」开关禁用态（封顶层/多成员组）：整体降透明度呈灰 */
@@ -780,13 +561,33 @@ function badgeDriftNotice(i: number): string {
   cursor: not-allowed;
 }
 
-/* 括号子组紧凑卡成员摘要（帧2/帧5）：「括号子组 · N 行：…」单行可换行 */
-.li-condx-groupcard {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--app-text-primary);
-  word-break: break-all;
+/* 换位组：靠右成组（模板摘要 flex:1 已占满剩余空间）；tooltip 悬停由内层 span 接管 */
+.li-condx-move {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.li-condx-move-btn {
+  display: inline-flex;
+}
+
+/* 换位组与行操作按钮的竖分隔线：间距交由主行 gap 统一（清零 divider 自带 margin） */
+.li-condx-move-sep {
+  margin: 0;
+  height: 14px;
+}
+
+/* 删行按钮：随换位组之后成组靠右 */
+.li-condx-del {
+  flex: none;
+}
+
+/* 卡片列表底部动作区（〔+ 加条件〕靠右） */
+.li-condx-cards-foot {
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* 删整组确认弹窗：正文与底部按钮行 */
@@ -802,259 +603,5 @@ function badgeDriftNotice(i: number): string {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-/* 行头换位组（决策1）：靠右成组（叶子行吃掉行头剩余空间；组行的紧凑卡 flex:1
-   已占满、margin-left:auto 无副作用）；tooltip 悬停由内层 span 接管 */
-.li-condx-move {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-}
-
-.li-condx-move-btn {
-  display: inline-flex;
-}
-
-/* 换位组与行操作按钮的竖分隔线（2026-11-10 审片修订）：间距交由行头 gap 统一
-   （清零 divider 自带 margin），高度对齐 small 按钮行 */
-.li-condx-move-sep {
-  margin: 0;
-  height: 14px;
-}
-
-/* 删行按钮：随换位组之后成组靠右（右对齐职责已移交 .li-condx-move） */
-.li-condx-del {
-  flex: none;
-}
-
-/* 行级校验红字（与父组件引用行/提取行共用同名词，两份同值） */
-.li-red-row-hint {
-  margin: 0;
-  font-size: 12px;
-  color: var(--app-color-danger);
-  word-break: break-all;
-}
-
-/* 提示级 ⚠（位次漂移提示；与父组件引用行提示共用同名词，两份同值） */
-.li-ref-notice {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--app-color-warning, var(--app-text-secondary));
-  word-break: break-all;
-}
-
-.li-condx-targets {
-  display: flex;
-  gap: 8px;
-}
-
-.li-condx-card {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: var(--app-radius);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.li-condx-card.is-active {
-  border-color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.li-condx-card-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--app-text-primary);
-}
-
-.li-condx-card-note {
-  font-size: 11px;
-  color: var(--app-text-secondary);
-  line-height: 1.5;
-}
-
-.li-condx-fmt {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-
-.li-condx-mode {
-  width: 130px;
-  flex: none;
-}
-
-.li-condx-tpl {
-  flex: 1;
-  resize: vertical;
-  font-family: var(--app-font-mono, monospace);
-  font-size: 13px;
-  line-height: 1.6;
-  padding: 6px 8px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: var(--app-radius);
-  background: transparent;
-  color: var(--app-text-primary);
-}
-
-.li-condx-tpl:focus {
-  outline: none;
-  border-color: var(--el-color-primary);
-}
-
-.li-condx-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-/* 模板词元切分预览（位次角标）：字面段灰字 + 占位词 chip；位≥2 的 chip 带
-   「第N处」角标（data-pos，复用可选 chip 的 ::after 角标样式先例）、主色描边 */
-.li-condx-toks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
-
-.li-condx-tok-lit {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-  word-break: break-all;
-}
-
-.li-condx-tok {
-  font-size: 12px;
-  padding: 1px 6px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: 10px;
-  color: var(--app-text-primary);
-}
-
-.li-condx-tok[data-pos] {
-  border-color: var(--el-color-primary);
-}
-
-.li-condx-tok[data-pos]::after {
-  content: attr(data-pos);
-  margin-left: 4px;
-  padding: 0 3px;
-  font-size: 10px;
-  line-height: 1.4;
-  border-radius: 4px;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.li-condx-chip {
-  font-size: 12px;
-  padding: 2px 8px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: 10px;
-  background: transparent;
-  cursor: pointer;
-  color: var(--app-text-primary);
-}
-
-.li-condx-chip:hover {
-  border-color: var(--el-color-primary);
-  color: var(--el-color-primary);
-}
-
-.li-condx-chip.is-example {
-  color: var(--app-text-secondary);
-}
-
-/* 可选记号词条（模板含 ? 的示例）：虚化虚线边框 + 淡色「可选」角标——阶段3
-   可选 chip 样式（无既有可选类先例，不阻塞语义的小额呈现设计）。 */
-.li-condx-chip.is-optional {
-  border-style: dashed;
-  color: var(--app-text-secondary);
-}
-
-.li-condx-chip.is-optional::after {
-  content: '可选';
-  margin-left: 4px;
-  padding: 0 3px;
-  font-size: 10px;
-  line-height: 1.4;
-  border-radius: 4px;
-  color: var(--el-color-primary);
-  background: var(--el-color-primary-light-9);
-}
-
-.li-condx-chips-sep {
-  color: var(--app-border-color-lighter, var(--app-border-color-light));
-}
-
-.li-condx-extra {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  border-top: 1px dashed var(--app-border-color-lighter, var(--app-border-color-light));
-  padding-top: 8px;
-}
-
-.li-condx-extra-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.li-condx-addsel {
-  width: 180px;
-}
-
-.li-condx-inline {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.li-condx-inline-label {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-}
-
-.li-condx-minitpl {
-  width: 160px;
-  resize: none;
-  font-family: var(--app-font-mono, monospace);
-  font-size: 12px;
-  padding: 4px 6px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  border-radius: var(--app-radius);
-  background: transparent;
-  color: var(--app-text-primary);
-}
-
-.li-condx-mini {
-  width: 150px;
-}
-
-.li-condx-num {
-  width: 110px;
-}
-
-.li-condx-dot {
-  color: var(--el-color-primary);
-  font-size: 10px;
-}
-
-.li-condx-fold {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--app-text-secondary);
 }
 </style>

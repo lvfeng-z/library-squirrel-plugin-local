@@ -1,7 +1,6 @@
 // 规则编辑弹窗（RuleEditDialog）的共享模型与纯函数：v4 条件行（三步漏斗）
 // 模型 + 提取段选项与「仅序列成员产出」when 原子构造/判别/并入/移除逻辑。
-// 纯前端模型，无 IO（唯一非纯量=文末「括号子组编辑入口」侧信道的一个 Vue ref）。
-import { ref } from 'vue'
+// 纯前端模型，无 IO（全部为纯函数与常量）。
 
 
 // 提取动作 JSON 的前端镜像（when 为原样透传的条件表达式树；row 为 v4 capture
@@ -248,8 +247,8 @@ export function condxVocabOf(word: string): { word: string; group: string; digit
 // 目标三分三卡（R3）：note=范围语义说明小字（卡片小字与悬停提示同源消费——
 // 卡片与 title 用同一常量）。
 export const CONDX_TARGETS: { value: 'file' | 'dir' | 'seq'; label: string; note: string }[] = [
-  { value: 'file', label: '文件', note: '按格式匹配文件名(不含扩展名)命中的满足格式的每个文件' },
-  { value: 'dir', label: '目录', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)；可用「位于第 N 级」限定层级（自识别根数起）' },
+  { value: 'file', label: '文件名', note: '按格式匹配文件名(不含扩展名)命中的满足格式的每个文件' },
+  { value: 'dir', label: '目录名', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)；可用「位于第 N 级」限定层级（自识别根数起）' },
   { value: 'seq', label: '序列', note: '文件名按模板成套—非序号部分为{公共段}；公共段相同≥2才算、落单不算、不跨目录' }
 ]
 
@@ -464,29 +463,14 @@ export function condxRowNos(rows: CondxRowForm[], base = 0): number[] {
   return out
 }
 
-// 行内容概要（紧凑卡与摘要行共用的目标+格式段）：目标标签+「格式」（含这个词
-// →含「词」；模板→旧词归一后的模板文本）。
+// 行内容概要（摘要行共用的目标+格式段）：目标标签+「格式」（含这个词→含「词」；
+// 模板→旧词归一后的模板文本）。
 export function condxRowBrief(condx: CondxForm): string {
   const target = CONDX_TARGETS.find((t) => t.value === condx.target)
   const fmt = condx.format.mode === 'contains'
     ? `含「${condx.format.word || '?'}」`
     : condxNormalizeTpl(condx.format.tpl || '?')
   return `${target ? target.label : condx.target}「${fmt}」`
-}
-
-// 括号子组紧凑卡成员概要：单成员=成员概要（成员又是子组时递归圆括号包裹）；
-// 多成员=成员全局行号以接词相连（「第2行 或 第3行」形态，行号=全局先序号）。
-export function condxGroupBrief(group: CondxRowForm[], base: number): string {
-  if (group.length === 1) {
-    const member = group[0]
-    return member.condition
-      ? condxRowBrief(member.condition)
-      : `（${condxGroupBrief(member.group || [], base)}）`
-  }
-  const nos = condxRowNos(group, base)
-  return group
-    .map((member, idx) => (idx === 0 ? `第${nos[idx]}行` : ` ${condxConnLabel(member.connector)} 第${nos[idx]}行`))
-    .join('')
 }
 
 // 开关「开」（叶子行入组）：原行去接词入组（组内首行无接词）、组行继承原行接词
@@ -511,13 +495,27 @@ export function condxUnwrapRow(row: CondxRowForm): void {
 // 行表规整移除：splice 指定位后，删的是 0 位且仍有后行时清空新首行 connector——
 // 首行接词控件不渲染（编辑器 v-if="i > 0"），残留接词在 UI 不可见、保存被内核
 // validateCondxRowsAt 拒（「首行不能带行前连接词」，顶层与组内行表同规递归）。
-// 所有条件行表移除路径统一经本函数：删普通行/删整组紧凑卡（CondxRowsEditor）、
-// 组内删空自动拆组的组行移除（CondxGroupDialog 父表/顶层表两处）、条件行转
-// 引用行（RuleEditDialog）。
+// 所有条件行表移除路径统一经本函数：删普通行/删整组（CondxRowsEditor 卡与
+// 组框头）、组内删空自动拆组的组行移除（CondxRowsEditor 组框 emptied 链）、
+// 条件行转引用行（RuleEditDialog）。
 export function condxRemoveRow(rows: CondxRowForm[], idx: number): void {
   if (idx < 0 || idx >= rows.length) return
   rows.splice(idx, 1)
   if (idx === 0 && rows.length) rows[0].connector = ''
+}
+
+// 全树按引用同一性定位行所在的行表与下标（条件编辑弹窗「新增取消移除行」等跨层
+// 行定位用；括号子组递归；找不到返回 null——行不在该树内）。
+export function condxFindRowList(root: CondxRowForm[], row: CondxRowForm): { list: CondxRowForm[]; idx: number } | null {
+  const idx = root.indexOf(row)
+  if (idx >= 0) return { list: root, idx }
+  for (const r of root) {
+    if (Array.isArray(r.group)) {
+      const hit = condxFindRowList(r.group, row)
+      if (hit) return hit
+    }
+  }
+  return null
 }
 
 // —— 条件行换位（上移/下移：内容交换 + 行号映射 + 引用重映射 + 相等门拦截） ——
@@ -772,16 +770,6 @@ function condxRowsShapeErrorAt(rows: CondxRowForm[], base: number): string {
   }
   return ''
 }
-
-// —— 括号子组编辑入口（组件间侧信道；本文件唯一非纯量） ——
-
-// 顶层 CondxRowsEditor 紧凑卡〔编辑〕点击的组行与其所在行表：RuleEditDialog 的
-// edit-group 接线只开窗（不带行引用），CondxGroupDialog 开窗时经此取得组行与
-// 顶层行表，构建面包屑导航栈首层与删空拆组的定位基准（组行 group 引用=编辑直改
-// 同一 reactive 行树，无取消语义、实时生效）。弹窗内的下钻不写此信道（弹窗内
-// 编辑器 recordEntry=false；CondxGroupDialog 直接接 editGroup 事件 push 导航栈）
-// ——开窗入口的组行引用在整个弹窗生命周期内不变。
-export const condxGroupEditEntry = ref<{ row: CondxRowForm; rows: CondxRowForm[] } | null>(null)
 
 // —— 重复段词（占位词内部量词变体）前端轻量镜像（与内核 parseCondxVariant 同口径） ——
 
@@ -1153,9 +1141,9 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
   if (!condx) return '须选择目标与格式'
   if (condx.anchor != null) return '主体锚（ref）为二期能力，v4 不支持'
   const target = condx.target
-  if (!CONDX_TARGETS.some((t) => t.value === target)) return '须选择目标（文件/目录/序列）'
+  if (!CONDX_TARGETS.some((t) => t.value === target)) return '须选择目标（文件名/目录名/序列）'
   if (condx.format.mode === 'contains') {
-    if (target !== 'dir') return '「含这个词」仅目录目标可用'
+    if (target !== 'dir') return '「含这个词」仅目录名目标可用'
     if (!(condx.format.word || '').trim()) return '包含词为空'
     if (condxTemplateChips(condx.format.word || '').chips) return '包含词须为纯文字（不含占位词）'
   } else {
@@ -1169,7 +1157,7 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
   const allowed = (CONDX_ATTACH_OPTIONS[target] || []).map((o) => o.value)
   const placeholders = condxRowPlaceholders(condx)
   for (const a of condx.attach || []) {
-    if (allowed.indexOf(a.kind) < 0) return `终结谓词「${a.kind}」不适用于${target === 'file' ? '文件' : target === 'dir' ? '目录' : '序列'}目标`
+    if (allowed.indexOf(a.kind) < 0) return `终结谓词「${a.kind}」不适用于${target === 'file' ? '文件名' : target === 'dir' ? '目录名' : '序列'}目标`
     const opt = (CONDX_ATTACH_OPTIONS[target] || []).find((o) => o.value === a.kind)
     for (const need of opt ? opt.needs : []) {
       if (need === 'tpl' && condxTemplateError(a.tpl || '')) return `附加条件的迷你模板不完整`
@@ -1393,4 +1381,107 @@ export function condxShapeSummary(rows: unknown): CondxShapeSummary {
     return hit ? hit.label : t
   })
   return { label: names.join('+'), count: flat.length, levelNote: notes.join(' · ') }
+}
+
+// —— 卡片摘要派生（规则编辑面总览：条件卡/产出卡的一行摘要字段，纯函数） ——
+
+// 条件卡模板摘要的截断长度（字符数，超出以「…」收尾）——卡片正文不随模板长度
+// 增长，复杂度只进徽标计数（总览密度守恒）。
+export const CONDX_CARD_TPL_MAX = 48
+
+// 条件卡片摘要字段：序号+目标词+模板文本（截断）+复杂度徽标计数（附加×N/校验×N/
+// 非/多值）+接词+层级锚小字。multiValue=模板含重复段词（多值产出）；levelNote=
+// 目录行层级锚（「第 N 级」）。
+export interface CondxRowCardView {
+  no: number
+  targetLabel: string
+  templateText: string
+  attachCount: number
+  badgeCount: number
+  negated: boolean
+  multiValue: boolean
+  connectorLabel: string
+  levelNote: string
+}
+
+export function condxRowCardView(row: CondxRowForm, no: number): CondxRowCardView {
+  const condx = row.condition
+  if (!condx) {
+    return {
+      no,
+      targetLabel: '—',
+      templateText: '（未设条件）',
+      attachCount: 0,
+      badgeCount: 0,
+      negated: !!row.negated,
+      multiValue: false,
+      connectorLabel: condxConnLabel(row.connector),
+      levelNote: ''
+    }
+  }
+  const target = CONDX_TARGETS.find((t) => t.value === condx.target)
+  const raw = condx.format.mode === 'contains'
+    ? `含「${condx.format.word || '?'}」`
+    : condxNormalizeTpl(condx.format.tpl || '')
+  return {
+    no,
+    targetLabel: target ? target.label : String(condx.target),
+    templateText: raw.length > CONDX_CARD_TPL_MAX ? `${raw.slice(0, CONDX_CARD_TPL_MAX)}…` : raw,
+    attachCount: (condx.attach || []).length,
+    badgeCount: (condx.badges || []).length,
+    negated: !!row.negated,
+    multiValue: condxRowAllPlaceholders(condx).some((p) => p.repeat),
+    connectorLabel: condxConnLabel(row.connector),
+    levelNote: condxDirLevelNote(condx)
+  }
+}
+
+// 英文组名（含位次化 tag__2）→ 中文显示词（词表九词组名唯一；位次化组名按
+// 词根中文+「·第N处」呈现）。
+export function condxGroupWordOf(group: string): string {
+  const m = /^(.+?)__(\d+)$/.exec(group)
+  const base = m ? m[1] : group
+  const hit = CONDX_VOCAB.find((v) => v.group === base)
+  const word = hit ? hit.word : base
+  return m ? `${word}·第${m[2]}处` : word
+}
+
+// 产出卡片摘要（单行）：维度 ← 来源摘要（capture/refCapture 携「第 N 行·{词}」
+// 寻址、常量携值）+角色/仅序列成员小缀。refLabelOf 由调用方传入（被引成员的显示
+// 名解析，保持本函数纯——不挂档案数据源）。
+export interface ExtractionCardSource {
+  dimension: string
+  from: string
+  captureName?: string
+  captureRow?: number
+  refRule?: string
+  constant?: string
+  scanScope?: string
+  roleName?: string
+  seqOnly?: boolean
+}
+
+export interface ExtractionCardView {
+  dimLabel: string
+  fromText: string
+  roleSuffix: string
+}
+
+export function extractionCardView(row: ExtractionCardSource, refLabelOf?: (ruleId: string) => string): ExtractionCardView {
+  const dim = DIMENSION_OPTIONS.find((d) => d.value === row.dimension)
+  const from = FROM_OPTIONS.find((f) => f.value === row.from)
+  const rowNo = row.captureRow || 1
+  let fromText = from ? from.label : row.from
+  if (row.from === 'capture' && row.captureName) {
+    fromText = `第 ${rowNo} 行·{${condxGroupWordOf(row.captureName)}}`
+  } else if (row.from === 'refCapture' && row.captureName) {
+    const label = refLabelOf && row.refRule ? refLabelOf(row.refRule) : row.refRule || '?'
+    fromText = `${label}·第 ${rowNo} 行·{${condxGroupWordOf(row.captureName)}}`
+  } else if ((row.from === 'constant' || row.from === 'adjudication') && (row.constant || '').trim()) {
+    fromText = `${fromText} ${row.constant}`
+  }
+  const suffix: string[] = []
+  if (row.roleName) suffix.push(`角色 ${row.roleName}`)
+  if (row.seqOnly) suffix.push('仅序列成员')
+  return { dimLabel: dim ? dim.label : row.dimension, fromText, roleSuffix: suffix.length ? ` · ${suffix.join(' · ')}` : '' }
 }

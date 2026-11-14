@@ -22,11 +22,11 @@
           <el-switch v-model="enabledInput" active-text="启用" inactive-text="停用" />
         </div>
 
-        <!-- 上半「识别规则」（v4 条件行 · 三步漏斗）：目标四卡（文件/目录/序列/
-             引用规则）→ 格式模板 → 附加条件+值校验；行前 且/或 + 行级非 + 括号
-             子组（行内「括号」开关入组、紧凑卡一行承载、弹窗编辑）；引用行恒置
-             条件行上方、独立编号「引用 N」、不占条件行「第 N 行」（W4 规则组合
-             引用） -->
+        <!-- 上半「识别规则」（卡片总览）：引用行卡+条件卡列表（序号/目标/模板摘要/
+             复杂度徽标/接词，恒定高度）；逐条件编辑经条件编辑弹窗（三步漏斗=目标
+             四卡〔文件名/目录名/序列/引用规则〕→格式模板→附加条件+值校验）；括号
+             子组页内直显（组框缩进承载成员卡，嵌套封顶 3 层）；引用行恒置条件行
+             上方、独立编号「引用 N」、不占条件行「第 N 行」（W4 规则组合引用） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">识别规则<span class="li-red-sec-note">上半 · 决定规则命中哪些文件</span></h4>
@@ -38,58 +38,67 @@
 
           <template v-if="!condxJsonMode">
             <p v-if="condxError" class="li-red-error">{{ condxError }}</p>
-            <!-- 引用行（W4 剧本一·帧4/帧5）：一卡一行一条成员规则；恒置条件行上方、
-                 独立编号「引用 N」、不带且/或；候选＝档案里其余非组合规则且非本条自身 -->
+            <!-- 条件卡片区（总览）：引用行卡（同款卡片+「引用」徽标，恒置条件行
+                 上方、独立编号「引用 N」、不带且/或；候选＝档案里其余非组合规则且
+                 非本条自身）+ 条件卡列表（CondxRowsEditor，括号子组=组框页内直显、
+                 成员卡与顶层同款）；位次漂移结果经 occurDrift 下传（快照与刷新留本
+                 组件，提取行漂移提示与卡片⚠徽标共用）、行换位经 moved 上抛
+                 （onCondxRowsMoved 改写三类行号引用；组框内换位逐层上浮同一消费）、
+                 逐条件编辑经条件编辑弹窗（editRow 开窗，组内成员卡同一链路）、
+                 提取区 JSON 模式经 extractionsJsonMode 下传（移动按钮禁用） -->
+            <div class="li-red-zone-head">
+              <span class="li-red-zone-title">条件（{{ condxCardCount }}）</span>
+            </div>
             <div
               v-for="(r, i) in refRows"
               :key="`ref${i}`"
-              class="li-condx-row li-ref-row"
+              class="li-condx-card"
               :class="{ 'is-invalid': !r.ruleId }"
             >
-              <div class="li-condx-row-head">
-                <span class="li-ref-no">引用 {{ i + 1 }}{{ r.ruleId ? '' : '（新行）' }}</span>
-                <span class="li-ref-desc">{{ refRowViews[i].desc }}</span>
+              <div class="li-condx-card-line">
+                <span class="li-condx-card-no">引用 {{ i + 1 }}{{ r.ruleId ? '' : '（新行）' }}</span>
+                <span class="li-condx-card-flag is-ref">引用</span>
+                <span class="li-condx-card-tpl" :title="refRowViews[i].desc">{{ refRowViews[i].desc }}</span>
+                <span v-if="refRowViews[i].alert" class="li-condx-card-flag is-err" :title="refRowViews[i].alert">✗</span>
+                <span v-if="refRowViews[i].notice" class="li-condx-card-flag is-warn" :title="refRowViews[i].notice">⚠</span>
+                <el-button size="small" text @click="toggleRefOpen(i)">[编辑]</el-button>
                 <el-button size="small" text type="danger" class="li-condx-del" @click="refRows.splice(i, 1)">删行</el-button>
               </div>
-              <el-select
-                v-if="!r.ruleId"
-                :model-value="r.ruleId"
-                size="small"
-                placeholder="选择要引用的规则"
-                class="li-ref-select"
-                @update:model-value="r.ruleId = String($event)"
-              >
-                <el-option v-for="m in refCandidates" :key="m.id" :label="m.description || m.id" :value="m.id">
-                  <div class="li-ref-opt">
-                    <span class="li-ref-opt-desc">{{ m.description || m.id }}</span>
-                    <span class="li-ref-opt-id">{{ m.id }}</span>
+              <!-- 展开区：成员改选下拉恒在（终审反馈①·选B：已选成员亦可就地改选，
+                   改选后引用旧成员捕获的提取行就地标红兜底）；新行（未选成员）恒
+                   展开给选择下拉；已选成员展开透出成员目标类别与形态数（B3）+只读
+                   平铺成员条件行（F）+静态告警（D：单行序列零提取成员标红 ✗ /
+                   成员独立产出提示 ⚠） -->
+              <div v-if="refIsOpen(i)" class="li-condx-card-more">
+                <el-select
+                  :model-value="r.ruleId"
+                  size="small"
+                  placeholder="选择要引用的规则"
+                  class="li-ref-select"
+                  @update:model-value="r.ruleId = String($event)"
+                >
+                  <el-option v-for="m in refCandidates" :key="m.id" :label="m.description || m.id" :value="m.id">
+                    <div class="li-ref-opt">
+                      <span class="li-ref-opt-desc">{{ m.description || m.id }}</span>
+                      <span class="li-ref-opt-id">{{ m.id }}</span>
+                    </div>
+                  </el-option>
+                </el-select>
+                <p v-if="!r.ruleId" class="li-red-row-hint">须选择要引用的规则</p>
+                <template v-if="r.ruleId">
+                  <div v-if="refRowViews[i].flatLines.length" class="li-ref-flat">
+                    <p v-for="(line, li) in refRowViews[i].flatLines" :key="li" class="li-ref-flat-line">{{ line }}</p>
                   </div>
-                </el-option>
-              </el-select>
-              <p v-if="!r.ruleId" class="li-red-row-hint">须选择要引用的规则</p>
-              <!-- 引用行透出成员目标类别与形态数（B3）+ 只读平铺成员条件行（F）+
-                   静态告警（D：单行序列零提取成员标红 ✗ / 成员独立产出提示 ⚠） -->
-              <template v-if="r.ruleId">
-                <div v-if="refRowViews[i].flatLines.length" class="li-ref-flat">
-                  <p v-for="(line, li) in refRowViews[i].flatLines" :key="li" class="li-ref-flat-line">{{ line }}</p>
-                </div>
-                <p v-if="refRowViews[i].alert" class="li-ref-alert">{{ refRowViews[i].alert }}</p>
-                <p v-if="refRowViews[i].notice" class="li-ref-notice">{{ refRowViews[i].notice }}</p>
-              </template>
+                  <p v-if="refRowViews[i].alert" class="li-ref-alert">{{ refRowViews[i].alert }}</p>
+                  <p v-if="refRowViews[i].notice" class="li-ref-notice">{{ refRowViews[i].notice }}</p>
+                </template>
+              </div>
             </div>
-            <div v-if="refRows.length && condxRows.length" class="li-ref-divider"></div>
-            <!-- 条件行区块（CondxRowsEditor）：行表经 v-model:rows 传同一 reactive
-                 数组（就地编辑、无拷贝）；行转引用行经 toRef 上抛、括号子组紧凑卡
-                 〔编辑〕经 editGroup 上抛开窗（组内编辑器后续阶段接入）、位次漂移
-                 结果经 occurDrift 下传（快照与刷新留本组件，提取行漂移提示共用）、
-                 行换位经 moved 上抛（onCondxRowsMoved 改写引用）、提取区 JSON 模式
-                 经 extractionsJsonMode 下传（移动按钮禁用，自决2） -->
             <CondxRowsEditor
               v-model:rows="condxRows"
               :occur-drift="occurDrift"
               :extractions-json-mode="extractionsJsonMode"
-              @to-ref="onRowToRef"
-              @edit-group="condxGroupDialogState = true"
+              @edit-row="openCondxRowEdit"
               @moved="onCondxRowsMoved"
             />
             <!-- 占位词捕获清单（行号+词）：提取段引用的唯一来源 -->
@@ -137,6 +146,9 @@
           </p>
 
           <template v-if="!extractionsJsonMode">
+            <div class="li-red-zone-head">
+              <span class="li-red-zone-title">产出（{{ extractionRows.length }}）</span>
+            </div>
             <template v-for="(row, i) in extractionRows" :key="i">
               <!-- 「来自被引规则」分组头（F）：置于首个被引捕获行之前，转写提示
                    小字常驻（与镜像缺失 ⚠ 联动） -->
@@ -144,11 +156,22 @@
                 <div class="li-red-ref-group-title">── 来自被引规则 ──</div>
                 <p class="li-red-ref-group-hint">每条「被引规则捕获」提取行转写成员一行的捕获值；成员多形态（多行）时须逐行各接一条，未接线的形态取不到值</p>
               </div>
-              <div
-                class="li-red-ex-row"
-                :class="{ 'is-invalid': !!extractionRowHint(row) }"
-              >
-              <div class="li-red-ex-main">
+              <!-- 产出卡（总览）：摘要行恒定一行高（维度 ← 来源摘要+角色/仅序列
+                   成员小缀，纯函数派生）；〔编辑〕展开本行完整编辑器——行级校验
+                   不过的行恒展开（保存闸门呈现不因收起而不可见） -->
+              <div class="li-out-card" :class="{ 'is-invalid': !!extractionRowHint(row) }">
+                <div class="li-condx-card-line">
+                  <span class="li-out-mark">▸</span>
+                  <span class="li-condx-card-tpl" :title="outCardText(row)">{{ outCardText(row) }}</span>
+                  <span
+                    v-if="extractionDriftWarn(row) || refCaptureMirrorWarn(row, i)"
+                    class="li-condx-card-flag is-warn"
+                    :title="extractionDriftWarn(row) || refCaptureMirrorWarn(row, i)"
+                  >⚠</span>
+                  <el-button size="small" text @click="toggleOutOpen(i)">[编辑]</el-button>
+                </div>
+                <div v-if="outIsOpen(i)" class="li-out-editor">
+                <div class="li-red-ex-main">
                 <el-select v-model="row.dimension" size="small" placeholder="维度" class="li-red-ex-dim">
                   <el-option v-for="d in dimOptionsOf(row)" :key="d.value" :label="d.label" :value="d.value" />
                 </el-select>
@@ -241,7 +264,8 @@
               <p v-if="extractionDriftWarn(row)" class="li-red-mirror-warn">{{ extractionDriftWarn(row) }}</p>
               <!-- 镜像缺失提示（D）：成员多行声明同组词而本行只接线部分行 -->
               <p v-if="refCaptureMirrorWarn(row, i)" class="li-red-mirror-warn">{{ refCaptureMirrorWarn(row, i) }}</p>
-            </div>
+                </div>
+              </div>
             </template>
             <el-button size="small" text @click="addExtractionRow">+ 加一行</el-button>
           </template>
@@ -290,14 +314,23 @@
           </div>
         </section>
 
-        <!-- 括号子组编辑弹窗：常驻挂载、开关纯由 state 控制（紧凑卡〔编辑〕开窗，
-             组内条件行编辑器后续阶段接入）；先挂载后开窗，保证壳组件 @open 高度
-             测量正常触发；组内行换位经 moved 透传（onCondxRowsMoved 同一消费）、
-             提取区 JSON 模式经 extractionsJsonMode 下传（子组内移动禁用同口径） -->
-        <CondxGroupDialog
-          v-model:state="condxGroupDialogState"
-          :extractions-json-mode="extractionsJsonMode"
-          @moved="onCondxRowsMoved"
+        <!-- 条件编辑弹窗（卡片总览的逐条件编辑入口）：常驻挂载、开关纯由 state
+             控制（先挂载后开窗，保证壳组件 @open 高度测量正常触发）；草稿〔确定〕
+             经 confirm 就地回写行对象（negated/condition——行对象身份不变，行号
+             引用与换位链不受影响）、〔取消〕新增态移除开窗时追加的空行；目标卡
+             「引用规则」经 toRef 转引用行（onRowToRef 既有消费）；occurDrift 下传
+             供相等值校验的对方行漂移提示（本行模板漂移在弹窗内就地 diff） -->
+        <CondxRowEditDialog
+          v-model:state="condxRowDialogState"
+          :row="condxRowEditTarget"
+          :no="condxRowEditNo"
+          :mode="condxRowEditMode"
+          :root-rows="condxRows"
+          :occur-drift="occurDrift"
+          :allow-ref-row="condxRowEditAllowRef"
+          @confirm="onCondxRowEditConfirm"
+          @cancel="onCondxRowEditCancel"
+          @to-ref="onRowToRef"
         />
       </template>
 
@@ -421,7 +454,7 @@
 // 提取来源新增「被引规则捕获」＝成员规则·占位词（按引用行顺序分组）；引用行在
 // 场时空条件表合法；保存载荷增 refs（成员 ID 列表随既有 saveRule 原样入档）。
 import { ref, computed, watch } from 'vue'
-import CondxGroupDialog from './CondxGroupDialog.vue'
+import CondxRowEditDialog from './CondxRowEditDialog.vue'
 import CondxRowsEditor from './CondxRowsEditor.vue'
 import {
   DIMENSION_OPTIONS,
@@ -437,7 +470,6 @@ import {
   buildWhenWithoutSeqAtom,
   hasOtherConds,
   CONDX_TARGETS,
-  CONDX_VOCAB,
   condxFlatRows,
   condxRowsSummary,
   condxRowAllPlaceholders,
@@ -447,7 +479,10 @@ import {
   condxNormalizeTpl,
   condxNormalizeRows,
   condxRemoveRow,
+  condxFindRowList,
+  condxGroupWordOf,
   condxMoveRemapRefs,
+  extractionCardView,
   condxComboSentence,
   condxShapeSummary,
   condxDirLevelNote,
@@ -636,8 +671,39 @@ interface RefRowForm {
   ruleId: string
 }
 const refRows = ref<RefRowForm[]>([])
-// 括号子组编辑弹窗开关（空壳：紧凑卡〔编辑〕入口随后续阶段接入）
-const condxGroupDialogState = ref(false)
+// 条件编辑弹窗态：目标行（行树内引用）、全局先序行号、edit/add（空行=新增态——
+// 首步条件种类选择）、是否提供「引用规则」卡（顶层条件行=true；括号子组内条件行
+// =false——引用行不进括号子组）
+const condxRowDialogState = ref(false)
+const condxRowEditTarget = ref<CondxRowForm | null>(null)
+const condxRowEditNo = ref(1)
+const condxRowEditMode = ref<'edit' | 'add'>('edit')
+const condxRowEditAllowRef = ref(true)
+
+// 条件卡〔编辑〕/〔+ 加条件〕开窗（顶层卡与组框内成员卡同一链路——成员卡经组框
+// 内编辑器逐层上浮至此）：空行按新增态开（首步条件种类选择）、已设内容按编辑态直达
+function openCondxRowEdit(row: CondxRowForm, no: number): void {
+  condxRowEditTarget.value = row
+  condxRowEditNo.value = no
+  condxRowEditMode.value = row.condition ? 'edit' : 'add'
+  condxRowEditAllowRef.value = condxRows.value.indexOf(row) >= 0
+  condxRowDialogState.value = true
+}
+
+// 条件编辑弹窗〔确定〕：草稿就地回写行对象（negated/condition——行对象身份
+// 不变，行号引用与换位链不受影响；行树深侦听触发位次漂移刷新与摘要重算）
+function onCondxRowEditConfirm(row: CondxRowForm, draft: CondxRowForm): void {
+  row.negated = draft.negated
+  row.condition = draft.condition
+}
+
+// 条件编辑弹窗〔取消〕：新增态移除开窗时追加的空行（全树定位——组内追加的行
+// 同链移除；规整移除=删 0 位行后新首行接词清零）；编辑态不动（草稿即弃）
+function onCondxRowEditCancel(row: CondxRowForm): void {
+  if (condxRowEditMode.value !== 'add') return
+  const hit = condxFindRowList(condxRows.value, row)
+  if (hit) condxRemoveRow(hit.list, hit.idx)
+}
 const condxText = ref('')
 const condxJsonMode = ref(false)
 const condxError = ref('')
@@ -793,15 +859,8 @@ const declaredRefCaptures = computed<Set<string>>(() =>
   new Set(refCaptureGroups.value.flatMap((g) => g.captures.map((c) => `${g.ruleId}/${c.row}/${c.group}`)))
 )
 
-// 英文组名 → 中文词（失效行残影呈现用；词表九词组名唯一）；位次化组名
-//（tag__2）按词根中文+「·第N处」呈现。
-function groupWordOf(group: string): string {
-  const m = /^(.+?)__(\d+)$/.exec(group)
-  const base = m ? m[1] : group
-  const hit = CONDX_VOCAB.find((v) => v.group === base)
-  const word = hit ? hit.word : base
-  return m ? `${word}·第${m[2]}处` : word
-}
+// 英文组名 → 中文显示词（含位次化组名）统一走 ruleFormModel 的 condxGroupWordOf
+// （失效行残影与产出卡摘要共用同一呈现口径）。
 
 // 失效占位词残影选项（剧本三·帧1）：行值不在成员现声明中时补一枚禁用选项，
 // 让行上仍按「成员 · 第 N 行 · {词}」呈现且不可重选
@@ -814,7 +873,7 @@ const refCaptureStaleOptions = computed<{ value: string; label: string }[]>(() =
     const key = `${row.refRule}/${row.captureRow}/${row.captureName}`
     if (declared.has(key) || seen.has(key)) continue
     seen.add(key)
-    out.push({ value: key, label: `${refRuleLabel(row.refRule)} · 第 ${row.captureRow} 行 · {${groupWordOf(row.captureName)}}` })
+    out.push({ value: key, label: `${refRuleLabel(row.refRule)} · 第 ${row.captureRow} 行 · {${condxGroupWordOf(row.captureName)}}` })
   }
   return out
 })
@@ -919,13 +978,11 @@ function refCaptureMirrorWarn(row: ExtractionRow, index: number): string {
   const missing = declared.filter((n) => wiredUnique.indexOf(n) < 0)
   if (!wiredUnique.length || !missing.length) return ''
   const list = (nums: number[]): string => nums.join('、')
-  return `⚠ {${groupWordOf(row.captureName)}}在成员第 ${list(declared)} 行都声明，你只接线了第 ${list(wiredUnique)} 行——第 ${list(missing)} 行形态命中时取不到值`
+  return `⚠ {${condxGroupWordOf(row.captureName)}}在成员第 ${list(declared)} 行都声明，你只接线了第 ${list(wiredUnique)} 行——第 ${list(missing)} 行形态命中时取不到值`
 }
 
-// 点「引用规则」卡（帧3）：该行转出条件行列表、追加为引用行——恒置条件行上方、
-// 独立编号「引用 N」、不占条件行「第 N 行」（占位词寻址不受影响）、不带且/或
-// 行转引用行（CondxRowsEditor 目标卡「引用规则」toRef 事件上抛）：该行从条件行表
-// 移入引用行表
+// 行转引用行（条件编辑弹窗目标卡「引用规则」toRef 事件上抛，顶层与新增两态同
+// 消费）：该行从条件行表移入引用行表
 function onRowToRef(row: CondxRowForm): void {
   const idx = condxRows.value.indexOf(row)
   if (idx < 0) return
@@ -934,7 +991,40 @@ function onRowToRef(row: CondxRowForm): void {
   refRows.value.push({ ruleId: '' })
 }
 
-// 条件行换位落地（moved 事件，顶层编辑器与子组弹窗透传两路）：行表已在编辑器内
+// —— 卡片总览：引用行卡/产出卡展开态与摘要 ——
+
+// 引用行卡展开态：〔编辑〕切换；新行（未选成员）恒展开（选择下拉必须可达）
+const refOpenMap = ref<Record<number, boolean>>({})
+function refIsOpen(i: number): boolean {
+  const r = refRows.value[i]
+  return !r?.ruleId || refOpenMap.value[i] === true
+}
+function toggleRefOpen(i: number): void {
+  refOpenMap.value[i] = !refIsOpen(i)
+}
+
+// 产出卡展开态：〔编辑〕切换；行级校验不过的行缺省展开（保存闸门呈现不因收起
+// 而不可见），显式收起后不再自动展开
+const outOpenMap = ref<Record<number, boolean>>({})
+function outIsOpen(i: number): boolean {
+  if (outOpenMap.value[i] !== undefined) return outOpenMap.value[i]
+  const row = extractionRows.value[i]
+  return !!row && !!extractionRowHint(row)
+}
+function toggleOutOpen(i: number): void {
+  outOpenMap.value[i] = !outIsOpen(i)
+}
+
+// 产出卡摘要文本（纯函数派生：维度 ← 来源摘要+角色/仅序列成员小缀）
+function outCardText(row: ExtractionRow): string {
+  const v = extractionCardView(row, refRuleLabel)
+  return `${v.dimLabel} ← ${v.fromText}${v.roleSuffix}`
+}
+
+// 条件卡片区计数（条件行数——括号子组递归计；引用行独立编号不计入）
+const condxCardCount = computed(() => condxFlatRows(condxRows.value).length)
+
+// 条件行换位落地（moved 事件，顶层编辑器与组框内编辑器逐层上浮两路）：行表已在编辑器内
 // 就地内容交换，此处按随行上抛的全局行号映射改写三类行号引用（决策3）——提取行
 // captureRow 与生效条件 when 树捕获操作数、条件树值校验 againstRow（递归子组）；
 // refCapture 行号指向被引规则不改写（声明9）。提取区 JSON 模式下移动按钮整体禁用
@@ -1423,6 +1513,8 @@ watch(
   () => props.state,
   (open) => {
     if (open) initFromProps()
+    // 主弹窗关闭时随关条件编辑弹窗（避免对已不在场行树的陈旧草稿会话做回写）
+    else condxRowDialogState.value = false
   },
   { immediate: true }
 )
@@ -1723,21 +1815,35 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   line-height: 1.6;
 }
 
-/* 提取段行：主行（维度←来源）+ 副行（角色/条件/剥壳提示）+ 行级提示 */
-.li-red-ex-row {
+/* 产出卡（总览）：容器纵向承载恒定高度摘要行+可选展开编辑器；左缘 success 绿
+   3px 竖条（与识别条件行主色蓝条色彩分野，行区域标识沿用） */
+.li-out-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  border-left: 3px solid var(--el-color-success);
+  border-radius: var(--app-radius);
+  padding: 0 10px;
+}
+
+.li-out-card.is-invalid {
+  border-color: var(--app-color-danger);
+}
+
+/* 产出卡展开编辑区：主行（维度←来源）+ 副行（角色/条件/剥壳提示）+ 行级提示 */
+.li-out-editor {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  /* 2026-10-28 行区域标识·左缘色条：提取条件行左缘 success 绿 3px 竖条（与识别行
-     主色蓝条分野，见 .li-condx-row 注） */
-  border-left: 3px solid var(--el-color-success);
-  border-radius: var(--app-radius);
-  padding: 8px 10px;
+  border-top: 1px dashed var(--app-border-color-lighter, var(--app-border-color-light));
+  padding: 8px 0;
 }
 
-.li-red-ex-row.is-invalid {
-  border-color: var(--app-color-danger);
+/* 产出卡摘要行首的「▸」记号 */
+.li-out-mark {
+  flex: none;
+  color: var(--app-text-secondary);
 }
 
 .li-red-ex-main {
@@ -2038,52 +2144,105 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   color: var(--app-text-secondary);
 }
 
-/* v4 条件行（三步漏斗）：行卡片 + 目标三卡 + 词条 chips + 附加/值校验行 */
-.li-condx-row {
+/* 卡片总览区标题（「条件（N）」「产出（N）」） */
+.li-red-zone-head {
+  display: flex;
+  align-items: center;
+}
+
+.li-red-zone-title {
+  margin-right: auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-primary);
+}
+
+/* 引用行卡（与条件卡同款）：容器纵向承载恒定高度主行+可选展开区；左缘主色
+   3px 竖条（识别条件行行区域标识沿用） */
+.li-condx-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  /* 2026-10-28 行区域标识·左缘色条（第三版，用户裁决「换方案」）：识别条件行
-     左缘主色 3px 竖条——不动任何底色（行/分区透明复原，行内组件配色环境即原
-     白底设计），逐行成块且与提取行（success 绿条）色彩分野；前两版（行级淡底/
-     分区淡底+白卡行）均因观感被否 */
   border-left: 3px solid var(--el-color-primary);
   border-radius: var(--app-radius);
-  padding: 10px;
+  padding: 0 10px;
 }
 
-.li-condx-row.is-invalid {
-  border-color: var(--el-color-danger);
+.li-condx-card.is-invalid {
+  border-color: var(--app-color-danger);
 }
 
-.li-condx-row-head {
+/* 卡片主行：恒定一行高（高度显式约束——卡片高度不随条件内部复杂度增长） */
+.li-condx-card-line {
+  height: 40px;
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex: none;
+}
+
+.li-condx-card-no {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-secondary);
+}
+
+/* 卡片摘要正文：单行截断（悬浮 title 看全文） */
+.li-condx-card-tpl {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--app-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 卡片徽标（引用/✗/⚠ 等）：小色块 */
+.li-condx-card-flag {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: var(--app-radius);
+  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  color: var(--app-text-secondary);
+  white-space: nowrap;
+}
+
+.li-condx-card-flag.is-ref {
+  color: var(--app-color-primary);
+  border-color: var(--app-color-primary);
+}
+
+.li-condx-card-flag.is-warn {
+  color: var(--app-color-warning, var(--app-text-secondary));
+  border-color: var(--app-color-warning, var(--app-border-color-light));
+}
+
+.li-condx-card-flag.is-err {
+  color: var(--app-color-danger);
+  border-color: var(--app-color-danger);
+}
+
+/* 卡片展开区（引用行卡成员明细/产出卡编辑器入口共用） */
+.li-condx-card-more {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  border-top: 1px dashed var(--app-border-color-lighter, var(--app-border-color-light));
+  padding: 6px 0 8px;
 }
 
 .li-condx-del {
   margin-left: auto;
 }
 
-/* W4 引用行（剧本一·帧4/帧5）：独立编号 + 引用规则描述 + 删行；候选下拉两行
-   （描述 + ID 小字）；与条件行之间的分隔线 */
-.li-ref-no {
-  flex-shrink: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--app-text-primary);
-}
-
-.li-ref-desc {
-  flex: 1;
-  min-width: 0;
-  font-size: 13px;
-  color: var(--app-text-primary);
-  word-break: break-all;
-}
-
+/* W4 引用行卡展开区：候选下拉两行（描述 + ID 小字） */
 .li-ref-select {
   width: 100%;
   max-width: 420px;
@@ -2105,10 +2264,6 @@ function previewSampleLine(s: RulePreviewSampleView): string {
 .li-ref-opt-id {
   font-size: 11px;
   color: var(--app-text-secondary);
-}
-
-.li-ref-divider {
-  border-top: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
 }
 
 /* F：引用行下只读平铺成员条件行 */
