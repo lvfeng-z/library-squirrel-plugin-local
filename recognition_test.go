@@ -4103,3 +4103,55 @@ func TestAggregationPlusSetComposition(t *testing.T) {
 		}
 	}
 }
+
+// TestSnapshotGroupMembersNaturalOrder 快照群卡成员自然序锚（序号自然排序的
+// 呈现消费面）：字母数字序号成员（1a/1b/2/9/10 与无前缀 ova/sp）经 v4 序列
+// 规则定群后，群卡成员按自然序排列——数值前缀主序（9<10，扫描字典序把 10
+// 排在 1a 之前被纠正）、同前缀余文次之（1a<1b）、无前缀殿后（ova/sp 居末）。
+func TestSnapshotGroupMembersNaturalOrder(t *testing.T) {
+	root := t.TempDir()
+	store := newFakeSessionStore()
+	ctx := &workbenchTestCtx{store: store}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetSeq, Format: condxTpl("{公共段}_{序号}")}}}
+	pat, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("序列规则编译失败: %v", err)
+	}
+	profile := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{{
+		ID: "seq-natural-order", Description: "自然序定群", Source: RuleSourceManual, Enabled: true,
+		Conditions: rows, Pattern: pat,
+	}}}
+	if err := SaveProfile(store, profile); err != nil {
+		t.Fatalf("写入测试规则档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	for _, name := range []string{"集_10.png", "集_1a.png", "集_1b.png", "集_2.png", "集_9.png", "集_ova.png", "集_sp.png"} {
+		writeTestFile(t, root+"/甲/"+name, name)
+	}
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	snap := sess.Snapshot
+	if snap == nil || len(snap.Groups) != 1 {
+		t.Fatalf("应恰有一个序列群卡: %+v", snap)
+	}
+	g := snap.Groups[0]
+	if g.RuleID != "seq-natural-order" || len(g.Members) != 7 {
+		t.Fatalf("群卡形态不符: %+v", g)
+	}
+	want := []string{"1a", "1b", "2", "9", "10", "ova", "sp"}
+	got := make([]string, 0, len(g.Members))
+	for _, mem := range g.Members {
+		got = append(got, mem.SeqText)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("群卡成员自然序不符: 得到 %v 期望 %v", got, want)
+	}
+}

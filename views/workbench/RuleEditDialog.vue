@@ -143,7 +143,7 @@
             </div>
             <p v-else class="li-red-hint">
               {{ isAggregate
-                ? '尚无可选的占位词——在轨行模板中写入 {作品} 等词条后，作品标识才能引用其捕获值'
+                ? '尚无可选的占位词——在轨行模板中写入 {作品标识} 等词条后，作品标识才能引用其捕获值'
                 : '尚无可引用的占位词——在行模板中写入 {作者}/{标题} 等词条后，提取段才能引用其捕获值' }}
             </p>
           </template>
@@ -363,7 +363,7 @@
             <el-button size="small" text @click="addIdentityPart">+ 加一部分</el-button>
           </div>
           <p class="li-red-hint">
-            （候选=各轨行捕获：轨1·{作品}、轨2·{作品}…；目录轨行的目录捕获、序列轨行的群键同样可选）
+            （候选=各轨行捕获：轨1·{作品标识}、轨2·{作品标识}…；目录轨行的目录捕获、序列轨行的群键同样可选）
           </p>
           <p v-if="!identityRows.length" class="li-red-row-hint">
             尚未选择作品标识——多文件按标识值相等并成一件作品；多个部分按声明序拼成复合标识
@@ -1298,7 +1298,7 @@ function isGroupingMember(member: RuleArchiveItem): boolean {
 
 // 成员条件行只读平铺（F）：按行序列出「第N行 目标「模板」」（行号与占位词
 // 寻址同口径——括号子组递归计行）；括号子组行显示「括号子组（N 行）」；模板
-// 文本经旧词归一显示（{键} 显示为 {公共段}）；目录行带层级锚（dirLevel）时
+// 文本经旧词归一显示（{键} 显示为 {公共段}、{作品} 显示为 {作品标识}）；目录行带层级锚（dirLevel）时
 // 行尾追加「 · 第 N 级」。
 function memberFlatLines(rows: unknown): string[] {
   const list = Array.isArray(rows) ? (rows as CondxRowForm[]) : []
@@ -1577,7 +1577,7 @@ function toggleCondxJson(): void {
       condxError.value = '顶层须为 JSON 数组（条件行列表）'
       return
     }
-    // 切回结构化：旧词 {键} 书写归一显示为 {公共段}（保存即落档新词）
+    // 切回结构化：旧词 {键}/{作品} 书写归一显示为 {公共段}/{作品标识}（保存即落档新词）
     condxRows.value = condxNormalizeRows(rows)
     condxParsed.value = null
     condxJsonMode.value = false
@@ -1871,7 +1871,7 @@ function initFromProps(): void {
     if (!rule || (rule.isNew && !Array.isArray(rule.conditions))) {
       condxRows.value = defaultRows()
     } else if (Array.isArray(rule.conditions)) {
-      // 旧档 {键} 模板归一显示为 {公共段}（与保存载荷构造同一归一函数——
+      // 旧档 {键}/{作品} 模板归一显示为 {公共段}/{作品标识}（与保存载荷构造同一归一函数——
       // 弹窗所见即保存所得）；复制条目（isNew+携内容）同路装载
       condxRows.value = condxNormalizeRows(cloneJSON(rule.conditions)) as CondxRowForm[]
     } else if (rule.conditions != null) {
@@ -1948,7 +1948,7 @@ function cancel(): void {
 
 // rule 模式保存载荷构造（含全部闸门：JSON 合法性/引用行完整/条件行完整/提取行
 // 校验——不过就地标红返回 null）。保存与命中预览共用本构造路径：预览载荷即
-// 归一后的保存草稿（{公共段} 归一在 conditions 构造层执行），非原始表单值——
+// 归一后的保存草稿（{公共段}/{作品标识} 旧词归一在 conditions 构造层执行），非原始表单值——
 // 预览=保存后口径。
 function buildRulePayload(): RuleSavePayload | null {
   // JSON 合法性闸门：识别/提取任一停在 JSON 模式且解析不过 → 不关窗不保存
@@ -1995,8 +1995,9 @@ function buildRulePayload(): RuleSavePayload | null {
     condxError.value = condxRowsErrorWithRefs(condxRows.value)
     return null
   }
-  // 保存载荷构造层统一执行旧词归一（{键} → {公共段}，语义等价）：结构化与
-  // JSON 高级模式同路径——JSON 手写 {键} 保存亦落档新词
+  // 保存载荷构造层统一执行旧词归一（{键} → {公共段}、{作品} → {作品标识}，
+  // 语义等价）：结构化与
+  // JSON 高级模式同路径——JSON 手写 {键}/{作品} 保存亦落档新词
   const conditions = condxNormalizeRows(condxJsonMode.value ? condxParsed.value : condxRows.value)
   let extractions: unknown
   if (extractionsJsonMode.value) {
@@ -2081,7 +2082,7 @@ const previewButtonLabel = computed((): string => {
   return previewEnabled.value ? '预览命中' : '预览命中（不可用）'
 })
 
-// 预览触发（帧1）：载荷走与保存同一条草稿构造路径（同一闸门与 {公共段} 归一）；
+// 预览触发（帧1）：载荷走与保存同一条草稿构造路径（同一闸门与 {公共段}/{作品标识} 旧词归一）；
 // 校验不过时不发请求（行内已标红、就地呈现）；等待/禁用态不可再点。
 function preview(): void {
   if (props.previewing || !previewEnabled.value) return

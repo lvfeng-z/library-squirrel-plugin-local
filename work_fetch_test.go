@@ -392,6 +392,120 @@ func TestCreateWorkInfoLegacyPseudoFormDataConvertsByName(t *testing.T) {
 	}
 }
 
+// descWireCtx {描述} 接线测试桩：在 KV 档案桩上补齐谓词索引构造的库查询
+// 五轨（恒空应答——接线用例不依赖库内谓词，索引构造照常走通不 panic）。
+type descWireCtx struct {
+	stubPluginCtx
+}
+
+func (c descWireCtx) QueryLocalAuthors(*sdkdto.QueryLocalAuthorsRequest) (*sdkdto.QueryLocalAuthorsResponse, error) {
+	return &sdkdto.QueryLocalAuthorsResponse{}, nil
+}
+
+func (c descWireCtx) QuerySiteAuthors(*sdkdto.QuerySiteAuthorsRequest) (*sdkdto.QuerySiteAuthorsResponse, error) {
+	return &sdkdto.QuerySiteAuthorsResponse{}, nil
+}
+
+func (c descWireCtx) QueryLocalTags(*sdkdto.QueryLocalTagsRequest) (*sdkdto.QueryLocalTagsResponse, error) {
+	return &sdkdto.QueryLocalTagsResponse{}, nil
+}
+
+func (c descWireCtx) QuerySiteTags(*sdkdto.QuerySiteTagsRequest) (*sdkdto.QuerySiteTagsResponse, error) {
+	return &sdkdto.QuerySiteTagsResponse{}, nil
+}
+
+func (c descWireCtx) QueryLocalWorkSets(*sdkdto.QueryLocalWorkSetsRequest) (*sdkdto.QueryLocalWorkSetsResponse, error) {
+	return &sdkdto.QueryLocalWorkSetsResponse{}, nil
+}
+
+// descWireFileRule 构造一条 v4 文件行规则（模板对去扩展名文件名全锚定匹配），
+// 提取动作按参数注入。
+func descWireFileRule(t *testing.T, id, tpl string, actions ...ExtractionAction) RuleEntry {
+	t.Helper()
+	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl(tpl)}}}
+	pat, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("编译条件行失败（%s）: %v", id, err)
+	}
+	return RuleEntry{
+		ID: id, Description: "测试规则 " + id, Source: RuleSourceManual, Enabled: true,
+		Conditions: rows, Pattern: pat, Extractions: actions,
+	}
+}
+
+// TestCreateWorkInfoDescriptionDeclaration {描述} 声明接线（占位词词汇表
+// 重设计阶段3）：终选描述声明落 resp.Work.SiteWorkDescription——多值并存取
+// 首个（描述无缺省合成策略、回退 union 并集不裁决，取首语义对齐标题）；
+// 无描述声明时字段缺席（nil 指针，不覆写）。
+func TestCreateWorkInfoDescriptionDeclaration(t *testing.T) {
+	newFetcher := func(rules ...RuleEntry) *LocalImportWorkFetcher {
+		data, err := json.Marshal(RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: rules})
+		if err != nil {
+			t.Fatalf("构造测试档案失败: %v", err)
+		}
+		return &LocalImportWorkFetcher{ctx: descWireCtx{
+			stubPluginCtx: stubPluginCtx{kv: map[string]string{RuleProfileKVKey: string(data)}},
+		}}
+	}
+	create := func(t *testing.T, h *LocalImportWorkFetcher, fileName string) *sdkdto.WorkResponse {
+		t.Helper()
+		pd := `{"schemaVersion":2,"fullPath":"C:/lib/` + fileName + `","relPath":"` + fileName + `","hash":"abc123","size":10}`
+		resp, err := h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
+		if err != nil {
+			t.Fatalf("CreateWorkInfo 不应报错: %v", err)
+		}
+		return resp
+	}
+
+	t.Run("单声明落字段", func(t *testing.T) {
+		h := newFetcher(descWireFileRule(t, "desc-one", "{标题}({描述})",
+			ExtractionAction{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1},
+			ExtractionAction{Dimension: DimDescription, From: FromCapture, CaptureName: condxVocab["描述"], Row: 1}))
+		resp := create(t, h, "投稿标题(简介文字).jpg")
+		if resp.Work.SiteWorkName == nil || *resp.Work.SiteWorkName != "投稿标题" {
+			t.Fatalf("标题声明应照常落作品名，实得 %+v", resp.Work.SiteWorkName)
+		}
+		if resp.Work.SiteWorkDescription == nil || *resp.Work.SiteWorkDescription != "简介文字" {
+			t.Fatalf("描述声明应落 SiteWorkDescription=简介文字，实得 %+v", resp.Work.SiteWorkDescription)
+		}
+	})
+
+	t.Run("多声明取首个", func(t *testing.T) {
+		h := newFetcher(descWireFileRule(t, "desc-multi", "{描述}[{描述}]",
+			ExtractionAction{Dimension: DimDescription, From: FromCapture, CaptureName: condxVocab["描述"], Row: 1},
+			ExtractionAction{Dimension: DimDescription, From: FromCapture, CaptureName: condxVocab["描述"] + "__2", Row: 1}))
+		// 前置核验（防取首断言空转）：终选确含两条描述声明（同词位次分立
+		// 取值、union 保底策略不裁决）
+		fp := &FilePluginData{FullPath: "C:/lib/简介一[简介二].jpg", RelPath: "简介一[简介二].jpg"}
+		conclusion, _ := h.recomputeFileDecision(fp, h.resolvePipelineRules(), h.libraryIndexCached())
+		descCount := 0
+		for _, decl := range conclusion.Final {
+			if decl.Dimension == DimDescription {
+				descCount++
+			}
+		}
+		if descCount != 2 {
+			t.Fatalf("终选应含两条描述声明（union 不裁决），实得 %d 条: %+v", descCount, conclusion.Final)
+		}
+		resp := create(t, h, "简介一[简介二].jpg")
+		if resp.Work.SiteWorkDescription == nil || *resp.Work.SiteWorkDescription != "简介一" {
+			t.Fatalf("多描述声明应取首个（简介一），实得 %+v", resp.Work.SiteWorkDescription)
+		}
+	})
+
+	t.Run("无声明字段缺席", func(t *testing.T) {
+		h := newFetcher(descWireFileRule(t, "title-only", "{标题}",
+			ExtractionAction{Dimension: DimTitle, From: FromCapture, CaptureName: condxVocab["标题"], Row: 1}))
+		resp := create(t, h, "只有标题.jpg")
+		if resp.Work.SiteWorkDescription != nil {
+			t.Fatalf("无描述声明时 SiteWorkDescription 应保持缺席零值，实得 %q", *resp.Work.SiteWorkDescription)
+		}
+		if resp.Work.SiteWorkName == nil || *resp.Work.SiteWorkName != "只有标题" {
+			t.Fatalf("标题声明应照常落作品名，实得 %+v", resp.Work.SiteWorkName)
+		}
+	})
+}
+
 // TestBuildChildResponsesSiteKeyAndSingleParent 混归属子行构造与单父行形态：
 // 子行归属键与 FilePluginData 归属字段同构——真实域子行携 siteKey 与页级作品
 // ID 身份、local 回退子行键留空（继承父应答站点键）与哈希身份；父行为纯容器
@@ -1267,4 +1381,72 @@ func TestEmitSelectedWorksChildrenBatchSplitting(t *testing.T) {
 			t.Fatalf("降级超限应零产出，实得 %d 条目", len(items))
 		}
 	})
+}
+
+// TestEmitSelectedWorksChildOrderNaturalSeq 子行序与集序作答的自然序锚：字母
+// 数字序号成员（含无前缀 ova/sp）按集内自然序排列——数值前缀主序（9<10，
+// 传入字典序把 10 排最前被纠正）、同前缀余文次之（1a<1b）、无前缀殿后；集序
+// 作答全序与子行序逐位一致（批次子行排序与 answerWorkSetOrderEntries 共用
+// seqMemberLess 比较器）。
+func TestEmitSelectedWorksChildOrderNaturalSeq(t *testing.T) {
+	root := t.TempDir()
+	// 成员按传入序（选择集落库序=文件名字典序）列出：10 → 1a → 1b → 2 → 9 → ova → sp。
+	members := []struct {
+		name    string
+		seq     int
+		seqText string
+	}{
+		{"集名_10.jpg", 10, "10"},
+		{"集名_1a.jpg", 1, "1a"},
+		{"集名_1b.jpg", 1, "1b"},
+		{"集名_2.jpg", 2, "2"},
+		{"集名_9.jpg", 9, "9"},
+		{"集名_ova.jpg", 0, "ova"},
+		{"集名_sp.jpg", 0, "sp"},
+	}
+	sess := &WorkbenchSession{Snapshot: &RecognitionSnapshot{}}
+	works := make([]*SelectableWork, 0, len(members))
+	groupMembers := make([]SnapGroupMember, 0, len(members))
+	for _, m := range members {
+		writeTestFile(t, root+"/乙/"+m.name, m.name)
+		rel := "乙/" + m.name
+		sess.Snapshot.Files = append(sess.Snapshot.Files, SnapFile{
+			RelPath: rel, FileName: m.name, DirRelKey: "乙", State: snapStatePlain,
+			Final:    []SnapDecl{{Dimension: string(DimCollection), Value: "集名"}},
+			GroupKey: "集名", GroupSeq: m.seq,
+		})
+		groupMembers = append(groupMembers, SnapGroupMember{RelPath: rel, Seq: m.seq, SeqText: m.seqText})
+		works = append(works, &SelectableWork{
+			WorkID: "f:" + rel, DirRelKey: "乙",
+			Files: []string{rel}, SetKey: workSetKey("乙", "集名"),
+		})
+	}
+	sess.Snapshot.Groups = append(sess.Snapshot.Groups, SnapGroup{DirRelKey: "乙", Key: "集名", Members: groupMembers})
+	m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
+	ctx := stubPluginCtx{kv: make(map[string]string)}
+	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx}
+
+	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "自然序批次"))
+	if len(resps) != 1 {
+		t.Fatalf("纯 local 批次应为单应答单父，实得 %d 个", len(resps))
+	}
+	want := "集名_1a.jpg,集名_1b.jpg,集名_2.jpg,集名_9.jpg,集名_10.jpg,集名_ova.jpg,集名_sp.jpg"
+	if names := strings.Join(responseChildNames(resps[0]), ","); names != want {
+		t.Fatalf("子行应按集内自然序排列，实际 %v", names)
+	}
+
+	// 集序作答全序与子行序逐位一致（自然序双端同口径）。
+	entries, err := h.QueryWorkSetOrder(0, "workSet:集名")
+	if err != nil {
+		t.Fatalf("查询集序作答失败: %v", err)
+	}
+	if len(entries) != len(members) {
+		t.Fatalf("作答应含 %d 条，实得 %d", len(members), len(entries))
+	}
+	children := resps[0].Children
+	for i, e := range entries {
+		if e.SortOrder != int64(i) || e.SiteWorkId != children[i].SiteWorkId {
+			t.Fatalf("作答第 %d 位应与子行一致（%s），实得 order=%d id=%s", i+1, children[i].SiteWorkId, e.SortOrder, e.SiteWorkId)
+		}
+	}
 }

@@ -218,7 +218,7 @@ const props = withDefaults(
     // 底部新增按钮文案（聚合轨行区换「+ 加轨」，与元数据规则同一弹窗链路）
     addLabel?: string
     // 聚合轨行区形态：卡片模板文本尾接扩展名谓词取值（模板对去扩展名的文件名
-    // 正文求值，轨行整体形态=模板+扩展名，如 {作品}.{任意}+.srt）
+    // 正文求值，轨行整体形态=模板+扩展名，如 {作品标识}.{任意}+.srt）
     aggMode?: boolean
   }>(),
   { rootRows: null, extractionsJsonMode: false, addLabel: '+ 加条件', aggMode: false }

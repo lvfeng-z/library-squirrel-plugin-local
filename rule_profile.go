@@ -25,6 +25,9 @@ const (
 	DimTitle MetadataDimension = "title"
 	// DimCollection 表示作品集维度。
 	DimCollection MetadataDimension = "collection"
+	// DimDescription 表示作品描述维度（site_work_description；取值词 {描述}，
+	// 创建期接线取首个声明）。
+	DimDescription MetadataDimension = "description"
 )
 
 // SourceKind 为元数据值的来源载体类别。

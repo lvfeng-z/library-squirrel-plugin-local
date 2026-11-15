@@ -26,13 +26,13 @@ func TestDeriveCondxTemplate(t *testing.T) {
 			// 锚定的贪婪段 .+ 全量改编译为惰性 .+?，下列期望表达式随之翻新。
 			name: "文件模板·中位惰性让位",
 			tpl:  "Isel_{集名}_{序号}_[中文翻譯][高清]",
-			expr: `^Isel_(?P<setname>.+?)_(?P<seq>[0-9]+)_\[中文翻譯\]\[高清\]$`,
+			expr: `^Isel_(?P<setname>.+?)_(?P<seq>[0-9A-Za-z]+)_\[中文翻譯\]\[高清\]$`,
 			caps: []string{"setname", "seq"},
 		},
 		{
 			name: "首位数字占位词",
 			tpl:  "Tumblr{日期}[pixiv_{作品号}_{作者}]_{序号}",
-			expr: `^Tumblr(?P<date>[0-9]+)\[pixiv_(?P<workid>[0-9]+)_(?P<author>.+?)\]_(?P<seq>[0-9]+)$`,
+			expr: `^Tumblr(?P<date>[0-9]+)\[pixiv_(?P<workid>[0-9A-Za-z]+)_(?P<author>.+?)\]_(?P<seq>[0-9A-Za-z]+)$`,
 			caps: []string{"date", "workid", "author", "seq"},
 		},
 		{
@@ -44,7 +44,7 @@ func TestDeriveCondxTemplate(t *testing.T) {
 		{
 			name: "目录模板·括号制式（括号感知捕获类）",
 			tpl:  "[{作者}][{作品号}][{标题}]",
-			expr: `^\[(?P<author>[^]]+)\]\[(?P<workid>[0-9]+)\]\[(?P<title>[^]]+)\]$`,
+			expr: `^\[(?P<author>[^]]+)\]\[(?P<workid>[0-9A-Za-z]+)\]\[(?P<title>[^]]+)\]$`,
 			caps: []string{"author", "workid", "title"},
 		},
 		{
@@ -54,9 +54,9 @@ func TestDeriveCondxTemplate(t *testing.T) {
 			caps: []string{"tag"},
 		},
 		{
-			name: "数字类词前开括号收尾·维持数字类",
+			name: "字母数字类词前开括号收尾·维持字母数字类",
 			tpl:  "[{作品号}]",
-			expr: `^\[(?P<workid>[0-9]+)\]$`,
+			expr: `^\[(?P<workid>[0-9A-Za-z]+)\]$`,
 			caps: []string{"workid"},
 		},
 		{
@@ -83,21 +83,21 @@ func TestDeriveCondxTemplate(t *testing.T) {
 			name: "序列成员模板·键含下划线可匹配",
 			tpl:  "{键}_{序号}",
 			opts: deriveOpts{allowKey: true, requireSeq: true},
-			expr: `^(?P<key>.+?)_(?P<seq>[0-9]+)$`,
+			expr: `^(?P<key>.+?)_(?P<seq>[0-9A-Za-z]+)$`,
 			caps: []string{"key", "seq"},
 		},
 		{
 			name: "序列成员模板·新词公共段与旧词同组同义",
 			tpl:  "{公共段}_{序号}",
 			opts: deriveOpts{allowKey: true, requireSeq: true},
-			expr: `^(?P<key>.+?)_(?P<seq>[0-9]+)$`,
+			expr: `^(?P<key>.+?)_(?P<seq>[0-9A-Za-z]+)$`,
 			caps: []string{"key", "seq"},
 		},
 		{name: "空模板", tpl: " ", wantErr: "格式模板不能为空"},
 		{name: "词表外", tpl: "{不存在}_{序号}", wantErr: "不在词表"},
-		// 三词位（标签/作者/集名）多次出现已放行位次分立（2026-11-08 方案），
-		// 拒绝面锚改用非三词位词根。
-		{name: "重复占位词", tpl: "{标题}_{标题}", wantErr: "重复"},
+		// 可多次出现全集（标签/作者/集名/标题/序号/作品号/日期/作品标识/描述）
+		// 已放行位次分立，拒绝面锚改用全集外的 {公共段}（key 组单次）。
+		{name: "重复占位词", tpl: "{公共段}_{公共段}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "重复"},
 		{name: "相邻占位词", tpl: "{作者}{序号}", wantErr: "缺少分隔"},
 		{name: "键用于文件模板", tpl: "{键}_{序号}", wantErr: "仅适用于序列"},
 		{name: "公共段用于文件模板", tpl: "{公共段}_{序号}", wantErr: "仅适用于序列"},
@@ -105,7 +105,7 @@ func TestDeriveCondxTemplate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expr, caps, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			expr, caps, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
@@ -139,7 +139,7 @@ func TestDeriveCondxTemplateBracketPairs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			expr, caps, _, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
+			expr, caps, _, _, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
 			if err != nil {
 				t.Fatalf("推导失败: %v", err)
 			}
@@ -653,8 +653,17 @@ func TestSeqSubjectEvaluate(t *testing.T) {
 	if p.Evaluate(&MatchInput{FileName: "a_01.jpg", Siblings: []string{"a_01.jpg", "a_02.jpg"}}, nil, &ParseContext{}) {
 		t.Fatalf("两成员未达门槛不应命中")
 	}
-	if p.Evaluate(&MatchInput{FileName: "a_x.jpg", Siblings: []string{"a_x.jpg", "a_02.jpg", "a_03.jpg"}}, nil, &ParseContext{}) {
-		t.Fatalf("自身无序数不应命中")
+	// 字母序号（无数值前缀）照常入套：自然键解析不拒绝纯字母序号，数值前缀
+	// 缺席取 0（序号原文照常携带）。
+	ctxX := &ParseContext{}
+	if !p.Evaluate(&MatchInput{FileName: "a_x.jpg", Siblings: []string{"a_x.jpg", "a_02.jpg", "a_03.jpg"}}, nil, ctxX) {
+		t.Fatalf("字母序号成员应照常入套")
+	}
+	if ctxX.Group == nil || ctxX.Group.Seq != 0 || ctxX.Group.Key != "a" {
+		t.Fatalf("字母序号成员的群组分析不符: %+v", ctxX.Group)
+	}
+	if p.Evaluate(&MatchInput{FileName: "plain.jpg", Siblings: []string{"a_01.jpg", "a_02.jpg", "a_03.jpg"}}, nil, &ParseContext{}) {
+		t.Fatalf("不匹配成员模板的文件不应命中")
 	}
 }
 
@@ -676,7 +685,9 @@ func TestDirSubjectChildrenAsserts(t *testing.T) {
 		AncestorFiles: [][]string{
 			{"index.txt"},
 			{"Artist[Isel]", "[Isel] [92242473] [T]"},
-			{"01.jpg", "02.jpg", "03.jpg", "info.txt"},
+			// 子女杂项取非字母数字名（说明.txt）：{序号} 类已放宽字母数字，
+			// 纯字母子女（如 info）也是合法序号位，不再充当当反例。
+			{"01.jpg", "02.jpg", "03.jpg", "说明.txt"},
 		},
 	}
 	if p.Evaluate(work, nil, &ParseContext{}) {
@@ -1148,7 +1159,7 @@ func TestDeriveCondxTemplateRepeat(t *testing.T) {
 	}
 	for _, tc := range green {
 		t.Run(tc.name, func(t *testing.T) {
-			expr, caps, reps, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			expr, caps, reps, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
 			if err != nil {
 				t.Fatalf("推导失败: %v", err)
 			}
@@ -1188,7 +1199,7 @@ func TestDeriveCondxTemplateRepeat(t *testing.T) {
 		})
 	}
 	// 语义底线抽查：单元子模式对整段匹配文本可再拆（阶段2 绑定层再拆口径）。
-	expr, _, reps, _ := deriveCondxTemplate("{标题}={标签+;_}", deriveOpts{})
+	expr, _, reps, _, _ := deriveCondxTemplate("{标题}={标签+;_}", deriveOpts{})
 	re := regexp.MustCompile(expr)
 	m := re.FindStringSubmatchIndex("标题甲=tag1_tag2")
 	lo, hi := m[2*reps[0].GroupIndex], m[2*reps[0].GroupIndex+1]
@@ -1210,7 +1221,7 @@ func TestDeriveCondxTemplateRepeat(t *testing.T) {
 	}
 	for _, tc := range red {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			_, _, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
 			}
@@ -1225,8 +1236,8 @@ func TestDeriveCondxTemplateRepeat(t *testing.T) {
 // 开括号+词+闭括号整组同进退、不产「空括号命中」、后闭括号不配对时开括号按
 // 字面回放走裸词可选；位置约束（决策4）=可选分隔两侧至少一侧非空必选字面段
 // 或模板首/尾——0+ 包裹组吞闭括号后的空残留不作锚（风险5 已知边界）、右邻开
-// 括号将被收进可缺形态时同理；拒绝面覆盖 {?}/{任意?}/{公共段?}{键?}/seq 词位/
-// 两侧无锚/{标签+?} 既有拒绝/同词根重复。
+// 括号将被收进可缺形态时同理；拒绝面覆盖 {?}/{任意?}/{公共段?}{键?}/序列模板
+// 全可选空键守卫/两侧无锚/{标签+?} 既有拒绝/同词根重复。
 func TestDeriveCondxTemplateOptional(t *testing.T) {
 	type matchCase struct {
 		input string
@@ -1284,13 +1295,24 @@ func TestDeriveCondxTemplateOptional(t *testing.T) {
 			},
 		},
 		{
-			name: "裸词可选·数字类沿用",
+			name: "裸词可选·类词沿用",
 			tpl:  "第{序号?}话",
-			expr: `^第(?:(?P<seq>[0-9]+))?话$`,
+			expr: `^第(?:(?P<seq>[0-9A-Za-z]+))?话$`,
 			caps: []string{"seq"},
 			matches: []matchCase{
 				{"第12话", map[string]string{"seq": "12"}},
 				{"第话", map[string]string{"seq": "<无>"}},
+			},
+		},
+		{
+			name: "可选词位双写位次分立（标题入可多次出现全集）",
+			tpl:  "{标题?}_{标题?}",
+			expr: `^(?:(?P<title>.+?))?_(?:(?P<title__2>.+?))?$`,
+			caps: []string{"title", "title__2"},
+			matches: []matchCase{
+				{"X_Y", map[string]string{"title": "X", "title__2": "Y"}},
+				{"X_", map[string]string{"title": "X", "title__2": "<无>"}},
+				{"_Y", map[string]string{"title": "<无>", "title__2": "Y"}},
 			},
 		},
 		{
@@ -1368,7 +1390,7 @@ func TestDeriveCondxTemplateOptional(t *testing.T) {
 			name: "序列成员模板·可选分隔字面不受限",
 			tpl:  "{公共段}_{序号}{ ?}",
 			opts: deriveOpts{allowKey: true, requireSeq: true},
-			expr: `^(?P<key>.+?)_(?P<seq>[0-9]+)(?: )?$`,
+			expr: `^(?P<key>.+?)_(?P<seq>[0-9A-Za-z]+)(?: )?$`,
 			caps: []string{"key", "seq"},
 			matches: []matchCase{
 				{"a_1", map[string]string{"key": "a", "seq": "1"}},
@@ -1378,7 +1400,7 @@ func TestDeriveCondxTemplateOptional(t *testing.T) {
 	}
 	for _, tc := range green {
 		t.Run(tc.name, func(t *testing.T) {
-			expr, caps, reps, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			expr, caps, reps, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
 			if err != nil {
 				t.Fatalf("推导失败: %v", err)
 			}
@@ -1429,7 +1451,7 @@ func TestDeriveCondxTemplateOptional(t *testing.T) {
 		{name: "吞位词不可带问号", tpl: "{任意?}", wantErr: "不产出声明、无可选语义，不可带问号"},
 		{name: "公共段不可带问号", tpl: "{公共段?}", wantErr: "成套的成群依据，不可带问号"},
 		{name: "旧词键经别名归公共段同拒", tpl: "{键?}", wantErr: "成套的成群依据"},
-		{name: "序列成员禁可选词位", tpl: "{公共段}_{标题?}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "序列成员格式不支持可选词位"},
+		{name: "序列成员全可选空键", tpl: "{标题?}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "成套键为空"},
 		{name: "两取值词之间可选分隔无字面锚", tpl: "{作者}{ ?}{集名}", wantErr: "可选分隔两侧均无字面锚"},
 		{name: "相邻两可选分隔天然被拒", tpl: "{ ?}{_?}", wantErr: "可选分隔两侧均无字面锚"},
 		{name: "0+包裹重复组后接可选分隔·闭括号被吞无锚（风险5 已知边界）", tpl: "[{标签*}]{ ?}{标题}", wantErr: "可选分隔两侧均无字面锚"},
@@ -1437,15 +1459,14 @@ func TestDeriveCondxTemplateOptional(t *testing.T) {
 		{name: "右邻开括号将被0+包裹组收进可缺形态·无必选锚", tpl: "{集名}{ ?}[{标签*}]", wantErr: "可选分隔两侧均无字面锚"},
 		{name: "右邻开括号将被包裹可选词位收进可缺形态·无必选锚", tpl: "{集名}{ ?}[{作者?}]", wantErr: "可选分隔两侧均无字面锚"},
 		{name: "量词后问号·既有拒绝不回归", tpl: "{标签+?}", wantErr: "量词后只能跟分号引出的分隔字面"},
-		// 三词位同词根重复已放行位次分立（2026-11-08 方案），同形拒绝面锚改用
-		// 非三词位词根；三词位绿锚见 TestDeriveCondxTemplateMultiOccur。
-		{name: "可选词位与单词同词根重复", tpl: "{标题?}_{标题}", wantErr: "重复"},
-		{name: "可选词位双写同词根重复", tpl: "{标题?}_{标题?}", wantErr: "重复"},
+		// 标题已入可多次出现全集，{标题?}_{标题} 一类双写位次分立放行
+		//（绿锚见上「可选词位双写位次分立」），拒绝面锚由 {公共段} 承担
+		//（TestDeriveCondxTemplate「重复占位词」）。
 		{name: "可选词位仍受相邻占位词约束", tpl: "{作者}{标题?}", wantErr: "缺少分隔"},
 	}
 	for _, tc := range red {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
+			_, _, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
 			}
@@ -1656,7 +1677,7 @@ func TestDeriveCondxTemplateMultiOccur(t *testing.T) {
 	}
 	for _, tc := range green {
 		t.Run(tc.name, func(t *testing.T) {
-			expr, caps, reps, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
+			expr, caps, reps, _, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
 			if err != nil {
 				t.Fatalf("推导失败: %v", err)
 			}
@@ -1705,16 +1726,18 @@ func TestDeriveCondxTemplateMultiOccur(t *testing.T) {
 	red := []struct {
 		name    string
 		tpl     string
+		opts    deriveOpts
 		wantErr string
 	}{
-		{name: "矩阵⑧·非三词位裸词重复维持拒绝（文案不变）", tpl: "{标题}_{标题}", wantErr: "模板占位词 {标题} 重复"},
-		{name: "矩阵⑧·非三词位可选词位双写维持拒绝", tpl: "{标题?}_{标题?}", wantErr: "模板占位词 {标题?} 重复"},
-		{name: "矩阵⑧·非三词位单词与可选混排维持拒绝", tpl: "{标题?}_{标题}", wantErr: "模板占位词 {标题} 重复"},
+		// 可多次出现全集扩容后，双写拒绝面锚改用全集外的 {公共段}（key 组
+		// 单次出现；标题/序号等取值词双写绿锚见 TestVocabMultiOccurExpanded）。
+		{name: "矩阵⑧·{公共段}双写维持拒绝（文案不变）", tpl: "{公共段}_{公共段}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "模板占位词 {公共段} 重复"},
+		{name: "矩阵⑧·新旧词同模板并用即重复", tpl: "{键}_{公共段}_{序号}", opts: deriveOpts{allowKey: true, requireSeq: true}, wantErr: "模板占位词 {公共段} 重复"},
 		{name: "矩阵⑨·{标签2} 词表外报错不回归", tpl: "{标签2}_{标签}", wantErr: "不在词表"},
 	}
 	for _, tc := range red {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := deriveCondxTemplate(tc.tpl, deriveOpts{})
+			_, _, _, _, err := deriveCondxTemplate(tc.tpl, tc.opts)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("期望错误含 %q，得到 %v", tc.wantErr, err)
 			}

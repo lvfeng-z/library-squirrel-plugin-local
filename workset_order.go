@@ -1,8 +1,8 @@
 // 集序记录与作答端：批次创建期为有集归属的子行按集归集落 KV 记录（键=集业务键
 // 原文，成员值=作品身份键+序号数值与原文+目录键+首见批次号），跨批次读改写合并
-// 维护全局总序（目录块按首见拼接、块内序号数值升序、并列按首见稳序）；作品
-// 拉取器实现可选能力接口 WorkOrderQuerier，按传入集业务键读记录按总序作答——
-// 宿主在作品入库后拉取该全序，写入集成员关系行的原站序。
+// 维护全局总序（目录块按首见拼接、块内序号自然序——数值前缀主序、无前缀殿后，
+// 并列按首见稳序）；作品拉取器实现可选能力接口 WorkOrderQuerier，按传入集业务
+// 键读记录按总序作答——宿主在作品入库后拉取该全序，写入集成员关系行的原站序。
 package main
 
 import (
@@ -260,7 +260,7 @@ func mergeWorkSetOrderMembers(rec *worksetOrderRecord, incoming []worksetOrderMe
 var _ sdkdto.WorkOrderQuerier = (*LocalImportWorkFetcher)(nil)
 
 // QueryWorkSetOrder 集内作品原站全序作答：按传入集业务键读集序记录，成员按
-// 全局总序（目录块首见序 → 块内序号数值升序 → 并列按首见插入序）排列作答，
+// 全局总序（目录块首见序 → 块内序号自然序 → 并列按首见插入序）排列作答，
 // 条目序号=全序位次（集内序从 1 起、RPC 序号从 0 起，恰差一）。记录缺席或无
 // 成员返回空切片——宿主保持该集原站序现状不动。siteId 不参与寻址：集序记录
 // 按集业务键全局一份，同名集在宿主按「站点+业务键」各自成行、各自拉取，作答
@@ -288,10 +288,14 @@ func answerWorkSetOrderEntries(rec *worksetOrderRecord) []*sdkdto.WorkOrderEntry
 		if bi != bj {
 			return bi < bj
 		}
-		if ordered[i].Seq != ordered[j].Seq {
-			return ordered[i].Seq < ordered[j].Seq
+		mi, mj := ordered[i], ordered[j]
+		if seqMemberLess(mi.Seq, mi.SeqText, mj.Seq, mj.SeqText) {
+			return true
 		}
-		return ordered[i].Ord < ordered[j].Ord
+		if seqMemberLess(mj.Seq, mj.SeqText, mi.Seq, mi.SeqText) {
+			return false
+		}
+		return mi.Ord < mj.Ord
 	})
 	entries := make([]*sdkdto.WorkOrderEntry, 0, len(ordered))
 	for rank, m := range ordered {

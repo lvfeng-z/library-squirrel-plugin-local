@@ -125,7 +125,7 @@ type LocalImportWorkFetcher struct {
 	verifyHeartbeatTick time.Duration
 	// childrenBatchByteLimit / childrenBatchCountLimit 单批子行双界（0=生产
 	// 16MB / 2 万条；流水线重叠期单测注入小值驱动多批）。
-	childrenBatchByteLimit int
+	childrenBatchByteLimit  int
 	childrenBatchCountLimit int
 }
 
@@ -712,7 +712,8 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 	}
 
 	// 集成员按选择域集内序排入批次：集间按集键字典序（与选择域集视图序一致）、
-	// 集内按快照群组序号升序（群组序号从 1 起）。群组序号取值与集序记录同口径
+	// 集内按序号自然序（数值前缀主序、无前缀殿后——seqMemberLess 共用比较器）。
+	// 群组序号取值与集序记录同口径
 	//（buildGroupSeqIndex：快照群卡按成员路径反查为主、文件行群组序兜底）——
 	// 已识别成员的文件行不落群组键，只读文件行会取零而丢集内序。批次子行按
 	// 集内序组织——任务树子项序与识别序一致；快照查不到群组序的成员（游标
@@ -724,7 +725,8 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			if setMembers[i].SetKey != setMembers[j].SetKey {
 				return setMembers[i].SetKey < setMembers[j].SetKey
 			}
-			return groupSeqByPath[setMembers[i].Files[0]].seq < groupSeqByPath[setMembers[j].Files[0]].seq
+			gi, gj := groupSeqByPath[setMembers[i].Files[0]], groupSeqByPath[setMembers[j].Files[0]]
+			return seqMemberLess(gi.seq, gi.seqText, gj.seq, gj.seqText)
 		})
 	}
 
@@ -1516,6 +1518,7 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	resp := &sdkdto.WorkResponse{Work: &sdkdto.WorkDTO{}}
 	workName := stripExt(filepath.Base(fp.FullPath))
 	titleDeclared := false
+	descriptionDeclared := false
 	for _, decl := range final {
 		switch decl.Dimension {
 		case DimTitle:
@@ -1546,6 +1549,13 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 				SiteWorkSetId: workSetBizKey(decl.Value),
 				WorkSetName:   decl.Value,
 			})
+		case DimDescription:
+			// 描述取首个终选声明（union 缺省策略下多值并存，保首个——语义
+			// 对齐标题取首）；无描述声明时本分支不可达，字段保持零值不覆写。
+			if !descriptionDeclared {
+				resp.Work.SiteWorkDescription = new(decl.Value)
+				descriptionDeclared = true
+			}
 		}
 	}
 

@@ -1344,11 +1344,14 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 	}
 	markStructuralPresentation(snap, structuralMarks)
 
-	// 序列群按集内序排列成员、规则定群群落元素公共性终判（结构群的元素终判在
-	// 对齐装配内完成），群间按目录、分组键与定群规则 ID 排序（呈现稳定序）
+	// 序列群成员按序号自然序排列（数值前缀主序、无前缀殿后、原文缺席按整型
+	// 序号——seqMemberLess 共用比较器）、规则定群群落元素公共性终判（结构群的
+	// 元素终判在对齐装配内完成），群间按目录、分组键与定群规则 ID 排序（呈现
+	// 稳定序）
 	for _, group := range groups {
 		sort.SliceStable(group.Members, func(i, j int) bool {
-			return group.Members[i].Seq < group.Members[j].Seq
+			mi, mj := group.Members[i], group.Members[j]
+			return seqMemberLess(mi.Seq, mi.SeqText, mj.Seq, mj.SeqText)
 		})
 		if group.RuleID != "" {
 			markCommonElements(group)

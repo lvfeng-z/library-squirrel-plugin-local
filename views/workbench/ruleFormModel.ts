@@ -24,12 +24,14 @@ export function cloneJSON<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
-// 含义维度（提取动作 dimension）。
+// 含义维度（提取动作 dimension）：description=作品描述（site_work_description，
+// 创建期接线、多值取首个——与标题取首同语义）。
 export const DIMENSION_OPTIONS: { value: string; label: string }[] = [
   { value: 'author', label: '作者' },
   { value: 'title', label: '作品名' },
   { value: 'tag', label: '标签' },
-  { value: 'collection', label: '作品集' }
+  { value: 'collection', label: '作品集' },
+  { value: 'description', label: '描述' }
 ]
 
 // 提取动作取值来源（from）——剧本F 提取段的来源下拉：捕获组／目录名／群组前缀
@@ -209,37 +211,46 @@ export interface CondxRowForm {
   group?: CondxRowForm[] | null
 }
 
-// 占位词词表（与内核 condxVocab 同源十词）：digit=数字类（[0-9]+）；
+// 占位词词表（与内核 condxVocab 同源十一词）：cls=捕获类三分——'lazy'=惰性段
+// （类锚定外的缺省取词）、'digit'=数字类（[0-9]+，仅 {日期}——真实日期即数字，
+// 维持纯数字）、'alnum'=字母数字类（[0-9A-Za-z]+，{序号}/{作品号}——编号类词
+// 按真实编号形态取超集放宽，纯数字照常命中，BV 号一类字母混合编号整词可匹配）；
 // refable=false 仅 {任意}（吞位词：非捕获、可重复、不可被提取引用）；
-// note 为词条说明（chips 提示）。{公共段}=序列成套成员模板的公共相同部分
-// （英文组名 key，与旧词 {键} 同组同义）。{作品}=聚合标识专用中性取值词根
-// （机制零新增的普通命名捕获槽——干名如 ep01 挂标签/作者等元数据语义词别扭，
-// 聚合轨行模板用它捕获标识值）。
+// note 为词条说明（chips 提示）。{公共段}=公共部分白段词（不接元数据维度、只圈
+// 住公共部分文本；成套键=全部非序号必选捕获按序拼接；仅序列模板、单次、不可带
+// 问号；英文组名 key，与旧词 {键} 同组同义）。{作品标识}=聚合标识专用中性取值
+// 词根（机制零新增的普通命名捕获槽——干名如 ep01 挂标签/作者等元数据语义词别扭，
+// 聚合轨行模板用它捕获标识值；英文组名 work，与旧词 {作品} 同组同义；与 {作品号}
+// 同模板并用被拒——整词标识 vs 编号段语义近邻防混用）。{描述}=作品描述维度
+// 取值词（提取动作接「描述」维度，创建期接线 site_work_description）。
 // 量词变体（重复段，与内核 parseCondxVariant 同口径）：标签/作者/集名 三词位
 // 可带量词——{词+}=至少一组、{词*}=可零组；分隔记号写作「;分隔」紧跟量词
 // （如 {标签+;_}，分隔字面=首个分号起的全部、含分号本身）。变体词为多值产出，
 // 仅提取段可引用，生效条件/值校验/组合接线三面禁引。
-export const CONDX_VOCAB: { word: string; group: string; digit: boolean; refable: boolean; note: string }[] = [
-  { word: '作者', group: 'author', digit: false, refable: true, note: '贪婪取词（.+），相邻须有分隔文字；可带量词 +/*（{作者+} 一类重复段）' },
-  { word: '集名', group: 'setname', digit: false, refable: true, note: '贪婪取词；{集名} 一位盖段组合；可带量词 +/*（{集名*} 一类重复段）' },
-  { word: '标题', group: 'title', digit: false, refable: true, note: '贪婪取词' },
-  { word: '标签', group: 'tag', digit: false, refable: true, note: '贪婪取词；可带量词 +/*（{标签+} 一类重复段）' },
-  { word: '作品', group: 'work', digit: false, refable: true, note: '聚合标识专用取值词根（普通命名捕获槽）：聚合轨行模板用它捕获标识值，如 {作品}.{任意} 配扩展名谓词 .srt' },
-  { word: '序号', group: 'seq', digit: true, refable: true, note: '数字类（[0-9]+）' },
-  { word: '作品号', group: 'workid', digit: true, refable: true, note: '数字类（pixiv 作品号等）' },
-  { word: '日期', group: 'date', digit: true, refable: true, note: '数字类（YYYYMMDD 等）' },
-  { word: '公共段', group: 'key', digit: false, refable: true, note: '序列成套成员模板的公共相同部分' },
-  { word: '任意', group: 'any', digit: false, refable: false, note: '吞位词：不产出声明、可重复出现' }
+export const CONDX_VOCAB: { word: string; group: string; cls: 'lazy' | 'digit' | 'alnum'; refable: boolean; note: string }[] = [
+  { word: '作者', group: 'author', cls: 'lazy', refable: true, note: '贪婪取词（.+），相邻须有分隔文字；可带量词 +/*（{作者+} 一类重复段）' },
+  { word: '集名', group: 'setname', cls: 'lazy', refable: true, note: '贪婪取词；{集名} 一位盖段组合；可带量词 +/*（{集名*} 一类重复段）' },
+  { word: '标题', group: 'title', cls: 'lazy', refable: true, note: '贪婪取词' },
+  { word: '标签', group: 'tag', cls: 'lazy', refable: true, note: '贪婪取词；可带量词 +/*（{标签+} 一类重复段）' },
+  { word: '作品标识', group: 'work', cls: 'lazy', refable: true, note: '聚合标识专用取值词根（普通命名捕获槽，旧词 {作品} 为别名书写）：聚合轨行模板用它捕获标识值，如 {作品标识}.{任意} 配扩展名谓词 .srt；不可与 {作品号} 同模板并用' },
+  { word: '序号', group: 'seq', cls: 'alnum', refable: true, note: '字母数字类（[0-9A-Za-z]+）：纯数字照常命中，字母序号（1a/1b）整词命中' },
+  { word: '作品号', group: 'workid', cls: 'alnum', refable: true, note: '字母数字类（[0-9A-Za-z]+）：pixiv 作品号/BV 号等编号段整词捕获' },
+  { word: '日期', group: 'date', cls: 'digit', refable: true, note: '数字类（[0-9]+，YYYYMMDD 等）' },
+  { word: '描述', group: 'description', cls: 'lazy', refable: true, note: '作品描述维度取值词（贪婪取词）：提取动作接「描述」维度（多值时创建期取首个）' },
+  { word: '公共段', group: 'key', cls: 'lazy', refable: true, note: '公共部分白段词：不接元数据维度、只圈住公共部分文本；成套键=全部非序号必选捕获按序拼接；仅序列模板、单次、不可带问号' },
+  { word: '任意', group: 'any', cls: 'lazy', refable: false, note: '吞位词：不产出声明、可重复出现' }
 ]
 
-// 旧词别名（旧词 → 英文组名）：{键} 为 {公共段} 的旧书写词——旧档模板零迁移、
-// 照常解析求值；仅供模板解析/校验路径消费（condxVocabOf 先查词表再查别名），
-// chips 与显示永不出旧词（显示走组名反查=现行词条）。
+// 旧词别名（旧词 → 英文组名）：{键} 为 {公共段}、{作品} 为 {作品标识} 的旧
+// 书写词——旧档模板零迁移、照常解析求值；仅供模板解析/校验路径消费
+// （condxVocabOf 先查词表再查别名），chips 与显示永不出旧词（显示走组名反查=
+// 现行词条；保存归一见 condxNormalizeTpl/condxNormalizeRows）。
 export const CONDX_VOCAB_ALIASES: Record<string, string> = {
-  键: 'key'
+  键: 'key',
+  作品: 'work'
 }
 
-export function condxVocabOf(word: string): { word: string; group: string; digit: boolean; refable: boolean; note: string } | undefined {
+export function condxVocabOf(word: string): { word: string; group: string; cls: 'lazy' | 'digit' | 'alnum'; refable: boolean; note: string } | undefined {
   const hit = CONDX_VOCAB.find((v) => v.word === word)
   if (hit) return hit
   const aliasGroup = CONDX_VOCAB_ALIASES[word]
@@ -252,7 +263,7 @@ export function condxVocabOf(word: string): { word: string; group: string; digit
 export const CONDX_TARGETS: { value: 'file' | 'dir' | 'seq'; label: string; note: string }[] = [
   { value: 'file', label: '文件名', note: '按格式匹配文件名(不含扩展名)命中的满足格式的每个文件' },
   { value: 'dir', label: '目录名', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)；可用「位于第 N 级」限定层级（自识别根数起）' },
-  { value: 'seq', label: '序列', note: '文件名按模板成套—非序号部分为{公共段}；公共段相同≥2才算、落单不算、不跨目录' }
+  { value: 'seq', label: '序列', note: '文件名按模板成套—成套键=全部非序号捕获按序拼接（可选词位不进键）；同键≥2才算、落单不算、不跨目录' }
 ]
 
 // 第四卡「引用规则」的说明小字（组合引用的门槛与停用语义；卡片小字与悬停
@@ -300,8 +311,9 @@ export const CONDX_BADGE_DIMS = ['author', 'tag', 'collection']
 export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 'dir' | 'seq'; description: string }[] = [
   { name: '【作者】标题', template: '【{作者}】{标题}', target: 'file', description: '方括号命名惯例' },
   { name: '作者 - 标题', template: '{作者} - {标题}', target: 'file', description: '连字符分隔（惰性取首个分隔位）' },
-  { name: 'pixiv 页级', template: '{作品号}_p{序号}', target: 'file', description: '作品号数字类 + _p 页号' },
-  { name: '序列成套', template: '{公共段}_{序号}', target: 'seq', description: '{公共段}相同 ≥2 件成套归入同一作品集' },
+  { name: 'pixiv 页级', template: '{作品号}_p{序号}', target: 'file', description: '作品号字母数字类（[0-9A-Za-z]+）+ _p 页号' },
+  { name: '序列成套', template: '{公共段}_{序号}', target: 'seq', description: '{公共段} 为公共部分白段词（不接元数据维度，只圈住公共部分文本）；成套判定键=全部非序号捕获按序拼接，同键 ≥2 件即归入同一作品集。{序号} 为序号位（序号词字母数字类）' },
+  { name: '序列成套·可选变化段', template: '{集名} - {序号}.{标题?}(Av{作品号},P{序号})', target: 'seq', description: '序列主体行的可选词位：{标题?} 逐件变化（如分P 标题）、不进成套键——成套键=集名+作品号（{序号} 两写时位2 也不进键）；该段缺席的成员照常入套（标题无声明）。须保留至少一个必选的非序号取值词（或 {公共段}），全部可选的序列模板会被拒绝' },
   { name: '目录层作者', template: 'Artist[{作者}]', target: 'dir', description: '剥壳惯例：字面括号 + 作者词' },
   { name: '首组内名', template: '[{标签}]{任意}', target: 'dir', description: '多组括号目录名取首组内名、尾段吞掉（单组整名同样命中）' },
   { name: '括号标签×N', template: '[{标签+}]', target: 'file', description: '方括号组连续出现一至多组、每组内名各取一标签（示例 [中国翻訳] [DL版] 两组双值；{标签*} 形态零组亦命中）。每组各取一值用本词条、只取第一组内名其余吞掉用「首组内名」' },
@@ -310,7 +322,9 @@ export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 
   { name: '可选分隔', template: '[{作者}]{ ?}{集名}', target: 'file', description: '可选分隔字面 { ?} 表示可缺席的字面空格：一条规则通吃 [{作者}]{集名} 与 [{作者}] {集名} 两形态（两侧至少一侧须有字面锚）' },
   { name: '可选作者组', template: '[{作者?}] {集名}', target: 'file', description: '可选词位：{作者?} 的方括号组整组可缺席、在场时单值可引用；缺席形态需保留包裹组后的字面空格' },
   { name: '多处标签', template: '({标签})[{作者}]{集名}{ ?}[{标签+}]', target: 'file', description: '同占位词多次出现（位次分立）：圆括号内为位1「标签」、尾部方括号组为位2「标签·第2处」（重复段多值），各处独立产出与引用' },
-  { name: '聚合标识（带锚形态）', template: '{作品}.{任意}', target: 'file', description: '聚合规则的轨行示例：{作品} 为聚合标识专用取值词根（命名捕获槽可用词），`.` 字面锚+{任意} 吞掉语言段——配扩展名谓词 .srt 时轨行整体呈 {作品}.{任意}.srt 形态（ep01.zh.srt 的标识取 ep01）。须写带锚形态而非裸 {作品}（无锚时语言段并进标识、同作不同名不可并组）；扩展名由扩展名谓词承载、不写进模板（{作品}.srt 一类把扩展名写进模板的形态不命中）' }
+  { name: '分P 双标题', template: '{标题} - {序号}.{标题}(Av{作品号},P{序号})', target: 'file', description: 'bilibili 分P 形态：投稿标题（位1 标题）与 P标题（位2 标题）各自独立取值、序号双写同理（位≥2 组名带 __2 后缀，如 title__2/seq__2，提取/值校验按位寻址）；作品号为字母数字类，Av 前缀后的编号整词捕获（BV 号形态同理，无需拆字面前缀）' },
+  { name: '描述括号段', template: '{标题}({描述})', target: 'file', description: '{描述} 为作品描述维度取值词：括号内简介段整词捕获，提取动作接「描述」维度（多值时创建期取首个）' },
+  { name: '聚合标识（带锚形态）', template: '{作品标识}.{任意}', target: 'file', description: '聚合规则的轨行示例：{作品标识} 为聚合标识专用取值词根（命名捕获槽可用词，旧词 {作品} 为其别名、书写合法），`.` 字面锚+{任意} 吞掉语言段——配扩展名谓词 .srt 时 ep01.zh.srt 的标识取 ep01。须写带锚形态而非裸 {作品标识}（无锚时语言段并进标识、同作不同名不可并组）；扩展名由扩展名谓词承载、不写进模板（{作品标识}.srt 一类把扩展名写进模板的形态不命中）' }
 ]
 
 // 模板解析为 chips（literal/word 交替）：未闭合 { 报错（与内核同口径）。
@@ -383,7 +397,7 @@ export function condxTemplateChips(tpl: string): { chips?: TemplateChip[]; error
 }
 
 // 模板词元切分 chips（位次角标供呈现）：字面段与占位词 chip 交替，同词根多位
-// 各自成 chip；可多次出现词根（标签/作者/集名）的位≥2 标注位次 occur 与寻址
+// 各自成 chip；可多次出现词根（九词根全集）的位≥2 标注位次 occur 与寻址
 // 组名 posName（呈现层据此出「第N处」角标——复用可选 chip 的角标样式先例）。
 // 与内核 condxPosOccur 同口径：量词变体/可选词位/普通词统一计数，{任意} 与
 // 可选分隔字面不计数。
@@ -780,10 +794,12 @@ function condxRowsShapeErrorAt(rows: CondxRowForm[], base: number): string {
 // 可带量词的词位（与内核 condxRepeatable 同源：仅 标签/作者/集名 三词位）。
 export const CONDX_REPEAT_ROOTS = ['标签', '作者', '集名']
 
-// 可多次出现（位次分立）的词根英文组名（与内核 condxRepeatableEn 同源：
-// 标签/作者/集名 → tag/author/setname）——同词根多位各自成条目、位次独立；
-// 其余词根第二次出现维持既有「重复」拒绝（轻校验镜像）。
-export const CONDX_REPEAT_GROUPS = ['tag', 'author', 'setname']
+// 可多次出现（位次分立）的词根英文组名全集（与内核 condxRepeatableEn 同源：
+// 标签/作者/集名/标题/序号/作品号/日期/作品标识/描述 九词根 → 全部取值词）——
+// 同词根多位各自成条目、位次独立；{公共段}（key）维持单次，第二次出现维持
+// 既有「重复」拒绝（轻校验镜像）；量词（+/*）仍限 CONDX_REPEAT_ROOTS 三词位，
+// 与多次出现全集解耦。
+export const CONDX_REPEAT_GROUPS = ['tag', 'author', 'setname', 'title', 'seq', 'workid', 'date', 'work', 'description']
 
 // 组界六对同型括号的开→闭映射（包裹单元判定用；与内核 condxOpenBrackets 同源）。
 const CONDX_OPEN_BRACKETS: Record<string, string> = {
@@ -822,7 +838,7 @@ export function condxVariantOfWord(word: string): { variant?: CondxRepeatVariant
   }
   const v = condxVocabOf(root)
   if (!v) {
-    return { error: `模板占位词 {${word}} 的词根 {${root}} 不在词表（作者/集名/序号/标题/标签/作品/作品号/日期/公共段/任意）` }
+    return { error: `模板占位词 {${word}} 的词根 {${root}} 不在词表（作者/集名/序号/标题/标签/作品标识/作品号/日期/描述/公共段/任意）` }
   }
   if (CONDX_REPEAT_ROOTS.indexOf(root) < 0) {
     return { error: `模板占位词 {${word}} 的词根 {${root}} 不可重复：仅 标签/作者/集名 可带量词（+ 或 *）` }
@@ -881,7 +897,7 @@ function condxOptSepAnchored(chips: TemplateChip[], idx: number, lastLitMandator
 // —— 同占位词多次出现（位次分立）前端镜像：位次化组名、位次表条目 ——
 
 // 位次化组名（与内核 condxPosName 同口径）：位1=裸组名（存量单出现模板零变化，
-// 决策6），位 N≥2=「组名__N」（双下划线+位次；九组名全无下划线、后缀无碰撞）。
+// 决策6），位 N≥2=「组名__N」（双下划线+位次；全组名均无下划线、后缀无碰撞）。
 export function condxPosName(group: string, occur: number): string {
   return occur > 1 ? `${group}__${occur}` : group
 }
@@ -892,7 +908,7 @@ export function condxPosName(group: string, occur: number): string {
 export interface CondxOccEntry {
   // word 为显示词：位1=词根现行词或变体书写原文；位≥2 追加「·第N处」。
   word: string
-  // baseWord 为词根现行词（标签——旧词 {键} 归一为 公共段）。
+  // baseWord 为词根现行词（如 标签；旧词 {键}/{作品} 归一为 公共段/作品标识）。
   baseWord: string
   // base 为词根英文组名（位次化前的裸组名，如 tag）。
   base: string
@@ -933,8 +949,8 @@ function condxChipBase(c: TemplateChip): { base: string; baseWord: string; repea
 }
 
 // 一行的全部占位词出现（含重复段位——多值产出，仅提取段可引用；含各位次）：
-// 同词根（仅 标签/作者/集名 可多次出现）多位各自成条目、位次=出现序；其余词根
-// 第二次出现由轻校验报错（条目仍按位产出，供行内标红下的呈现完整性）。可选词位
+// 同词根（可多次出现九词根全集）多位各自成条目、位次=出现序；{公共段} 第二次
+// 出现由轻校验报错（条目仍按位产出，供行内标红下的呈现完整性）。可选词位
 // {作者?} 按现行词登记——引用权由书写记号静态决定；可选分隔字面与 {任意}
 //（非引用吞位词）不产出条目、不计数（与内核 condxPosOccur 同口径）。
 export function condxRowAllPlaceholders(condx: CondxForm): CondxOccEntry[] {
@@ -963,7 +979,8 @@ export function condxRowAllPlaceholders(condx: CondxForm): CondxOccEntry[] {
 
 // 一行的可引用占位词条目（剔除重复段位）：生效条件/值校验/组合接线三面禁引的
 // 按位镜像——位为重复段（多值产出）禁引、位为单值词（含可选词位）可引用。
-// 顺序=模板内出现序；旧词 {键} 书写的模板归一为 {公共段}（组名同 key，寻址
+// 顺序=模板内出现序；旧词 {键}/{作品} 书写的模板归一为 {公共段}/{作品标识}
+//（组名同 key/work，寻址
 // 不受影响，显示不出旧词）。
 export function condxRowPlaceholders(condx: CondxForm): CondxOccEntry[] {
   return condxRowAllPlaceholders(condx).filter((p) => !p.repeat)
@@ -1019,17 +1036,38 @@ export function condxOccurDrift(before: CondxOccEntry[], after: CondxOccEntry[])
 
 // 模板轻校验（与内核 deriveCondxTemplate 主要拒绝面同口径，构造期校验兜底
 // 真源）：词表外词（旧词别名合法）/ 引用词重复（按英文组名判重——{键} 与
-// {公共段} 同组，同模板并用即重复；标签/作者/集名 三词位多次出现放行、位次
-// 分立）/ 相邻占位词无分隔 / 重复段词（量词变体）
-// 语法与形态（越权词位带量词、裸词无分隔、序列成员不支持重复段）/ 可选记号
-// 拒绝面（{?} 空根、{任意?} 与 {公共段?}/{键?} 带问号、序列成员可选词位、
-// 可选分隔两侧无字面锚）。target 传入时按主体镜像序列成员禁区。返回中文错误
-//（空串=通过）。
+// {公共段}、{作品} 与 {作品标识} 同组，同模板并用即重复；可多次出现九词根
+// 多次出现放行、位次分立，{公共段} 维持单次）/ {作品标识} 与 {作品号} 同模板
+// 并用（语义近邻防混用）/ {公共段} 仅序列成员模板 / 相邻占位词无分隔 /
+// 重复段词（量词变体）语法与形态（越权词位带量词、裸词无分隔、序列成员不支持
+// 重复段）/ 可选记号拒绝面（{?} 空根、{任意?} 与 {公共段?}/{键?} 带问号、
+// 可选分隔两侧无字面锚）。可选词位在序列模板解禁（可选捕获不进成套键——
+// 全可选=空键守卫见 condxRowError）。target 传入时按主体镜像序列成员禁区。
+// 返回中文错误（空串=通过）。
 export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq'): string {
   const parsed = condxTemplateChips(tpl)
   if (parsed.error) return parsed.error
   const chips = parsed.chips || []
   const seen = new Set<string>()
+  // {作品标识} 与 {作品号} 同模板互斥登记（与内核 noteIDPair 同口径）：整词
+  // 标识 vs 编号段语义近邻，并用易混用——普通词与可选词位两种书写面统一经此
+  // 裁决（旧词 {作品} 经别名归组 work 同受约束）。
+  let sawWork = false
+  let sawWorkID = false
+  const noteIDPair = (word: string, en: string): string => {
+    if (en === 'work') {
+      if (sawWorkID) {
+        return `模板占位词 {${word}} 不可与 {作品号} 同模板并用：{作品标识} 取整词标识、{作品号} 取编号段，语义近邻易混用，请按文件名形态择一`
+      }
+      sawWork = true
+    } else if (en === 'workid') {
+      if (sawWork) {
+        return `模板占位词 {${word}} 不可与 {作品标识} 同模板并用：{作品标识} 取整词标识、{作品号} 取编号段，语义近邻易混用，请按文件名形态择一`
+      }
+      sawWorkID = true
+    }
+    return ''
+  }
   let prevPlaceholder = false
   let skipCloserHead = false
   let lastLitMandatory = ''
@@ -1098,11 +1136,13 @@ export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq')
         if (optRoot === '键' || optRoot === '公共段') {
           return `模板占位词 {${c.text}}：{公共段} 是序列成套的成群依据，不可带问号`
         }
-        if (target === 'seq') {
-          return `模板占位词 {${c.text}}：序列成员格式不支持可选词位（可选分隔字面不受限）`
-        }
-        // 位次分立：三词位（标签/作者/集名）多次出现放行、位次独立；其余词根
-        // 第二次出现维持既有「重复」拒绝。
+        // 序列模板可选词位解禁（决策6）：可选捕获不进成套键、缺席成员照常入套
+        // ——全可选=空键守卫在 condxRowError 序列分支拦截。
+        const idErr = noteIDPair(c.text, v.group)
+        if (idErr) return idErr
+        // 位次分立：可多次出现九词根（标签/作者/集名/标题/序号/作品号/日期/
+        // 作品标识/描述）多次出现放行、位次独立；{公共段} 第二次出现维持既有
+        // 「重复」拒绝。
         if (CONDX_REPEAT_GROUPS.indexOf(v.group) < 0) {
           if (seen.has(v.group)) return `模板占位词 {${c.text}} 重复`
           seen.add(v.group)
@@ -1125,10 +1165,18 @@ export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq')
       continue
     }
     const v = condxVocabOf(c.text)
-    if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品/作品号/日期/公共段/任意）`
+    if (!v) return `占位词「${c.text}」不在词表内（作者/集名/序号/标题/标签/作品标识/作品号/日期/描述/公共段/任意）`
     if (!v.refable) continue
-    // 位次分立：三词位（标签/作者/集名）多次出现放行、位次独立；其余词根重复
-    // 维持既有报错文案（{标签2} 词表外报错由上一行维持）。
+    const idErr = noteIDPair(c.text, v.group)
+    if (idErr) return idErr
+    // {公共段} 仅序列成员模板（与内核 allowKey 同口径——target 缺省=迷你模板
+    // 校验，后端按 allowKey:true 校验，此处同样放行）。
+    if (target && target !== 'seq' && (c.text === '键' || c.text === '公共段')) {
+      return `模板占位词 {${c.text}}：{公共段} 仅适用于序列成员格式`
+    }
+    // 位次分立：可多次出现九词根（标签/作者/集名/标题/序号/作品号/日期/
+    // 作品标识/描述）多次出现放行、位次独立；{公共段} 重复维持既有报错文案
+    //（{标签2} 词表外报错由上一行维持）。
     if (CONDX_REPEAT_GROUPS.indexOf(v.group) < 0) {
       if (seen.has(v.group)) {
         return `占位词「${c.text}」在同一模板内重复（引用词不可重复；同一词根重复取值请用重复段记号 {${v.word}+}，吞位用 {任意}）`
@@ -1155,7 +1203,24 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
     if (err) return err
     if (target === 'seq') {
       const chips = condxTemplateChips(condx.format.tpl || '').chips || []
-      if (!chips.some((c) => c.ph && c.text === '序号')) return '序列目标模板须含 {序号}（非序号部分为{公共段}）'
+      if (!chips.some((c) => c.ph && c.text === '序号')) return '序列目标模板须含 {序号}（成套键=其余捕获按序拼接）'
+      // 全可选=空键守卫（新存档拦截，存量照旧）：与内核同口径——仅当模板含
+      // 可选词位时启用（可选词位此前在序列模板整体被拒、存量档案不含此形态，
+      // 无可选词位的既有书写不受新守卫影响）；可选捕获不进成套键，{序号} 之外
+      // 再无必选取值词时键恒为空——同目录内一切命中文件同键并套。必选取值词=
+      // 非可选词位/非可选分隔/非量词变体、词表内可引用且组名非 seq 的词
+      //（{公共段} 计入；{任意} 吞位词不产捕获不计入）。
+      const hasOptWord = chips.some((c) => c.ph && c.opt === 'word')
+      if (hasOptWord) {
+        const hasRequiredKeyWord = chips.some((c) => {
+          if (!c.ph || c.opt || condxHasVariantMark(c.text)) return false
+          const hit = condxVocabOf(c.text)
+          return !!hit && hit.refable && hit.group !== 'seq'
+        })
+        if (!hasRequiredKeyWord) {
+          return '序列成员格式的成套键为空：可选词位不参与成套键，{序号} 之外须至少保留一个必选取值词（或 {公共段}），否则同目录内所有命中文件会并成一套'
+        }
+      }
     }
   }
   const allowed = (CONDX_ATTACH_OPTIONS[target] || []).map((o) => o.value)
@@ -1200,7 +1265,8 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
 }
 
 // 值校验占位词+位次是否在本行可引用词内：按词根组名+位次配对命中（旧词 {键}
-// 与 {公共段} 同组同义——JSON 手写旧词照常通过，保存时归一为新词）。
+// 与 {公共段}、{作品} 与 {作品标识} 同组同义——JSON 手写旧词照常通过，保存时
+// 归一为新词）。
 function badgePlaceholderInRow(placeholders: CondxOccEntry[], placeholder: string | undefined, occur: number | undefined): boolean {
   const own = condxVocabOf(placeholder || '')
   if (!own) return false
@@ -1222,8 +1288,9 @@ export function condxRowsError(rows: CondxRowForm[]): string {
 }
 
 // 捕获声明清单（v4：行号+占位词+英文组名）：提取段「行N·{词}」选项与清单
-// 呈现用 word（现行词——旧词 {键} 书写归一显示为 {公共段}；重复段词为模板
-// 书写原文如 标签+）；captureName 落 JSON 用 group（内核寻址口径=英文组名）。
+// 呈现用 word（现行词——旧词 {键}/{作品} 书写归一显示为 {公共段}/{作品标识}；
+// 重复段词为模板书写原文如 标签+）；captureName 落 JSON 用 group（内核寻址
+// 口径=英文组名）。
 // repeat=true 为重复段词（多值产出）：提取段可引用，三面（生效条件/值校验/
 // 组合接线）禁引——opts.includeRepeat=false 时剔除（组合接线的成员下拉口径）。
 export interface CondxCaptureDecl {
@@ -1245,12 +1312,13 @@ export function condxCaptures(rows: CondxRowForm[], opts?: { includeRepeat?: boo
   return out
 }
 
-// —— 旧词归一（{键} → {公共段}：同一英文组名 key 的同义词书写，语义等价） ——
+// —— 旧词归一（{键} → {公共段}、{作品} → {作品标识}：同一英文组名的同义词
+// 书写，语义等价） ——
 
-// 模板文本归一：整位占位词 {键} 替换为 {公共段}（仅花括号整位匹配，字面
-// 文本不动）。
+// 模板文本归一：整位占位词 {键} 替换为 {公共段}、{作品} 替换为 {作品标识}
+//（仅花括号整位匹配，字面文本不动）。
 export function condxNormalizeTpl(tpl: string): string {
-  return (tpl || '').replace(/\{键\}/g, '{公共段}')
+  return (tpl || '').replace(/\{键\}/g, '{公共段}').replace(/\{作品\}/g, '{作品标识}')
 }
 
 // 条件行树归一：行/括号子组递归遍历，格式模板（含附加条件迷你模板）整位
@@ -1268,6 +1336,8 @@ export function condxNormalizeRows<T>(rows: T): T {
         out[key] = condxNormalizeTpl(v)
       } else if ((key === 'placeholder' || key === 'againstPh') && v === '键') {
         out[key] = '公共段'
+      } else if ((key === 'placeholder' || key === 'againstPh') && v === '作品') {
+        out[key] = '作品标识'
       } else {
         out[key] = walk(v)
       }
@@ -1327,7 +1397,7 @@ export function condxMemberShape(member: CondxComboMember): CondxMemberShape {
 }
 
 // 组合关系直译句：每成员一段、段间以「、」连接；dir 段=「位于「A」命中的
-// 目录之下的」、seq 段=「属于「B」的成员文件（公共段相同≥2、落单不算）」
+// 目录之下的」、seq 段=「属于「B」的成员文件（成套键相同≥2、落单不算）」
 // （自带名词短语）、file/回退段=「被「C」命中」；末段非 seq 时整句尾接
 // 「的文件」（段尾恰为「的」时只接「文件」）。任一成员含析取连接 → 整句
 // 回退「命中=「A」与「B」都命中的文件」。
@@ -1341,7 +1411,7 @@ export function condxComboSentence(members: CondxComboMember[]): string {
   }
   const segs = shapes.map((s) => {
     if (s.seg === 'dir') return `位于「${s.label}」命中的目录之下的`
-    if (s.seg === 'seq') return `属于「${s.label}」的成员文件（公共段相同≥2、落单不算）`
+    if (s.seg === 'seq') return `属于「${s.label}」的成员文件（成套键相同≥2、落单不算）`
     return `被「${s.label}」命中`
   })
   const body = segs.join('、')
@@ -1410,7 +1480,7 @@ export interface CondxRowCardView {
 
 // 卡片摘要选项：appendExt=模板文本尾接扩展名谓词取值（聚合轨行卡呈现——模板对
 // 去扩展名的文件名正文求值、扩展名由 fileExt 谓词承载，拼接后卡片按轨行整体
-// 形态呈现，如模板 {作品}.{任意} 配谓词 .srt 显示为 {作品}.{任意}.srt）。
+// 形态呈现，如模板 {作品标识}.{任意} 配谓词 .srt 显示为 {作品标识}.{任意}.srt）。
 export interface CondxRowCardOpts {
   appendExt?: boolean
 }
@@ -1457,7 +1527,7 @@ export function condxRowCardView(row: CondxRowForm, no: number, opts?: CondxRowC
   }
 }
 
-// 英文组名（含位次化 tag__2）→ 中文显示词（词表九词组名唯一；位次化组名按
+// 英文组名（含位次化 tag__2）→ 中文显示词（词表全词组名唯一；位次化组名按
 // 词根中文+「·第N处」呈现）。
 export function condxGroupWordOf(group: string): string {
   const m = /^(.+?)__(\d+)$/.exec(group)

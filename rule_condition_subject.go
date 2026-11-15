@@ -6,8 +6,8 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -243,8 +243,9 @@ func (p *DirSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 }
 
 // SeqSubjectPattern 序列主体模式：成员格式模板（含 {序号}，可选 {键}）逐成员
-// 全名匹配；**非{序号}捕获段的拼接文本为群组键**——跨成员键相同即同套（收敛
-// 档 R3：模板的其余部分跨成员恒同，这正是「成套」的语义）。达到 MinSize 记
+// 全名匹配；**必选非序号捕获段的拼接文本为群组键**——跨成员键相同即同套（收敛
+// 档 R3：模板的其余部分跨成员恒同，这正是「成套」的语义）；{序号} 位次变体与
+// 可选词位捕获逐成员变化（或可缺席），不进键。达到 MinSize 记
 // GroupAnalysis 并绑定捕获（键/序号等）；MemberTypes 非空时只统计指定类型的
 // 成员（seqMemberType 谓词，T3 散页成套排除目录内的说明 txt 等）。
 //
@@ -260,9 +261,13 @@ type SeqSubjectPattern struct {
 	// Repeats 为重复段描述列表（量词占位词推导；机械透传存字段，语义消费
 	// 在阶段2 绑定层；seq 主体行已禁重复词，通常为空）。
 	Repeats []condxRepeatDesc `json:"repeats,omitempty"`
+	// OptionalCaptures 为可选词位捕获组名列表（{词?} 推导）：这些捕获不参与
+	// 成套键（在场/缺席成员的键须恒同）；缺席成员照常入套，该词无绑定无声明。
+	OptionalCaptures []string `json:"optionalCaptures,omitempty"`
 	// SeqName 为序号捕获组名（恒为 "seq"）。
 	SeqName string `json:"seqName"`
-	// KeyParts 为键段捕获组名列表（模板中除 {序号} 外的全部占位词，按模板顺序）。
+	// KeyParts 为键段捕获组名列表（参与成套键的必选非序号捕获，按模板顺序；
+	// {序号} 位次变体（seq__N）与可选词位捕获不进键）。
 	KeyParts []string `json:"keyParts"`
 	// MinSize 为成套最少成员数（含自身，默认 2；seqMinLength 谓词）。
 	MinSize int `json:"minSize"`
@@ -273,17 +278,26 @@ type SeqSubjectPattern struct {
 }
 
 // newSeqSubjectPattern 构造序列主体模式：正则编译失败或模板无 {序号} 捕获组
-// 返回中文错误。
-func newSeqSubjectPattern(expr string, captures []string, repeats []condxRepeatDesc, minSize int) (*SeqSubjectPattern, error) {
+// 返回中文错误。键段=必选非序号捕获（{序号} 位次变体与可选词位捕获排除）。
+func newSeqSubjectPattern(expr string, captures []string, repeats []condxRepeatDesc, optionalCaptures []string, minSize int) (*SeqSubjectPattern, error) {
 	re, err := regexp.Compile(expr)
 	if err != nil {
 		return nil, fmt.Errorf("序列成员正则 %q 编译失败: %w", expr, err)
 	}
 	hasSeq := false
+	optSet := make(map[string]bool, len(optionalCaptures))
+	for _, name := range optionalCaptures {
+		optSet[name] = true
+	}
 	var keyParts []string
 	for _, name := range captures {
-		if name == "seq" {
+		// 词根判 seq（含 seq__N 位次变体）：序号捕获逐成员变化，不进键。
+		if condxRepeatEnOfCapture(name) == "seq" {
 			hasSeq = true
+			continue
+		}
+		// 可选词位捕获不进键：在场/缺席成员的键须恒同，进键则两态键不同必拆套。
+		if optSet[name] {
 			continue
 		}
 		keyParts = append(keyParts, name)
@@ -294,7 +308,7 @@ func newSeqSubjectPattern(expr string, captures []string, repeats []condxRepeatD
 	if minSize < 2 {
 		minSize = 2
 	}
-	return &SeqSubjectPattern{Expr: expr, Captures: captures, Repeats: repeats, SeqName: "seq", KeyParts: keyParts, MinSize: minSize, re: re}, nil
+	return &SeqSubjectPattern{Expr: expr, Captures: captures, Repeats: repeats, OptionalCaptures: optionalCaptures, SeqName: "seq", KeyParts: keyParts, MinSize: minSize, re: re}, nil
 }
 
 // patternMarker 实现 Pattern 接口标记。
@@ -314,8 +328,74 @@ func (p *SeqSubjectPattern) memberAllowed(fileName string) bool {
 	return false
 }
 
-// seqMemberKey 对单个成员名求模板匹配：命中返回 (键=非序号捕获段按序拼接,
-// 序号文本, true)；不匹配或序号非整数返回零值与 false。
+// seqSplitNumericPrefix 拆序号文本的数值前缀：前导数字段与其余文；无前导
+// 数字时 hasPrefix=false、余文取整词。前导数字段超出 int 范围时取值饱和于
+// MaxInt（超长数字段之间按余文字节序区分，次序仍确定）。
+func seqSplitNumericPrefix(text string) (num int, rest string, hasPrefix bool) {
+	end := 0
+	for end < len(text) && text[end] >= '0' && text[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, text, false
+	}
+	value := 0
+	for i := 0; i < end; i++ {
+		d := int(text[i] - '0')
+		if value > (math.MaxInt-d)/10 {
+			return math.MaxInt, text[end:], true
+		}
+		value = value*10 + d
+	}
+	return value, text[end:], true
+}
+
+// seqNumericPrefix 序号文本的数值前缀（无前导数字为 0）：群组分析 Seq 字段
+// 的取值来源（int 字段，纯字母序号取 0）。
+func seqNumericPrefix(text string) int {
+	num, _, _ := seqSplitNumericPrefix(text)
+	return num
+}
+
+// seqNaturalLess 序号文本的自然序比较：数值前缀主序（升序）、同前缀按余文
+// 字节序；无数值前缀的文本排在一切有前缀文本之后，其间按整文字节序。
+func seqNaturalLess(a, b string) bool {
+	na, ra, aHas := seqSplitNumericPrefix(a)
+	nb, rb, bHas := seqSplitNumericPrefix(b)
+	if aHas != bHas {
+		return aHas
+	}
+	if na != nb {
+		return na < nb
+	}
+	return ra < rb
+}
+
+// seqMemberLess 序号成员排序共用比较器（快照群卡成员序 / 集序作答总序 /
+// 批次子行集内序三处）：序号原文在场按自然序；原文缺席（文件行兜底条目）以
+// 整型序号承载主序、余文视空——整型即原文数值前缀的同源推导值，两态取值
+// 口径不分裂。
+func seqMemberLess(aSeq int, aText string, bSeq int, bText string) bool {
+	na, ra, aHas := seqSplitNumericPrefix(aText)
+	if aText == "" {
+		na, ra, aHas = aSeq, "", true
+	}
+	nb, rb, bHas := seqSplitNumericPrefix(bText)
+	if bText == "" {
+		nb, rb, bHas = bSeq, "", true
+	}
+	if aHas != bHas {
+		return aHas
+	}
+	if na != nb {
+		return na < nb
+	}
+	return ra < rb
+}
+
+// seqMemberKey 对单个成员名求模板匹配：命中返回 (键=键段捕获按序拼接,
+// 序号文本, true)；不匹配返回零值与 false。序号文本不要求纯整数——字母
+// 序号照常计入成套，数值化由 seqNumericPrefix 承担。
 func (p *SeqSubjectPattern) seqMemberKey(name string) (string, string, bool) {
 	m := p.re.FindStringSubmatch(name)
 	if m == nil {
@@ -331,9 +411,6 @@ func (p *SeqSubjectPattern) seqMemberKey(name string) (string, string, bool) {
 	if !ok || seqIdx >= len(m) {
 		return "", "", false
 	}
-	if _, err := strconv.Atoi(m[seqIdx]); err != nil {
-		return "", "", false
-	}
 	var key string
 	for _, part := range p.KeyParts {
 		if idx, ok := groupIdx[part]; ok && idx < len(m) {
@@ -345,7 +422,7 @@ func (p *SeqSubjectPattern) seqMemberKey(name string) (string, string, bool) {
 
 // Evaluate 先对自身求成员键与序号，再统计 Siblings（含自身）中同键且类型合格
 // 的成员数；达到 MinSize 时绑定自身捕获、写入 GroupAnalysis（Key/Prefix 取键、
-// Seq 取序号整数、Size 取合格成员数）并返回 true；落单返回 false。
+// Seq 取序号数值前缀、Size 取合格成员数）并返回 true；落单返回 false。
 func (p *SeqSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseContext) bool {
 	if p.re == nil {
 		return false
@@ -371,8 +448,7 @@ func (p *SeqSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 		return false
 	}
 	bindCondxCaptures(p.re, selfName, p.Captures, p.Repeats, ctx)
-	seq, _ := strconv.Atoi(seqText)
-	ctx.Group = &GroupAnalysis{Key: key, Prefix: key, Seq: seq, Size: size}
+	ctx.Group = &GroupAnalysis{Key: key, Prefix: key, Seq: seqNumericPrefix(seqText), Size: size}
 	return true
 }
 
