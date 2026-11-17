@@ -49,8 +49,7 @@
               </ul>
             </el-alert>
 
-            <!-- 一、档案规则列表（W4：组合行「组合·引用 N 条」、被引用行「被 N 条组合引用」
-                  小字标记——由全列表 refs 统计） -->
+            <!-- 一、档案规则列表（元数据与聚合两类同列；范围小字=「类别 · N 形态」） -->
             <section class="li-rules-card">
               <div class="li-rules-card-head">
                 <h3 class="li-rules-card-title">档案规则 <span class="li-rules-card-note">{{ rules.length }} 条 · 元数据与聚合两类同列<template v-if="skipped.length"> · 载入失败 {{ skipped.length }} 条</template></span></h3>
@@ -94,12 +93,9 @@
                   <!-- 来源与命中小字（帧1「来源:预置 · 命中 3 件」）：命中段取最近识别
                        快照统计，无会话/无快照时缺席 -->
                   <div class="li-rules-row-src">来源:{{ sourceLabel(r.source) }}{{ hitCountOf(r) != null ? ` · 命中 ${hitCountOf(r)} 件` : '' }}</div>
-                  <div v-if="isComboRule(r)" class="li-rules-row-refnote">组合·引用 {{ (r.refs || []).length }} 条</div>
-                  <div v-else-if="comboRefCount(r.id) > 0" class="li-rules-row-refnote">被 {{ comboRefCount(r.id) }} 条组合引用</div>
-                  <!-- 范围小字（B2）：组合行=直译句（与编辑弹窗同函数）；普通行=「类别 · N 形态」（目录行带层级锚时尾缀「· 第 N 级」） -->
-                  <div v-if="isComboRule(r) && comboSentenceOf(r)" class="li-rules-row-shape">{{ comboSentenceOf(r) }}</div>
-                  <div v-else-if="!isComboRule(r) && shapeSummaryOf(r)" class="li-rules-row-shape">{{ shapeSummaryOf(r) }}</div>
-                  <div v-if="isComboRule(r) && hasDisabledMember(r)" class="li-rules-row-combo-off">成员已停用——本组合不产出</div>
+                  <!-- 范围小字（B2）：普通行=「类别 · N 形态」（目录行多段模板与作用域
+                       附件的直译句在编辑弹窗摘要行呈现，决策7） -->
+                  <div v-if="shapeSummaryOf(r)" class="li-rules-row-shape">{{ shapeSummaryOf(r) }}</div>
                   <div class="li-rules-row-id" :title="r.id">{{ r.id }}</div>
                 </div>
                 <span class="li-rules-row-side">
@@ -115,7 +111,7 @@
                 <span class="li-rules-row-skip-badge">载入失败</span>
                 <div class="li-rules-row-main">
                   <div class="li-rules-row-desc" :title="s.description">{{ s.description || '（无描述）' }}</div>
-                  <div class="li-rules-row-skip-reason">{{ s.reason }}</div>
+                  <div class="li-rules-row-skip-reason">{{ skippedReasonText(s) }}</div>
                   <div class="li-rules-row-id" :title="s.id">{{ s.id }}</div>
                 </div>
                 <span class="li-rules-row-side">
@@ -185,22 +181,6 @@
         @preview-close="onDialogPreviewClose"
       />
 
-      <!-- 级联管理确认框（W5 剧本二·帧2/帧4）：停用/删除被组合规则引用的成员规则
-           前先列后果清单；〔取消〕= 关闭、零变化，〔仍要停用/删除〕才走既有 RPC -->
-      <el-dialog
-        v-model="confirmVisible"
-        :title="confirmTitle"
-        width="460px"
-        append-to-body
-      >
-        <p class="li-rules-confirm-body">{{ confirmMessage }}</p>
-        <template #footer>
-          <el-button @click="cancelRuleConfirm">取消</el-button>
-          <el-button :type="confirmAction === 'delete' ? 'danger' : 'primary'" @click="onRuleConfirmProceed">
-            {{ confirmOkText }}
-          </el-button>
-        </template>
-      </el-dialog>
       <!-- 载入失败条目删除确认框：错误态行的唯一出口——〔取消〕= 关闭、零变化，
            〔仍要删除〕走既有 deleteRule RPC（删除作用于档案原文层） -->
       <el-dialog
@@ -226,7 +206,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated } from 'vue'
 import { Events } from '@wailsio/runtime'
 import RuleEditDialog from './RuleEditDialog.vue'
-import { condxComboSentence, condxShapeSummary, type CondxComboMember } from './ruleFormModel'
+import { condxShapeSummary } from './ruleFormModel'
 import { requestTimeoutMs } from './requestTimeout'
 
 // 工作台事件协议通道（与插件 Go 侧 session.go 约定一致）
@@ -254,9 +234,8 @@ interface DimPolicyView {
 }
 
 // 档案规则条目（ruleEntryJSON 形态：conditions / extractions 即 JSON 片段源——
-// v4 档案条件只落 conditions，模式树为编译缓存不落档；refs 为 W4 组合引用的
-// 成员规则 ID 列表——非组合规则缺省空；category/identity/aggregate 为聚合规则
-// 的类别与两件声明——元数据规则三者缺省）
+// v4/v5 档案条件只落 conditions，模式树为编译缓存不落档；category/identity/
+// aggregate 为聚合规则的类别与两件声明——元数据规则三者缺省）
 interface RuleEntryView {
   id: string
   description: string
@@ -265,7 +244,6 @@ interface RuleEntryView {
   category?: string
   identity?: { row: number; capture: string }[] | null
   aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
-  refs?: string[]
   conditions?: unknown
   extractions?: unknown
   synthesis?: { dimPolicies?: DimPolicyView[] | null; roles?: RoleBindingView[] | null }
@@ -294,6 +272,18 @@ interface SkippedEntryView {
   id: string
   description: string
   reason: string
+}
+
+// 错误态行跳过原因的呈现文本（剧本2 帧4 形态）：作用域附件供给方悬空的条目在
+// 后端原因之后尾缀处置指路（帧4 文案「——恢复该规则或删除本条的附件条件」）；
+// 其余跳过原因原样呈现。规则级引用机制已随 refs 退役——供给方悬空由档案载入
+// 期跨规则校验按条跳过（后端告警数据），本视图以错误态行呈现。
+function skippedReasonText(entry: SkippedEntryView): string {
+  const reason = entry.reason || ''
+  if (reason.indexOf('作用域附件引用的供给方规则') >= 0) {
+    return `${reason}——恢复该规则或删除本条的附件条件`
+  }
+  return reason
 }
 
 interface RulesAdminView {
@@ -489,18 +479,10 @@ function openRuleById(ruleId: string): void {
   openEdit(rule)
 }
 
-// —— 一、列表操作：启停 / 删除（W5 级联管理：被组合引用的规则先确认后果） ——
+// —— 一、列表操作：启停 / 删除（规则级引用机制已随 refs 退役——被引用级联确认
+//     随之消亡；作用域附件供给方的删/停后果由档案载入期错误态行承载，见上） ——
 
 async function doToggleRule(rule: RuleEntryView, enable: boolean): Promise<void> {
-  // 关向且被组合引用：先弹确认框（帧2），取消＝零变化
-  if (!enable && comboRefCount(rule.id) > 0) {
-    requestRuleConfirm('disable', rule)
-    return
-  }
-  await doToggleRuleConfirmed(rule, enable)
-}
-
-async function doToggleRuleConfirmed(rule: RuleEntryView, enable: boolean): Promise<void> {
   acting.value = true
   actionError.value = ''
   const resp = await request('setRuleEnabled', { ruleId: rule.id, enabled: enable, root: sessionRoot() })
@@ -514,15 +496,6 @@ async function doToggleRuleConfirmed(rule: RuleEntryView, enable: boolean): Prom
 }
 
 async function doDeleteRule(rule: RuleEntryView): Promise<void> {
-  // 被组合引用：先弹确认框（帧4），取消＝零变化
-  if (comboRefCount(rule.id) > 0) {
-    requestRuleConfirm('delete', rule)
-    return
-  }
-  await doDeleteRuleConfirmed(rule)
-}
-
-async function doDeleteRuleConfirmed(rule: RuleEntryView): Promise<void> {
   acting.value = true
   actionError.value = ''
   const resp = await request('deleteRule', { ruleId: rule.id, root: sessionRoot() })
@@ -596,75 +569,12 @@ async function doMoveRule(index: number, delta: -1 | 1): Promise<void> {
   notice.value = '顺序已保存（可在识别全景页重新识别查看效果）'
 }
 
-// —— 一·二、级联管理确认框（W5 剧本二·帧2/帧4）：后果清单逐字对齐剧本 ——
-
-type RuleConfirmAction = 'disable' | 'delete'
-
-const confirmVisible = ref(false)
-const confirmAction = ref<RuleConfirmAction | null>(null)
-const confirmRule = ref<RuleEntryView | null>(null)
-
-function ruleDisplayName(rule: RuleEntryView): string {
-  return rule.description || rule.id
-}
-
-// 引用目标规则的组合规则（列表统计 refs 含其 ID，与列表小字同源）
-const confirmComboRules = computed<RuleEntryView[]>(() => {
-  const target = confirmRule.value
-  if (!target) return []
-  return rules.value.filter((r) => (r.refs || []).indexOf(target.id) >= 0)
-})
-
-const confirmTitle = computed<string>(() =>
-  confirmAction.value === 'delete' ? '删除被引用的规则？' : '停用被引用的规则？'
-)
-
-const confirmOkText = computed<string>(() => (confirmAction.value === 'delete' ? '仍要删除' : '仍要停用'))
-
-// 正文＝帧2/帧4 逐字文案（组合描述列表以顿号连接，与列表标记同源）
-const confirmMessage = computed<string>(() => {
-  const target = confirmRule.value
-  if (!target) return ''
-  const combos = confirmComboRules.value
-  const names = combos.map(ruleDisplayName).join('、')
-  const head = `『${ruleDisplayName(target)}』被 ${combos.length} 条组合规则引用：${names}。`
-  if (confirmAction.value === 'delete') {
-    return `${head}删除后该组合的成员引用悬空，下次载入档案时该组合将被跳过，并在「档案载入告警」中列出。`
-  }
-  return `${head}停用后这些组合规则将整体不产出（不会降级为仅其余成员命中）。`
-})
-
-function requestRuleConfirm(action: RuleConfirmAction, rule: RuleEntryView): void {
-  confirmAction.value = action
-  confirmRule.value = rule
-  confirmVisible.value = true
-  actionError.value = ''
-}
-
-// 取消：只关框，不触碰开关/档案（帧2/帧4 的失败路径）
-function cancelRuleConfirm(): void {
-  confirmVisible.value = false
-}
-
-// 仍要停用/删除：关框后照旧走既有 RPC（帧2/帧4 的确认路径）
-async function onRuleConfirmProceed(): Promise<void> {
-  const target = confirmRule.value
-  const action = confirmAction.value
-  confirmVisible.value = false
-  if (!target || !action) return
-  if (action === 'delete') {
-    await doDeleteRuleConfirmed(target)
-  } else {
-    await doToggleRuleConfirmed(target, false)
-  }
-}
-
 // —— 二、单条编辑（两段式弹窗 · 剧本F，共用组件 RuleEditDialog） ——
 
 // 弹窗初始载荷（RuleEditDialog rule 模式入参的结构投影；conditions/extractions
-// 即档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑；refs 为 W4 组合
-// 引用成员列表；category/identity/aggregate 为聚合规则三件声明——复制条目时
-// 内容随载、id 置空 source 归 manual（复制件=用户手写条目））
+// 即档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑；category/identity/
+// aggregate 为聚合规则三件声明——复制条目时内容随载、id 置空 source 归 manual
+//（复制件=用户手写条目））
 interface RuleDialogInput {
   id: string
   description: string
@@ -674,7 +584,6 @@ interface RuleDialogInput {
   category?: string
   identity?: { row: number; capture: string }[] | null
   aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
-  refs?: string[] | null
   conditions?: unknown
   extractions: unknown
   synthesis: { dimPolicies: DimPolicyView[]; roles: RoleBindingView[] }
@@ -755,44 +664,12 @@ function hitCountOf(rule: RuleEntryView): number | null {
   return typeof n === 'number' ? n : null
 }
 
-// —— W4 列表引用标记（帧10）：组合行「组合·引用 N 条」、被引用行「被 N 条组合引用」 ——
-
-// 组合规则＝refs 非空（引用了成员规则）
-function isComboRule(rule: RuleEntryView): boolean {
-  return (rule.refs || []).length > 0
-}
-
-// 被引用计数：全列表 refs 统计
-function comboRefCount(ruleId: string): number {
-  return rules.value.reduce((n, r) => n + ((r.refs || []).indexOf(ruleId) >= 0 ? 1 : 0), 0)
-}
-
-// 组合行「成员已停用——本组合不产出」（W5 剧本二·帧3）：任一被引成员当前停用
-function hasDisabledMember(rule: RuleEntryView): boolean {
-  return (rule.refs || []).some((refId) => {
-    const member = rules.value.find((r) => r.id === refId)
-    return member !== undefined && member.enabled === false
-  })
-}
-
 // —— 列表行范围小字（B2）：与编辑弹窗同函数生成 ——
-// 组合行=组合关系直译句（成员按 refs 寻址取档案现档；与弹窗摘要行同一纯函数）
-function comboSentenceOf(rule: RuleEntryView): string {
-  const members: CondxComboMember[] = (rule.refs || [])
-    .map((refId) => rules.value.find((r) => r.id === refId))
-    .filter((m): m is RuleEntryView => m !== undefined)
-    .map((m) => ({ label: m.description || m.id, rows: m.conditions }))
-  if (!members.length) return ''
-  return condxComboSentence(members)
-}
-
 // 普通行=「目标类别 · N 形态」（类别=条件行目标并集去重、多类别以 + 并列；
-// 目录行带层级锚〔dirLevel〕时尾缀「 · 第 N 级」；条件行缺失的坏档行不显示）
+// 条件行缺失的坏档行不显示）
 function shapeSummaryOf(rule: RuleEntryView): string {
   const shape = condxShapeSummary(rule.conditions)
-  return shape.count > 0
-    ? `${shape.label} · ${shape.count} 形态${shape.levelNote ? ` · ${shape.levelNote}` : ''}`
-    : ''
+  return shape.count > 0 ? `${shape.label} · ${shape.count} 形态` : ''
 }
 
 // 新建：空载荷入弹窗（v4 缺省样例〔【{作者}】{标题} 行 + 作者/标题提取行〕
@@ -807,7 +684,6 @@ function openNew(): void {
     category: '',
     identity: null,
     aggregate: null,
-    refs: null,
     conditions: null,
     extractions: null,
     synthesis: { dimPolicies: [], roles: [] }
@@ -830,7 +706,6 @@ function ruleToDialogInput(rule: RuleEntryView, asCopy: boolean): RuleDialogInpu
     category: rule.category || '',
     identity: rule.identity ?? null,
     aggregate: rule.aggregate ?? null,
-    refs: rule.refs ?? null,
     conditions: rule.conditions ?? null,
     extractions: rule.extractions ?? [],
     synthesis: {
@@ -1099,12 +974,6 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* W4 引用标记小字（帧10）：组合·引用 N 条 / 被 N 条组合引用 */
-.li-rules-row-refnote {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-}
-
 /* 两级类别标记（帧1）：[聚合]|[元数据] 行首小标——聚合主色、元数据灰 */
 .li-rules-row-cat {
   margin-right: 6px;
@@ -1123,17 +992,11 @@ onUnmounted(() => {
   color: var(--app-text-secondary);
 }
 
-/* B2 范围小字：组合行直译句 / 普通行「类别 · N 形态」 */
+/* B2 范围小字：普通行「类别 · N 形态」 */
 .li-rules-row-shape {
   font-size: 12px;
   color: var(--app-text-secondary);
   word-break: break-all;
-}
-
-/* W5 级联管理（剧本二·帧3）：组合行「成员已停用——本组合不产出」灰字 */
-.li-rules-row-combo-off {
-  font-size: 12px;
-  color: var(--app-text-secondary);
 }
 
 /* 载入失败条目（错误态行）：fail 色系行——徽标与原因同色源，与任务失败态一致 */
@@ -1160,7 +1023,7 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-/* W5 确认框正文（剧本二·帧2/帧4）：后果清单整段呈现 */
+/* 删除确认框正文（载入失败条目删除）：后果整段呈现 */
 .li-rules-confirm-body {
   margin: 0;
   font-size: 13px;

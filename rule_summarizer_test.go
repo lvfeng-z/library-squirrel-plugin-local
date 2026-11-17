@@ -1,10 +1,11 @@
 package main
 
-// 规则总结器的单元测试：真实样例的组合规则构造（根名→标签 / 一级目录剥壳→
-// 作者 / 文件名首段→作品名 / 尾部码丢弃）、手填值自动匹配兜底与手工维度降级、
-// 剥壳变换的求值、全库命中预览统计与跨目录样例（含目录键）、赋值出处存取
-//（会话态+协议透传）、summarizeRule 不写档与 generalize mode=struct 确认入档
-//（单文件与目录寻址）。
+// 规则总结器的单元测试：真实样例的组合规则构造（根名→标签 / 一级目录剥壳
+// →作者 / 文件名首段→作品名 / 尾部码丢弃）、多段目录模板合并产物（决策3：
+// 逐层目录条目合并单条多段规则、段距=层距差、零绝对层级锚）、手填值自动匹配
+// 兜底与手工维度降级、剥壳变换的求值、全库命中预览统计与跨目录样例（含目录
+// 键）、赋值出处存取（会话态+协议透传）、summarizeRule 不写档与 generalize
+// mode=struct 确认入档（单文件与目录寻址）。
 import (
 	"encoding/json"
 	"fmt"
@@ -20,10 +21,10 @@ func realSampleStructFixture() (root, rel, file string) {
 		"atago__commission__by_jake__jaccobus_delithw.png"
 }
 
-// TestBuildStructMapRulesRealSample 退出标准样例（v4 模板）：根名→标签（常量
-// 折入目录条目）、一级目录壳形态 → 目录模板 Artist[{作者}]（剥壳语义由捕获
-// 天然承载）、文件名全段展开模板（首段 {标题}、未引用段/尾部 {任意} 吞位
-// ——尾部码丢弃语义）。
+// TestBuildStructMapRulesRealSample 退出标准样例（决策3 形态）：根名→标签
+//（常量折入目录层级条目）、一级目录壳形态 → 目录行模板 Artist[{作者}]（剥壳
+// 语义由捕获天然承载、不附绝对层级锚）、文件名全段展开模板（首段 {标题}、
+// 未引用段/尾部 {任意} 吞位——尾部码丢弃语义）。
 func TestBuildStructMapRulesRealSample(t *testing.T) {
 	root, rel, file := realSampleStructFixture()
 	assign := &SessionAssignment{
@@ -36,23 +37,23 @@ func TestBuildStructMapRulesRealSample(t *testing.T) {
 		t.Fatalf("结构映射规则构造失败: %v", err)
 	}
 	if len(rules) != 2 || len(sugg.Rules) != 2 {
-		t.Fatalf("组合规则应恰两条（目录层+文件名），实际 %d 条", len(rules))
+		t.Fatalf("组合规则应恰两条（目录层级+文件名），实际 %d 条", len(rules))
 	}
 
-	// 目录层条目（v4 目录行模板）：Artist[{作者}]、作者=行 1 捕获、标签=库根
-	// 名常量。
+	// 目录层级条目（单层样本=单段模板）：Artist[{作者}]、零附加（无绝对
+	// 层级锚）、作者=行 1 捕获、标签=库根名常量折入。
 	if _, ok := rules[0].Pattern.(*RowSubjectPattern); !ok || rules[0].Conditions == nil {
-		t.Fatalf("首条应为 v4 目录行条件规则，实际 %T", rules[0].Pattern)
+		t.Fatalf("首条应为目录行条件规则，实际 %T", rules[0].Pattern)
 	}
 	dirCond := rules[0].Conditions[0].Condition
 	if dirCond.Target != CondxTargetDir || dirCond.Format.Tpl != "Artist[{作者}]" {
 		t.Fatalf("目录层模板不符: %+v", dirCond)
 	}
-	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 1 {
-		t.Fatalf("目录行应随附第 1 级层深锚（AE 决策2）: %+v", dirCond.Attach)
+	if len(dirCond.Attach) != 0 {
+		t.Fatalf("目录行不应附任何层级锚（dirLevel 已废弃）: %+v", dirCond.Attach)
 	}
 	if len(rules[0].Extractions) != 2 {
-		t.Fatalf("目录条目提取应两维（作者+标签），实际 %d", len(rules[0].Extractions))
+		t.Fatalf("目录条目提取应两维（作者+标签），实际 %d 条", len(rules[0].Extractions))
 	}
 	auth := rules[0].Extractions[0]
 	if auth.Dimension != DimAuthor || auth.From != FromCapture ||
@@ -79,8 +80,11 @@ func TestBuildStructMapRulesRealSample(t *testing.T) {
 		t.Fatalf("作品名提取应为首段捕获: %+v", rules[1].Extractions)
 	}
 
-	// 人话规则与映射。
-	for _, piece := range []string{"一级目录", "Artist[任意]", "剥壳→作者", "文件名首段→作品名", "库根名→标签", "尾部码丢弃"} {
+	// 人话规则与映射（决策7 多段句式——单段样本同款「目录层级」句式）。
+	for _, piece := range []string{
+		"目录层级 Artist[{作者}]（自上而下逐级紧邻）", "作者=壳内名",
+		"文件名首段→作品名", "库根名→标签", "尾部码丢弃",
+	} {
 		if !strings.Contains(sugg.Summary, piece) {
 			t.Fatalf("人话规则缺片段 %q: %q", piece, sugg.Summary)
 		}
@@ -91,23 +95,112 @@ func TestBuildStructMapRulesRealSample(t *testing.T) {
 	if len(sugg.Mappings) != 3 {
 		t.Fatalf("映射说明应三条，实际 %v", sugg.Mappings)
 	}
+	if sugg.Mappings[0].From != "目录段壳内名" {
+		t.Fatalf("目录段来源标签应为壳内名: %v", sugg.Mappings)
+	}
+}
+
+// TestBuildStructMapRulesMultiLevelMerge 多级目录条目合并（决策3 主例）：作者=
+// 一级目录壳内名、集名=二级目录整名 → 单条多段模板规则 Artist[{作者}]/{集名}
+//（段距紧邻缺省 /），两槽提取各引本行捕获（跨段捕获 Row 指向该行），零绝对
+// 层级锚；跳层（一、三级取值）合并为显式段距 /{2}；建议卡句式与来源标签随
+// 多段形态（决策7）。
+func TestBuildStructMapRulesMultiLevelMerge(t *testing.T) {
+	t.Run("紧邻两层合并", func(t *testing.T) {
+		rel := "Artist[七尾ゆきじ]/酔いがさめない/x.png"
+		assign := &SessionAssignment{
+			Author:     "七尾ゆきじ", AuthorClueRef: "dirLevelStripped1",
+			Collection: "酔いがさめない", CollectionClueRef: "dirLevel2",
+		}
+		sugg, rules, err := buildStructMapRules("E:/libs/漫画库", rel, "x.png", assign)
+		if err != nil {
+			t.Fatalf("结构映射规则构造失败: %v", err)
+		}
+		if len(rules) != 1 || len(sugg.Rules) != 1 {
+			t.Fatalf("两级目录条目应合并为单条规则，实际 %d 条", len(rules))
+		}
+		cond := rules[0].Conditions[0].Condition
+		if cond.Target != CondxTargetDir || cond.Format.Tpl != "Artist[{作者}]/{集名}" {
+			t.Fatalf("多段模板不符: %+v", cond.Format)
+		}
+		if len(cond.Attach) != 0 {
+			t.Fatalf("多段目录行不应附任何层级锚: %+v", cond.Attach)
+		}
+		if len(rules[0].Extractions) != 2 {
+			t.Fatalf("合并条目应两维提取，实际 %d 条", len(rules[0].Extractions))
+		}
+		auth, set := rules[0].Extractions[0], rules[0].Extractions[1]
+		if auth.Dimension != DimAuthor || auth.From != FromCapture ||
+			auth.CaptureName != condxVocab["作者"] || auth.Row != 1 {
+			t.Fatalf("作者提取应为第 1 段捕获: %+v", auth)
+		}
+		if set.Dimension != DimCollection || set.From != FromCapture ||
+			set.CaptureName != condxVocab["集名"] || set.Row != 1 {
+			t.Fatalf("集名提取应为末段捕获: %+v", set)
+		}
+		for _, piece := range []string{
+			"目录层级 Artist[{作者}]/{集名}（自上而下逐级紧邻）", "作者=壳内名", "集名=末段",
+		} {
+			if !strings.Contains(sugg.Summary, piece) {
+				t.Fatalf("人话规则缺片段 %q: %q", piece, sugg.Summary)
+			}
+		}
+		if len(sugg.Mappings) != 2 ||
+			sugg.Mappings[0].From != "目录段壳内名" || sugg.Mappings[1].From != "目录段末段" {
+			t.Fatalf("来源标签不符: %v", sugg.Mappings)
+		}
+		// 自检复现：同链样例输入上两维取值=赋值值。
+		in := &MatchInput{FileName: "x.png", DirNames: []string{"Artist[七尾ゆきじ]", "酔いがさめない"}, RelPath: rel}
+		ctx := &ParseContext{}
+		if !rules[0].Pattern.Evaluate(in, nil, ctx) {
+			t.Fatal("样例输入应命中合并规则")
+		}
+		for i, want := range []string{"七尾ゆきじ", "酔いがさめない"} {
+			decl, ok := rules[0].Extractions[i].Apply(rules[0].ID, ctx)
+			if !ok || decl.Value != want {
+				t.Fatalf("提取 %d 应复现赋值值 %q: %+v", i, want, decl)
+			}
+		}
+	})
+
+	t.Run("跳层显式段距", func(t *testing.T) {
+		rel := "Artist[七尾ゆきじ]/中间层/酔いがさめない/x.png"
+		assign := &SessionAssignment{
+			Author:     "七尾ゆきじ", AuthorClueRef: "dirLevelStripped1",
+			Collection: "酔いがさめない", CollectionClueRef: "dirLevel3",
+		}
+		sugg, rules, err := buildStructMapRules("E:/libs/漫画库", rel, "x.png", assign)
+		if err != nil {
+			t.Fatalf("结构映射规则构造失败: %v", err)
+		}
+		if len(rules) != 1 {
+			t.Fatalf("两级目录条目应合并为单条规则，实际 %d 条", len(rules))
+		}
+		cond := rules[0].Conditions[0].Condition
+		if cond.Format.Tpl != "Artist[{作者}]/{2}{集名}" {
+			t.Fatalf("跳层合并应为显式段距 /{2}: %+v", cond.Format)
+		}
+		if !strings.Contains(sugg.Summary, "目录层级 Artist[{作者}]（隔2级）/{集名}（自上而下）") {
+			t.Fatalf("跳层句式应夹注隔2级: %q", sugg.Summary)
+		}
+	})
 }
 
 // TestBuildStructMapRulesManualFallback 手填兜底：无显式出处时值=某段自动匹配
-// （作者=剥壳内名、作品名=首段）；不对应任何段的值降级「手工指定（不参与泛化）」。
+//（作者=剥壳内名、作品名=首段）；不对应任何段的值降级「手工指定（不参与泛化）」。
 func TestBuildStructMapRulesManualFallback(t *testing.T) {
 	root, rel, file := realSampleStructFixture()
 	assign := &SessionAssignment{
 		Author:     "Jake--Jaccobus", // 自动匹配 dirLevelStripped1
 		Title:      "atago",          // 自动匹配 filenameSeg0
-		Collection: "手填集",            // 无对应段
+		Collection: "手填集",          // 无对应段
 	}
 	sugg, rules, err := buildStructMapRules(root, rel, file, assign)
 	if err != nil {
 		t.Fatalf("构造失败: %v", err)
 	}
 	if len(rules) != 2 {
-		t.Fatalf("应构造目录+文件名两条，实际 %d", len(rules))
+		t.Fatalf("应构造目录+文件名两条，实际 %d 条", len(rules))
 	}
 	if len(sugg.ManualDims) != 1 || !strings.Contains(sugg.ManualDims[0], "手填集") ||
 		!strings.Contains(sugg.ManualDims[0], "手工指定") {
@@ -140,11 +233,11 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 		t.Fatalf("结构映射规则构造失败: %v", err)
 	}
 	if len(rules) != 2 || len(sugg.Rules) != 2 {
-		t.Fatalf("组合规则应恰两条（目录层+文件名），实际 %d 条", len(rules))
+		t.Fatalf("组合规则应恰两条（目录层级+文件名），实际 %d 条", len(rules))
 	}
 	dirRule, ok := rules[0].Pattern.(*RowSubjectPattern)
 	if !ok || rules[0].Conditions == nil || rules[0].Conditions[0].Condition.Format.Tpl != "Artist[{作者}]" {
-		t.Fatalf("首条应为 v4 目录行条件规则（壳模板），实际 %T", rules[0].Pattern)
+		t.Fatalf("首条应为目录行条件规则（壳模板），实际 %T", rules[0].Pattern)
 	}
 	fileRule, ok := rules[1].Pattern.(*RowSubjectPattern)
 	if !ok || rules[1].Conditions == nil {
@@ -156,15 +249,15 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 		t.Fatalf("文件名形态模板不符:\n取回 %s\n期望 %s", got, wantTpl)
 	}
 
-	// 来源标签（剥壳标签无圆括号形态）与人话措辞（首段/第 N 段措辞不变）。
+	// 来源标签（壳内名标签）与人话措辞（首段/第 N 段措辞不变）。
 	fromBy := map[string]string{}
 	for _, m := range sugg.Mappings {
 		fromBy[m.Dimension] = m.From
 	}
-	if fromBy["author"] != "一级目录剥壳" || fromBy["title"] != "文件名第3段" {
+	if fromBy["author"] != "目录段壳内名" || fromBy["title"] != "文件名第3段" {
 		t.Fatalf("来源标签不符: %v", sugg.Mappings)
 	}
-	for _, piece := range []string{"Artist[任意]剥壳→作者", "文件名第3段→作品名"} {
+	for _, piece := range []string{"作者=壳内名", "文件名第3段→作品名"} {
 		if !strings.Contains(sugg.Summary, piece) {
 			t.Fatalf("人话规则缺片段 %q: %q", piece, sugg.Summary)
 		}
@@ -199,57 +292,16 @@ func TestBuildStructMapRulesBracketUnderscore(t *testing.T) {
 	}
 }
 
-// TestStructSummaryDirLevelAnchor 泛化目录条目层深锚（AE 阶段2 决策2）：
-// 产物目录行随附「位于第 N 级」（N=赋值出处层级）——条件 JSON 含
-// attach:[{kind:"dirLevel",minCount:N}]；同层同名照常命中（任意一级名），
-// 深层同名不再被产物接管（「子树同名都接管」收紧为「仅构造层级接管」）。
-func TestStructSummaryDirLevelAnchor(t *testing.T) {
-	rel := "画师甲/合集名/pic_01.png"
-	assign := &SessionAssignment{Tags: []string{"合集名"}, TagClueRefs: []string{"dirLevel2"}}
-	sugg, rules, err := buildStructMapRules("E:/libs/锚库", rel, "pic_01.png", assign)
-	if err != nil {
-		t.Fatalf("结构映射规则构造失败: %v", err)
-	}
-	if len(rules) != 1 || len(sugg.Rules) != 1 {
-		t.Fatalf("应恰一条目录层条目，实际 %d 条", len(rules))
-	}
-	dirCond := rules[0].Conditions[0].Condition
-	if dirCond.Format.Tpl != "合集名" {
-		t.Fatalf("目录层模板应为整名字面: %+v", dirCond.Format)
-	}
-	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 2 {
-		t.Fatalf("目录行应随附第 2 级层深锚: %+v", dirCond.Attach)
-	}
-	// 产物 JSON（与手写条件 JSON 片段同源序列化）：attach 数组含 dirLevel/minCount。
-	data, err := json.Marshal(rules[0].Conditions)
-	if err != nil {
-		t.Fatalf("序列化条件失败: %v", err)
-	}
-	if want := `"attach":[{"kind":"dirLevel","minCount":2}]`; !strings.Contains(string(data), want) {
-		t.Fatalf("目录条目 JSON 应含层深锚 %s:\n%s", want, data)
-	}
+// 【已删除·决策3/6】TestStructSummaryDirLevelAnchor（泛化目录条目层深锚用例，
+// AE 阶段2 决策2）随 dirLevel 词条退役与泛化器目录层合并删除：泛化器改产
+// 多段模板规则（零绝对层级锚），合并产物断言见
+// TestBuildStructMapRulesMultiLevelMerge、单段零附锚见
+// TestBuildStructMapRulesRealSample。
 
-	// 同层同名照常命中（一级名不同不影响）；深层同名不再被接管。
-	pattern := rules[0].Pattern
-	sameLevel := &MatchInput{
-		FileName: "pic_02.png", DirNames: []string{"画师乙", "合集名"}, RelPath: "画师乙/合集名/pic_02.png",
-	}
-	if !pattern.Evaluate(sameLevel, nil, &ParseContext{}) {
-		t.Fatal("第 2 级同名目录应照常命中")
-	}
-	deep := &MatchInput{
-		FileName: "pic_03.png", DirNames: []string{"画师甲", "别处", "合集名"}, RelPath: "画师甲/别处/合集名/pic_03.png",
-	}
-	if pattern.Evaluate(deep, nil, &ParseContext{}) {
-		t.Fatal("第 3 级深层同名目录不应被锚定产物命中")
-	}
-}
-
-// TestStructSummaryBareBracketDirAnchor 阶段2×阶段3 联合锚：`[...]` 裸括号
-// 一级目录（阶段3 bareBracket 剥壳表条目）赋 标签=剥壳内名 → 泛化目录条目
-// 壳模板=字面 `[`+{标签}+字面 `]`（前缀字面+占位词+后缀字面，7 壳形态机制
-// 共用），且随附第 1 级层深锚（阶段2 决策2 叠加）；同层异值壳照常命中（捕获
-// 泛化取内名），深层同名 `[...]` 目录被层深锚拒绝。
+// TestStructSummaryBareBracketDirAnchor `[…]` 裸括号一级目录赋 标签=剥壳内名
+// → 泛化目录条目壳模板=字面 `[`+{标签}+字面 `]`（前缀字面+占位词+后缀字面，7
+// 壳形态机制共用），零附加（无层级锚——任意祖先层命中，深层同名目录照常
+// 接管=决策6 放宽面）。
 func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
 	rel := "[路灯后辈]/pic_01.png"
 	assign := &SessionAssignment{Tags: []string{"路灯后辈"}, TagClueRefs: []string{"dirLevelStripped1"}}
@@ -264,16 +316,16 @@ func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
 	if dirCond.Format.Tpl != "[{标签}]" {
 		t.Fatalf("裸括号目录模板应为字面 [ + {标签} + 字面 ]: %+v", dirCond.Format)
 	}
-	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 1 {
-		t.Fatalf("目录行应随附第 1 级层深锚（阶段2 带锚叠加阶段3 剥壳表条目）: %+v", dirCond.Attach)
+	if len(dirCond.Attach) != 0 {
+		t.Fatalf("目录行不应附任何层级锚: %+v", dirCond.Attach)
 	}
-	// 产物 JSON（与手写条件 JSON 片段同源序列化）：attach 数组含 dirLevel/minCount=1。
+	// 产物 JSON（与手写条件 JSON 片段同源序列化）：无 attach 键。
 	data, err := json.Marshal(rules[0].Conditions)
 	if err != nil {
 		t.Fatalf("序列化条件失败: %v", err)
 	}
-	if want := `"attach":[{"kind":"dirLevel","minCount":1}]`; !strings.Contains(string(data), want) {
-		t.Fatalf("目录条目 JSON 应含层深锚 %s:\n%s", want, data)
+	if strings.Contains(string(data), "attach") {
+		t.Fatalf("目录条目 JSON 不应含 attach: %s", data)
 	}
 	// 标签提取=目录行 {标签} 位捕获（壳形态语义由捕获天然承载）。
 	tagAct := rules[0].Extractions[0]
@@ -281,14 +333,15 @@ func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
 		tagAct.CaptureName != condxVocab["标签"] || tagAct.Row != 1 {
 		t.Fatalf("标签提取应为目录行 {标签} 位捕获: %+v", tagAct)
 	}
-	if piece := "一级目录 [任意]剥壳→标签"; !strings.Contains(sugg.Summary, piece) {
+	if piece := "目录层级 [{标签}]（自上而下逐级紧邻）→ 标签=壳内名"; !strings.Contains(sugg.Summary, piece) {
 		t.Fatalf("人话规则缺片段 %q: %q", piece, sugg.Summary)
 	}
-	if len(sugg.Mappings) != 1 || sugg.Mappings[0].From != "一级目录剥壳" {
-		t.Fatalf("映射来源应为一级目录剥壳: %v", sugg.Mappings)
+	if len(sugg.Mappings) != 1 || sugg.Mappings[0].From != "目录段壳内名" {
+		t.Fatalf("映射来源应为目录段壳内名: %v", sugg.Mappings)
 	}
 
-	// 同层异值壳照常命中且捕获泛化；深层同名 `[...]` 被锚拒绝。
+	// 同层异值壳照常命中且捕获泛化；深层同名 `[…]` 无层级锚同样接管（决策6
+	// 放宽面——绝对层级锚退役）。
 	pattern := rules[0].Pattern
 	sameLevel := &MatchInput{
 		FileName: "pic_02.png", DirNames: []string{"[X]"}, RelPath: "[X]/pic_02.png",
@@ -304,8 +357,8 @@ func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
 	deep := &MatchInput{
 		FileName: "pic_03.png", DirNames: []string{"别处", "更深", "[路灯后辈]"}, RelPath: "别处/更深/[路灯后辈]/pic_03.png",
 	}
-	if pattern.Evaluate(deep, nil, &ParseContext{}) {
-		t.Fatal("第 3 级深层同名 [..] 目录不应被锚定产物命中")
+	if !pattern.Evaluate(deep, nil, &ParseContext{}) {
+		t.Fatal("深层同名 [..] 目录应照常命中（无绝对层级锚）")
 	}
 }
 
@@ -314,7 +367,7 @@ func TestStructSummaryBareBracketDirAnchor(t *testing.T) {
 // 模板=前缀字面+[{标签}]+首组后间隙字面+{任意}（首组后正文全部由吞位段
 // 承接），标签提取=行 1 捕获且自检复现首组内名；人话包裹形态与来源标签随
 // 新语义措辞（首组内名）。单组收尾形态产物零漂移由既有断言锚定
-// （Artist[{作者}]/[{标签}]，见本文件其余壳形用例）。
+//（Artist[{作者}]/[{标签}]，见本文件其余壳形用例）。
 func TestSummarizeMultiGroupDirFirstGroupTemplate(t *testing.T) {
 	const dir = "[七尾ゆきじ] 酔いが醒めるその前に (COMIC 阿吽 2019年2月号) [中国翻訳] [DL版]"
 	rel := dir + "/001.png"
@@ -330,8 +383,8 @@ func TestSummarizeMultiGroupDirFirstGroupTemplate(t *testing.T) {
 	if dirCond.Target != CondxTargetDir || dirCond.Format.Tpl != "[{标签}] {任意}" {
 		t.Fatalf("多组名目录模板应收敛为 前缀+[{标签}]+间隙+{任意}: %+v", dirCond.Format)
 	}
-	if len(dirCond.Attach) != 1 || dirCond.Attach[0].Kind != CondxAttachDirLevel || dirCond.Attach[0].MinCount != 1 {
-		t.Fatalf("目录行应随附第 1 级层深锚: %+v", dirCond.Attach)
+	if len(dirCond.Attach) != 0 {
+		t.Fatalf("目录行不应附任何层级锚: %+v", dirCond.Attach)
 	}
 	tagAct := rules[0].Extractions[0]
 	if tagAct.Dimension != DimTag || tagAct.From != FromCapture ||
@@ -355,11 +408,11 @@ func TestSummarizeMultiGroupDirFirstGroupTemplate(t *testing.T) {
 		t.Fatalf("同形异值标签捕获应为首组内名: %+v", decl)
 	}
 
-	// 人话与来源标签：包裹形态收敛为 [任意] …、来源注明首组内名。
-	if piece := "一级目录 [任意] …剥壳→标签"; !strings.Contains(sugg.Summary, piece) {
-		t.Fatalf("人话规则缺片段 %q: %q", piece, sugg.Summary)
+	// 人话与来源标签：目录段句式 + 壳内名来源、多组名注明首组内名。
+	if !strings.Contains(sugg.Summary, "→ 标签=壳内名") {
+		t.Fatalf("人话规则应为多段句式: %q", sugg.Summary)
 	}
-	if len(sugg.Mappings) != 1 || sugg.Mappings[0].From != "一级目录剥壳（首组内名）" {
+	if len(sugg.Mappings) != 1 || sugg.Mappings[0].From != "目录段壳内名（首组内名）" {
 		t.Fatalf("来源标签应注明首组内名: %v", sugg.Mappings)
 	}
 }
@@ -496,7 +549,7 @@ func TestStructSummaryPreviewAndSessionRoundTrip(t *testing.T) {
 		t.Fatalf("全景应透出尾部码线索: %v", rec.StructClues)
 	}
 
-	// generalize mode=struct：确认入档（组合规则两条，v4 目录行模板序列化往返）。
+	// generalize mode=struct：确认入档（组合规则两条，目录行模板经档案序列化往返）。
 	result, err := m.ApplyGeneralization(root, rel, generalizeModeStruct)
 	if err != nil {
 		t.Fatalf("结构映射泛化失败: %v", err)
@@ -603,7 +656,7 @@ func TestDirSummarizeRuleAddressing(t *testing.T) {
 	if sugg.RelPath != "Artist[X]" {
 		t.Fatalf("建议卡 RelPath 应呈现目录键: %q", sugg.RelPath)
 	}
-	if !strings.Contains(sugg.Summary, "剥壳→作者") || !strings.Contains(sugg.Summary, "文件名首段→作品名") {
+	if !strings.Contains(sugg.Summary, "作者=壳内名") || !strings.Contains(sugg.Summary, "文件名首段→作品名") {
 		t.Fatalf("人话规则应由子树首个有赋值文件推导: %q", sugg.Summary)
 	}
 	if sugg.HitTotal != 12 {
@@ -639,7 +692,7 @@ func TestHandleFrontendRequestSummarizeRule(t *testing.T) {
 	if !resp.OK || resp.RuleSuggestion == nil {
 		t.Fatalf("summarizeRule 应答不符: %+v", resp)
 	}
-	if !strings.Contains(resp.RuleSuggestion.Summary, "剥壳→作者") ||
+	if !strings.Contains(resp.RuleSuggestion.Summary, "作者=壳内名") ||
 		!strings.Contains(resp.RuleSuggestion.Summary, "文件名首段→作品名") {
 		t.Fatalf("建议卡人话规则不符: %q", resp.RuleSuggestion.Summary)
 	}
@@ -703,10 +756,10 @@ func previewStructRulesSerialRef(rules []RuleEntry, snap *RecognitionSnapshot, s
 }
 
 // TestPreviewStructRulesParallelEquivalence 结构建议卡命中预览求值并行化等值锚
-// （预览面大库性能方案·阶段4）：同一夹具（文件数越过分块阈值 evalFileChunkSize
-// ——并行区真多块）上，串行参考实现（previewStructRulesSerialRef）vs 生产实现
+//（预览面大库性能方案·阶段4）：同一夹具（文件数越过分块阈值 evalFileChunkSize
+//——并行区真多块）上，串行参考实现（previewStructRulesSerialRef）vs 生产实现
 // 在多工作子与 1 工作子（串行回退路径）两模式、基座供给（sub）与现场重建
-// （nil）两形态下，计数与样例逐字段全等（reflect.DeepEqual）；夹具形态保证
+//（nil）两形态下，计数与样例逐字段全等（reflect.DeepEqual）；夹具形态保证
 // 命中数远超样例上限 3（样例原序装配面非空转）且自排样本在命中集内（自排除
 // 路径被走）。求值期共享态只读的声明同由本锚在 -race 下运行期验证。
 func TestPreviewStructRulesParallelEquivalence(t *testing.T) {
@@ -750,7 +803,7 @@ func TestPreviewStructRulesParallelEquivalence(t *testing.T) {
 		t.Fatalf("结构映射规则构造失败: %v", err)
 	}
 	if len(rules) != 2 {
-		t.Fatalf("夹具形态缺损：应构造目录+文件名两条规则，实际 %d", len(rules))
+		t.Fatalf("夹具形态缺损：应构造目录+文件名两条规则，实际 %d 条", len(rules))
 	}
 
 	assertEqual := func(label string, sub *evalSubstrate) {
@@ -768,7 +821,7 @@ func TestPreviewStructRulesParallelEquivalence(t *testing.T) {
 		t.Fatalf("夹具形态缺损：命中数 %d 未越样例上限（等值锚空转）", wantH)
 	}
 	if _, _, wantSamples := previewStructRulesSerialRef(rules, snap, self, nil); len(wantSamples) != 3 {
-		t.Fatalf("夹具形态缺损：样例应恰 3 条，实际 %d", len(wantSamples))
+		t.Fatalf("夹具形态缺损：样例应恰 3 条，实际 %d 条", len(wantSamples))
 	}
 
 	// 多工作子模式（并行区真多块）：sub/nil 两形态各与串行参考全等。

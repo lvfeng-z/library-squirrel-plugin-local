@@ -376,19 +376,19 @@ func testMarkerRule(t RuleSource, marker string) (RuleEntry, error) {
 	}, nil
 }
 
-// TestArchiveWriteThreeEntriesSerialized 档案写三入口（泛化/裁决生成/规则编辑面）
-// 并发互斥：真实档案写入口与串行 API 并发写入时（变更体带在途观测），任意时刻
-// 至多一个档案变更在途，全部标记规则落库无丢失。
-func TestArchiveWriteThreeEntriesSerialized(t *testing.T) {
+// TestArchiveWriteEntriesSerialized 档案写入口（泛化/规则编辑面）并发互斥：
+// 真实档案写入口与串行 API 并发写入时（变更体带在途观测），任意时刻至多一个
+// 档案变更在途，全部标记规则落库无丢失。
+func TestArchiveWriteEntriesSerialized(t *testing.T) {
 	store := newFakeSessionStore()
 	mgr, _ := newTestManager(t, store)
 
 	var inFlight, maxInFlight atomic.Int32
 	gate := make(chan struct{})
-	// 三真实写入口：泛化/裁决生成入口经 UpdateProfile 携对应入口标识（真实
-	// 事务 ApplyGeneralization / ApplyAdjudication 需会话与快照上下文，此处
-	// 以同一串行入口承载入口标识语义）；规则编辑面走真实事务 ApplySaveRule
-	// 全管线（解析→构造期校验→入档）。
+	// 两真实写入口：泛化入口经 UpdateProfile 携对应入口标识（真实事务
+	// ApplyGeneralization 需会话与快照上下文，此处以同一串行入口承载入口
+	// 标识语义——裁决流已改写会话赋值、不再是档案写入口）；规则编辑面走
+	// 真实事务 ApplySaveRule 全管线（解析→构造期校验→入档）。
 	markerRuleJSON := func(source RuleSource, marker string) ([]byte, error) {
 		rule, err := testMarkerRule(source, marker)
 		if err != nil {
@@ -412,16 +412,6 @@ func TestArchiveWriteThreeEntriesSerialized(t *testing.T) {
 			})
 		},
 		func(marker string) error {
-			rule, err := testMarkerRule(RuleSourceAdjudication, marker)
-			if err != nil {
-				return err
-			}
-			return mgr.UpdateProfile(ArchiveWriteAdjudicate, func(p *RuleProfile) error {
-				p.Rules = append(p.Rules, rule)
-				return nil
-			})
-		},
-		func(marker string) error {
 			data, err := markerRuleJSON(RuleSourceManual, marker)
 			if err != nil {
 				return err
@@ -434,7 +424,7 @@ func TestArchiveWriteThreeEntriesSerialized(t *testing.T) {
 	const probeWriters = 6
 	var wg sync.WaitGroup
 
-	// 三入口并发写（各自标记规则落库）
+	// 两入口并发写（各自标记规则落库）
 	for entryIdx, entry := range entryFuncs {
 		for i := 0; i < stubWritesPerEntry; i++ {
 			wg.Add(1)

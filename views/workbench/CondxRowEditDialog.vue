@@ -13,7 +13,7 @@
     </template>
 
     <div v-if="draft" class="li-cred-body">
-      <!-- 新增态首步：条件种类选择（「添加哪种条件？」——文件名/目录名/序列/引用规则；
+      <!-- 新增态首步：条件种类选择（「添加哪种条件？」——文件名/目录名/序列；
            选定后进入该种类编辑；编辑态直达内容（下方三步漏斗含目标卡可再切换）） -->
       <template v-if="mode === 'add' && !draft.condition">
         <p class="li-cred-q">添加哪种条件？</p>
@@ -29,29 +29,19 @@
             <span class="li-condx-card-label">{{ t.label }}</span>
             <span class="li-condx-card-note">{{ t.note }}</span>
           </button>
-          <!-- 引用规则卡：仅顶层条件行提供（引用是规则级字段+求值门段，结构上不可能
-               成为括号内条件行） -->
-          <button
-            v-if="allowRefRow"
-            type="button"
-            class="li-condx-card"
-            :title="CONDX_TARGET_REF_NOTE"
-            @click="setRowToRef()"
-          >
-            <span class="li-condx-card-label">引用规则</span>
-            <span class="li-condx-card-note">{{ CONDX_TARGET_REF_NOTE }}</span>
-          </button>
+          <!-- 规则级引用卡已随 refs 退役删除（编辑面回三分） -->
         </div>
       </template>
 
       <!-- 三步漏斗（与原行内编辑同款：目标卡/格式模板/词条/例子模板/附加条件/值校验/
-           位次角标与漂移提示）+行级「非」——编辑对象为开窗时的深拷贝草稿，确定才回写 -->
+           位次角标与漂移提示·多段分组与层距提示）+行级「非」——编辑对象为开窗时的
+           深拷贝草稿，确定才回写 -->
       <template v-else>
         <label class="li-condx-neg li-cred-neg">
           <input v-model="draft.negated" type="checkbox">
           <span>非（本行条件取反）</span>
         </label>
-        <!-- Step 1 目标四卡（一次点选；第四卡＝W4 引用规则） -->
+        <!-- Step 1 目标三卡（一次点选：文件名/目录名/序列；规则级引用已退役，编辑面回三分） -->
         <div class="li-condx-targets">
           <button
             v-for="t in CONDX_TARGETS"
@@ -64,16 +54,6 @@
           >
             <span class="li-condx-card-label">{{ t.label }}</span>
             <span class="li-condx-card-note">{{ t.note }}</span>
-          </button>
-          <button
-            v-if="allowRefRow"
-            type="button"
-            class="li-condx-card"
-            :title="CONDX_TARGET_REF_NOTE"
-            @click="setRowToRef()"
-          >
-            <span class="li-condx-card-label">引用规则</span>
-            <span class="li-condx-card-note">{{ CONDX_TARGET_REF_NOTE }}</span>
           </button>
         </div>
         <template v-if="condx">
@@ -107,19 +87,26 @@
               @click="onTplSelection($event.target.selectionStart)"
             />
           </div>
-          <!-- 模板词元切分预览（位次角标）：同词根多位各自成 chip，位≥2 带
-               「第N处」角标；悬浮注记位次与寻址组名、重复段位的多值禁引 -->
-          <div v-if="tplTokChips.length" class="li-condx-toks">
-            <template v-for="(t, ti) in tplTokChips" :key="ti">
-              <span v-if="!t.ph" class="li-condx-tok-lit">{{ t.text }}</span>
-              <span
-                v-else
-                class="li-condx-tok"
-                :data-pos="t.occur && t.occur > 1 ? `第${t.occur}处` : null"
-                :title="tplTokTitle(t) || undefined"
-              >{{ '{' + t.text + '}' }}</span>
+          <!-- 模板词元切分预览（位次角标·按段分组）：多段目录模板按段分组、段间画
+               分隔符（剧本1 帧2「词元：Artist[ {作者} ] / {集名}」）；同词根多位
+               各自成 chip、出现序跨段连续（决策2），位≥2 带「第N处」角标；悬浮
+               注记位次与寻址组名、重复段位的多值禁引 -->
+          <div v-if="tplSegGroups.length" class="li-condx-toks">
+            <template v-for="(g, gi) in tplSegGroups" :key="`g${gi}`">
+              <template v-for="(t, ti) in g.toks" :key="`${gi}-${ti}`">
+                <span v-if="!t.ph" class="li-condx-tok-lit">{{ t.text }}</span>
+                <span
+                  v-else
+                  class="li-condx-tok"
+                  :data-pos="t.occur && t.occur > 1 ? `第${t.occur}处` : null"
+                  :title="tplTokTitle(t) || undefined"
+                >{{ '{' + t.text + '}' }}</span>
+              </template>
+              <span v-if="g.sep" class="li-condx-tok-sep">{{ g.sep }}</span>
             </template>
           </div>
+          <!-- 多段目录模板的层距提示行（帧2 逐字）：写「/」即多段，提示随段在场 -->
+          <p v-if="tplGapHintVisible" class="li-condx-gap-hint">段间「/」=下一级目录；写「//」=之下任意层、「/{2}」=隔2级</p>
           <div v-if="condx.format.mode === 'template'" class="li-condx-chips">
             <button
               v-for="v in CONDX_VOCAB"
@@ -169,9 +156,53 @@
               <el-select v-if="attachNeeds(a, 'types')" v-model="a.types" size="small" multiple placeholder="类型" class="li-condx-mini">
                 <el-option v-for="t in CONDX_TYPE_OPTIONS" :key="t" :label="t" :value="t" />
               </el-select>
-              <el-input v-if="attachNeeds(a, 'value')" v-model="a.value" size="small" placeholder=".jpg" class="li-condx-mini" />
+              <el-input v-if="attachNeeds(a, 'value') && a.kind !== 'refScope'" v-model="a.value" size="small" placeholder=".jpg" class="li-condx-mini" />
+              <!-- 作用域附件（refScope·决策8 甲案）：规则选择下拉（只列纯目录规则，
+                   选项文本=规则描述）+层距三选下拉（隔 N 级档配数字输入 N≥2）；
+                   无候选时空态（帧3：下拉呈「（暂无可引用的目录规则）」+指路文案） -->
+              <template v-if="a.kind === 'refScope'">
+                <el-select
+                  :model-value="a.value || ''"
+                  size="small"
+                  class="li-condx-refsel"
+                  :placeholder="refScopeCandidates.length ? '选择要引用的目录规则' : '（暂无可引用的目录规则）'"
+                  @update:model-value="a.value = String($event)"
+                >
+                  <el-option v-for="c in refScopeCandidates" :key="c.id" :label="c.label" :value="c.id" />
+                  <!-- 已选供给方不在候选（悬空/停用/非纯目录）时的残影：仅供呈现不可重选 -->
+                  <el-option
+                    v-if="refScopeStaleValue(a)"
+                    :label="refScopeStaleValue(a) || ''"
+                    :value="refScopeStaleValue(a) || ''"
+                    disabled
+                  />
+                </el-select>
+                <el-select
+                  :model-value="refScopeGapKeyOf(a.minCount)"
+                  size="small"
+                  class="li-condx-gap"
+                  @update:model-value="setRefScopeGap(a, $event)"
+                >
+                  <el-option
+                    v-for="g in REFSCOPE_GAP_OPTIONS"
+                    :key="g.value"
+                    :label="g.label"
+                    :value="g.value"
+                  />
+                </el-select>
+                <el-input-number
+                  v-if="refScopeGapKeyOf(a.minCount) === 'n'"
+                  v-model="a.minCount"
+                  :min="2"
+                  size="small"
+                  controls-position="right"
+                  class="li-condx-num"
+                />
+              </template>
               <el-button size="small" text type="danger" @click="removeAttach(ai)">删</el-button>
             </div>
+            <!-- 作用域附件无候选空态指路（帧3 逐字）：保留附件行点确定由行级红字拦 -->
+            <p v-if="refScopeEmptyHint" class="li-condx-refempty">{{ refScopeEmptyHint }}</p>
             <div class="li-condx-extra-head">
               <span class="li-condx-label">值校验（占位词上的断言）</span>
               <el-select
@@ -248,24 +279,27 @@
 
 <script setup lang="ts">
 // 条件编辑弹窗：规则编辑面卡片总览的逐条件编辑入口（卡片〔编辑〕/〔+ 加条件〕）。
-// 承载原条件行内「三步漏斗」全部编辑能力（目标卡/格式模板/词条点选/例子模板/
-// 附加条件/值校验/位次角标与漂移提示）+行级「非」。编辑对象=开窗时目标行的深拷贝
+// 承载条件行「三步漏斗」全部编辑能力（目标三卡/格式模板/词条点选/例子模板/
+// 附加条件·含作用域附件（refScope：供给方规则选择+层距三选）/值校验/位次角标
+// 与漂移提示·多段分组与层距提示）+行级「非」。编辑对象=开窗时目标行的深拷贝
 // 草稿——〔确定〕经 confirm 事件回写主视图（弹窗→主视图事件链，语义与行内就地
-// 编辑等价）、〔取消〕不动（新增态由主视图移除开窗时追加的空行）。行转引用行
-// （目标卡「引用规则」）经 toRef 事件上抛主视图处理。壳=主程序全局注册的
+// 编辑等价；行级校验红字在场时确定拦住、弹窗不关——剧本1 帧3/剧本2 帧3）、
+// 〔取消〕不动（新增态由主视图移除开窗时追加的空行）。壳=主程序全局注册的
 // AutoHeightDialog（EntryConfirmDialog 先例——无需 import；单弹窗确定关窗模式
 // 沿用已退役的原括号组弹窗），常驻挂载、开关纯由 state 控制。
 import { computed, ref, watch } from 'vue'
 import {
   DIMENSION_OPTIONS,
   CONDX_TARGETS,
-  CONDX_TARGET_REF_NOTE,
   CONDX_VOCAB,
   CONDX_ATTACH_OPTIONS,
   CONDX_TYPE_OPTIONS,
   CONDX_BADGE_KINDS,
   CONDX_BADGE_DIMS,
   CONDX_EXAMPLES,
+  REFSCOPE_GAP_OPTIONS,
+  refScopeGapKeyOf,
+  refScopeGapCountOf,
   cloneJSON,
   condxFlatRows,
   condxRowPlaceholders,
@@ -273,14 +307,15 @@ import {
   condxOccurDrift,
   condxPosName,
   condxVocabOf,
-  condxTplOccurChips,
+  condxTplSegOccurChips,
   condxRowError,
   type CondxRowForm,
   type CondxForm,
   type CondxBadgeForm,
   type CondxAttachForm,
   type CondxOccEntry,
-  type CondxTplTok
+  type CondxTplTok,
+  type CondxTplSegGroup
 } from './ruleFormModel'
 
 const state = defineModel<boolean>('state', { required: true })
@@ -300,11 +335,12 @@ const props = withDefaults(
     // equal 值校验的对方行漂移提示读取；本行模板漂移在弹窗内就地 diff（基线=开窗
     // 快照）
     occurDrift?: Record<number, { group: string; word: string }[]>
-    // 是否提供目标卡「引用规则」（顶层条件行=true；括号子组内条件行=false——引用行
-    // 不进括号子组）
-    allowRefRow?: boolean
+    // 作用域附件（refScope）的供给方候选（纯目录规则：只含目录行、启用、非聚合、
+    // 非本条自身——悬空/链式排除；主视图自档案规则列表算得传入）。无候选时附件行
+    // 呈空态（剧本2 帧3）
+    refScopeCandidates?: { id: string; label: string }[]
   }>(),
-  { mode: 'edit', rootRows: null, allowRefRow: true }
+  { mode: 'edit', rootRows: null, refScopeCandidates: () => [] }
 )
 
 const emit = defineEmits<{
@@ -313,8 +349,6 @@ const emit = defineEmits<{
   confirm: [row: CondxRowForm, draft: CondxRowForm]
   // 〔取消〕（含新增态）：主视图移除开窗时追加的空行（仅新增态）
   cancel: [row: CondxRowForm]
-  // 行转引用行：主视图把该行从条件行表移入引用行表
-  toRef: [row: CondxRowForm]
 }>()
 
 // 编辑草稿：开窗时深拷贝目标行，全部编辑只落在草稿上
@@ -392,6 +426,8 @@ function doConfirm(): void {
   if (!props.row || !draft.value) return
   // 新增态未选种类：确定按钮已禁用，此处防御
   if (props.mode === 'add' && !draft.value.condition) return
+  // 行级校验与保存闸同函数（剧本1 帧3/剧本2 帧3）：红字在场时确定拦住、弹窗不关
+  if (rowHintText.value) return
   emit('confirm', props.row, draft.value)
   state.value = false
 }
@@ -399,13 +435,6 @@ function doConfirm(): void {
 function doCancel(): void {
   if (!props.row) return
   emit('cancel', props.row)
-  state.value = false
-}
-
-// 行转引用行（目标卡/种类选择「引用规则」）：上抛主视图移入引用行表并关窗
-function setRowToRef(): void {
-  if (!props.row) return
-  emit('toRef', props.row)
   state.value = false
 }
 
@@ -483,7 +512,9 @@ function addRowAttach(kind: string): void {
   const c = condx.value
   if (!c) return
   if (!c.attach) c.attach = []
-  c.attach.push({ kind })
+  // 作用域附件缺省紧邻（层距 1=紧邻缺省——MinCount 0 为「任意深度」哨兵，
+  // 缺省值必须显式落档，不可省略）
+  c.attach.push(kind === 'refScope' ? { kind, minCount: 1 } : { kind })
 }
 function removeAttach(ai: number): void {
   const c = condx.value
@@ -508,12 +539,40 @@ function removeBadge(bi: number): void {
   const c = condx.value
   if (c?.badges) c.badges.splice(bi, 1)
 }
-// 模板词元切分 chips（位次角标呈现）：解析失败（未闭合 { 等）静默不显示——
-// 行级校验已报错。
-const tplTokChips = computed<CondxTplTok[]>(() => {
+// 模板词元切分 chips（位次角标呈现·按段分组，段间画分隔符——剧本1 帧2）：
+// 解析失败（未闭合 {、段界非法等）静默不显示——行级校验已报错。
+const tplSegGroups = computed<CondxTplSegGroup[]>(() => {
   const c = condx.value
   if (!c || c.format.mode !== 'template') return []
-  return condxTplOccurChips(c.format.tpl || '').chips || []
+  return condxTplSegOccurChips(c.format.tpl || '').groups || []
+})
+
+// 多段目录模板的层距提示行可见性（帧1→帧2：写入「/」即浮出）。
+const tplGapHintVisible = computed(() => {
+  const c = condx.value
+  return !!c && c.target === 'dir' && c.format.mode === 'template' && (c.format.tpl || '').indexOf('/') >= 0
+})
+
+// —— 作用域附件（refScope）行内编辑辅助 ——
+
+// 层距三选改档（隔 N 级档保留既有 ≥2 值、缺省 2）。
+function setRefScopeGap(a: CondxAttachForm, key: string): void {
+  a.minCount = refScopeGapCountOf(key as 'adjacent' | 'any' | 'n', a.minCount)
+}
+
+// 已选供给方不在候选（悬空/停用/非纯目录/本条自身）时的残影值：仅供行上呈现。
+function refScopeStaleValue(a: CondxAttachForm): string {
+  if (!a.value) return ''
+  return props.refScopeCandidates.some((c) => c.id === a.value) ? '' : a.value
+}
+
+// 无候选空态指路（帧3 逐字）：本行挂有 refScope 附件且候选为空时常驻。
+const refScopeEmptyHint = computed(() => {
+  const c = condx.value
+  if (!c || props.refScopeCandidates.length) return ''
+  return (c.attach || []).some((a) => a && a.kind === 'refScope')
+    ? '档案中没有可作来源的规则——先建一条只含目录行的规则'
+    : ''
 })
 
 // 占位词 chip 的悬浮说明：位≥2 注记位次与寻址组名；重复段位注记多值禁引。
@@ -731,6 +790,37 @@ function dimNameOf(dim: string): string {
   border-radius: 4px;
   color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
+}
+
+/* 多段目录模板的段间分隔符（剧本1 帧2「词元：Artist[ {作者} ] / {集名}」） */
+.li-condx-tok-sep {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-color-primary);
+}
+
+/* 多段模板的层距提示行（帧2 逐字文案） */
+.li-condx-gap-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* 作用域附件（refScope）行：供给方规则选择下拉（选项文本=规则描述，可宽） */
+.li-condx-refsel {
+  width: 260px;
+}
+
+/* 作用域附件层距三选下拉 */
+.li-condx-gap {
+  width: 150px;
+}
+
+/* 作用域附件无候选空态指路（帧3 逐字文案） */
+.li-condx-refempty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
 }
 
 .li-condx-chip {

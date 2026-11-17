@@ -51,8 +51,9 @@ func parallelAssigns() map[string]SessionAssignment {
 // 平局形态目录）之上叠加并行区覆盖面——
 //   - 结构群全员已识别：空格形态不入下划线规则定群、由结构对齐成群，括号命名
 //     惯例规则对每成员提取 author/title → 全员 identified；
-//   - 组合规则门段样板：「门段样板」文件（空格形态，另成一组结构群）命中成员
-//     正则、纯门组合（refs 单成员、空条件表——命中前提全部由成员门段承担）；
+//   - 作用域附件门段样板：「门段样板」文件（空格形态，另成一组结构群）命中
+//     作用域附件规则对（供给方=组合目录行、消费方=紧邻其下的 {标题} 目录行
+//——refScope 门段先行求值+层距谓词核对）；
 //   - 体量网格：12 目录 × 60 文件（下划线形态规则定群）——总文件数越过分块
 //     阈值（evalFileChunkSize=128）→ 并行区2 真正多块，目录数 ≥ 工作子数 →
 //     并行区1 真正多目录（两模式锚非空转的形态保证）。
@@ -62,9 +63,9 @@ func parallelSampleTree(t *testing.T, root string) {
 	for i := 1; i <= 3; i++ {
 		writeTestFile(t, fmt.Sprintf("%s/结构已识别/【作者A】标题 %02d.jpg", root, i), "s")
 	}
-	writeTestFile(t, root+"/组合/门段样板 01.jpg", "t")
-	writeTestFile(t, root+"/组合/门段样板 02.jpg", "u")
-	writeTestFile(t, root+"/组合/门段样板 03.jpg", "v")
+	writeTestFile(t, root+"/组合/门段/门段样板 01.jpg", "t")
+	writeTestFile(t, root+"/组合/门段/门段样板 02.jpg", "u")
+	writeTestFile(t, root+"/组合/门段/门段样板 03.jpg", "v")
 	for d := 0; d < 12; d++ {
 		for i := 1; i <= 60; i++ {
 			writeTestFile(t, fmt.Sprintf("%s/网格%02d/网格_%03d.jpg", root, d, i), "w")
@@ -73,8 +74,9 @@ func parallelSampleTree(t *testing.T, root string) {
 }
 
 // newParallelFixture 并行锚测试环境：newRecognitionFixture（内存存储+桩上下文+
-// 测试档案）之上追加组合规则对——成员=文件名正则，组合=纯门（refs 单成员、空
-// 条件表），经 SaveProfile→LoadProfile 与识别干跑同款装载路径往返。
+// 测试档案）之上追加作用域附件规则对——供给方=组合目录行、消费方=紧邻其下的
+// {标题} 目录行（refScope 层距 1），经 SaveProfile→LoadProfile 与识别干跑同款
+// 装载路径往返。
 func newParallelFixture(t *testing.T, root string, assigns map[string]SessionAssignment) (*SessionManager, *workbenchTestCtx) {
 	t.Helper()
 	m, ctx := newRecognitionFixture(t, root, assigns)
@@ -83,14 +85,8 @@ func newParallelFixture(t *testing.T, root string, assigns map[string]SessionAss
 		t.Fatalf("载入基础档案失败: %v", errs)
 	}
 	profile.Rules = append(profile.Rules,
-		RuleEntry{
-			ID: "parallel-gate-member", Description: "并行锚：门段成员（文件名正则）", Source: RuleSourceManual, Enabled: true,
-			Pattern: mustRegexPattern(t, `^门段样板.+\.jpg$`, nil),
-		},
-		RuleEntry{
-			ID: "parallel-gate-combo", Description: "并行锚：纯门组合（refs 单成员）", Source: RuleSourceManual, Enabled: true,
-			Refs: []string{"parallel-gate-member"}, Conditions: []CondxRow{}, Pattern: And{},
-		},
+		refDirRowRule(t, "parallel-gate-member", "组合", nil, nil),
+		refDirRowRule(t, "parallel-gate-combo", "{标题}", []CondxAttach{refScopeAttach("parallel-gate-member", 1)}, nil),
 	)
 	if err := SaveProfile(m.store, profile); err != nil {
 		t.Fatalf("写入并行锚档案失败: %v", err)
@@ -131,9 +127,9 @@ func assertParallelConclusionShape(t *testing.T, conclusions []FileConclusion) {
 			t.Fatalf("夹具形态缺损：%s 应带 author=作者A 终选（结构群全员已识别形态），实际终选 %+v", rel, c.Final)
 		}
 	}
-	// 组合规则门段：成员命中 + 纯门组合命中（门段在结论层双登记）
+	// 作用域附件门段：供给方命中 + 消费方命中（门段在结论层双登记）
 	for i := 1; i <= 3; i++ {
-		rel := fmt.Sprintf("组合/门段样板 %02d.jpg", i)
+		rel := fmt.Sprintf("组合/门段/门段样板 %02d.jpg", i)
 		c, ok := byRel[rel]
 		if !ok {
 			t.Fatalf("夹具形态缺损：结论缺 %s", rel)

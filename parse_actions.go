@@ -1,8 +1,8 @@
 // 手动解析动作族：单次赋值与目录赋值（会话态知识写入，不升格规则）、泛化成
 // 规则（按文件名形态/目录层/序列形态/结构映射四维度选择；入档后赋值保留
 // ——与新规则双源互证，2026-10-25 用户裁决废除「泛化即接管」消费剥离）、
-// 冲突裁决生成（双命中 And 组合/单侧缺席
-// 改绑的谓词条件策略，生成物不消费赋值）。生成物一律为最简充分形式——不生成
+// 冲突裁决（点选候选值写会话赋值——不再产出规则；赋值按维度覆盖压待裁决
+// 项，重识别不会冲掉）。生成物一律为最简充分形式——不生成
 // 超出必要的模式复杂度与条件复杂度；每次生成规则或赋值变更后经识别刷新调度
 // 自动排定一轮重识别（差异集高亮，过窄=差异里仍有未覆盖、过泛=差异里错套）。
 // 档案写一律经会话管理器 UpdateProfile 单点串行，会话赋值写经 mutateSession
@@ -30,15 +30,14 @@ const (
 	generalizeModeStruct   = "struct"   // 按结构映射：赋值线索出处→组合规则（规则总结器的确认入档动作）
 )
 
-// 裁决方式词汇（adjudicate 动作的模式分支）。
-const (
-	adjudicateModePick        = "pick"        // 双命中择一：模式=A∧B + 合成=裁决结果
-	adjudicateModeConditional = "conditional" // 单侧缺席改绑：谓词条件策略
-)
+// 裁决方式词汇（adjudicate 动作）：点选候选值写会话赋值——条件改绑路径
+//（在场/缺席择分支改绑）已随规则产出退役，谓词当次已可判定，双路收敛为
+// 单值择一。
+const adjudicateModePick = "pick"
 
 // GeneratedRuleView 生成规则的前端呈现摘要。
 type GeneratedRuleView struct {
-	// ID / Description / Source 规则身份与来源（qna=泛化、adjudication=裁决）。
+	// ID / Description / Source 规则身份与来源（qna=泛化）。
 	ID          string `json:"id"`
 	Description string `json:"description"`
 	Source      string `json:"source"`
@@ -65,22 +64,27 @@ type GenerationResult struct {
 // 变更时走赋值增量重算，秒级），快照最终反映变更、无需前端再发识别请求。返回
 // 会话与该文件的赋值呈现（清除后为 nil）。
 func (m *SessionManager) ApplyAssignment(root, relPath string, assign SessionAssignment) (*WorkbenchSession, *workbenchAssignmentView, error) {
-	sess, err := m.SetAssignment(root, relPath, assign)
-	if err != nil {
-		return nil, nil, err
+	sess, view, _, err := m.applyAssignment(root, relPath, assign)
+	return sess, view, err
+}
+
+// assignmentViewOf 会话内该文件的赋值呈现（例外条目缺席=清除后形态，nil）。
+func assignmentViewOf(sess *WorkbenchSession, relPath string) *workbenchAssignmentView {
+	if sess == nil {
+		return nil
 	}
-	m.scheduleRecognitionRefresh(root)
 	relPath = filepath.ToSlash(relPath)
-	if current, ok := sess.Assignments[relPath]; ok {
-		return sess, &workbenchAssignmentView{
-			RelPath: relPath, Author: current.Author, AuthorRole: current.AuthorRole,
-			Title: current.Title, Tags: current.Tags, Collection: current.Collection,
-			AuthorClueRef: current.AuthorClueRef, TitleClueRef: current.TitleClueRef,
-			CollectionClueRef: current.CollectionClueRef, TagClueRefs: current.TagClueRefs,
-			Generalized: current.Generalized, UpdatedAtMs: current.UpdatedAtMs,
-		}, nil
+	current, ok := sess.Assignments[relPath]
+	if !ok {
+		return nil
 	}
-	return sess, nil, nil
+	return &workbenchAssignmentView{
+		RelPath: relPath, Author: current.Author, AuthorRole: current.AuthorRole,
+		Title: current.Title, Tags: current.Tags, Collection: current.Collection,
+		AuthorClueRef: current.AuthorClueRef, TitleClueRef: current.TitleClueRef,
+		CollectionClueRef: current.CollectionClueRef, TagClueRefs: current.TagClueRefs,
+		Generalized: current.Generalized, UpdatedAtMs: current.UpdatedAtMs,
+	}
 }
 
 // —— 目录赋值（目录条目合并写+扇出）——
@@ -833,39 +837,35 @@ func submatchSpan(m []int, groupCount int) [2]int {
 	return [2]int{m[0], m[1]}
 }
 
-// —— 冲突裁决生成 ——
+// —— 冲突裁决（写会话赋值） ——
 
 // adjudicationInput 裁决动作的决策载荷。
 type adjudicationInput struct {
-	// Mode 裁决方式：pick / conditional。
+	// Mode 裁决方式：pick（点选候选值写会话赋值）。
 	Mode string
 	// PickIndex pick 模式采纳的候选下标。
 	PickIndex int
-	// PredicateSource / PredicateDimension conditional 模式的条件谓词
-	//（某来源在某维度上的声明是否在场）。
-	PredicateSource    SourceKind
-	PredicateDimension MetadataDimension
-	// PresentIndex / AbsentIndex conditional 模式谓词在场/缺席时采纳的候选下标。
-	PresentIndex int
-	AbsentIndex  int
 }
 
 // ApplyAdjudication 裁决动作：按当前识别快照的待裁决项（relPath+dimension 寻址）
-// 呈双方候选规则，用户裁决后生成组合规则（来源 adjudication）入档案并立即启动
-// 强制验证轮。锚定采用组合规则机制（2026-10-26 refs 门）：refs=候选规则集、空
-// 条件行（命中前提全部由成员门段承担，模式=恒真合取缓存）——不内嵌候选规则
-// 的模式树（v4 候选编译为行包装模式 RowSubjectPattern，不可序列化落档）。
-// 双命中择一生成「refs 门 + 合成=裁决结果常量」；单侧缺席改绑生成「同一 refs
-// 门 + 在场/缺席谓词条件双分支常量」的谓词条件策略。
-func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDimension, in adjudicationInput) (*GenerationResult, error) {
+// 呈双方候选，用户点选采纳其一——按文件+维度写会话赋值（复用赋值通道，经
+// SetAssignment 同点串行；赋值是求值输入而非产物：信任级顶格、按维度覆盖，
+// 重识别与增量轮不会冲掉，会话按库根持久化、跨重启恢复，清除赋值为唯一
+// 显式解除口）。写入按维度并入该文件既有例外条目（未裁决维度不动，裁决维度
+// 的既有线索出处引用随值一并清空——新值不再对应旧出处段）。待裁决项随赋值
+// 按维度覆盖在重识别后消散。返回会话、赋值回执与识别刷新启动结论。
+func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDimension, in adjudicationInput) (*WorkbenchSession, *workbenchAssignmentView, bool, error) {
+	if in.Mode != adjudicateModePick {
+		return nil, nil, false, fmt.Errorf("未知的裁决方式 %q（可用：%s；条件改绑路径已退役，裁决收敛为点选候选值）", in.Mode, adjudicateModePick)
+	}
 	relPath = filepath.ToSlash(relPath)
 
 	sess, err := m.cachedSession(root) // 只读校验前置读：共享只读实例
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 	if sess.Snapshot == nil {
-		return nil, fmt.Errorf("该会话尚未完成全量识别，无待裁决项，请先识别")
+		return nil, nil, false, fmt.Errorf("该会话尚未完成全量识别，无待裁决项，请先识别")
 	}
 	var item *SnapPending
 	for i := range sess.Snapshot.Pending {
@@ -876,112 +876,47 @@ func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDim
 		}
 	}
 	if item == nil {
-		return nil, fmt.Errorf("文件 %s 在维度 %s 上无待裁决项（可能已被处置或规则已变化），请刷新识别全景", relPath, dim)
+		return nil, nil, false, fmt.Errorf("文件 %s 在维度 %s 上无待裁决项（可能已被处置或规则已变化），请刷新识别全景", relPath, dim)
 	}
 	if len(item.Candidates) < 2 {
-		return nil, fmt.Errorf("待裁决项候选不足双方，无法裁决: %+v", item)
+		return nil, nil, false, fmt.Errorf("待裁决项候选不足双方，无法裁决: %+v", item)
 	}
+	if in.PickIndex < 0 || in.PickIndex >= len(item.Candidates) {
+		return nil, nil, false, fmt.Errorf("候选下标 %d 超出范围（共 %d 个候选）", in.PickIndex, len(item.Candidates))
+	}
+	value := item.Candidates[in.PickIndex].Value
 
-	// 候选规则解析：档案规则 ∪ 内置表内按 RuleID 取模式
-	profile, errs := LoadProfile(m.store)
-	for _, err := range errs {
-		m.warnf("规则档案载入异常（裁决）: %v", err)
-	}
-	if profile == nil {
-		return nil, fmt.Errorf("规则档案不可载入，拒绝裁决生成")
-	}
-	allRules := allRulesWithBuiltins(profile)
-	patternByID := func(ruleID string) (Pattern, bool) {
-		for i := range allRules {
-			if allRules[i].ID == ruleID {
-				return allRules[i].Pattern, true
-			}
-		}
-		return nil, false
-	}
-	candidateRuleIDs := make([]string, 0, 2)
-	seenRule := make(map[string]bool)
-	for _, cand := range item.Candidates {
-		if cand.RuleID == "" || seenRule[cand.RuleID] {
-			continue
-		}
-		seenRule[cand.RuleID] = true
-		candidateRuleIDs = append(candidateRuleIDs, cand.RuleID)
-	}
-	if len(candidateRuleIDs) < 1 {
-		return nil, fmt.Errorf("待裁决候选均无规则出处，无法组合（候选: %+v）", item.Candidates)
-	}
-	// 候选规则在场性核验（refs 门求值须可解析；不取其模式树——见函数头注释）
-	for _, ruleID := range candidateRuleIDs {
-		pattern, ok := patternByID(ruleID)
-		if !ok || pattern == nil {
-			return nil, fmt.Errorf("候选规则 %q 在档案与内置表中均不存在（可能已被删除），无法组合", ruleID)
-		}
-	}
-
-	candValue := func(index int) (string, error) {
-		if index < 0 || index >= len(item.Candidates) {
-			return "", fmt.Errorf("候选下标 %d 超出范围（共 %d 个候选）", index, len(item.Candidates))
-		}
-		return item.Candidates[index].Value, nil
-	}
-
-	var extractions []ExtractionAction
-	switch in.Mode {
-	case adjudicateModePick:
-		value, err := candValue(in.PickIndex)
-		if err != nil {
-			return nil, err
-		}
-		extractions = []ExtractionAction{{
-			Dimension: dim, From: FromAdjudication, Constant: value,
-		}}
-	case adjudicateModeConditional:
-		if !knownSourceKinds[in.PredicateSource] {
-			return nil, fmt.Errorf("条件谓词引用了未知的声明来源 %q", in.PredicateSource)
-		}
-		if !knownDimensions[in.PredicateDimension] {
-			return nil, fmt.Errorf("条件谓词引用了未知的含义维度 %q", in.PredicateDimension)
-		}
-		presentValue, err := candValue(in.PresentIndex)
-		if err != nil {
-			return nil, err
-		}
-		absentValue, err := candValue(in.AbsentIndex)
-		if err != nil {
-			return nil, err
-		}
-		pred := DeclPredicate{Source: in.PredicateSource, Dimension: in.PredicateDimension}
-		// 最简充分形式：两分支各恰一条谓词节点（在场 / 在场取反）
-		presentWhen := predicateExpr(pred)
-		extractions = []ExtractionAction{
-			{Dimension: dim, From: FromAdjudication, Constant: presentValue,
-				When: presentWhen},
-			{Dimension: dim, From: FromAdjudication, Constant: absentValue,
-				When: &CondExpr{Kind: ExprNot, Inner: presentWhen}},
-		}
+	// 按维度并入既有例外条目：裁决维度取所选值并清其线索出处引用，其余维度
+	// 原样保留（整条写 SetAssignment——文件例外条目整体替换）。
+	merged := sess.Assignments[relPath]
+	switch dim {
+	case DimAuthor:
+		merged.Author, merged.AuthorClueRef = value, ""
+	case DimTitle:
+		merged.Title, merged.TitleClueRef = value, ""
+	case DimCollection:
+		merged.Collection, merged.CollectionClueRef = value, ""
+	case DimTag:
+		merged.Tags, merged.TagClueRefs = []string{value}, nil
 	default:
-		return nil, fmt.Errorf("未知的裁决方式 %q（可用：%s / %s）", in.Mode, adjudicateModePick, adjudicateModeConditional)
+		return nil, nil, false, fmt.Errorf("裁决维度 %q 无对应赋值维度", dim)
 	}
+	sess, view, started, err := m.applyAssignment(root, relPath, merged)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return sess, view, started, nil
+}
 
-	rule := RuleEntry{
-		ID:          generatedRuleID("adj", BaseNameWithoutExt(item.FileName)),
-		Description: adjudicationDescription(item, dim, in, extractions),
-		Source:      RuleSourceAdjudication,
-		Enabled:     true,
-		Refs:        candidateRuleIDs,
-		Conditions:  []CondxRow{},
-		Pattern:     And{},
-		Extractions: extractions,
-	}
-	if err := m.commitGeneratedRule(ArchiveWriteAdjudicate, &rule); err != nil {
-		return nil, err
+// applyAssignment 赋值写与识别刷新调度的内核（ApplyAssignment / 裁决赋值化
+// 共用）：返回会话、赋值回执与刷新轮启动结论（已在途=已排定补启动）。
+func (m *SessionManager) applyAssignment(root, relPath string, assign SessionAssignment) (*WorkbenchSession, *workbenchAssignmentView, bool, error) {
+	sess, err := m.SetAssignment(root, relPath, assign)
+	if err != nil {
+		return nil, nil, false, err
 	}
 	started := m.scheduleRecognitionRefresh(root)
-	return &GenerationResult{
-		Rule:                generatedRuleViewOf(&rule),
-		VerificationStarted: started,
-	}, nil
+	return sess, assignmentViewOf(sess, relPath), started, nil
 }
 
 // scheduleRecognitionRefresh 识别刷新调度（规则生成与赋值变更共用入口）：立即
@@ -1023,28 +958,6 @@ func (m *SessionManager) scheduleRecognitionRefresh(root string) bool {
 
 // recognitionFollowupTimeout 在途识别等待补启动的上限。
 const recognitionFollowupTimeout = 30 * time.Second
-
-// adjudicationDescription 裁决生成规则的人话描述：从裁决内容派生。
-func adjudicationDescription(item *SnapPending, dim MetadataDimension, in adjudicationInput, extractions []ExtractionAction) string {
-	dimLabel := qnaDimensionLabel(dim)
-	rules := make([]string, 0, 2)
-	seen := make(map[string]bool)
-	for _, cand := range item.Candidates {
-		if cand.RuleID == "" || seen[cand.RuleID] {
-			continue
-		}
-		seen[cand.RuleID] = true
-		rules = append(rules, cand.RuleID)
-	}
-	combined := strings.Join(rules, " 与 ")
-	if in.Mode == adjudicateModePick {
-		return fmt.Sprintf("裁决生成：「%s」的%s冲突（%s）裁决为 %s=%s", item.RelPath, dimLabel, combined, dimLabel, extractions[0].Constant)
-	}
-	return fmt.Sprintf("裁决生成：「%s」的%s冲突（%s）按条件改绑——%s的%s在场时 %s=%s、缺席时 %s=%s",
-		item.RelPath, dimLabel, combined,
-		sourceKindLabel(in.PredicateSource), qnaDimensionLabel(in.PredicateDimension),
-		dimLabel, extractions[0].Constant, dimLabel, extractions[1].Constant)
-}
 
 // —— 生成物公共件 ——
 
@@ -1238,10 +1151,25 @@ func patternSummary(p Pattern) string {
 	case *FileSubjectPattern:
 		return fmt.Sprintf("文件名按模板 %s", t.Expr)
 	case *DirSubjectPattern:
-		if len(t.Asserts) > 0 {
-			return fmt.Sprintf("目录名按模板 %s（终结谓词 %d 项）", t.Expr, len(t.Asserts))
+		// 目录主体摘要（决策7 后端面）：多段行念「目录层级 `tpl`（自上而下
+		// 逐级紧邻）」、显式段距夹注；作用域附件念「位于…命中的目录之下
+		//（紧邻/任意深度/隔 N 级）」；单段维持模板自读 + 谓词计数。
+		summary := fmt.Sprintf("目录名按模板 %s", t.Expr)
+		if len(t.Segments) >= 2 {
+			summary = dirSegLevelPhrase(t.Expr, t.SegGaps)
 		}
-		return fmt.Sprintf("目录名按模板 %s", t.Expr)
+		assertCount := 0
+		for _, a := range t.Asserts {
+			if a.Kind == CondxAttachRefScope {
+				summary += "，" + refScopeAssertPhrase(a)
+				continue
+			}
+			assertCount++
+		}
+		if assertCount > 0 {
+			summary += fmt.Sprintf("（终结谓词 %d 项）", assertCount)
+		}
+		return summary
 	case *SeqSubjectPattern:
 		return fmt.Sprintf("序列成员按模板 %s（同键≥%d）", t.Expr, t.MinSize)
 	case *ParentNamePattern:
@@ -1270,4 +1198,56 @@ func joinPatternSummaries(subs []Pattern, sep string) string {
 		summaries = append(summaries, patternSummary(sub))
 	}
 	return strings.Join(summaries, sep)
+}
+
+// dirSegLevelPhrase 多段目录模板的人话句式（决策7，patternSummary 与规则总结器
+// 建议卡同源）：全段距紧邻时念「目录层级 `tpl`（自上而下逐级紧邻）」；含显式
+// 段距（// 任意、/{N} 跳层）时改为段间夹注形态——夹注词「（任意层）」「（隔N级）」
+// 落在段与分隔符之间，句尾缀「（自上而下）」。切分失配（非多段原文）回落模板
+// 自读。
+func dirSegLevelPhrase(tpl string, gaps []dirSegGap) string {
+	allAdjacent := true
+	for _, g := range gaps {
+		if g.Any || g.N != 1 {
+			allAdjacent = false
+			break
+		}
+	}
+	if allAdjacent {
+		return fmt.Sprintf("目录层级 %s（自上而下逐级紧邻）", tpl)
+	}
+	segs, parsed, err := splitDirTplSegments(tpl)
+	if err != nil || len(parsed) != len(gaps) || len(segs) != len(gaps)+1 {
+		return fmt.Sprintf("目录层级 %s（自上而下）", tpl)
+	}
+	var b strings.Builder
+	b.WriteString("目录层级 ")
+	for i, seg := range segs {
+		b.WriteString(seg)
+		if i < len(gaps) {
+			switch {
+			case gaps[i].Any:
+				b.WriteString("（任意层）")
+			case gaps[i].N > 1:
+				b.WriteString(fmt.Sprintf("（隔%d级）", gaps[i].N))
+			}
+			b.WriteString("/")
+		}
+	}
+	b.WriteString("（自上而下）")
+	return b.String()
+}
+
+// refScopeAssertPhrase 作用域附件谓词的人话句式（决策7 后端面）：「位于规则 X
+// 命中的目录之下（紧邻/任意深度/隔N级）」——供给方规则描述的解析需档案在场，
+// 此处以供给方 ID 直读（呈现面由前端镜像承载完整描述形态）。
+func refScopeAssertPhrase(a DirAssert) string {
+	gap := "紧邻"
+	switch {
+	case a.MinCount <= 0:
+		gap = "任意深度"
+	case a.MinCount >= 2:
+		gap = fmt.Sprintf("隔%d级", a.MinCount)
+	}
+	return fmt.Sprintf("位于规则 %s 命中的目录之下（%s）", a.Value, gap)
 }

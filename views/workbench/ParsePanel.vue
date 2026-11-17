@@ -28,9 +28,10 @@
       <p class="li-pp-hint">子树 {{ dir.subtreeFileCount }} 个文件（含子目录 {{ dir.subdirCount }} 个）</p>
     </div>
 
-    <!-- 待裁决：选中文件冲突维度就地双路裁决（左栏待裁决折叠区保留只读总览）；目录模式无此项 -->
+    <!-- 待裁决：选中文件冲突维度点选候选就地裁决（裁决赋值化：点选候选值写会话赋值、
+         不产规则；在场/缺席改绑入口已随该路径退役）；目录模式无此项 -->
     <div v-if="!dir && pendingItems.length" class="li-pp-sec">
-      <h4 class="li-pp-sec-title">待裁决冲突 <span class="li-pp-sec-note">{{ pendingItems.length }} 维 · 就地双路裁决</span></h4>
+      <h4 class="li-pp-sec-title">待裁决冲突 <span class="li-pp-sec-note">{{ pendingItems.length }} 维 · 就地裁决</span></h4>
       <div v-for="p in pendingItems" :key="p.dimension" class="li-pp-pending">
         <div class="li-pp-pending-head">
           <span class="li-pp-pending-dim">{{ dimLabel(p.dimension) }} 冲突</span>
@@ -50,46 +51,7 @@
           </button>
         </div>
         <div class="li-pp-row">
-          <el-button type="primary" size="small" :loading="adjudicating" @click="doAdjudicatePick(p)">裁决采纳所选（双命中）</el-button>
-          <el-button size="small" @click="toggleConditional(p)">按条件改绑（单侧缺席）…</el-button>
-        </div>
-        <!-- 条件改绑面板：谓词条件策略（在场/缺席各采纳一候选） -->
-        <div v-if="condOpenByDim[p.dimension]" class="li-pp-cond">
-          <div class="li-pp-cond-row">
-            <span class="li-pp-cond-label">条件谓词（何来源在何维度上的声明）：</span>
-            <el-select v-model="predSourceByDim[p.dimension]" class="li-pp-cond-select" size="small">
-              <el-option v-for="s in predSources" :key="s.key" :label="s.label" :value="s.key" />
-            </el-select>
-            <el-select v-model="predDimensionByDim[p.dimension]" class="li-pp-cond-select" size="small">
-              <el-option v-for="d in predDims" :key="d.key" :label="d.label" :value="d.key" />
-            </el-select>
-          </div>
-          <div class="li-pp-cond-row">
-            <span class="li-pp-cond-label">谓词在场时采纳：</span>
-            <button
-              v-for="(c, j) in p.candidates || []"
-              :key="`p${j}`"
-              type="button"
-              class="li-pp-cand is-mini"
-              :class="{ 'is-active': presentByDim[p.dimension] === j }"
-              @click="presentByDim[p.dimension] = j"
-            >{{ c.value }}</button>
-          </div>
-          <div class="li-pp-cond-row">
-            <span class="li-pp-cond-label">谓词缺席时采纳：</span>
-            <button
-              v-for="(c, j) in p.candidates || []"
-              :key="`a${j}`"
-              type="button"
-              class="li-pp-cand is-mini"
-              :class="{ 'is-active': absentByDim[p.dimension] === j }"
-              @click="absentByDim[p.dimension] = j"
-            >{{ c.value }}</button>
-          </div>
-          <div class="li-pp-row">
-            <el-button type="primary" size="small" :loading="adjudicating" @click="doAdjudicateConditional(p)">生成条件策略</el-button>
-          </div>
-          <p class="li-pp-hint">生成「在场时用甲、缺席时用乙」的最简谓词条件策略（来源=裁决）</p>
+          <el-button type="primary" size="small" :loading="adjudicating" @click="doAdjudicatePick(p)">裁决采纳所选</el-button>
         </div>
       </div>
     </div>
@@ -215,14 +177,15 @@
       <p v-if="!dir" class="li-pp-hint">空维度不覆盖档案结论；全部留空即清除赋值。保存赋值后自动总结规则建议（手填值由后端按「值=某段」兜底匹配），确认泛化才入档；保存后后端自动排定增量重识别，完成后本面板与全景自动刷新</p>
     </div>
 
-    <!-- 剧本G4 规则建议卡：保存赋值后按选给出处总结（人话规则+命中预览+样例应用），
-         未入档；「泛化成规则」=确认入档（G5），「仅保留本次赋值」=收起卡（G6） -->
+    <!-- 泛化建议卡（剧本G4/剧本3 帧2）：保存赋值后按选给出处总结（多段句式人话
+         规则+逐维度映射+全库命中预览+样例应用），未入档；「入档」=确认入档
+         （目录层多段模板规则+独立文件名规则，两条；G5），「放弃」=收起卡（G6） -->
     <div v-if="suggestion" class="li-pp-sec">
       <h4 class="li-pp-sec-title">
-        规则建议
+        泛化建议
         <span class="li-pp-sec-note">按本次选给总结 · 未入档</span>
       </h4>
-      <p class="li-pp-sugg-summary">{{ suggestion.summary }}</p>
+      <p class="li-pp-sugg-summary">建议：{{ suggestion.summary }}</p>
       <div v-if="suggestion.mappings && suggestion.mappings.length" class="li-pp-sugg-maps">
         <div v-for="(m, i) in suggestion.mappings" :key="i" class="li-pp-sugg-map">
           <span class="li-pp-sugg-dim">{{ dimLabel(m.dimension) }}</span>
@@ -237,7 +200,7 @@
       <p v-for="(n, ni) in suggestion.notes || []" :key="`sugg-note-${ni}`" class="li-pp-hint">{{ n }}</p>
       <!-- 命中预览（文件与目录两路共用）：全库口径；样例行带目录键时文件名前呈目录键 -->
       <p class="li-pp-hint">
-        命中预览：还将命中全库 {{ suggestion.hitCount }} 个文件（全库共 {{ suggestion.hitTotal }} 个）<template v-if="suggestion.dropsTailCode">；样例尾部码将被丢弃</template>
+        全库命中预览：除样本外 {{ suggestion.hitCount }} / 共 {{ suggestion.hitTotal }} 件<template v-if="suggestion.dropsTailCode">；样例尾部码将被丢弃</template>
       </p>
       <div v-if="suggestion.samples && suggestion.samples.length" class="li-pp-sugg-samples">
         <div v-for="(s, i) in suggestion.samples" :key="i" class="li-pp-sugg-sample">
@@ -247,13 +210,13 @@
         </div>
       </div>
       <div class="li-pp-row">
-        <el-button type="primary" size="small" :loading="generalizing" @click="doGeneralizeStruct">泛化成规则</el-button>
-        <el-button size="small" @click="dismissSuggestion">仅保留本次赋值</el-button>
+        <el-button type="primary" size="small" :loading="generalizing" @click="doGeneralizeStruct">入档</el-button>
+        <el-button size="small" @click="dismissSuggestion">放弃</el-button>
       </div>
     </div>
 
-    <!-- 泛化/裁决生成物与验证轮差异提示（完整差异见左栏差异条） -->
-    <div v-if="lastGenRule || lastGenRules.length || lastCondition || diffTotal" class="li-pp-sec">
+    <!-- 泛化生成物与验证轮差异提示（完整差异见左栏差异条） -->
+    <div v-if="lastGenRule || lastGenRules.length || diffTotal" class="li-pp-sec">
       <h4 class="li-pp-sec-title">
         生成规则与验证差异
         <span class="li-pp-sec-note">变更 {{ diffChangedCount }} · 新增 {{ diffAddedCount }} · 消失 {{ diffRemovedCount }}</span>
@@ -262,14 +225,10 @@
         <p class="li-pp-gen-line li-pp-gen-name">{{ lastGenRule.description || lastGenRule.id }}</p>
         <p v-if="lastGenRule.pattern" class="li-pp-gen-pattern">{{ lastGenRule.pattern }}</p>
       </div>
-      <!-- 剧本G5：结构映射确认入档的组合规则序列（generalize mode=struct 的 Rules） -->
+      <!-- 剧本G5/剧本3 帧2：结构映射确认入档的规则序列（目录层多段模板规则+独立文件名规则） -->
       <div v-for="r in lastGenRules" :key="r.id" class="li-pp-gen">
         <p class="li-pp-gen-line li-pp-gen-name">{{ r.description || r.id }}</p>
         <p v-if="r.pattern" class="li-pp-gen-pattern">{{ r.pattern }}</p>
-      </div>
-      <div v-if="lastCondition" class="li-pp-condjson">
-        <div class="li-pp-condjson-head">条件策略生成物（条件 JSON，与规则档案同构的表达式片段）</div>
-        <pre class="li-pp-condjson-body">{{ lastCondition }}</pre>
       </div>
       <p v-if="diffTotal" class="li-pp-hint">生成规则后自动增量重识别——过窄＝差异里仍有未覆盖，过泛＝差异里出现错套，请核对</p>
       <div v-if="diffEntries.length" class="li-pp-difflist">
@@ -411,7 +370,7 @@ interface PanelResponse {
   ok: boolean
   error?: string
   rule?: PanelRule
-  // 剧本G5：generalize mode=struct 入档的组合规则摘要序列
+  // 剧本G5：generalize mode=struct 入档的规则摘要序列（目录层多段+独立文件名）
   rules?: PanelRule[]
   // 剧本G4：summarizeRule 的总结器产物（建议卡载荷；未入档）
   ruleSuggestion?: PanelRuleSuggestion
@@ -422,6 +381,9 @@ interface PanelResponse {
   // 维度标签一致）；无上级在场则两字段缺省（前端维持现文案）
   survivorDirKey?: string
   survivorDims?: string[]
+  // 剧本3 帧1：裁决赋值化回执——adjudicate 点选候选后随答的赋值呈现
+  //（workbenchAssignmentView 投影；回执缺席该维度时前端回退所选候选值）
+  assignment?: PanelAssignment
 }
 
 // 剧本G4 规则建议（后端 RuleSuggestion：人话规则+逐维度映射+命中预览+样例应用）
@@ -978,39 +940,19 @@ watch(
   { flush: 'sync' }
 )
 const summarizing = ref(false)
-// 结构映射确认入档的组合规则序列（generalize mode=struct 应答 Rules）
+// 结构映射确认入档的规则序列（generalize mode=struct 应答 Rules）
 const lastGenRules = ref<PanelRule[]>([])
 
 function genModeLabel(mode: string): string {
   return mode === 'struct' ? '结构映射' : mode
 }
 
-// —— 待裁决就地双路（维度键控的裁决选择态） ——
+// —— 就地裁决（裁决赋值化·剧本3 帧1：点选候选值按文件+维度写会话赋值，不产规则） ——
 const adjudicating = ref(false)
 const pickByDim = ref<Record<string, number>>({})
-const condOpenByDim = ref<Record<string, boolean>>({})
-const predSourceByDim = ref<Record<string, string>>({})
-const predDimensionByDim = ref<Record<string, string>>({})
-const presentByDim = ref<Record<string, number>>({})
-const absentByDim = ref<Record<string, number>>({})
-
-const predSources = [
-  { key: 'dir', label: '目录源' },
-  { key: 'filename', label: '文件名源' },
-  { key: 'predicate', label: '库内命中源' },
-  { key: 'group', label: '群组前缀源' },
-  { key: 'constant', label: '常量' }
-]
-const predDims = [
-  { key: 'author', label: '作者' },
-  { key: 'title', label: '作品名' },
-  { key: 'tag', label: '标签' },
-  { key: 'collection', label: '作品集' }
-]
 
 // —— 生成物与差异呈现 ——
 const lastGenRule = ref<PanelRule | null>(null)
-const lastCondition = ref('')
 const DIFF_CAP = 8
 const diffChangedCount = computed(() => (props.diff && props.diff.changed ? props.diff.changed.length : 0))
 const diffAddedCount = computed(() => (props.diff && props.diff.added ? props.diff.added.length : 0))
@@ -1037,17 +979,11 @@ function resetPanelState(): void {
   actionError.value = ''
   halfState.value = null
   lastGenRule.value = null
-  lastCondition.value = ''
   lastGenRules.value = []
   suggestion.value = null
   clueMenu.value = null
   verifyStarted.value = false
   pickByDim.value = {}
-  condOpenByDim.value = {}
-  predSourceByDim.value = {}
-  predDimensionByDim.value = {}
-  presentByDim.value = {}
-  absentByDim.value = {}
 }
 
 watch(
@@ -1091,6 +1027,24 @@ if (props.noticeSeed) notice.value = props.noticeSeed
 // 丢失；种子仅挂载时消费一次，后续生命周期仍由本实例动作自治（切换目标时
 // 父组件已先行弃管清空种子）
 if (props.suggestionSeed) suggestion.value = props.suggestionSeed
+// 缺陷②修复（文件模式）：迟到建议的回流注入——doSave 的 summarizeRule 应答
+// 可能落在增量识别完成事件驱动的全景重载（recognitionDone → loadPanorama 置
+// snapshot=null → 本面板同批卸载）之后：应答已由父层在通道层托管（ParseView
+// request 的 summarizeRule 应答钩子——面板侧 watch/emit 随实例停止/失效），
+// 但本实例可能已以空种子重挂、种子仅挂载时消费会漏这一拍，此监听把托管建议
+// 注入在场实例（本实例自产的建议已在场，跳过不双取）。目标匹配守卫：建议只
+// 回流到其寻址目标（文件 relPath / 目录键——总结器两路寻址的 RelPath 语义），
+// 切目标后的复活被拦（与父层「切换即弃管」守卫同语义）。
+function suggestionTargetMatches(s: PanelRuleSuggestion): boolean {
+  if (props.dir) return s.relPath === props.dir.relKey
+  return !!props.file && s.relPath === props.file.relPath
+}
+watch(
+  () => props.suggestionSeed,
+  (s) => {
+    if (s && !suggestion.value && suggestionTargetMatches(s)) suggestion.value = s
+  }
+)
 
 // —— 赋值动作（动作协议零改动，经父通道串行调用） ——
 
@@ -1165,6 +1119,9 @@ async function doSave(): Promise<void> {
     notice.value = `已保存赋值；未产生规则建议（${resp.error || '无可泛化内容'}）`
     return
   }
+  // 缺陷②（文件模式）：应答与增量识别重载存在竞态——本实例可能已被卸载
+  //（watch/emit 随实例失效），建议由父层在通道层托管（ParseView request 的
+  // summarizeRule 应答钩子）、重挂/在场实例经 suggestionSeed 回流注入续现。
   suggestion.value = resp.ruleSuggestion
 }
 
@@ -1280,10 +1237,9 @@ async function runGeneralize(mode: string): Promise<void> {
     return
   }
   halfState.value = null
-  // struct 为组合规则序列（建议卡收起，结论转「生成规则与验证差异」区呈现）
+  // struct 为规则序列（建议卡收起，结论转「生成规则与验证差异」区呈现）
   lastGenRules.value = rules
   lastGenRule.value = null
-  lastCondition.value = ''
   suggestion.value = null
   const names = rules.map((r) => r.description || r.id).join('、')
   notice.value = `已生成规则 ${names}；验证轮重识别已启动，差异见下方`
@@ -1313,7 +1269,6 @@ async function doClearAssign(): Promise<void> {
   }
   setForm(null)
   lastGenRule.value = null
-  lastCondition.value = ''
   lastGenRules.value = []
   suggestion.value = null
   notice.value = '已清除赋值（重识别后生效）'
@@ -1399,23 +1354,22 @@ async function doIgnoreAction(): Promise<void> {
   emit('refresh')
 }
 
-// —— 就地裁决双路 ——
+// —— 就地裁决（裁决赋值化·剧本3 帧1/帧1b） ——
 
-function toggleConditional(p: PanelPending): void {
-  const k = p.dimension
-  condOpenByDim.value[k] = !condOpenByDim.value[k]
-  if (condOpenByDim.value[k]) {
-    // 缺省：谓词=目录源作者、在场=首个候选、缺席=次候选
-    if (predSourceByDim.value[k] === undefined) predSourceByDim.value[k] = 'dir'
-    if (predDimensionByDim.value[k] === undefined) predDimensionByDim.value[k] = 'author'
-    if (presentByDim.value[k] === undefined) presentByDim.value[k] = 0
-    if (absentByDim.value[k] === undefined) absentByDim.value[k] = 1
+// 裁决维度在赋值回执中的取值（标签维度取首个）；回执缺席该维度时回退所选候选值。
+function adjudicationValueOf(dim: string, a: PanelAssignment | null | undefined, p: PanelPending, pickIndex: number): string {
+  if (a) {
+    if (dim === 'author' && a.author) return a.author
+    if (dim === 'title' && a.title) return a.title
+    if (dim === 'collection' && a.collection) return a.collection
+    if (dim === 'tag' && a.tags && a.tags.length) return a.tags[0]
   }
-  notice.value = ''
-  actionError.value = ''
+  const c = p.candidates && p.candidates[pickIndex]
+  return c ? c.value : ''
 }
 
-// 双路一：双命中择一（pick）——两来源声明均在场，采纳所选候选生成组合规则
+// 点选候选值 → 按文件+维度写会话赋值（回执=赋值呈现 resp.assignment，非规则
+// 视图）；待裁决项随赋值按维度覆盖在重识别后消散。
 async function doAdjudicatePick(p: PanelPending): Promise<void> {
   if (!props.root) return
   if (pickByDim.value[p.dimension] === undefined) {
@@ -1425,51 +1379,27 @@ async function doAdjudicatePick(p: PanelPending): Promise<void> {
   adjudicating.value = true
   notice.value = ''
   actionError.value = ''
+  const pickIndex = pickByDim.value[p.dimension]
   const resp = await props.request('adjudicate', {
     root: props.root,
     relPath: p.relPath,
     dimension: p.dimension,
     adjudicateMode: 'pick',
-    pickIndex: pickByDim.value[p.dimension]
+    pickIndex: pickIndex
   })
   adjudicating.value = false
-  if (!resp.ok || !resp.rule) {
-    actionError.value = resp.error || '裁决生成失败'
+  if (!resp.ok || !resp.assignment) {
+    // 帧1b：待裁决项已被处置/规则已变化——后端错误句直通，锚片段命中时按帧句式呈现
+    const err = resp.error || ''
+    actionError.value = err.indexOf('可能已被处置或规则已变化') >= 0
+      ? '该待裁决项可能已被处置或规则已变化，请刷新识别全景'
+      : err || '裁决未记录，请重试'
     return
   }
-  lastGenRule.value = resp.rule
-  lastCondition.value = resp.rule.condition || ''
+  lastGenRule.value = null
   lastGenRules.value = []
-  notice.value = `已生成组合规则 ${resp.rule.id}；验证轮重识别已启动，差异见下方`
-  verifyStarted.value = true
-}
-
-// 双路二：单侧缺席条件改绑（conditional）——生成「在场用甲、缺席用乙」的谓词条件策略
-async function doAdjudicateConditional(p: PanelPending): Promise<void> {
-  if (!props.root) return
-  adjudicating.value = true
-  notice.value = ''
-  actionError.value = ''
-  const resp = await props.request('adjudicate', {
-    root: props.root,
-    relPath: p.relPath,
-    dimension: p.dimension,
-    adjudicateMode: 'conditional',
-    predicateSource: predSourceByDim.value[p.dimension] || 'dir',
-    predicateDimension: predDimensionByDim.value[p.dimension] || 'author',
-    presentIndex: presentByDim.value[p.dimension] || 0,
-    absentIndex: absentByDim.value[p.dimension] === undefined ? 1 : absentByDim.value[p.dimension]
-  })
-  adjudicating.value = false
-  if (!resp.ok || !resp.rule) {
-    actionError.value = resp.error || '条件策略生成失败'
-    return
-  }
-  lastGenRule.value = resp.rule
-  lastCondition.value = resp.rule.condition || ''
-  lastGenRules.value = []
-  condOpenByDim.value[p.dimension] = false
-  notice.value = `已生成条件策略 ${resp.rule.id}；验证轮重识别已启动，差异见下方`
+  const value = adjudicationValueOf(p.dimension, resp.assignment, p, pickIndex)
+  notice.value = `已记录裁决：${dimLabel(p.dimension)}=「${value}」（本会话长期生效，重识别不会冲掉；清除赋值可撤销）；重识别已启动，差异见下方`
   verifyStarted.value = true
 }
 
@@ -1957,12 +1887,6 @@ const conclusionSummary = (c?: PanelDiffConclusion | null): string => {
   background: var(--app-color-primary-light, rgba(64, 158, 255, 0.08));
 }
 
-.li-pp-cand.is-mini {
-  padding: 2px 8px;
-  font-size: 12px;
-  justify-content: flex-start;
-}
-
 .li-pp-cand-value {
   font-size: 12px;
   color: var(--app-text-primary);
@@ -1975,32 +1899,6 @@ const conclusionSummary = (c?: PanelDiffConclusion | null): string => {
   font-size: 11px;
   color: var(--app-text-secondary);
   flex-shrink: 0;
-}
-
-/* 条件改绑面板 */
-.li-pp-cond {
-  border: 1px solid var(--app-border-color-light);
-  border-radius: var(--app-radius);
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.li-pp-cond-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.li-pp-cond-label {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-}
-
-.li-pp-cond-select {
-  width: 110px;
 }
 
 /* 生成物与差异 */
@@ -2025,31 +1923,6 @@ const conclusionSummary = (c?: PanelDiffConclusion | null): string => {
   margin: 0;
   font-size: 12px;
   color: var(--app-text-secondary);
-  word-break: break-all;
-}
-
-.li-pp-condjson {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.li-pp-condjson-head {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-}
-
-.li-pp-condjson-body {
-  margin: 0;
-  padding: 6px 8px;
-  border-radius: var(--app-radius);
-  background: var(--app-bg-page, #f5f7fa);
-  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
-  font-size: 11px;
-  line-height: 1.5;
-  max-height: 140px;
-  overflow: auto;
-  white-space: pre-wrap;
   word-break: break-all;
 }
 

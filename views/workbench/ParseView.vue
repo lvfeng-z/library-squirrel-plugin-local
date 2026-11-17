@@ -700,7 +700,11 @@
                 </div>
                 <!-- 阶段3 · 剧本G：线索集胶囊陈列（结构分段+既有库名命中/pixiv，含旧「线索」区职能）+
                      选给五字段+出处小字 → 保存 → 规则建议卡（泛化成规则/仅保留本次赋值）+
-                     待裁决就地双路裁决 / 忽略 / 清除赋值 / 生成规则与差异提示；请求走本组件唯一通道 -->
+                     待裁决就地双路裁决 / 忽略 / 清除赋值 / 生成规则与差异提示；请求走本组件唯一通道。
+                     缺陷②第二周期修复：文件模式补绑 suggestion-seed/@suggestion（与目录面板同机制）——
+                     doSave 的 summarizeRule 应答虽即时到达并被消费，但后端自动排定的增量识别完成事件
+                     （recognitionDone → loadPanorama 置 snapshot=null）数毫秒后即卸载重挂本面板，
+                     实例内建议随卸载消亡；不经种子回流则重挂后建议卡永不复现（目录模式靠同绑定免疫） -->
                 <ParsePanel
                   ref="filePanelRef"
                   :root="session ? session.rootPath : ''"
@@ -713,7 +717,9 @@
                   :recognizing="recognizing"
                   :request="request"
                   :notice-seed="panelNotice"
+                  :suggestion-seed="panelSuggestion"
                   @notice="onPanelNotice"
+                  @suggestion="onPanelSuggestion"
                   @refresh="onPanelRefresh"
                   @open-rule="openRuleEdit"
                 />
@@ -1070,6 +1076,10 @@ interface WorkbenchResponse {
   // 事件）/ completed=恰好已完成（原子提交点已过、未执行取消，风险10）；idle 走
   // ok=false（无在途创建可取消）
   cancelState?: string
+  // summarizeRule 的总结器产物（建议卡载荷；未入档）——缺陷②文件模式补齐的
+  // 通道层托管消费（hostSummarizeRuleResponse），面板侧 ParsePanel 亦以窄投影
+  //（PanelResponse.ruleSuggestion）同字段消费
+  ruleSuggestion?: PanelSuggestionSeed | null
 }
 
 interface WorkbenchEvent {
@@ -1589,7 +1599,10 @@ function request(action: string, payload: Record<string, unknown> = {}): Promise
   seq += 1
   const reqSeq = seq
   return new Promise((resolve) => {
-    pending.set(reqSeq, resolve)
+    pending.set(reqSeq, (resp) => {
+      hostSummarizeRuleResponse(action, resp)
+      resolve(resp)
+    })
     Events.Emit(TOPIC_REQUEST, JSON.stringify({ seq: reqSeq, action: action, ...payload }))
     setTimeout(() => {
       if (pending.has(reqSeq)) {
@@ -1598,6 +1611,22 @@ function request(action: string, payload: Record<string, unknown> = {}): Promise
       }
     }, requestTimeoutMs(action))
   })
+}
+
+// —— 缺陷②修复（文件模式补齐）：summarizeRule 应答的通道层托管 ——
+// doSave（文件模式）的 summarizeRule 应答与增量识别完成事件驱动的全景重载
+//（recognitionDone → loadPanorama 首行置 snapshot=null → 右栏面板同批卸载）
+// 存在竞态：应答落在已卸载实例上时，面板侧落值与上浮都随实例消亡（sync watch
+// 随实例停止、emit 对已卸载实例直接丢弃），建议卡永不渲染、suggestionSeed 无
+// 物可回填（目录模式 doSaveDir 自持「refresh 排在摘要应答之后」保护不受此
+// 形态影响）。故在应答落地的通道层同步托管：summarizeRule 应答不依赖面板
+// 实例存活直接写入 panelSuggestion；在场/重挂实例经 suggestionSeed 注入续现
+//（ParsePanel 种子监听，目标匹配守卫与「切换即弃管」同语义）。成功（携带
+// 建议）托管建议；失败/无建议清空托管（存活面板的失败分支通知由面板自呈，
+// 不在此代拟文案）。
+function hostSummarizeRuleResponse(action: string, resp: WorkbenchResponse): void {
+  if (action !== 'summarizeRule') return
+  panelSuggestion.value = resp.ruleSuggestion || null
 }
 
 // 从 hash 查询参数读取进入本页时携带的库根

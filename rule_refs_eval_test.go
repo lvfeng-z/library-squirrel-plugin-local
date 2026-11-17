@@ -1,10 +1,12 @@
-// 规则组合引用的求值两段化（规则组合引用方案阶段2）：门段先行——被引用成员
-// 全体先求值、命中单点登记（MatchedRuleIDs 不重复计数、追加序保持规则序）、
-// 成员捕获快照以限定键（成员ID.rN.组名，含 #canon 变体）注入仅组合规则可见的
-// 注入区。锚定测试矩阵第 1/3/5/7 项：门控矩阵（全命中→组合命中；任一未命中/
-// 停用/被跳过/悬空→组合零产出不进 MatchedRuleIDs）、非组合路径零变化与捕获
-// 隔离（发现6：限定键为唯一通道）、三通道一致性（批量识别/增量识别/执行期
-// 单文件重算）与门段双求值去重（风险5）。
+// 作用域附件（refScope）的求值两段化锚定测试：
+// needed 收集自「全部启用规则条件行递归扫描 refScope 附件」；供给方命中层集
+//（dirHitDepths）
+// 经 ParseContext.RefScopeDepths 透传，消费规则目录行逐层槽位按层距阶梯判据
+// 核对（裁决⑥）；供给方捕获快照以限定键注入消费规则私有作用域（发现6：
+// 限定键为唯一通道）。锚定矩阵：层距阶梯（紧邻/任意/N 三档正反例+其身）、
+// 供给方未命中（停用/悬空/被跳过/above-form）行不中、限定键注入可被提取
+// （refCapture）与 when 引用、命中单点登记与追加序稳定（风险2/5）、三通道
+// 一致性（批量识别/增量识别/执行期单文件重算）。
 package main
 
 import (
@@ -15,22 +17,35 @@ import (
 
 // —— 测试构造件 ——
 
-// refFileRowRule 构造一条 v4 文件行成员规则（模板对文件名全锚定匹配）。
+// refScopeAttach 构造一条作用域附件（provider=供给方规则 ID；gap=层距：
+// 1=紧邻、0=任意深度、N≥2 显式）。
+func refScopeAttach(provider string, gap int) CondxAttach {
+	return CondxAttach{Kind: CondxAttachRefScope, Value: provider, MinCount: gap}
+}
+
+// refDirRowRule 构造一条 v4 目录行规则（模板匹配任一层祖先目录名），可携带
+// 附加条件与提取动作——供给方/消费规则的通用构造件。
+func refDirRowRule(t *testing.T, id, tpl string, attach []CondxAttach, actions []ExtractionAction) RuleEntry {
+	t.Helper()
+	cond := &Condx{Target: CondxTargetDir, Format: condxTpl(tpl)}
+	if len(attach) > 0 {
+		cond.Attach = attach
+	}
+	rows := []CondxRow{{Condition: cond}}
+	return refRowsRule(t, id, rows, actions)
+}
+
+// refFileRowRule 构造一条 v4 文件行规则（模板对文件名全锚定匹配），可携
+// 带值校验（构造件：rule_condition_optional_absent_test.go /
+// rule_refs_capture_test.go 沿用）。
 func refFileRowRule(t *testing.T, id, tpl string, badges []CondxBadge, actions []ExtractionAction) RuleEntry {
 	t.Helper()
 	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl(tpl), Badges: badges}}}
-	return refRowsRule(t, id, rows, nil, actions)
+	return refRowsRule(t, id, rows, actions)
 }
 
-// refDirRowRule 构造一条 v4 目录行成员规则（模板匹配任一层祖先目录名）。
-func refDirRowRule(t *testing.T, id, tpl string) RuleEntry {
-	t.Helper()
-	rows := []CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl(tpl)}}}
-	return refRowsRule(t, id, rows, nil, nil)
-}
-
-// refRowsRule 构造一条 v4 行条件规则并编译模式树；refs 非空即组合规则。
-func refRowsRule(t *testing.T, id string, rows []CondxRow, refs []string, actions []ExtractionAction) RuleEntry {
+// refRowsRule 构造一条 v4 行条件规则并编译模式树。
+func refRowsRule(t *testing.T, id string, rows []CondxRow, actions []ExtractionAction) RuleEntry {
 	t.Helper()
 	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
@@ -38,22 +53,8 @@ func refRowsRule(t *testing.T, id string, rows []CondxRow, refs []string, action
 	}
 	return RuleEntry{
 		ID: id, Description: "测试规则 " + id, Source: RuleSourceManual, Enabled: true,
-		Refs: refs, Conditions: rows, Pattern: pattern, Extractions: actions,
+		Conditions: rows, Pattern: pattern, Extractions: actions,
 	}
-}
-
-// refComboRule 构造一条组合规则：ownRows 为 nil 时模式为空合取（恒真——门
-// 单独决定命中，锚定「组合可无自身行」形态）；ownRows 非空时按决策1 并存
-// 自身行（照旧私有语义）。
-func refComboRule(t *testing.T, id string, refs []string, ownRows []CondxRow, actions []ExtractionAction) RuleEntry {
-	t.Helper()
-	if ownRows == nil {
-		return RuleEntry{
-			ID: id, Description: "测试组合 " + id, Source: RuleSourceManual, Enabled: true,
-			Refs: refs, Pattern: And{}, Extractions: actions,
-		}
-	}
-	return refRowsRule(t, id, ownRows, refs, actions)
 }
 
 // runRefEval 对单文件输入执行提取段（含门段），返回决策。
@@ -89,159 +90,367 @@ func countRefMatched(ids []string, id string) int {
 	return count
 }
 
-// refHitIn 门全命中形态：文件名命中成员A（{作者}_{标题}），祖先目录命中成员B
-//（Artist[{作者}]）。
-func refHitIn() *MatchInput {
-	return &MatchInput{
-		FileName: "甲_乙.jpg", DirNames: []string{"Artist[甲]"},
-		RelPath: "Artist[甲]/甲_乙.jpg", Siblings: []string{"甲_乙.jpg"},
+// —— 层距阶梯（裁决⑥：紧邻/任意/N 三档正反例，其身与 above-form 天然不成立）——
+
+// TestRefGateScopeLadder 层距阶梯判据矩阵：供给方（Artist[{作者}] 目录行）
+// 命中层集固定后，消费行（Set{集名}）候选层按层距核对——紧邻(1)：恰下一级
+// 命中、隔层不中；任意(0)：之下任一层命中；N=2：恰隔一级命中、紧邻不中；
+// 其身（候选层=供给方命中层）在任意档位下均不可成立。
+func TestRefGateScopeLadder(t *testing.T) {
+	setAction := []ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}}
+	chain2 := &MatchInput{ // Artist 壳 → 集名目录（紧邻）
+		FileName: "x.jpg", DirNames: []string{"Artist[甲]", "SetA"},
+		RelPath: "Artist[甲]/SetA/x.jpg", Siblings: []string{"x.jpg"},
 	}
-}
-
-// refMissIn 成员B 未命中形态：无 Artist 壳祖先目录。
-func refMissIn() *MatchInput {
-	return &MatchInput{
-		FileName: "甲_乙.jpg", DirNames: []string{"Plain"},
-		RelPath: "Plain/甲_乙.jpg", Siblings: []string{"甲_乙.jpg"},
+	chain3 := &MatchInput{ // Artist 壳 → 中隔目录 → 集名目录（隔一级）
+		FileName: "x.jpg", DirNames: []string{"Artist[甲]", "Mid", "SetA"},
+		RelPath: "Artist[甲]/Mid/SetA/x.jpg", Siblings: []string{"x.jpg"},
 	}
-}
+	shellOnly := &MatchInput{ // 文件直属 Artist 壳（候选层=供给方命中层——其身）
+		FileName: "x.jpg", DirNames: []string{"Artist[甲]"},
+		RelPath: "Artist[甲]/x.jpg", Siblings: []string{"x.jpg"},
+	}
 
-// refEvalMembers 标准成员对：A=文件行（作者声明产出），B=目录行（纯命中无提取）。
-func refEvalMembers(t *testing.T) (RuleEntry, RuleEntry) {
-	t.Helper()
-	memberA := refFileRowRule(t, "member-a", "{作者}_{标题}", nil, []ExtractionAction{
-		{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 1},
-	})
-	memberB := refDirRowRule(t, "member-b", "Artist[{作者}]")
-	return memberA, memberB
-}
-
-// —— 测试矩阵第 1 项：门控矩阵 ——
-
-// TestRefGateMatrix 门控矩阵：全部成员命中→组合 ID 进 MatchedRuleIDs；任一
-// 成员未命中/停用/被跳过（模式缺失）/悬空（不在规则集内）→组合零产出、不进
-// MatchedRuleIDs（严格语义，不降级）；门过但组合自身行未命中→同样不计入。
-func TestRefGateMatrix(t *testing.T) {
-	t.Run("全命中组合计入", func(t *testing.T) {
-		memberA, memberB := refEvalMembers(t)
-		combo := refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, nil)
-		decision := runRefEval(t, []RuleEntry{memberA, memberB, combo}, refHitIn(), nil)
-		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a", "member-b", "combo-1")
-		// 成员独立产出照旧（成员A 的作者声明不受组合在场影响）。
-		if v, ok := declOf(decision, "member-a", DimAuthor); !ok || v != "甲" {
-			t.Fatalf("成员A 独立作者声明不符: %q %v", v, ok)
+	t.Run("紧邻正例", func(t *testing.T) {
+		provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+		consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 1)}, setAction)
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, chain2, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "consumer")
+		if v, ok := declOf(decision, "consumer", DimCollection); !ok || v != "A" {
+			t.Fatalf("紧邻集名应为 A: %q %v", v, ok)
 		}
 	})
-
-	t.Run("任一成员未命中组合零产出", func(t *testing.T) {
-		memberA, memberB := refEvalMembers(t)
-		combo := refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, nil)
-		decision := runRefEval(t, []RuleEntry{memberA, memberB, combo}, refMissIn(), nil)
-		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a")
+	t.Run("紧邻反例·隔层不中", func(t *testing.T) {
+		provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+		consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 1)}, nil)
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, chain3, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b")
 	})
-
-	t.Run("成员停用组合零产出", func(t *testing.T) {
-		memberA, memberB := refEvalMembers(t)
-		memberB.Enabled = false
-		combo := refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, nil)
-		decision := runRefEval(t, []RuleEntry{memberA, memberB, combo}, refHitIn(), nil)
-		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a")
+	t.Run("任意深度", func(t *testing.T) {
+		provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+		consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 0)}, setAction)
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, chain3, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "consumer")
+		if v, ok := declOf(decision, "consumer", DimCollection); !ok || v != "A" {
+			t.Fatalf("任意深度集名应为 A: %q %v", v, ok)
+		}
+		// 其身在任意档下同样不可成立：直属壳文件的候选层=供给方命中层。
+		decision = runRefEval(t, []RuleEntry{provider, consumer}, shellOnly, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b")
 	})
-
-	t.Run("成员被跳过组合零产出", func(t *testing.T) {
-		memberA, _ := refEvalMembers(t)
-		// 模式缺失的成员＝主循环被跳过，门段按未命中。
-		skipped := RuleEntry{ID: "member-b", Description: "无模式成员", Source: RuleSourceManual, Enabled: true}
-		combo := refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, nil)
-		decision := runRefEval(t, []RuleEntry{memberA, skipped, combo}, refHitIn(), nil)
-		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a")
+	t.Run("显式层距二", func(t *testing.T) {
+		provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+		consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 2)}, setAction)
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, chain3, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "consumer")
+		if v, ok := declOf(decision, "consumer", DimCollection); !ok || v != "A" {
+			t.Fatalf("隔一级集名应为 A: %q %v", v, ok)
+		}
+		// 紧邻链在层距二下不中（c−D=1≠2）。
+		decision = runRefEval(t, []RuleEntry{provider, consumer}, chain2, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b")
 	})
-
-	t.Run("悬空成员组合零产出", func(t *testing.T) {
-		memberA, _ := refEvalMembers(t)
-		combo := refComboRule(t, "combo-1", []string{"member-a", "ghost"}, nil, nil)
-		decision := runRefEval(t, []RuleEntry{memberA, combo}, refHitIn(), nil)
-		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a")
+	t.Run("供给方多命中层取可行层", func(t *testing.T) {
+		// 供给方两行合取（Or 行短路只记首个命中行，And 行各自记层）：Artist 壳
+		// 与 Mid 层都命中——层距一在三层链上经 Mid 层（D=1）成立。
+		provider := refRowsRule(t, "member-b", []CondxRow{
+			{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("Artist[{作者}]")}},
+			{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("Mid")}},
+		}, nil)
+		consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 1)}, nil)
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, chain3, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "consumer")
 	})
+}
 
-	t.Run("门过但自身行未命中不计入", func(t *testing.T) {
-		memberA, memberB := refEvalMembers(t)
-		// 自身行（Vol{序号} 数字段）不命中测试文件名——门过但自身模式未中。
-		combo := refComboRule(t, "combo-1", []string{"member-a", "member-b"},
-			[]CondxRow{{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("Vol{序号}")}}}, nil)
-		decision := runRefEval(t, []RuleEntry{memberA, memberB, combo}, refHitIn(), nil)
-		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a", "member-b")
+// —— 供给方未命中矩阵（边界：严格语义，不降级）——
+
+// TestRefGateScopeProviderMiss 供给方未命中（停用/悬空/被跳过〔模式缺失〕/
+// above-form〔候选层在供给方命中层之上〕）→ 附件谓词恒不满足 → 消费行不中
+//（消费规则零产出、不进 MatchedRuleIDs）。
+func TestRefGateScopeProviderMiss(t *testing.T) {
+	in := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"Artist[甲]", "SetA"},
+		RelPath: "Artist[甲]/SetA/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	consumerOf := func(providerID string) RuleEntry {
+		return refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach(providerID, 1)}, nil)
+	}
+
+	t.Run("供给方停用", func(t *testing.T) {
+		provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+		provider.Enabled = false
+		decision := runRefEval(t, []RuleEntry{provider, consumerOf("member-b")}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs)
 	})
+	t.Run("供给方悬空", func(t *testing.T) {
+		decision := runRefEval(t, []RuleEntry{consumerOf("ghost")}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs)
+	})
+	t.Run("供给方被跳过", func(t *testing.T) {
+		skipped := RuleEntry{ID: "member-b", Description: "无模式供给方", Source: RuleSourceManual, Enabled: true}
+		decision := runRefEval(t, []RuleEntry{skipped, consumerOf("member-b")}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs)
+	})
+	t.Run("消费候选层在供给方命中层之上", func(t *testing.T) {
+		// 供给方命中深层（Mid 的子层）；消费行候选层只有更浅层——above-form
+		// 在阶梯判据下天然不可成立（层距 N 要求 c−D=N>0、任意深度要求 c>D）。
+		provider := refDirRowRule(t, "member-b", "Set{集名}", nil, nil)
+		consumer := refDirRowRule(t, "consumer", "{集名}", []CondxAttach{refScopeAttach("member-b", 0)}, nil)
+		in2 := &MatchInput{
+			FileName: "y.jpg", DirNames: []string{"SetA"},
+			RelPath: "SetA/y.jpg", Siblings: []string{"y.jpg"},
+		}
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, in2, nil)
+		// 供给方在单层链命中第 0 层；消费候选层=同层（其身）→ 附件不满足。
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b")
+	})
+}
 
-	t.Run("门过refCapture动作按限定键取值产出", func(t *testing.T) {
-		memberA, memberB := refEvalMembers(t)
-		combo := refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, []ExtractionAction{
-			{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-a", CaptureName: "author", Row: 1},
-		})
-		decision := runRefEval(t, []RuleEntry{memberA, memberB, combo}, refHitIn(), nil)
-		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a", "member-b", "combo-1")
-		// 阶段3 起 Apply 的 refCapture 分支取限定键值产出（完整取值矩阵——
-		// #canon 回退/行限定/Row≤0 兜底/剥壳——见 rule_refs_capture_test.go）。
-		if v, ok := declOf(decision, "combo-1", DimAuthor); !ok || v != "甲" {
-			t.Fatalf("组合规则的 refCapture 动作应取成员限定键值产出: %q %v", v, ok)
+// —— 限定键注入：提取（refCapture）与 when 限定名双通道 ——
+
+// TestRefGateScopeCaptureInjection 供给方捕获经限定键注入消费规则私有作用域：
+// refCapture 提取按「供给方ID.rN.组名」取值产出（#canon 规范名回退序对齐
+// FromCapture）；when 条件的限定名操作数（conditionOperandValue）同源取值；
+// 普通自有捕获通道读不到供给方捕获（隔离，发现6）。
+func TestRefGateScopeCaptureInjection(t *testing.T) {
+	provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+	providerLib := refRowsRule(t, "member-c", []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir, Format: condxTpl("Artist[{作者}]"),
+		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true}},
+	}}}, nil)
+	lib := &LibraryIndex{AuthorNames: map[string]struct{}{"Jake_Jaccobus": {}}}
+	in := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"Artist[jake jaccobus]", "SetA"},
+		RelPath: "Artist[jake jaccobus]/SetA/x.jpg", Siblings: []string{"x.jpg"},
+	}
+
+	t.Run("refCapture提取与when限定名", func(t *testing.T) {
+		consumer := refDirRowRule(t, "consumer", "Set{集名}",
+			[]CondxAttach{refScopeAttach("member-b", 1)},
+			[]ExtractionAction{
+				// 无条件动作：供给方作者经限定键产出。
+				{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-b", CaptureName: "author", Row: 1},
+				// 条件动作：when 限定名比较供给方捕获值，成立才产出标签常量。
+				{Dimension: DimTag, From: FromConstant, Constant: "壳内作者",
+					When: &CondExpr{Kind: ExprEqual,
+						Left:  &CondExpr{Kind: ExprCapture, CaptureName: "member-b.r1.author"},
+						Right: &CondExpr{Kind: ExprString, Str: "jake jaccobus"}}},
+			})
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "consumer")
+		if v, ok := declOf(decision, "consumer", DimAuthor); !ok || v != "jake jaccobus" {
+			t.Fatalf("refCapture 应取供给方限定键值: %q %v", v, ok)
+		}
+		if v, ok := declOf(decision, "consumer", DimTag); !ok || v != "壳内作者" {
+			t.Fatalf("when 限定名条件应取注入区值成立: %q %v", v, ok)
+		}
+		// when 不成立的对照：限定名比较他值 → 条件动作不产出。
+		consumerReject := refDirRowRule(t, "consumer-r", "Set{集名}",
+			[]CondxAttach{refScopeAttach("member-b", 1)},
+			[]ExtractionAction{
+				{Dimension: DimTag, From: FromConstant, Constant: "不该出现",
+					When: &CondExpr{Kind: ExprEqual,
+						Left:  &CondExpr{Kind: ExprCapture, CaptureName: "member-b.r1.author"},
+						Right: &CondExpr{Kind: ExprString, Str: "别人"}}},
+			})
+		decision2 := runRefEval(t, []RuleEntry{provider, consumerReject}, in, nil)
+		if _, ok := declOf(decision2, "consumer-r", DimTag); ok {
+			t.Fatalf("when 不成立时条件动作不应产出")
+		}
+	})
+	t.Run("canon规范名回退", func(t *testing.T) {
+		// 供给方带在库名单小标：#canon 规范名变体一并快照，refCapture 的
+		// #canon→原始键回退序产出规范名。
+		consumer := refDirRowRule(t, "consumer-c", "Set{集名}",
+			[]CondxAttach{refScopeAttach("member-c", 1)},
+			[]ExtractionAction{{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-c", CaptureName: "author", Row: 1}})
+		decision := runRefEval(t, []RuleEntry{providerLib, consumer}, in, lib)
+		if v, ok := declOf(decision, "consumer-c", DimAuthor); !ok || v != "Jake_Jaccobus" {
+			t.Fatalf("refCapture 应经 #canon 回退取规范名: %q %v", v, ok)
+		}
+	})
+	t.Run("自有捕获隔离", func(t *testing.T) {
+		// 消费规则的普通 capture 动作读不到供给方捕获（限定键为唯一通道）。
+		consumer := refDirRowRule(t, "consumer-iso", "Set{集名}",
+			[]CondxAttach{refScopeAttach("member-b", 1)},
+			[]ExtractionAction{{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 1}})
+		decision := runRefEval(t, []RuleEntry{provider, consumer}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "consumer-iso")
+		if _, ok := declOf(decision, "consumer-iso", DimAuthor); ok {
+			t.Fatalf("普通 capture 不应读到供给方捕获（发现6 隔离）")
 		}
 	})
 }
 
-// —— 测试矩阵第 7 项：门段双求值去重与追加序稳定（风险5/风险2）——
+// —— 命中单点登记与追加序稳定（风险2/5）——
 
-// TestRefGateDedupAndOrder 成员被（多条）组合引用时 MatchedRuleIDs 只计一次；
-// 组合先于成员排列时门段先行仍成立，追加序保持规则传入序（命中列统计与任务
-// 树子行序消费者的顺序面不变）。
+// TestRefGateDedupAndOrder 供给方被多条消费规则引用时 MatchedRuleIDs 只计
+// 一次（供给方自身独立段单点登记，门段双求值不重复计数）；消费规则先于
+// 供给方排列时门段先行仍成立，追加序保持规则传入序。
 func TestRefGateDedupAndOrder(t *testing.T) {
-	memberA, memberB := refEvalMembers(t)
-	combo1 := refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, nil)
-	combo2 := refComboRule(t, "combo-2", []string{"member-a"}, nil, nil)
-	rules := []RuleEntry{combo1, memberA, memberB, combo2}
-	decision := runRefEval(t, rules, refHitIn(), nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "combo-1", "member-a", "member-b", "combo-2")
-	for _, id := range []string{"combo-1", "member-a", "member-b", "combo-2"} {
+	provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+	consumer1 := refDirRowRule(t, "consumer-1", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 1)}, nil)
+	consumer2 := refDirRowRule(t, "consumer-2", "{集名}", []CondxAttach{refScopeAttach("member-b", 0)}, nil)
+	rules := []RuleEntry{consumer1, provider, consumer2}
+	in := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"Artist[甲]", "SetA"},
+		RelPath: "Artist[甲]/SetA/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	decision := runRefEval(t, rules, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "consumer-1", "member-b", "consumer-2")
+	for _, id := range []string{"consumer-1", "member-b", "consumer-2"} {
 		if got := countRefMatched(decision.MatchedRuleIDs, id); got != 1 {
 			t.Fatalf("规则 %s 命中计数应为 1（门段双求值不重复计数），实际 %d", id, got)
 		}
 	}
-	// 门失败侧同样不重复，且门控按各组合的 refs 独立分叉：memberB 未命中
-	// 文件上 combo-1（引用 A+B）门失败零产出，combo-2（只引用 member-a）
-	// 门过照常计入；被引的 memberA 仍只计一次。
-	decisionMiss := runRefEval(t, rules, refMissIn(), nil)
-	assertRefMatchedIDs(t, decisionMiss.MatchedRuleIDs, "member-a", "combo-2")
+	// 供给方未命中文件上（无 Artist 壳祖先）：全部消费行不中，仅无关供给方缺席。
+	inMiss := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"Plain"},
+		RelPath: "Plain/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	decisionMiss := runRefEval(t, rules, inMiss, nil)
+	assertRefMatchedIDs(t, decisionMiss.MatchedRuleIDs)
 }
 
-// —— 捕获快照的限定键形态与注入区隔离（发现6 回归锚）——
+// —— 消费规则在场不改供给方与非消费路径（解耦本义）——
 
-// TestRefCaptureSnapshotQualifiedKeys 门段快照以限定键「成员ID.rN.组名」落位
-//（#canon 规范名变体一并快照）；注入只挂 RefCaptures 注入区、不并入组合规则
-// 私有捕获（跨规则捕获仍隔离，限定键为唯一通道）；取值为取最后语义。
-func TestRefCaptureSnapshotQualifiedKeys(t *testing.T) {
-	// 成员A：文件行 + 库名单折叠小标（命中后另绑 r1.author#canon 规范名）。
-	memberA := refFileRowRule(t, "member-a", "{作者}_{标题}", []CondxBadge{
-		{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true},
-	}, nil)
-	combo := refComboRule(t, "combo-1", []string{"member-a"}, nil, nil)
+// TestRefGateNonComboZeroChange 消费规则在场不改变供给方与普通规则的命中与
+// 产出（消费规则自身零提取——只命中计入清单）；解耦本义。
+func TestRefGateNonComboZeroChange(t *testing.T) {
+	provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, []ExtractionAction{
+		{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 1},
+	})
+	third := refFileRowRule(t, "plain-c", "{标题}_{标签}", nil, []ExtractionAction{
+		{Dimension: DimTitle, From: FromCapture, CaptureName: "title", Row: 1},
+	})
+	consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 1)}, nil)
+	declKey := func(d *FileDecision) []string {
+		keys := make([]string, 0, len(d.Declarations))
+		for _, decl := range d.Declarations {
+			keys = append(keys, string(decl.RuleID)+"|"+string(decl.Dimension)+"="+decl.Value)
+		}
+		return keys
+	}
+	in := &MatchInput{
+		FileName: "乙_科幻.jpg", DirNames: []string{"Artist[甲]", "SetA"},
+		RelPath: "Artist[甲]/SetA/乙_科幻.jpg", Siblings: []string{"乙_科幻.jpg"},
+	}
+
+	baseline := runRefEval(t, []RuleEntry{provider, third}, in, nil)
+	withConsumer := runRefEval(t, []RuleEntry{provider, third, consumer}, in, nil)
+
+	assertRefMatchedIDs(t, baseline.MatchedRuleIDs, "member-b", "plain-c")
+	assertRefMatchedIDs(t, withConsumer.MatchedRuleIDs, "member-b", "plain-c", "consumer")
+	if len(baseline.Declarations) != len(withConsumer.Declarations) {
+		t.Fatalf("消费规则在场不应改变既有声明集: %v vs %v", declKey(baseline), declKey(withConsumer))
+	}
+	for i := range baseline.Declarations {
+		if !reflect.DeepEqual(baseline.Declarations[i], withConsumer.Declarations[i]) {
+			t.Fatalf("声明 %d 因消费规则在场而变化: %+v vs %+v", i, baseline.Declarations[i], withConsumer.Declarations[i])
+		}
+	}
+}
+
+// —— 三通道一致性 ——
+
+// TestRefGateThreeChannelConsistency 批量识别（MergedRecognition）、增量识别
+//（MergedRecognitionWithTree：本批子集 + 全量树——增量轮的求值形态）与执行期
+// 单文件重算（recomputeFileDecision）三通道对作用域附件的口径一致：供给方
+// 命中文件上消费规则入 MatchedRuleIDs、供给方缺席文件上消费规则缺席，且三
+// 通道命中序列全等。
+func TestRefGateThreeChannelConsistency(t *testing.T) {
+	root := t.TempDir()
+	files := []struct {
+		dir         string
+		dirNames    []string
+		consumerHit bool
+	}{
+		{"Artist[甲]/SetA", []string{"Artist[甲]", "SetA"}, true}, // 供给方命中（Artist 壳）+ 集名目录紧邻其下
+		{"Plain", []string{"Plain"}, false},                      // 无 Artist 壳祖先 → 附件谓词不满足
+	}
+	scanFiles := make([]ScanFile, 0, len(files))
+	for _, f := range files {
+		dir := root + "/" + f.dir
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("建目录失败: %v", err)
+		}
+		full := dir + "/x.jpg"
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatalf("写文件失败: %v", err)
+		}
+		scanFiles = append(scanFiles, ScanFile{
+			Path: full, FileName: "x.jpg", DirNames: f.dirNames, RelPath: f.dir + "/x.jpg",
+		})
+	}
+
+	provider := refDirRowRule(t, "member-b", "Artist[{作者}]", nil, nil)
+	consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("member-b", 1)}, []ExtractionAction{
+		{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1},
+	})
+	rules := []RuleEntry{provider, consumer}
+
+	batch := MergedRecognition(scanFiles, rules, nil, nil)
+	incremental := MergedRecognitionWithTree(scanFiles[:1], scanFiles, rules, nil, nil)
+	h := &LocalImportWorkFetcher{}
+
+	for i, f := range files {
+		fp := &FilePluginData{FullPath: scanFiles[i].Path, RelPath: scanFiles[i].RelPath}
+		recomputed, _ := h.recomputeFileDecision(fp, rules, nil)
+
+		if got := refIDsContain(recomputed.MatchedRuleIDs, "consumer"); got != f.consumerHit {
+			t.Fatalf("%s：重算通道作用域门控不符（期望消费命中=%v）: %v", f.dir, f.consumerHit, recomputed.MatchedRuleIDs)
+		}
+		if got := refIDsContain(batch[i].MatchedRuleIDs, "consumer"); got != f.consumerHit {
+			t.Fatalf("%s：批量通道作用域门控不符（期望消费命中=%v）: %v", f.dir, f.consumerHit, batch[i].MatchedRuleIDs)
+		}
+		if !refIDsEqual(recomputed.MatchedRuleIDs, batch[i].MatchedRuleIDs) {
+			t.Fatalf("%s：重算通道与批量通道命中序列不一致: %v vs %v", f.dir, recomputed.MatchedRuleIDs, batch[i].MatchedRuleIDs)
+		}
+	}
+	if !refIDsEqual(incremental[0].MatchedRuleIDs, batch[0].MatchedRuleIDs) {
+		t.Fatalf("增量通道与批量通道命中序列不一致: %v vs %v", incremental[0].MatchedRuleIDs, batch[0].MatchedRuleIDs)
+	}
+	// 全命中文件的三通道终局序列锚（供给方单点登记 + 消费规则殿后）。
+	assertRefMatchedIDs(t, batch[0].MatchedRuleIDs, "member-b", "consumer")
+}
+
+// —— 捕获快照的限定键形态与注入区隔离（发现6 回归锚·作用域版）——
+
+// TestRefGateCaptureSnapshotQualifiedKeys 门段快照以限定键「供给方ID.rN.组名」
+// 落位（#canon 规范名变体一并快照）；注入只挂 RefCaptures 注入区、不并入消费
+// 规则私有捕获（跨规则捕获仍隔离，限定键为唯一通道）；供给方命中层集
+//（dirHitDepths）即层距阶梯判据的数据源（RefScopeDepths 透传面）。
+func TestRefGateCaptureSnapshotQualifiedKeys(t *testing.T) {
+	// 供给方：目录行 + 库名单折叠小标（命中后另绑 r1.author#canon 规范名）。
+	provider := refRowsRule(t, "member-a", []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir, Format: condxTpl("Artist[{作者}]"),
+		Badges: []CondxBadge{{Placeholder: "作者", Kind: CondxBadgeLibrary, Dim: "author", Fold: true}},
+	}}}, nil)
+	consumer := refDirRowRule(t, "consumer", "{集名}", []CondxAttach{refScopeAttach("member-a", 1)}, nil)
 	lib := &LibraryIndex{AuthorNames: map[string]struct{}{"Jake_Jaccobus": {}}}
-	// 2026-11-04 终审拍板（惰性化）：载体名由双下划线形变换为空格形变。
-	in := &MatchInput{FileName: "jake jaccobus_乙.jpg", RelPath: "jake jaccobus_乙.jpg"}
-	ctx := &ParseContext{Depth: 0}
+	in := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"Artist[jake jaccobus]", "SetA"},
+		RelPath: "Artist[jake jaccobus]/SetA/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
 
-	gate := runRefGateStage([]RuleEntry{memberA, combo}, in, lib, ctx)
+	gate := runRefGateStage([]RuleEntry{provider, consumer}, in, lib, ctx)
 	if !gate.hits["member-a"] {
-		t.Fatalf("门段应判定成员命中")
+		t.Fatalf("门段应判定供给方命中")
+	}
+	if !gate.dirHitDepths["member-a"][0] || len(gate.dirHitDepths["member-a"]) != 1 {
+		t.Fatalf("供给方命中层集应恰含第 0 层: %+v", gate.dirHitDepths)
 	}
 	snap := gate.snapshot("member-a")
 	byName := map[string]string{}
 	for _, binding := range snap {
 		byName[binding.Name] = binding.Value
 	}
-	// 限定键全量断言：行捕获（author/title——文件主体对去扩展名基名匹配，
-	// title 为 "乙"）+ 库名单小标的 #canon 规范名变体，一并冠以成员 ID 前缀快照。
+	// 限定键全量断言：行捕获（author）+ 库名单小标的 #canon 规范名变体，一并
+	// 冠以供给方 ID 前缀快照。
 	wantBindings := map[string]string{
 		"member-a.r1.author":       "jake jaccobus",
-		"member-a.r1.title":        "乙",
 		"member-a.r1.author#canon": "Jake_Jaccobus",
 	}
 	if len(snap) != len(wantBindings) {
@@ -253,11 +462,11 @@ func TestRefCaptureSnapshotQualifiedKeys(t *testing.T) {
 		}
 	}
 
-	// 注入区：组合规则作用域经注入可按限定键取值；私有捕获保持空（隔离）。
+	// 注入区：消费规则作用域经注入可按限定键取值；私有捕获保持空（隔离）。
 	ruleCtx := ctx.ruleScopedContext()
-	injectRefSnapshots(ruleCtx, gate, []string{"member-a"})
+	injectRefSnapshots(ruleCtx, gate, refScopeProvidersOf(&consumer))
 	if len(ruleCtx.Captures) != 0 {
-		t.Fatalf("快照不得并入组合规则私有捕获（发现6 隔离），实际 %+v", ruleCtx.Captures)
+		t.Fatalf("快照不得并入消费规则私有捕获（发现6 隔离），实际 %+v", ruleCtx.Captures)
 	}
 	if v, ok := ruleCtx.refCaptureValue("member-a", "r1.author#canon"); !ok || v != "Jake_Jaccobus" {
 		t.Fatalf("#canon 限定键取值不符: %q %v", v, ok)
@@ -265,257 +474,22 @@ func TestRefCaptureSnapshotQualifiedKeys(t *testing.T) {
 	if v, ok := ruleCtx.refCaptureValue("member-a", "r1.author"); !ok || v != "jake jaccobus" {
 		t.Fatalf("原始限定键取值不符: %q %v", v, ok)
 	}
-	if _, ok := ruleCtx.refCaptureValue("member-a", "r2.author"); ok {
-		t.Fatalf("未绑定行的限定键不应取到值")
-	}
 	if _, ok := ruleCtx.refCaptureValue("ghost", "r1.author"); ok {
-		t.Fatalf("悬空成员限定键不应取到值")
+		t.Fatalf("悬空供给方限定键不应取到值")
 	}
-	// 非组合规则作用域：零注入（限定键通道对非组合路径不可见）。
+	// 供给方命中层集透传（提取段同款）：ruleScopedContext 继承后阶梯判据可读。
+	ctx.RefScopeDepths = gate.dirHitDepths
+	scoped := ctx.ruleScopedContext()
+	if !scoped.RefScopeDepths["member-a"][0] {
+		t.Fatalf("ruleScopedContext 应继承供给方命中层集（风险6 核对点）")
+	}
+	if _, ok := scoped.RefScopeDepths["ghost"]; ok {
+		t.Fatalf("未求值供给方不应有层集条目")
+	}
+	// 非消费规则作用域：零注入（限定键通道对非消费路径不可见）。
 	plain := ctx.ruleScopedContext()
 	if _, ok := plain.refCaptureValue("member-a", "r1.author"); ok || len(plain.RefCaptures) != 0 {
-		t.Fatalf("非组合规则作用域不应有注入区内容")
-	}
-}
-
-// —— 测试矩阵第 3 项：成员独立产出与非组合路径零变化 ——
-
-// TestRefGateNonComboZeroChange 组合规则在场不改变成员与非组合规则的命中与
-// 产出（解耦本义）；组合规则自身行照旧私有语义——无自身行时其普通 capture
-// 取值读不到成员捕获（隔离），有自身行时读自身绑定。
-func TestRefGateNonComboZeroChange(t *testing.T) {
-	memberA, memberB := refEvalMembers(t)
-	third := refFileRowRule(t, "plain-c", "{标题}_{标签}", nil, []ExtractionAction{
-		{Dimension: DimTitle, From: FromCapture, CaptureName: "title", Row: 1},
-	})
-	declKey := func(d *FileDecision) []string {
-		keys := make([]string, 0, len(d.Declarations))
-		for _, decl := range d.Declarations {
-			keys = append(keys, string(decl.RuleID)+"|"+string(decl.Dimension)+"="+decl.Value)
-		}
-		return keys
-	}
-
-	baseline := runRefEval(t, []RuleEntry{memberA, memberB, third}, refHitIn(), nil)
-	withCombo := runRefEval(t, []RuleEntry{memberA, memberB, third,
-		refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, nil)}, refHitIn(), nil)
-
-	assertRefMatchedIDs(t, baseline.MatchedRuleIDs, "member-a", "member-b", "plain-c")
-	assertRefMatchedIDs(t, withCombo.MatchedRuleIDs, "member-a", "member-b", "plain-c", "combo-1")
-	if len(baseline.Declarations) != len(withCombo.Declarations) {
-		t.Fatalf("组合在场不应改变既有声明集: %v vs %v", declKey(baseline), declKey(withCombo))
-	}
-	for i := range baseline.Declarations {
-		if !reflect.DeepEqual(baseline.Declarations[i], withCombo.Declarations[i]) {
-			t.Fatalf("声明 %d 因组合在场而变化: %+v vs %+v", i, baseline.Declarations[i], withCombo.Declarations[i])
-		}
-	}
-
-	// 隔离锚：无自身行的组合规则其普通 capture 取值读不到成员捕获（限定键为
-	// 唯一通道）——命中计数在、声明零产出。
-	isolated := refComboRule(t, "combo-iso", []string{"member-a"}, nil, []ExtractionAction{
-		{Dimension: DimAuthor, From: FromCapture, CaptureName: "author", Row: 1},
-	})
-	decision := runRefEval(t, []RuleEntry{memberA, isolated}, refHitIn(), nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a", "combo-iso")
-	if _, ok := declOf(decision, "combo-iso", DimAuthor); ok {
-		t.Fatalf("组合规则的普通 capture 取值不应读到成员捕获（发现6 隔离）")
-	}
-
-	// 自身行锚（决策1）：组合携带自身行时普通 capture 读自身绑定（非成员值）。
-	selfRow := refComboRule(t, "combo-self", []string{"member-b"},
-		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("Vol[{标签}]")}}}, []ExtractionAction{
-			{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1},
-		})
-	in := &MatchInput{
-		FileName: "甲_乙.jpg", DirNames: []string{"Vol[科幻]", "Artist[甲]"},
-		RelPath:  "Vol[科幻]/Artist[甲]/甲_乙.jpg", Siblings: []string{"甲_乙.jpg"},
-	}
-	decision = runRefEval(t, []RuleEntry{memberB, selfRow}, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "combo-self")
-	if v, ok := declOf(decision, "combo-self", DimTag); !ok || v != "科幻" {
-		t.Fatalf("组合自身行 capture 应读自身绑定: %q %v", v, ok)
-	}
-}
-
-// —— 测试矩阵第 5 项：三通道一致性 ——
-
-// TestRefGateThreeChannelConsistency 批量识别（MergedRecognition）、增量识别
-//（MergedRecognitionWithTree：本批子集 + 全量树——增量轮的求值形态）与执行期
-// 单文件重算（recomputeFileDecision）三通道对组合门控的口径一致：成员全命中
-// 文件上组合入 MatchedRuleIDs、成员缺失文件上组合缺席，且三通道命中序列全等。
-// 增量识别通道的调用链收敛已核实：runFullRecognition（recognition.go 增量轮）
-// 经 MergedRecognitionWithTree → mergedFileConclusionWithStructural，与批量入口
-// 和 recomputeFileDecision（mergedFileConclusionOf）同一实现（风险3）。
-func TestRefGateThreeChannelConsistency(t *testing.T) {
-	root := t.TempDir()
-	files := []struct {
-		dir, name string
-		comboHit  bool
-	}{
-		{"Artist[甲]", "甲_乙.jpg", true},  // 成员A（文件行）+成员B（Artist 壳目录）全命中
-		{"Plain", "甲_乙.jpg", false},      // 成员B 无 Artist 壳祖先目录→门失败
-	}
-	scanFiles := make([]ScanFile, 0, len(files))
-	for _, f := range files {
-		dir := root + "/" + f.dir
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("建目录失败: %v", err)
-		}
-		full := dir + "/" + f.name
-		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
-			t.Fatalf("写文件失败: %v", err)
-		}
-		scanFiles = append(scanFiles, ScanFile{
-			Path: full, FileName: f.name, DirNames: []string{f.dir}, RelPath: f.dir + "/" + f.name,
-		})
-	}
-
-	memberA, memberB := refEvalMembers(t)
-	combo := refComboRule(t, "combo-1", []string{"member-a", "member-b"}, nil, []ExtractionAction{
-		{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-a", CaptureName: "author", Row: 1},
-	})
-	rules := []RuleEntry{memberA, memberB, combo}
-
-	// 通道一：批量识别（全集自聚合）。
-	batch := MergedRecognition(scanFiles, rules, nil, nil)
-	// 通道二：增量识别形态（本批仅首个文件 + 全量树聚合）。
-	incremental := MergedRecognitionWithTree(scanFiles[:1], scanFiles, rules, nil, nil)
-	// 通道三：执行期单文件重算（磁盘重扫兄弟全集）。
-	h := &LocalImportWorkFetcher{}
-
-	for i, f := range files {
-		fp := &FilePluginData{FullPath: scanFiles[i].Path, RelPath: scanFiles[i].RelPath}
-		recomputed, _ := h.recomputeFileDecision(fp, rules, nil)
-
-		wantCombo := f.comboHit
-		if got := refIDsContain(recomputed.MatchedRuleIDs, "combo-1"); got != wantCombo {
-			t.Fatalf("%s：重算通道组合门控不符（期望含组合=%v）: %v", f.dir, wantCombo, recomputed.MatchedRuleIDs)
-		}
-		if got := refIDsContain(batch[i].MatchedRuleIDs, "combo-1"); got != wantCombo {
-			t.Fatalf("%s：批量通道组合门控不符（期望含组合=%v）: %v", f.dir, wantCombo, batch[i].MatchedRuleIDs)
-		}
-		// 三通道命中序列全等（顺序与成员单点登记口径一并锚定）。
-		if i == 0 {
-			if !refIDsEqual(incremental[0].MatchedRuleIDs, batch[0].MatchedRuleIDs) {
-				t.Fatalf("增量通道与批量通道命中序列不一致: %v vs %v", incremental[0].MatchedRuleIDs, batch[0].MatchedRuleIDs)
-			}
-		}
-		if !refIDsEqual(recomputed.MatchedRuleIDs, batch[i].MatchedRuleIDs) {
-			t.Fatalf("%s：重算通道与批量通道命中序列不一致: %v vs %v", f.dir, recomputed.MatchedRuleIDs, batch[i].MatchedRuleIDs)
-		}
-	}
-
-	// 全命中文件的三通道终局序列锚（成员单点登记 + 组合殿后）。
-	assertRefMatchedIDs(t, batch[0].MatchedRuleIDs, "member-a", "member-b", "combo-1")
-}
-
-// —— 「之下不含其身」（2026-10-29 用户拍板收紧）——
-
-// TestRefGateAnchorStrictBelow 组合自身目录行锚定层与被引目录成员命中层重合
-// 时整体不中：集名等锚定不得落在被引规则命中的目录身上（同链同层即同目录）；
-// 纯门组合（无自身目录行，无锚定）与文件行成员（无目录命中层）不受该约束。
-func TestRefGateAnchorStrictBelow(t *testing.T) {
-	setCombo := refComboRule(t, "combo-set", []string{"member-b"},
-		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}}},
-		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
-	memberA, memberB := refEvalMembers(t) // memberA=文件行，memberB=目录行 Artist[{作者}]
-	rules := []RuleEntry{memberB, setCombo}
-
-	// 壳下子目录文件：锚定层（SetA=1）严格深于成员命中层（Artist[甲]=0）→命中。
-	in := &MatchInput{
-		FileName: "x.jpg", DirNames: []string{"Artist[甲]", "SetA"},
-		RelPath: "Artist[甲]/SetA/x.jpg", Siblings: []string{"x.jpg"},
-	}
-	decision := runRefEval(t, rules, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "combo-set")
-	if v, ok := declOf(decision, "combo-set", DimCollection); !ok || v != "SetA" {
-		t.Fatalf("壳下子目录集名应为 SetA: %q %v", v, ok)
-	}
-
-	// 壳直属文件：{集名} 最深命中层=壳目录自身（0）与成员命中层重合→组合零产出。
-	in = &MatchInput{
-		FileName: "x.jpg", DirNames: []string{"Artist[甲]"},
-		RelPath: "Artist[甲]/x.jpg", Siblings: []string{"x.jpg"},
-	}
-	decision = runRefEval(t, rules, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b")
-
-	// 纯门组合（无自身行）：壳直属文件仍命中（无目录锚定，约束不适用）。
-	pureGate := refComboRule(t, "combo-gate", []string{"member-b"}, nil, nil)
-	decision = runRefEval(t, []RuleEntry{memberB, pureGate}, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "combo-gate")
-
-	// 文件行成员（无目录命中层）：组合自身目录行锚定不受约束，直接父目录即集名。
-	fileCombo := refComboRule(t, "combo-file", []string{"member-a"},
-		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}}},
-		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
-	in = &MatchInput{
-		FileName: "甲_乙.jpg", DirNames: []string{"Plain"},
-		RelPath: "Plain/甲_乙.jpg", Siblings: []string{"甲_乙.jpg"},
-	}
-	decision = runRefEval(t, []RuleEntry{memberA, fileCombo}, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-a", "combo-file")
-	if v, ok := declOf(decision, "combo-file", DimCollection); !ok || v != "Plain" {
-		t.Fatalf("文件行成员的组合集名应为直接父目录名 Plain: %q %v", v, ok)
-	}
-
-	// 锚定层在被引成员命中层之上（不重合）：不受约束——既有「Vol 标签目录在
-	// 作者目录之上」形态保持命中（同 TestRefGateNonComboZeroChange 自身行锚）。
-	aboveCombo := refComboRule(t, "combo-above", []string{"member-b"},
-		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("Vol[{标签}]")}}},
-		[]ExtractionAction{{Dimension: DimTag, From: FromCapture, CaptureName: "tag", Row: 1}})
-	in = &MatchInput{
-		FileName: "甲_乙.jpg", DirNames: []string{"Vol[科幻]", "Artist[甲]"},
-		RelPath:  "Vol[科幻]/Artist[甲]/甲_乙.jpg", Siblings: []string{"甲_乙.jpg"},
-	}
-	decision = runRefEval(t, []RuleEntry{memberB, aboveCombo}, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-b", "combo-above")
-	if v, ok := declOf(decision, "combo-above", DimTag); !ok || v != "科幻" {
-		t.Fatalf("锚定层在成员命中层之上时应保持命中: %q %v", v, ok)
-	}
-}
-
-// TestRefGateMemberDirLevelAnchor 组合门段通道（声明5 第 3 路，AE 阶段5 核验）：
-// 门段登记成员的 dirHitDepths 时读成员私有作用域的 DirHits——成员目录行带
-// 「位于第 N 级」锚则集合只含 N 级层（按锚定层记录，「之下不含其身」判定本身
-// 不变）：成员锚在更浅层即不再与组合自身更深锚定层重合，组合照常产出；对照
-// 去锚成员取最深命中层，与自身锚重合 → 组合零产出；成员锚定级不存在则门失败
-// → 组合零产出。
-func TestRefGateMemberDirLevelAnchor(t *testing.T) {
-	memberRows := []CondxRow{{Condition: &Condx{
-		Target: CondxTargetDir, Format: condxTpl("[{标签}]"),
-		Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: 2}},
-	}}}
-	member := refRowsRule(t, "member-anchored", memberRows, nil, nil)
-	combo := refComboRule(t, "combo-set", []string{"member-anchored"},
-		[]CondxRow{{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}}},
-		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
-	in := &MatchInput{
-		FileName: "x.jpg", DirNames: []string{"[外层]", "[内层]", "[更深]"},
-		RelPath: "[外层]/[内层]/[更深]/x.jpg", Siblings: []string{"x.jpg"},
-	}
-	decision := runRefEval(t, []RuleEntry{member, combo}, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-anchored", "combo-set")
-	// 自身行 {集名} 最深命中层=第 3 级 [更深]；成员锚在第 2 级 [内层]，不重合。
-	if v, ok := declOf(decision, "combo-set", DimCollection); !ok || v != "[更深]" {
-		t.Fatalf("成员锚在更浅层时组合应照常产出集名 [更深]: %q %v", v, ok)
-	}
-
-	// 对照：同一成员去锚 → 最深命中层=[更深]（第 3 级）与自身锚重合 → 之下
-	// 不含其身 → 组合零产出。
-	unanchored := refDirRowRule(t, "member-any", "[{标签}]")
-	decision = runRefEval(t, []RuleEntry{unanchored, combo}, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-any")
-
-	// 成员锚定第 2 级在单层链上不存在 → 门失败 → 组合零产出。
-	short := &MatchInput{
-		FileName: "x.jpg", DirNames: []string{"[外层]"},
-		RelPath: "[外层]/x.jpg", Siblings: []string{"x.jpg"},
-	}
-	decision = runRefEval(t, []RuleEntry{member, combo}, short, nil)
-	if len(decision.MatchedRuleIDs) != 0 {
-		t.Fatalf("成员锚定级不存在时门应失败、组合零产出: %v", decision.MatchedRuleIDs)
+		t.Fatalf("未注入的作用域不应有注入区内容")
 	}
 }
 

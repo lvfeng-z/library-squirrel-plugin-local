@@ -2,7 +2,8 @@ package main
 
 // 规则总结器（结构直连规则构造 · 后端）：从单文件赋值的线索出处（clueRef；
 // 手填值无出处时以「值=某段」自动匹配兜底）推导结构映射，构造组合规则——
-// 目录层锚定+剥壳变换（LocationPattern MinDepth=层深-1）/ 文件名分隔段捕获
+// 目录层多段模板规则（各层条目合并为单条：段=各层模板、段距=赋值出处层距差，
+// 紧邻缺省 /、跳层显式 /{N}）/ 文件名分隔段捕获
 //（RegexPattern）/ 尾部码丢弃（正则仅消费不捕获）/ 库根名常量。出参=人话
 // 规则+逐维度映射+全库命中预览统计+跨目录样例应用；仅总结不入档，用户确认
 //（generalize mode=struct）才经档案写单点（ArchiveWriteGeneralize）入档。
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -173,27 +175,45 @@ func buildStructMapRules(rootPath, relPath, fileName string, assign *SessionAssi
 	var mappings []RuleSuggestionMapping
 	var manualDims []string
 
-	// 目录层条目（层序稳定）。firstDirIdx 为常量折入目标（-1=尚无目录条目）；
-	// 以下标寻址避免 append 扩容后的悬垂指针。
-	firstDirIdx := -1
+	// 目录层条目（决策3）：各层条目计划合并为单条多段目录模板规则——段=
+	// 各层模板、段距=赋值出处层距差，不附绝对层级锚。计划按层升序；同层多
+	// 计划（同层既有剥壳又有原文名取值——单段无法承载两组捕获）保留首个、
+	// 其余槽位降级手工。
+	sortedPlans := make([]*structDirPlan, 0, len(dirOrder))
 	for _, key := range dirOrder {
-		plan := dirPlans[key]
-		rule, ok := plan.build(relPath, fileName)
-		if !ok {
+		sortedPlans = append(sortedPlans, dirPlans[key])
+	}
+	sort.SliceStable(sortedPlans, func(i, j int) bool { return sortedPlans[i].level < sortedPlans[j].level })
+	levelPlans := make([]*structDirPlan, 0, len(sortedPlans))
+	for _, plan := range sortedPlans {
+		if len(levelPlans) > 0 && levelPlans[len(levelPlans)-1].level == plan.level {
 			for _, s := range plan.slots {
 				s.manual = true
 			}
 			continue
 		}
-		rules = append(rules, rule)
-		if firstDirIdx < 0 {
+		levelPlans = append(levelPlans, plan)
+	}
+	// 以下标寻址避免 append 扩容后的悬垂指针；firstDirIdx 为常量折入目标
+	//（-1=尚无目录条目）。
+	firstDirIdx := -1
+	if len(levelPlans) > 0 {
+		rule, dirPhrase, dirSlotLabels, ok := buildStructDirLevelRule(relPath, fileName, levelPlans)
+		if ok {
+			rules = append(rules, rule)
 			firstDirIdx = len(rules) - 1
-		}
-		for _, s := range plan.slots {
-			phrases = append(phrases, structDirPhrase(s, relPath))
-			mappings = append(mappings, RuleSuggestionMapping{
-				Dimension: string(s.dim), From: structFromLabel(s, relPath), ClueRef: s.clue.Ref,
-			})
+			phrases = append(phrases, dirPhrase)
+			for _, sl := range dirSlotLabels {
+				mappings = append(mappings, RuleSuggestionMapping{
+					Dimension: string(sl.slot.dim), From: sl.label, ClueRef: sl.slot.clue.Ref,
+				})
+			}
+		} else {
+			for _, plan := range levelPlans {
+				for _, s := range plan.slots {
+					s.manual = true
+				}
+			}
 		}
 	}
 
@@ -298,17 +318,150 @@ type structDirPlan struct {
 	slots []*structMappingSlot
 }
 
-// build 构造目录层规则条目并自检（锚定样例目录层、逐槽提取值=赋值值）。
-// build 目录层条目构造（v4）：壳形态（前缀+内名+后缀）→ 目录模板
+// buildStructDirLevelRule 把各层目录条目计划合并构造为单条多段目录模板规则
+//（决策3）：plans 须按层升序且层深互异。段模板——壳形态（前缀+内名+后缀）
+// 为「前缀字面+{占位词}+尾段（占位词盖内名，剥壳语义由捕获天然承载；多组名
+// 的首组后正文由末位 {任意} 吞位段承接）」，原文名（整名即取值）为裸
+//「{占位词}」整段捕获；段距=相邻计划层深差（1=紧邻缺省 /、N≥2 显式 /{N}），
+// 不附绝对层级锚——同形异深由段内字面区分。全部槽位提取走 FromCapture
+//（跨段捕获的提取动作 Row 指向本行）；词池全条共用（同词跨段冲突即构造
+// 失配）。自检：样例文件上命中且各槽提取值复现赋值值。构造失配（词池冲突/
+// 花括号/编译失败/自检不过）返回假，调用方降级手工。
+func buildStructDirLevelRule(relPath, fileName string, plans []*structDirPlan) (RuleEntry, string, []structDirSlotLabel, bool) {
+	pool := newCondxWordPool()
+	wordOfPlan := make([]string, len(plans))
+	segs := make([]string, 0, len(plans))
+	for i, p := range plans {
+		word, ok := condxWordOfSlot(p.slots[0].dim, p.slots[0].tagIndex)
+		if !ok || !pool.Take(word) {
+			return RuleEntry{}, "", nil, false
+		}
+		wordOfPlan[i] = word
+		if p.shell != nil {
+			tailLit, swallowTail := structShellTail(p.name)
+			if !condxTemplateBraceOK(p.shell.Prefix) || !condxTemplateBraceOK(tailLit) {
+				return RuleEntry{}, "", nil, false
+			}
+			seg := p.shell.Prefix + "{" + word + "}" + tailLit
+			if swallowTail {
+				seg += "{任意}"
+			}
+			segs = append(segs, seg)
+		} else {
+			// 原文名取值：整段捕获（值为目录全名）。
+			segs = append(segs, "{"+word+"}")
+		}
+	}
+	gaps := make([]dirSegGap, 0, len(plans)-1)
+	var tpl strings.Builder
+	tpl.WriteString(segs[0])
+	for i := 1; i < len(plans); i++ {
+		gap := plans[i].level - plans[i-1].level
+		if gap < 1 {
+			return RuleEntry{}, "", nil, false
+		}
+		gaps = append(gaps, dirSegGap{N: gap})
+		tpl.WriteString("/")
+		if gap > 1 {
+			tpl.WriteString("{" + strconv.Itoa(gap) + "}")
+		}
+		tpl.WriteString(segs[i])
+	}
+	rows := []CondxRow{{Condition: &Condx{
+		Target: CondxTargetDir,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl.String()},
+	}}}
+	pattern, err := CompileRuleConditions(rows)
+	if err != nil {
+		return RuleEntry{}, "", nil, false
+	}
+	extractions := make([]ExtractionAction, 0, len(plans))
+	for i, p := range plans {
+		for _, s := range p.slots {
+			extractions = append(extractions, ExtractionAction{
+				Dimension: s.dim, From: FromCapture, CaptureName: condxVocab[wordOfPlan[i]], Row: 1, RoleName: s.roleName,
+			})
+		}
+	}
+	rule := RuleEntry{
+		ID:          generatedRuleID("qna-struct", relPath),
+		Description: fmt.Sprintf("泛化（结构映射·目录层级）：%s→%s（源自「%s」的赋值）", dirSegLevelPhrase(tpl.String(), gaps), structDimPhraseOf(allSlotsOf(plans)), relPath),
+		Source:      RuleSourceQna,
+		Enabled:     true,
+		Conditions:  rows,
+		Pattern:     pattern,
+		Extractions: extractions,
+	}
+	// 自检：样例文件上命中且各槽提取值复现赋值值。
+	ctx := &ParseContext{}
+	if !pattern.Evaluate(structSampleInput(relPath, fileName), nil, ctx) {
+		return RuleEntry{}, "", nil, false
+	}
+	for i, s := range allSlotsOf(plans) {
+		decl, ok := extractions[i].Apply(rule.ID, ctx)
+		if !ok || decl.Value != s.value {
+			return RuleEntry{}, "", nil, false
+		}
+	}
+	// 建议卡句式（决策7/剧本3 帧2）：「目录层级 `tpl`（自上而下逐级紧邻）→
+	// 作者=壳内名、集名=末段」——段来源以该段占位词称名（壳内名=剥壳段来源，
+	// 原文名段按段位：末段/第N段）。
+	phraseParts := make([]string, 0, len(plans))
+	labels := make([]structDirSlotLabel, 0, len(plans))
+	for i, p := range plans {
+		pos := "末段"
+		if i < len(plans)-1 {
+			pos = "第" + strconv.Itoa(i+1) + "段"
+		}
+		for _, s := range p.slots {
+			if p.shell != nil {
+				phraseParts = append(phraseParts, wordOfPlan[i]+"=壳内名")
+			} else {
+				phraseParts = append(phraseParts, wordOfPlan[i]+"="+pos)
+			}
+			labels = append(labels, structDirSlotLabel{slot: s, label: structDirSegLabel(p, pos)})
+		}
+	}
+	phrase := dirSegLevelPhrase(tpl.String(), gaps) + "→ " + strings.Join(phraseParts, "、")
+	return rule, phrase, labels, true
+}
+
+// structDirSlotLabel 目录段槽位的呈现标签载体（建议卡映射来源用）。
+type structDirSlotLabel struct {
+	slot  *structMappingSlot
+	label string
+}
+
+// allSlotsOf 计划序列的全部槽位（计划序 × 槽序——与提取动作构造序一致）。
+func allSlotsOf(plans []*structDirPlan) []*structMappingSlot {
+	var slots []*structMappingSlot
+	for _, p := range plans {
+		slots = append(slots, p.slots...)
+	}
+	return slots
+}
+
+// structDirSegLabel 目录段来源标签（映射说明用）：壳形态注明壳内名（多组名
+// 注明首组内名）；原文名段按段位（末段/第N段）。
+func structDirSegLabel(p *structDirPlan, pos string) string {
+	if p.shell != nil {
+		if _, swallow := structShellTail(p.name); swallow {
+			return "目录段壳内名（首组内名）"
+		}
+		return "目录段壳内名"
+	}
+	return "目录段" + pos
+}
+
+// build 构造单层目录条目（集规则族构造器消费——workset_rule 的目录层维度条目
+// 与目录格式草稿的作者条目）：壳形态（前缀+内名+后缀）→ 目录模板
 // 前缀字面+{占位词}+尾段（占位词盖内名，剥壳语义由捕获天然承载——
 // StripPrefix/Suffix 随之废止）；单组收尾（组即目录名末尾）的尾段=后缀
 // 字面（Artist[{作者}]/[{作者}]）；多组名（首组闭括号后另有正文）的尾段
 // =闭括号+首组后间隙字面+{任意}（如 [{标签}] {任意}——首组内名由括号
-// 感知捕获类承载，首组后正文全部由吞位段承接）；无壳 → 目录名整名字面。
-// 目录行随附「位于第 N 级」层深锚（AE 决策2：N=赋值出处层级，忠实取证——
-// 同名目录异层不再被子树接管，仅构造层级接管；不欲锚定可在编辑弹窗删锚
-// 放开为任意层）。自检：样例文件上命中且各槽提取值复现赋值值；构造
-// 失配（花括号/词法）返回假由调用方降级手工。
+// 感知捕获类承载，首组后正文全部由吞位段承接）；无壳 → 目录名整名字面
+//（值为整名时走 FromAncestorDir 提取）。自检：样例文件上命中且各槽提取值
+// 复现赋值值；构造失配（花括号/词法）返回假由调用方降级手工。
 func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 	pool := newCondxWordPool()
 	var tpl string
@@ -335,12 +488,9 @@ func (p *structDirPlan) build(relPath, fileName string) (RuleEntry, bool) {
 		}
 		tpl = p.name
 	}
-	// 层深锚（AE 决策2）：目录行随附「位于第 N 级」——N=赋值出处层级
-	//（level），深层同名目录不再被产物接管。
 	rows := []CondxRow{{Condition: &Condx{
 		Target: CondxTargetDir,
 		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: tpl},
-		Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: p.level}},
 	}}}
 	pattern, err := CompileRuleConditions(rows)
 	if err != nil {
@@ -702,16 +852,6 @@ func structGroupName(dim MetadataDimension, tagIndex int) string {
 	return string(dim)
 }
 
-// structDirPhrase 目录层映射的人话（如「一级目录 Artist[任意] 剥壳→作者」）。
-func structDirPhrase(s *structMappingSlot, relPath string) string {
-	n := structClueLevelOf(s.clue.Ref)
-	label := qnaDimensionLabel(s.dim)
-	if s.clue.Kind == structClueDirLevelStripped {
-		return fmt.Sprintf("%s %s剥壳→%s", dirLevelLabel(n), structWrapDesc(relPath, n), label)
-	}
-	return fmt.Sprintf("%s「%s」→%s", dirLevelLabel(n), s.clue.Value, label)
-}
-
 // structWrapDesc 剥壳映射的包裹形态描述（如 "Artist[任意]"）：单组收尾取
 // 剥壳前/后缀+「任意」内名；多组名（剥壳变体=首组内名）首组后正文收敛为
 // 省略号（如 "[任意] …"）。
@@ -735,19 +875,10 @@ func structFilePhrase(s *structMappingSlot) string {
 	return fmt.Sprintf("文件名第%d段→%s", s.segIndex+1, qnaDimensionLabel(s.dim))
 }
 
-// structFromLabel 映射说明的来源标签（多组名剥壳注明取首组内名）。
+// structFromLabel 映射说明的来源标签（非目录段槽位：库根名/文件名段；目录段
+// 标签由 buildStructDirLevelRule 按段位生成——见 structDirSegLabel）。
 func structFromLabel(s *structMappingSlot, relPath string) string {
 	switch s.clue.Kind {
-	case structClueDirLevelStripped:
-		n := structClueLevelOf(s.clue.Ref)
-		if name := dirNameAtLevel(relPath, n); name != "" {
-			if _, swallow := structShellTail(name); swallow {
-				return dirLevelLabel(n) + "剥壳（首组内名）"
-			}
-		}
-		return dirLevelLabel(n) + "剥壳"
-	case structClueDirLevel:
-		return dirLevelLabel(structClueLevelOf(s.clue.Ref))
 	case structClueRootName:
 		return "库根名"
 	case structClueFilenameSeg:

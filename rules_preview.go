@@ -226,7 +226,8 @@ var previewFastPathDisabled bool
 //     载入档案一致（识别后档案被保存改写即失配回退）、求值器构建标识等值
 //     （与识别增量闸门同款空串语义）；
 //   - 形态分箱：新增草稿（非替换，调用方守卫）且 refs 空（非组合）、非定群
-//     形态、且草稿 ID 不被任何启用档案规则引用（refs 门段/条件限定名/refCapture
+//     形态、条件行不含 refScope 附件（草稿独集求值时供给方不在场），且草稿
+//     ID 不被任何启用档案规则引用（refScope 行扫描/条件限定名/refCapture
 //     提取三路反查）——受影响集={草稿}；
 //   - 等值护栏：启用档案规则均无生效条件（When）与贪婪识别（scan）动作、
 //     模式树不消费库内谓词索引（基座按识别轮名单铸造，名单换代即偏离）——
@@ -371,12 +372,17 @@ func (m *SessionManager) previewDraftFastConclusions(sess *WorkbenchSession, pro
 	return conclusions, true
 }
 
-// previewDraftFastEligible 快路径形态判定（受影响集={草稿}）：草稿非组合
-//（refs 空）、非定群形态，且任何启用档案规则不以草稿 ID 为被引成员。替换
-// 形态（草稿 ID 与档案条目同 ID）由调用方先行排除。
+// previewDraftFastEligible 快路径形态判定（受影响集={草稿}）：草稿非定群形态、
+// 条件行不含 refScope 附件（草稿自身消费供给方——
+// 门段在草稿独集上求值时供给方不在场，快路径结论将偏离整库全量，风险5），
+// 且任何启用档案规则不以草稿 ID 为供给方。替换形态（草稿 ID 与档案条目同
+// ID）由调用方先行排除。
 func previewDraftFastEligible(enabled []RuleEntry, entry *RuleEntry) bool {
-	if len(entry.Refs) > 0 || isGroupingRule(entry) {
+	if isGroupingRule(entry) {
 		return false
+	}
+	if len(refScopeProvidersOf(entry)) > 0 {
+		return false // 草稿含 refScope 附件：门段求值需档案供给方在场
 	}
 	for i := range enabled {
 		rule := &enabled[i]
@@ -384,7 +390,7 @@ func previewDraftFastEligible(enabled []RuleEntry, entry *RuleEntry) bool {
 			continue // 草稿自身（形态判定只针对档案规则）
 		}
 		if ruleReferencesRuleID(rule, entry.ID) {
-			return false // 被引用（形态四）：组合门段语义随草稿在场而变
+			return false // 被引用（形态四）：refScope 门段语义随草稿在场而变
 		}
 		if archiveRuleBlocksDraftFastPath(rule) {
 			return false // 等值护栏：档案规则产物不可按基座重放
@@ -393,12 +399,13 @@ func previewDraftFastEligible(enabled []RuleEntry, entry *RuleEntry) bool {
 	return true
 }
 
-// ruleReferencesRuleID 判定规则是否以 ruleID 为被引成员：refs 门段引用、条件
-// 表达式的限定键形操作数（「成员ID.rN.组名」）、refCapture 提取动作三路。
-// 构造期校验保证后两路 ⊆ refs（rule_profile.go validateExpr/validateRuleRefs），
+// ruleReferencesRuleID 判定规则是否以 ruleID 为被引方：条件行 refScope 附件
+//（供给方=ruleID，行扫描——阶段2 取代规则级 refs 直查，风险5）、条件表达式
+// 的限定键形操作数（「供给方ID.rN.组名」）、refCapture 提取动作三路。构造期
+// 校验保证后两路 ⊆ 本规则供给方集（rule_profile.go validateExpr/第二遍校验），
 // 此处兜底直查防存量档案绕过校验漂移。
 func ruleReferencesRuleID(rule *RuleEntry, ruleID string) bool {
-	if containsString(rule.Refs, ruleID) {
+	if containsString(refScopeProvidersOf(rule), ruleID) {
 		return true
 	}
 	for i := range rule.Extractions {

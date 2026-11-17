@@ -41,7 +41,7 @@ const (
 	// perfStructuralPerDir 每块结构群全员已识别文件数：两群 × 3（空格形态
 	// 结构对齐成群 + 括号命名惯例规则逐成员提取 author/title）。
 	perfStructuralPerDir = 6
-	// perfComboPerDir 每块组合规则门段文件数：成员正则 + 纯门组合双登记。
+	// perfComboPerDir 每块作用域附件门段文件数：供给方+消费方双登记。
 	perfComboPerDir = 4
 	// perfPredicatePerDir 每块谓词索引命中文件数：本地/站点作者轨各 2（文件名
 	// 去扩展名精确等于库内作者名）。
@@ -101,10 +101,14 @@ func syntheticEvalLibrary() ([]ScanFile, map[string]SessionAssignment, perfShape
 		assigns[dir+"/【画师乙】画集 01.jpg"] = SessionAssignment{
 			Title: fmt.Sprintf("手工标题%03d", b), UpdatedAtMs: int64(b) + 100001,
 		}
-		// ③ 组合规则门段：空格形态（另成结构群）命中成员正则 + 纯门组合
+		// ③ 作用域附件门段：供给方（组合NNN 目录行）先行求值 + 消费方
+		//（紧邻 {标题} 目录行）双登记（两级目录链——add 只承单级，此处
+		// 直写两级 DirNames）。
 		dir = fmt.Sprintf("组合%03d", b)
 		for i := 1; i <= perfComboPerDir; i++ {
-			add(dir, fmt.Sprintf("门段样板 %02d.jpg", i))
+			name := fmt.Sprintf("门段样板 %02d.jpg", i)
+			rel := dir + "/门段/" + name
+			files = append(files, ScanFile{Path: rel, FileName: name, DirNames: []string{dir, "门段"}, RelPath: rel})
 		}
 		// ④ 谓词索引命中：文件名去扩展名=库内作者名（test-predicate-author）
 		dir = fmt.Sprintf("谓词%03d", b)
@@ -119,7 +123,7 @@ func syntheticEvalLibrary() ([]ScanFile, map[string]SessionAssignment, perfShape
 		}
 	}
 	want := perfShape{
-		dirs:                 perfBlockCount * 5,
+		dirs:                 perfBlockCount * 6, // 每块 6 目录：五类目录 + 组合门段的「门段」子目录
 		files:                perfBlockCount * perBlock,
 		ruleGrouped:          perfBlockCount * perfRuleGroupPerDir,
 		structuralIdentified: perfBlockCount * perfStructuralPerDir,
@@ -132,20 +136,15 @@ func syntheticEvalLibrary() ([]ScanFile, map[string]SessionAssignment, perfShape
 }
 
 // perfEvalRules 性能锚规则集：recognitionTestRules 六条（兄弟定群/括号惯例/双
-// 冲突/谓词作者/目录含义）之上追加组合规则对——成员=文件名正则，组合=纯门
-//（refs 单成员、空条件表），形态与 newParallelFixture 的组合样板同构。
+// 冲突/谓词作者/目录含义）之上追加作用域附件规则对——供给方=组合目录行
+//（组合{序号} 匹配 组合NNN 层）、消费方=紧邻其下的 {标题} 目录行（refScope
+// 层距 1），形态与 newParallelFixture 的作用域样板同构。
 func perfEvalRules(t *testing.T) []RuleEntry {
 	t.Helper()
 	rules := recognitionTestRules(t)
 	return append(rules,
-		RuleEntry{
-			ID: "perf-gate-member", Description: "性能锚：门段成员（文件名正则）", Source: RuleSourceManual, Enabled: true,
-			Pattern: mustRegexPattern(t, `^门段样板.+\.jpg$`, nil),
-		},
-		RuleEntry{
-			ID: "perf-gate-combo", Description: "性能锚：纯门组合（refs 单成员）", Source: RuleSourceManual, Enabled: true,
-			Refs: []string{"perf-gate-member"}, Conditions: []CondxRow{}, Pattern: And{},
-		},
+		refDirRowRule(t, "perf-gate-member", "组合{序号}", nil, nil),
+		refDirRowRule(t, "perf-gate-combo", "{标题}", []CondxAttach{refScopeAttach("perf-gate-member", 1)}, nil),
 	)
 }
 
@@ -174,11 +173,11 @@ func perfDeclHas(decls []MetadataDeclaration, dim MetadataDimension, value strin
 
 // assertPerfShape 六类形态在场断言（结论层清点对账，防夹具静默退化）：规则定群
 //（Group 非空且带定群规则 ID）/ 结构群全员已识别（Group 非空且规则 ID 空、每
-// 成员带 author 终选）/ 组合规则门段（成员与组合双双进 MatchedRuleIDs）/ 赋值
-// 覆盖（终选含赋值标记值）/ 谓词索引命中（test-predicate-author + author 终选
-// =库内名）/ 无线索（无群、无终选、无命中规则）。另附两条赋值语义探针（author
-// 改写 / title 改写且 author 保留）。形态间允许交叠（赋值文件同时是定群/结构
-// 群成员），各计数独立对账。
+// 成员带 author 终选）/ 作用域附件门段（供给方与消费方双双进 MatchedRuleIDs）
+// / 赋值覆盖（终选含赋值标记值）/ 谓词索引命中（test-predicate-author +
+// author 终选=库内名）/ 无线索（无群、无终选、无命中规则）。另附两条赋值语义
+// 探针（author 改写 / title 改写且 author 保留）。形态间允许交叠（赋值文件同时
+// 是定群/结构群成员），各计数独立对账。
 func assertPerfShape(t *testing.T, conclusions []FileConclusion, want perfShape) {
 	t.Helper()
 	if len(conclusions) != want.files {
@@ -229,7 +228,7 @@ func assertPerfShape(t *testing.T, conclusions []FileConclusion, want perfShape)
 	}
 	check("规则定群成员", ruleGrouped, want.ruleGrouped)
 	check("结构群全员已识别成员", structural, want.structuralIdentified)
-	check("组合规则门段命中", combo, want.combo)
+	check("作用域附件门段命中", combo, want.combo)
 	check("谓词索引命中", predicate, want.predicateHits)
 	check("赋值覆盖文件", assigned, want.assigned)
 	check("无线索文件", clueless, want.clueless)
@@ -311,7 +310,7 @@ func TestRecognitionEvalSpeedup(t *testing.T) {
 	speedup := float64(serialMedian) / float64(parallelMedian)
 
 	// —— 留档（阶段4 转述入文档）：库规模与形态/核数/两模式各轮与中位/加速比 ——
-	t.Logf("合成大库：%d 块 × 5 目录 = %d 目录 / %d 文件（规则定群 %d · 结构群全员已识别 %d · 组合规则门段 %d · 谓词索引命中 %d · 赋值覆盖 %d · 无线索 %d，无线索占比 %.1f%%）",
+	t.Logf("合成大库：%d 块 × 5 目录 = %d 目录 / %d 文件（规则定群 %d · 结构群全员已识别 %d · 作用域附件门段 %d · 谓词索引命中 %d · 赋值覆盖 %d · 无线索 %d，无线索占比 %.1f%%）",
 		perfBlockCount, want.dirs, want.files, want.ruleGrouped, want.structuralIdentified,
 		want.combo, want.predicateHits, want.assigned, want.clueless,
 		100*float64(want.clueless)/float64(want.files))

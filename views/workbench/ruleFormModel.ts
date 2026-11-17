@@ -4,8 +4,9 @@
 
 
 // 提取动作 JSON 的前端镜像（when 为原样透传的条件表达式树；row 为 v4 capture
-// 来源行号——「行N·{词}」寻址，1 起缺省；refRule 为 W4 refCapture 来源的成员
-// 规则 ID——refRule/row/captureName 三元寻址，与 refs 顶层字段配套）。
+// 来源行号——「行N·{词}」寻址，1 起缺省；refRule 为 refCapture 来源的供给方
+// 规则 ID——本规则目录行作用域附件（refScope）所引供给方；refRule/row/
+// captureName 三元寻址）。
 export interface ExtractionActionJSON {
   dimension?: string
   from?: string
@@ -47,9 +48,10 @@ export const FROM_OPTIONS: { value: string; label: string }[] = [
   { value: 'constant', label: '常量' },
   { value: 'predicate', label: '谓词命中' },
   { value: 'adjudication', label: '裁决常量' },
-  // W4 组合引用（规则组合引用剧本·帧7）：值取自被引成员规则上半声明的捕获槽；
-  // 选中后出现「成员规则·占位词」下拉——选项按引用行顺序分组列出（帧8）
-  { value: 'refCapture', label: '被引规则捕获' }
+  // 作用域附件捕获（剧本2·裁决②）：值取自本规则目录行供给方（refScope 附件
+  // 所引纯目录规则）上半声明的捕获槽；选中后出现「供给方·占位词」下拉——
+  // 选项按供给方顺序分组列出
+  { value: 'refCapture', label: '供给方捕获' }
 ]
 
 // 贪婪识别（帧-05 收敛）：可扫描维度（LibraryIndex 有集合者）与扫描范围。
@@ -262,15 +264,14 @@ export function condxVocabOf(word: string): { word: string; group: string; cls: 
 // 卡片与 title 用同一常量）。
 export const CONDX_TARGETS: { value: 'file' | 'dir' | 'seq'; label: string; note: string }[] = [
   { value: 'file', label: '文件名', note: '按格式匹配文件名(不含扩展名)命中的满足格式的每个文件' },
-  { value: 'dir', label: '目录名', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)；可用「位于第 N 级」限定层级（自识别根数起）' },
+  { value: 'dir', label: '目录名', note: '按格式匹配任一层祖先目录名——整个子树都算(不限直接父目录)；层级表达属目录行：段间「/」=下一级目录、「//」=之下任意层、「/{2}」=隔2级（如 Artist[{作者}]/{集名} 自上而下逐级）' },
   { value: 'seq', label: '序列', note: '文件名按模板成套—成套键=全部非序号捕获按序拼接（可选词位不进键）；同键≥2才算、落单不算、不跨目录' }
 ]
 
-// 第四卡「引用规则」的说明小字（组合引用的门槛与停用语义；卡片小字与悬停
-// 提示同源）。
-export const CONDX_TARGET_REF_NOTE = '引用另一条规则，仅当所有被引用规则命中时本规则才命中；被引用规则停用时本规则不可用'
-
 // 终结谓词封闭集（与内核 attachAllowed 镜像）：needs 列出必填字段族。
+// refScope（作用域附件·决策8 甲案）为行内特殊呈现——供给方规则选择+层距两
+// 控件不走 needs 通用控件；MinCount 复用为层距（0=任意深度哨兵、1=紧邻缺省、
+// N≥2 显式隔 N 级——与模板段距记号不同）；仅目录行可挂。
 export const CONDX_ATTACH_OPTIONS: Record<string, { value: string; label: string; needs: string[] }[]> = {
   file: [
     { value: 'fileExt', label: '扩展名是', needs: ['value'] },
@@ -285,7 +286,7 @@ export const CONDX_ATTACH_OPTIONS: Record<string, { value: string; label: string
     { value: 'childTypeIs', label: '子女类型是', needs: ['types'] },
     { value: 'parentFormat', label: '父目录名按模板', needs: ['tpl'] },
     { value: 'parentContains', label: '父目录名含词', needs: ['word'] },
-    { value: 'dirLevel', label: '位于第 N 级', needs: ['count'] }
+    { value: 'refScope', label: '位于某规则命中的目录之下', needs: ['refRule', 'gap'] }
   ],
   seq: [
     { value: 'seqMinLength', label: '序列长度 ≥N', needs: ['count'] },
@@ -293,6 +294,28 @@ export const CONDX_ATTACH_OPTIONS: Record<string, { value: string; label: string
     { value: 'parentFormat', label: '父目录名按模板', needs: ['tpl'] },
     { value: 'parentContains', label: '父目录名含词', needs: ['word'] }
   ]
+}
+
+// 作用域附件层距三选（剧本2 帧2）：「紧邻（下一级）／之下任意层／之下隔 N 级」
+//（隔 N 级档配数字输入 N≥2）；MinCount 编码=0 任意深度、1 紧邻、N≥2 显式。
+export const REFSCOPE_GAP_OPTIONS: { value: 'adjacent' | 'any' | 'n'; label: string }[] = [
+  { value: 'adjacent', label: '紧邻（下一级）' },
+  { value: 'any', label: '之下任意层' },
+  { value: 'n', label: '之下隔 N 级' }
+]
+
+// 层距档判定：MinCount → 三选档位（缺省/1=紧邻、0=任意、≥2=隔 N 级）。
+export function refScopeGapKeyOf(minCount: number | undefined): 'adjacent' | 'any' | 'n' {
+  if (minCount === 0) return 'any'
+  if (minCount != null && minCount >= 2) return 'n'
+  return 'adjacent'
+}
+
+// 层距档取值：三选档位 → MinCount（隔 N 级档保留既有 ≥2 值、缺省 2）。
+export function refScopeGapCountOf(key: 'adjacent' | 'any' | 'n', cur?: number): number {
+  if (key === 'any') return 0
+  if (key === 'n') return cur != null && cur >= 2 ? cur : 2
+  return 1
 }
 
 // 类型列表谓词（childTypeIs / seqMemberType）的封闭类型集。
@@ -396,6 +419,180 @@ export function condxTemplateChips(tpl: string): { chips?: TemplateChip[]; error
   return { chips }
 }
 
+// —— 多段目录模板（决策1）：段切分前端镜像与直译句（决策7 前端镜像） ——
+
+// 段距（两段之间的层距，裁决④）：any=true 为「之下任意层」（//）；否则 N≥1
+// 显式层距（/{N}；「/」=1 紧邻缺省）。层距 0 不可书写。
+export interface DirSegGapForm {
+  any: boolean
+  n: number
+}
+
+export interface DirTplSegmentsForm {
+  segs: string[]
+  gaps: DirSegGapForm[]
+  // seps 为段间分隔符书写原文（'/'、'//'、'/{N}'——词元分组呈现的段间分隔）。
+  seps: string[]
+  error?: string
+}
+
+// splitDirTplSegments 把目录模板按分隔符切分为段序列与段距序列（决策1 形态，
+// 镜像内核 rule_condition.go splitDirTplSegments、错误文案同源）：`/`=紧邻
+//（N=1）、`//`=任意层距、`/{N}`（花括号纯数字，N≥1）=显式层距。边界：首段前/
+// 末段后不得有分隔符；空段拒绝（连斜杠>2 同理）；非纯数字花括号不作层距记号
+//（回到段内词法）。单段（无分隔符）返回单段、段距序列为空。
+export function splitDirTplSegments(tpl: string): DirTplSegmentsForm {
+  const text = tpl || ''
+  const segs: string[] = []
+  const gaps: DirSegGapForm[] = []
+  const seps: string[] = []
+  let start = 0
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== '/') {
+      i++
+      continue
+    }
+    // 分隔符候选：吃掉连续斜杠（>2 即夹空段）。
+    let j = i
+    while (j < text.length && text[j] === '/') j++
+    const slashes = j - i
+    if (slashes > 2) {
+      return { segs: [], gaps: [], seps: [], error: `目录模板在 ${slashes} 个连斜杠处存在空段：相邻分隔符之间没有目录名` }
+    }
+    let gap: DirSegGapForm = { any: false, n: 1 }
+    let k = j
+    if (slashes === 1 && j < text.length && text[j] === '{') {
+      // /{N} 显式层距：花括号内纯数字才作层距记号，否则 `/` 按紧邻、花括号
+      // 内容留给段内词法（词表校验照常处置）。
+      let m = j + 1
+      while (m < text.length && text[m] >= '0' && text[m] <= '9') m++
+      if (m > j + 1 && m < text.length && text[m] === '}') {
+        const digits = text.slice(j + 1, m)
+        const n = Number(digits)
+        if (!Number.isInteger(n) || n < 1) {
+          return { segs: [], gaps: [], seps: [], error: `目录模板层距记号 /{${digits}} 无效：层距须为 ≥1 的整数（紧邻写 /、之下任意层写 //）` }
+        }
+        gap = { any: false, n }
+        k = m + 1
+      }
+    }
+    if (slashes === 2) gap = { any: true, n: 1 }
+    if (i === 0) return { segs: [], gaps: [], seps: [], error: '目录模板不得以分隔符开头：首段之前没有目录名' }
+    if (text.slice(start, i) === '') return { segs: [], gaps: [], seps: [], error: '目录模板存在空段：相邻分隔符之间没有目录名' }
+    if (k >= text.length) return { segs: [], gaps: [], seps: [], error: '目录模板不得以分隔符结尾：末段之后没有目录名' }
+    segs.push(text.slice(start, i))
+    gaps.push(gap)
+    seps.push(text.slice(i, k))
+    start = k
+    i = k
+  }
+  segs.push(text.slice(start))
+  return { segs, gaps, seps }
+}
+
+// condxStripGapNotation 层距记号剥离（校验用）：/{N} 显式层距记号折回「/」
+//——剥离后的模板可整体走既有词法校验（分隔符作字面、位次流跨段连续）。
+export function condxStripGapNotation(tpl: string): string {
+  return (tpl || '').replace(/\/\{([0-9]+)\}/g, '/')
+}
+
+// dirSegLevelPhrase 多段目录模板的人话句式（决策7 前端镜像，与后端
+// parse_actions.go dirSegLevelPhrase 同源）：全段距紧邻时念「目录层级 `tpl`
+//（自上而下逐级紧邻）」；含显式段距（// 任意、/{N} 跳层）时改为段间夹注形态
+//——夹注词「（任意层）」「（隔N级）」落在段与分隔符之间，句尾缀「（自上而下）」。
+// 切分失配（非多段原文）回落「目录层级 `tpl`（自上而下）」。
+export function dirSegLevelPhrase(tpl: string, gaps: DirSegGapForm[]): string {
+  const allAdjacent = gaps.every((g) => !g.any && g.n === 1)
+  if (allAdjacent) return `目录层级 ${tpl}（自上而下逐级紧邻）`
+  const split = splitDirTplSegments(tpl)
+  if (split.error || split.gaps.length !== gaps.length || split.segs.length !== gaps.length + 1) {
+    return `目录层级 ${tpl}（自上而下）`
+  }
+  let out = '目录层级 '
+  split.segs.forEach((seg, i) => {
+    out += seg
+    if (i < gaps.length) {
+      const g = gaps[i]
+      if (g.any) out += '（任意层）'
+      else if (g.n > 1) out += `（隔${g.n}级）`
+      out += '/'
+    }
+  })
+  return `${out}（自上而下）`
+}
+
+// refScopeGapWord 作用域附件层距词（决策7）：0=任意深度、1=紧邻、N≥2=隔 N 级。
+export function refScopeGapWord(minCount: number | undefined): string {
+  const n = minCount == null ? 1 : minCount
+  if (n <= 0) return '任意深度'
+  if (n >= 2) return `隔${n}级`
+  return '紧邻'
+}
+
+// refScopeAssertPhrase 作用域附件谓词的人话句式（决策7 前端镜像）：完整描述
+// 形态「位于「〈供给方规则描述〉」命中的目录之下（紧邻/任意深度/隔N级）」
+//（labelOf 解析供给方 ID→规则描述）；labelOf 缺席时回落供给方 ID 直读形态
+//「位于规则 X 命中的目录之下（…）」——与后端 refScopeAssertPhrase 同源。
+export function refScopeAssertPhrase(attach: CondxAttachForm, labelOf?: (ruleId: string) => string): string {
+  const id = attach.value || '?'
+  const gap = refScopeGapWord(attach.minCount)
+  return labelOf ? `位于「${labelOf(id)}」命中的目录之下（${gap}）` : `位于规则 ${id} 命中的目录之下（${gap}）`
+}
+
+// 一条目录行的全部作用域附件直译句（按附加条件序以「 · 」并列；非目录行恒空）。
+export function condxRefScopeNotes(condx: CondxForm | null | undefined, labelOf?: (ruleId: string) => string): string {
+  if (!condx || condx.target !== 'dir') return ''
+  const notes: string[] = []
+  for (const a of condx.attach || []) {
+    if (a && a.kind === 'refScope') notes.push(refScopeAssertPhrase(a, labelOf))
+  }
+  return notes.join(' · ')
+}
+
+// condxRefScopeProviders 条件行列表（含括号子组递归）引用的供给方规则 ID 集
+//（refScope 行扫描，按出现序去重——镜像内核 refScopeProvidersOfRows）。
+export function condxRefScopeProviders(rows: unknown): string[] {
+  const out: string[] = []
+  const walk = (list: CondxRowForm[]): void => {
+    for (const r of list || []) {
+      if (Array.isArray(r.group)) {
+        walk(r.group)
+        continue
+      }
+      for (const a of (r.condition && r.condition.attach) || []) {
+        if (a && a.kind === 'refScope' && a.value && out.indexOf(a.value) < 0) out.push(a.value)
+      }
+    }
+  }
+  walk(Array.isArray(rows) ? (rows as CondxRowForm[]) : [])
+  return out
+}
+
+// condxRowsAllDirTarget 纯目录规则判据（镜像内核 condxRowsAllDir，裁决③/自决2）：
+// 全部条件行（含括号子组递归）目标=目录且至少一行；空表/非数组不满足
+//（定群与聚合天然出局——判定只看行的目标类别，不猜布尔语义）。
+export function condxRowsAllDirTarget(rows: unknown): boolean {
+  if (!Array.isArray(rows)) return false
+  let any = false
+  const walk = (list: CondxRowForm[]): boolean => {
+    for (const r of list) {
+      if (Array.isArray(r.group) && r.group !== null) {
+        any = true
+        if (!walk(r.group)) return false
+        continue
+      }
+      if (r.condition) {
+        any = true
+        if (r.condition.target !== 'dir') return false
+      }
+    }
+    return true
+  }
+  if (!walk(rows as CondxRowForm[])) return false
+  return any
+}
+
 // 模板词元切分 chips（位次角标供呈现）：字面段与占位词 chip 交替，同词根多位
 // 各自成 chip；可多次出现词根（九词根全集）的位≥2 标注位次 occur 与寻址
 // 组名 posName（呈现层据此出「第N处」角标——复用可选 chip 的角标样式先例）。
@@ -410,8 +607,13 @@ export interface CondxTplTok extends TemplateChip {
 export function condxTplOccurChips(tpl: string): { chips?: CondxTplTok[]; error?: string } {
   const parsed = condxTemplateChips(tpl)
   if (parsed.error) return { error: parsed.error }
-  const occ = new Map<string, number>()
-  const chips = (parsed.chips || []).map((c): CondxTplTok => {
+  return { chips: condxApplyOccurs(parsed.chips || [], new Map<string, number>()) }
+}
+
+// chips 的出现序流（跨段连续编号——决策2：共享一次出现序计数，量词变体/
+// 可选词位/普通词统一计数，{任意} 与可选分隔字面不计数）。
+function condxApplyOccurs(chips: TemplateChip[], occ: Map<string, number>): CondxTplTok[] {
+  return chips.map((c): CondxTplTok => {
     const hit = condxChipBase(c)
     if (!hit) return { ...c }
     const n = (occ.get(hit.base) || 0) + 1
@@ -419,7 +621,34 @@ export function condxTplOccurChips(tpl: string): { chips?: CondxTplTok[]; error?
     if (CONDX_REPEAT_GROUPS.indexOf(hit.base) < 0) return { ...c }
     return { ...c, occur: n, posName: condxPosName(hit.base, n), repeat: hit.repeat }
   })
-  return { chips }
+}
+
+// 模板词元的分段分组（剧本1 帧2）：多段目录模板按段分组（段内 chips + 段间
+// 分隔符原文 sep），出现序流跨段共享（决策2——同词跨段按书写序连续编号，
+// 位≥2 角标跨段连续）；无分隔符模板=单组（与既有 condxTplOccurChips 同构）。
+// 段切分/词法失败返回 error——词元行静默不显示，行级校验红字承担报错。
+export interface CondxTplSegGroup {
+  toks: CondxTplTok[]
+  // sep 为与后一段之间的分隔符书写原文（'/'、'//'、'/{N}'）；末段空串。
+  sep: string
+}
+
+export function condxTplSegOccurChips(tpl: string): { groups?: CondxTplSegGroup[]; error?: string } {
+  const split = splitDirTplSegments(tpl)
+  if (split.error) return { error: split.error }
+  if (split.segs.length <= 1) {
+    const parsed = condxTemplateChips(tpl)
+    if (parsed.error) return { error: parsed.error }
+    return { groups: [{ toks: condxApplyOccurs(parsed.chips || [], new Map<string, number>()), sep: '' }] }
+  }
+  const occ = new Map<string, number>()
+  const groups: CondxTplSegGroup[] = []
+  for (let i = 0; i < split.segs.length; i++) {
+    const parsed = condxTemplateChips(split.segs[i])
+    if (parsed.error) return { error: parsed.error }
+    groups.push({ toks: condxApplyOccurs(parsed.chips || [], occ), sep: i < split.seps.length ? split.seps[i] : '' })
+  }
+  return { groups }
 }
 
 // 先序展平（Group 递归）：行号按内核口径 1 起连续计数（equal 的 againstRow、
@@ -482,13 +711,23 @@ export function condxRowNos(rows: CondxRowForm[], base = 0): number[] {
 }
 
 // 行内容概要（摘要行共用的目标+格式段）：目标标签+「格式」（含这个词→含「词」；
-// 模板→旧词归一后的模板文本）。
-export function condxRowBrief(condx: CondxForm): string {
+// 模板→旧词归一后的模板文本）；目录行多段模板=层级直译句（决策7 前端镜像，
+// 与后端 patternSummary 同源）；作用域附件句以「 · 」缀后（labelOf 供给方
+// 完整描述解析，缺席时按供给方 ID 直读——后端同源形态）。
+export function condxRowBrief(condx: CondxForm, labelOf?: (ruleId: string) => string): string {
+  const scope = condxRefScopeNotes(condx, labelOf)
+  if (condx.target === 'dir' && condx.format.mode === 'template' && (condx.format.tpl || '').indexOf('/') >= 0) {
+    const tpl = condxNormalizeTpl(condx.format.tpl || '')
+    const split = splitDirTplSegments(tpl)
+    const base = split.error ? tpl : dirSegLevelPhrase(tpl, split.gaps)
+    return scope ? `${base} · ${scope}` : base
+  }
   const target = CONDX_TARGETS.find((t) => t.value === condx.target)
   const fmt = condx.format.mode === 'contains'
     ? `含「${condx.format.word || '?'}」`
     : condxNormalizeTpl(condx.format.tpl || '?')
-  return `${target ? target.label : condx.target}「${fmt}」`
+  const body = `${target ? target.label : condx.target}「${fmt}」`
+  return scope ? `${body} · ${scope}` : body
 }
 
 // 开关「开」（叶子行入组）：原行去接词入组（组内首行无接词）、组行继承原行接词
@@ -514,8 +753,7 @@ export function condxUnwrapRow(row: CondxRowForm): void {
 // 首行接词控件不渲染（编辑器 v-if="i > 0"），残留接词在 UI 不可见、保存被内核
 // validateCondxRowsAt 拒（「首行不能带行前连接词」，顶层与组内行表同规递归）。
 // 所有条件行表移除路径统一经本函数：删普通行/删整组（CondxRowsEditor 卡与
-// 组框头）、组内删空自动拆组的组行移除（CondxRowsEditor 组框 emptied 链）、
-// 条件行转引用行（RuleEditDialog）。
+// 组框头）、组内删空自动拆组的组行移除（CondxRowsEditor 组框 emptied 链）。
 export function condxRemoveRow(rows: CondxRowForm[], idx: number): void {
   if (idx < 0 || idx >= rows.length) return
   rows.splice(idx, 1)
@@ -728,17 +966,23 @@ export function condxMoveBlockReason(root: CondxRowForm[], list: CondxRowForm[],
   return ''
 }
 
-// 摘要段带计数的行概要（值校验/附加条数与层级锚小字缀于内容概要后）。
-function condxSummaryBrief(condx: CondxForm): string {
+// 摘要段带计数的行概要（值校验/附加条数缀于内容概要后；内容概要内已含
+// 多段直译句与作用域附件句）。
+function condxSummaryBrief(condx: CondxForm, labelOf?: (ruleId: string) => string): string {
   const badges = (condx.badges || []).length ? ` ·${(condx.badges || []).length} 项值校验` : ''
   const attach = (condx.attach || []).length ? ` ·${(condx.attach || []).length} 条附加` : ''
-  const levelNote = condxDirLevelNote(condx)
-  return `${condxRowBrief(condx)}${badges}${attach}${levelNote ? ` · ${levelNote}` : ''}`
+  return `${condxRowBrief(condx, labelOf)}${badges}${attach}`
 }
 
 // 摘要行先序递归拼接（括号化）：组=圆括号包成员、接词随行、行号=全局先序号；
 // 段间分隔——首段后为「；」，其后以接词（且/或）相连；空叶子行不进摘要。
-export function condxRowsSummary(rows: CondxRowForm[]): string {
+// opts.refLabelOf 解析作用域附件供给方 ID→规则描述（完整描述形态直译句）。
+export interface CondxRowsSummaryOpts {
+  refLabelOf?: (ruleId: string) => string
+}
+
+export function condxRowsSummary(rows: CondxRowForm[], opts?: CondxRowsSummaryOpts): string {
+  const labelOf = opts && opts.refLabelOf
   const sepFor = (emitted: number, top: boolean, connector?: string): string =>
     emitted === 0 ? '' : top && emitted === 1 ? '；' : ` ${condxConnLabel(connector)} `
   const build = (list: CondxRowForm[], base: number, top: boolean): string => {
@@ -751,7 +995,7 @@ export function condxRowsSummary(rows: CondxRowForm[]): string {
         emitted += 1
         n += condxFlatRows(row.group).length
       } else if (row.condition) {
-        out += sepFor(emitted, top, row.connector) + `第${n + 1}行 ${condxSummaryBrief(row.condition)}`
+        out += sepFor(emitted, top, row.connector) + `第${n + 1}行 ${condxSummaryBrief(row.condition, labelOf)}`
         emitted += 1
         n += 1
       } else {
@@ -1042,10 +1286,17 @@ export function condxOccurDrift(before: CondxOccEntry[], after: CondxOccEntry[])
 // 重复段词（量词变体）语法与形态（越权词位带量词、裸词无分隔、序列成员不支持
 // 重复段）/ 可选记号拒绝面（{?} 空根、{任意?} 与 {公共段?}/{键?} 带问号、
 // 可选分隔两侧无字面锚）。可选词位在序列模板解禁（可选捕获不进成套键——
-// 全可选=空键守卫见 condxRowError）。target 传入时按主体镜像序列成员禁区。
-// 返回中文错误（空串=通过）。
+// 全可选=空键守卫见 condxRowError）。target 传入时按主体镜像序列成员禁区；
+// 文件名/序列行模板含「/」即拒（剧本1 帧3——层级表达属目录行，行校验与保存
+// 闸同函数）；目录行模板的层距记号 /{N} 先折回「/」（段界合法性由
+// splitDirTplSegments 在行级校验先行，此处只管段内词法——分隔符作字面、
+// 位次流跨段连续）。返回中文错误（空串=通过）。
 export function condxTemplateError(tpl: string, target?: 'file' | 'dir' | 'seq'): string {
-  const parsed = condxTemplateChips(tpl)
+  if ((target === 'file' || target === 'seq') && (tpl || '').indexOf('/') >= 0) {
+    return '文件名模板不可含「/」——层级表达属目录行；文件名里没有这个字符，写了永不命中'
+  }
+  const checkTpl = target === 'dir' ? condxStripGapNotation(tpl || '') : tpl
+  const parsed = condxTemplateChips(checkTpl)
   if (parsed.error) return parsed.error
   const chips = parsed.chips || []
   const seen = new Set<string>()
@@ -1197,8 +1448,15 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
   if (condx.format.mode === 'contains') {
     if (target !== 'dir') return '「含这个词」仅目录名目标可用'
     if (!(condx.format.word || '').trim()) return '包含词为空'
+    if ((condx.format.word || '').indexOf('/') >= 0) return '包含词不可含「/」——目录名里没有这个字符，写了永不命中'
     if (condxTemplateChips(condx.format.word || '').chips) return '包含词须为纯文字（不含占位词）'
   } else {
+    // 目录行多段模板：段界合法性（首尾分隔符/空段/层距记号值域）先行——
+    // 与内核 splitDirTplSegments 同口径同文案。
+    if (target === 'dir' && (condx.format.tpl || '').indexOf('/') >= 0) {
+      const split = splitDirTplSegments(condx.format.tpl || '')
+      if (split.error) return split.error
+    }
     const err = condxTemplateError(condx.format.tpl || '', target)
     if (err) return err
     if (target === 'seq') {
@@ -1227,6 +1485,14 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
   const placeholders = condxRowPlaceholders(condx)
   for (const a of condx.attach || []) {
     if (allowed.indexOf(a.kind) < 0) return `终结谓词「${a.kind}」不适用于${target === 'file' ? '文件名' : target === 'dir' ? '目录名' : '序列'}目标`
+    // 作用域附件（refScope）：供给方规则 ID 非空 + 层距值域（0=任意深度、
+    // 1=紧邻、N≥2 显式隔 N 级——与内核 validateCondx 同口径同文案方向）。
+    if (a.kind === 'refScope') {
+      if (!(a.value || '').trim()) return '附加条件「位于某规则命中的目录之下」须选择规则'
+      const n = a.minCount == null ? 1 : a.minCount
+      if (!(n === 0 || n === 1 || n >= 2)) return '附加条件 refScope 的层距无效（0=任意深度、1=紧邻、N≥2=隔 N 级）'
+      continue
+    }
     const opt = (CONDX_ATTACH_OPTIONS[target] || []).find((o) => o.value === a.kind)
     for (const need of opt ? opt.needs : []) {
       if (need === 'tpl' && condxTemplateError(a.tpl || '')) return `附加条件的迷你模板不完整`
@@ -1234,15 +1500,6 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
       if (need === 'count' && !(a.minCount && a.minCount > 0)) return `附加条件的数量门槛须 ≥1`
       if (need === 'types' && !(a.types || []).length) return `附加条件须选择至少一个类型`
       if (need === 'value' && !(a.value || '').trim()) return `附加条件的扩展名为空`
-    }
-  }
-  // 「位于第 1 级」与父目录谓词互斥（N≥2 合法共存）：第 1 级目录的上面是
-  // 识别根（库根）本身，没有可匹配的父目录名——行内提示与保存闸门同函数拦。
-  if (target === 'dir') {
-    const level1 = (condx.attach || []).some((a) => a.kind === 'dirLevel' && a.minCount === 1)
-    const hasParent = (condx.attach || []).some((a) => a.kind === 'parentFormat' || a.kind === 'parentContains')
-    if (level1 && hasParent) {
-      return '「位于第 1 级」与父目录条件不能同用：第 1 级目录的上面是库根本身，没有可匹配的父目录名'
     }
   }
   for (const b of condx.badges || []) {
@@ -1347,114 +1604,27 @@ export function condxNormalizeRows<T>(rows: T): T {
   return walk(rows) as T
 }
 
-// —— 组合关系直译句与类别形态推导（弹窗摘要/引用行/列表小字同源） ——
-
-// 成员规则在直译句与引用行摘要中的数据面：label=成员描述（缺省回退成员
-// ID），rows=成员当前条件行（档案现档，组合求值对该形态的判定同源）。
-export interface CondxComboMember {
-  label: string
-  rows: unknown
-}
-
-// 成员直译形态：全部条件行单一且同目标 → 按目标成段（dir/seq/file）；括号
-// 子组、行级非或多行混合目标 → 该成员回退「被「A」命中」；任一析取（或）
-// 连接 → 组合关系不可直译，整句回退通用措辞。
-type CondxMemberSegKind = 'dir' | 'seq' | 'file' | 'fallback' | 'complex'
-
-export interface CondxMemberShape {
-  seg: CondxMemberSegKind
-  label: string
-}
-
-export function condxMemberShape(member: CondxComboMember): CondxMemberShape {
-  const rows = Array.isArray(member.rows) ? (member.rows as CondxRowForm[]) : []
-  let rowCount = 0
-  let hasGroup = false
-  let hasNegated = false
-  let hasOr = false
-  const targets: string[] = []
-  const walk = (list: CondxRowForm[]): void => {
-    for (const r of list) {
-      if (r.group) {
-        hasGroup = true
-        walk(r.group)
-        continue
-      }
-      if (r.negated) hasNegated = true
-      if (r.connector === 'or') hasOr = true
-      if (r.condition) {
-        rowCount += 1
-        if (targets.indexOf(r.condition.target) < 0) targets.push(r.condition.target)
-      }
-    }
-  }
-  walk(rows)
-  if (hasOr) return { seg: 'complex', label: member.label }
-  if (hasGroup || hasNegated || rowCount === 0 || targets.length > 1) {
-    return { seg: 'fallback', label: member.label }
-  }
-  return { seg: targets[0] as CondxMemberSegKind, label: member.label }
-}
-
-// 组合关系直译句：每成员一段、段间以「、」连接；dir 段=「位于「A」命中的
-// 目录之下的」、seq 段=「属于「B」的成员文件（成套键相同≥2、落单不算）」
-// （自带名词短语）、file/回退段=「被「C」命中」；末段非 seq 时整句尾接
-// 「的文件」（段尾恰为「的」时只接「文件」）。任一成员含析取连接 → 整句
-// 回退「命中=「A」与「B」都命中的文件」。
-export function condxComboSentence(members: CondxComboMember[]): string {
-  if (!members.length) return ''
-  const shapes = members.map(condxMemberShape)
-  if (shapes.some((s) => s.seg === 'complex')) {
-    const names = members.map((m) => `「${m.label}」`)
-    if (names.length === 1) return `命中=${names[0]}命中的文件`
-    return `命中=${names.join('与')}都命中的文件`
-  }
-  const segs = shapes.map((s) => {
-    if (s.seg === 'dir') return `位于「${s.label}」命中的目录之下的`
-    if (s.seg === 'seq') return `属于「${s.label}」的成员文件（成套键相同≥2、落单不算）`
-    return `被「${s.label}」命中`
-  })
-  const body = segs.join('、')
-  if (shapes[shapes.length - 1].seg === 'seq') return `命中=${body}`
-  return `命中=${body}${body.endsWith('的') ? '文件' : '的文件'}`
-}
+// —— 类别形态推导（列表小字/行卡摘要同源） ——
 
 // 条件行的目标类别并集与形态数：label=按首次出现序去重并列（如「目录+文件」），
-// count=条件行数（括号子组递归计行，与占位词寻址的行号口径一致）；
-// levelNote=目录行层级锚（附加条件 dirLevel，N 走 count 字段）的小字并列
-// （如「第 1 级」，多行锚按行序以「 · 」连接），供各摘要面缀于「N 形态」后。
+// count=条件行数（括号子组递归计行，与占位词寻址的行号口径一致）。
 export interface CondxShapeSummary {
   label: string
   count: number
-  levelNote: string
-}
-
-// 单行的层级锚小字：目录行附加条件含 dirLevel 时按 N 值生成「第 N 级」，
-// 一行多条锚按附加条件序以「 · 」并列；非目录行或无锚返回空串。
-export function condxDirLevelNote(condx: CondxForm): string {
-  if (!condx || condx.target !== 'dir') return ''
-  const notes: string[] = []
-  for (const a of condx.attach || []) {
-    if (a.kind === 'dirLevel' && a.minCount && a.minCount > 0) notes.push(`第 ${a.minCount} 级`)
-  }
-  return notes.join(' · ')
 }
 
 export function condxShapeSummary(rows: unknown): CondxShapeSummary {
   const list = Array.isArray(rows) ? (rows as CondxRowForm[]) : []
   const flat = condxFlatRows(list)
   const targets: string[] = []
-  const notes: string[] = []
   for (const f of flat) {
     if (targets.indexOf(f.condx.target) < 0) targets.push(f.condx.target)
-    const note = condxDirLevelNote(f.condx)
-    if (note && notes.indexOf(note) < 0) notes.push(note)
   }
   const names = targets.map((t) => {
     const hit = CONDX_TARGETS.find((c) => c.value === t)
     return hit ? hit.label : t
   })
-  return { label: names.join('+'), count: flat.length, levelNote: notes.join(' · ') }
+  return { label: names.join('+'), count: flat.length }
 }
 
 // —— 卡片摘要派生（规则编辑面总览：条件卡/产出卡的一行摘要字段，纯函数） ——
@@ -1464,8 +1634,11 @@ export function condxShapeSummary(rows: unknown): CondxShapeSummary {
 export const CONDX_CARD_TPL_MAX = 48
 
 // 条件卡片摘要字段：序号+目标词+模板文本（截断）+复杂度徽标计数（附加×N/校验×N/
-// 非/多值）+接词+层级锚小字。multiValue=模板含重复段词（多值产出）；levelNote=
-// 目录行层级锚（「第 N 级」）。
+// 非/多值）+接词+作用域附件句。multiValue=模板含重复段词（多值产出）；levelNote
+// 为目录行作用域附件（refScope）直译句（剧本2 帧2「{集名} · 位于「…」命中的
+// 目录之下（紧邻）」式后缀）——字段名沿用既有卡片消费面（CondxRowsEditor 的
+// 「· 」小字），语义已由层级锚（已退役）改为作用域句。opts.refLabelOf 解析
+// 供给方 ID→规则描述（完整描述形态）；缺席时按供给方 ID 直读（后端同源形态）。
 export interface CondxRowCardView {
   no: number
   targetLabel: string
@@ -1480,9 +1653,11 @@ export interface CondxRowCardView {
 
 // 卡片摘要选项：appendExt=模板文本尾接扩展名谓词取值（聚合轨行卡呈现——模板对
 // 去扩展名的文件名正文求值、扩展名由 fileExt 谓词承载，拼接后卡片按轨行整体
-// 形态呈现，如模板 {作品标识}.{任意} 配谓词 .srt 显示为 {作品标识}.{任意}.srt）。
+// 形态呈现，如模板 {作品标识}.{任意} 配谓词 .srt 显示为 {作品标识}.{任意}.srt）；
+// refLabelOf=作用域附件供给方 ID→规则描述的解析器（缺省按 ID 直读）。
 export interface CondxRowCardOpts {
   appendExt?: boolean
+  refLabelOf?: (ruleId: string) => string
 }
 
 // 行的扩展名谓词取值依序拼接（扩展名自带前导点；无扩展名谓词为空串）。
@@ -1510,9 +1685,18 @@ export function condxRowCardView(row: CondxRowForm, no: number, opts?: CondxRowC
     }
   }
   const target = CONDX_TARGETS.find((t) => t.value === condx.target)
-  const base = condx.format.mode === 'contains'
-    ? `含「${condx.format.word || '?'}」`
-    : condxNormalizeTpl(condx.format.tpl || '')
+  // 目录行多段模板：模板文本=层级直译句（决策7——卡片按直译句呈现）；其余
+  // 形态维持模板原文（旧词归一）。
+  let base: string
+  if (condx.format.mode === 'contains') {
+    base = `含「${condx.format.word || '?'}」`
+  } else if (condx.target === 'dir' && (condx.format.tpl || '').indexOf('/') >= 0) {
+    const tpl = condxNormalizeTpl(condx.format.tpl || '')
+    const split = splitDirTplSegments(tpl)
+    base = split.error ? tpl : dirSegLevelPhrase(tpl, split.gaps)
+  } else {
+    base = condxNormalizeTpl(condx.format.tpl || '')
+  }
   const raw = opts && opts.appendExt ? `${base}${condxRowExtSuffix(condx)}` : base
   return {
     no,
@@ -1523,7 +1707,7 @@ export function condxRowCardView(row: CondxRowForm, no: number, opts?: CondxRowC
     negated: !!row.negated,
     multiValue: condxRowAllPlaceholders(condx).some((p) => p.repeat),
     connectorLabel: condxConnLabel(row.connector),
-    levelNote: condxDirLevelNote(condx)
+    levelNote: condxRefScopeNotes(condx, opts && opts.refLabelOf)
   }
 }
 
@@ -1538,8 +1722,8 @@ export function condxGroupWordOf(group: string): string {
 }
 
 // 产出卡片摘要（单行）：维度 ← 来源摘要（capture/refCapture 携「第 N 行·{词}」
-// 寻址、常量携值）+角色/仅序列成员小缀。refLabelOf 由调用方传入（被引成员的显示
-// 名解析，保持本函数纯——不挂档案数据源）。
+// 寻址、常量携值）+角色/仅序列成员小缀。refLabelOf 由调用方传入（供给方规则的
+// 显示名解析，保持本函数纯——不挂档案数据源）。
 export interface ExtractionCardSource {
   dimension: string
   from: string

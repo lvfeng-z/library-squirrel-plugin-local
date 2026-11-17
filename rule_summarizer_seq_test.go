@@ -247,8 +247,8 @@ func TestSeqFormSuggestionUnmatchedNote(t *testing.T) {
 	if strings.Contains(sugg.Summary, "同形序列成员") {
 		t.Fatalf("对不上段组合不应产出序列形态摘要: %q", sugg.Summary)
 	}
-	if !strings.Contains(sugg.Summary, "一级目录") {
-		t.Fatalf("既有目录层映射形态应照旧: %q", sugg.Summary)
+	if !strings.Contains(sugg.Summary, "目录层级") {
+		t.Fatalf("既有目录层映射形态应照旧（目录层级句式）: %q", sugg.Summary)
 	}
 	if len(sugg.Notes) != 1 || sugg.Notes[0] != seqNameUnmatchedNote {
 		t.Fatalf("应附说明行: %+v", sugg.Notes)
@@ -288,8 +288,8 @@ func TestSeqFormSuggestionNonGroupSample(t *testing.T) {
 	if strings.Contains(sugg.Summary, "同形序列成员") || len(sugg.Notes) != 0 {
 		t.Fatalf("非群样本应完全走既有形态: %q %+v", sugg.Summary, sugg.Notes)
 	}
-	if !strings.Contains(sugg.Summary, "一级目录") {
-		t.Fatalf("既有目录层映射形态应照旧: %q", sugg.Summary)
+	if !strings.Contains(sugg.Summary, "目录层级") {
+		t.Fatalf("既有目录层映射形态应照旧（目录层级句式）: %q", sugg.Summary)
 	}
 }
 

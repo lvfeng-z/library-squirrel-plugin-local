@@ -195,16 +195,15 @@ func (c *PathClassifier) meaningsFromRules(level int, dirName string) []PathMean
 
 // dirMeaningReplay 目录层含义回放（纯求值，无 IO、不弹问）：识别全景元素1 的
 // Meanings 与 MeaningRuleID 同源同序出自本实现。对给定目录链（dirNames = 库根
-// 下各层目录名，目标层为末元素，须为真实目录名——祖先层供组合规则门段判定）
+// 下各层目录名，目标层为末元素，须为真实目录名——祖先层供供给方门段判定）
 // 构造合成匹配输入（文件名留空使文件名规则不参与），逐条求值可表达目录层
-// 含义的启用规则；组合规则（refs 非空）与提取段同语义地先过门段——被引成员
-// 全体在同一合成输入上命中才参与（runRefGateStage，与 runExtractionStage 同一
-// 实现），门过把成员捕获快照注入本规则作用域（refCapture 提取与 when 限定名
-// 可用），且同受「之下不含其身」约束（自身目录行锚定层与被引目录成员命中层
-// 重合时整体不中）；命中落点须恰为目标层目标名（祖先层命中不算覆盖），再执行
-// 提取动作把声明转回路径含义并按（类型,名字）去重。返回（含义序列, 首个命中
-// 规则 ID——不论该规则是否产出含义，与元素1「被哪条规则覆盖」口径一致）；
-// 空链返回零值。
+// 含义的启用规则；条件行挂 refScope 附件的规则与提取段同语义地先过门段
+//（runRefGateStage，与 runExtractionStage 同一实现——needed 自 refScope 行
+// 扫描），供给方命中层集透传进本规则作用域（层距阶梯判据数据源）、门过把
+// 供给方捕获快照注入本规则作用域（refCapture 提取与 when 限定名可用）；命中
+// 落点须恰为目标层目标名（祖先层命中不算覆盖），再执行提取动作把声明转回
+// 路径含义并按（类型,名字）去重。返回（含义序列, 首个命中规则 ID——不论该
+// 规则是否产出含义，与元素1「被哪条规则覆盖」口径一致）；空链返回零值。
 func dirMeaningReplay(rules []RuleEntry, dirNames []string, lib *LibraryIndex) ([]PathMeaning, string) {
 	if len(dirNames) == 0 {
 		return nil, ""
@@ -225,25 +224,15 @@ func dirMeaningReplay(rules []RuleEntry, dirNames []string, lib *LibraryIndex) (
 			// 兄弟群组规则定群文件归属，不表达目录层含义
 			continue
 		}
-		ctx := &ParseContext{DirNames: dirNames, Depth: len(dirNames)}
-		if len(rule.Refs) > 0 {
-			// 组合规则门段（与提取段同语义）：refs 全体成员在本回放输入上命中
-			// 才参与；门过注入成员捕获快照（限定键通道）。
-			if !gate.allHit(rule.Refs) {
-				continue
-			}
-			injectRefSnapshots(ctx, gate, rule.Refs)
-		}
+		// 供给方命中层集透传（与提取段同语义——文件级事实，先行求值一次）。
+		ctx := &ParseContext{DirNames: dirNames, Depth: len(dirNames), RefScopeDepths: gate.dirHitDepths}
+		// 作用域附件消费规则：供给方捕获快照按本规则供给方集注入（限定键通道）。
+		injectRefSnapshots(ctx, gate, refScopeProvidersOf(&rule))
 		if !rule.Pattern.Evaluate(in, lib, ctx) {
 			continue
 		}
 		if hit, ok := ctx.LastDirHit(); !ok || hit.Depth != depth || hit.Name != dirName {
 			// 命中未落在本层目录名上（祖先层命中），不算覆盖
-			continue
-		}
-		if len(rule.Refs) > 0 && gate.anchorCoincides(rule.Refs, depth) {
-			// 之下不含其身（与提取段同判据）：目标目录即被引目录成员命中的
-			// 目录 → 组合不覆盖本层。
 			continue
 		}
 		if firstHitRuleID == "" {

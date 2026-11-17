@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -101,8 +102,14 @@ const (
 	CondxAttachChildDirCount = "childDirCount"
 	// 目录：子女类型是指定类型之一。
 	CondxAttachChildTypeIs = "childTypeIs"
-	// 目录：位于第 N 级（自识别根数起，根直下=第 1 级；N 复用 count 字段承载）。
-	CondxAttachDirLevel = "dirLevel"
+	// 目录：位于某条规则命中的目录之下（作用域附件，目录行专属——阶段2）。
+	// Value 复用为供给方规则 ID（须为纯目录规则，保存期校验）；MinCount 复用
+	// 为层距：1=紧邻（下一级，UI 缺省档）、N≥2=显式隔 N 级、0=任意深度哨兵
+	// 值（与多段模板段距记号不同——模板段距不可写 0，附件的 0 是合法哨兵）。
+	// 层距阶梯判据（裁决⑥）：候选层 c 合格 ⟺ 供给方命中且 ∃D∈供给方命中层集
+	// s.t. 层距=0 时 c>D、层距=N 时 c−D=N——其身（c=D）与 above-form 天然
+	// 不可成立。
+	CondxAttachRefScope = "refScope"
 	// 目录/文件/序列：父目录名整条按迷你模板（上级断言，1 级）。
 	CondxAttachParentFormat = "parentFormat"
 	// 目录/文件/序列：父目录名含某词（上级断言，1 级）。
@@ -126,8 +133,8 @@ var attachAllowed = map[CondxTargetKind]map[string]bool{
 	CondxTargetDir: {
 		CondxAttachChildrenAllFormat: true, CondxAttachChildrenAtLeastN: true,
 		CondxAttachChildDirCount: true, CondxAttachChildTypeIs: true,
-		CondxAttachDirLevel:     true,
-		CondxAttachParentFormat: true, CondxAttachParentContains: true,
+		CondxAttachParentFormat:  true, CondxAttachParentContains: true,
+		CondxAttachRefScope:      true,
 	},
 	CondxTargetSeq: {
 		CondxAttachSeqMinLength: true, CondxAttachSeqMemberType: true,
@@ -143,7 +150,6 @@ var attachNeedsWord = map[string]bool{CondxAttachParentContains: true}
 var attachNeedsCount = map[string]bool{
 	CondxAttachChildrenAllFormat: true, CondxAttachChildrenAtLeastN: true,
 	CondxAttachChildDirCount: true, CondxAttachFileSizeMin: true, CondxAttachSeqMinLength: true,
-	CondxAttachDirLevel: true,
 }
 
 // CondxAnchor 为主体锚：v4 仅接受 nil（「基于其他条件」为二期能力，R8——
@@ -523,6 +529,15 @@ func condxClassEscape(s string) string {
 	return sb.String()
 }
 
+// deriveState 为模板推导的跨段共享状态（多段目录模板）：出现计数（位次分立，
+// 决策2 跨段连续编号——整条模板一次出现序流）与 {作品标识}×{作品号} 互斥登记
+// 均按整条模板计；单段推导不共享（每次新建），行为与既有完全一致。
+type deriveState struct {
+	occ        map[string]int
+	sawWork    bool
+	sawWorkID  bool
+}
+
 // deriveCondxTemplate 把占位词模板推导为锚定正则：字面段转义；数字类 {日期}
 // 取 [0-9]+、字母数字类（序号/作品号）取 [0-9A-Za-z]+；前字面段以开括号收尾
 // 的占位词取排除配对
@@ -546,6 +561,14 @@ func condxClassEscape(s string) string {
 // 原文、捕获组名列表、重复段描述列表与可选词位捕获组名列表；词表外/重复/
 // 相邻占位词与非法重复段返回中文错误。
 func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condxRepeatDesc, []string, error) {
+	return deriveCondxTemplateState(tpl, opts, nil)
+}
+
+// deriveCondxTemplateState 为带共享推导状态的推导入口：st 非 nil 时出现计数
+// 与 {作品标识}×{作品号} 互斥登记跨段延续（多段目录模板逐段推导共用一址——
+// 同一占位词跨段出现按整条模板出现序连续编号，决策2）；st 为 nil 时新建，
+// 单段行为与既有完全一致。
+func deriveCondxTemplateState(tpl string, opts deriveOpts, st *deriveState) (string, []string, []condxRepeatDesc, []string, error) {
 	if strings.TrimSpace(tpl) == "" {
 		return "", nil, nil, nil, fmt.Errorf("格式模板不能为空")
 	}
@@ -553,24 +576,28 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condx
 	if err != nil {
 		return "", nil, nil, nil, err
 	}
+	if st == nil {
+		st = &deriveState{occ: make(map[string]int)}
+	}
 	// 同词根出现计数（位次分立）：可多次出现全集放行、组名按位次生成；
-	// {公共段}/{键} 第二次出现维持既有拒绝（condxPosOccur）。
-	occ := make(map[string]int)
+	// {公共段}/{键} 第二次出现维持既有拒绝（condxPosOccur）。occ 住共享
+	// 状态——多段共享时跨段连续编号。
+	occ := st.occ
 	// {作品标识} 与 {作品号} 同模板互斥登记：整词标识 vs 编号段语义近邻，并用
-	// 易混用——普通词与可选词位两种书写面统一经此裁决。
-	sawWork, sawWorkID := false, false
+	// 易混用——普通词与可选词位两种书写面统一经此裁决（多段共享时按整条
+	// 模板计）。
 	noteIDPair := func(word, en string) error {
 		switch en {
 		case "work":
-			if sawWorkID {
+			if st.sawWorkID {
 				return fmt.Errorf("模板占位词 {%s} 不可与 {作品号} 同模板并用：{作品标识} 取整词标识、{作品号} 取编号段，语义近邻易混用，请按文件名形态择一", word)
 			}
-			sawWork = true
+			st.sawWork = true
 		case "workid":
-			if sawWork {
+			if st.sawWork {
 				return fmt.Errorf("模板占位词 {%s} 不可与 {作品标识} 同模板并用：{作品标识} 取整词标识、{作品号} 取编号段，语义近邻易混用，请按文件名形态择一", word)
 			}
-			sawWorkID = true
+			st.sawWorkID = true
 		}
 		return nil
 	}
@@ -873,6 +900,111 @@ func deriveCondxTemplate(tpl string, opts deriveOpts) (string, []string, []condx
 	return sb.String(), captures, repeats, optCaptures, nil
 }
 
+// dirTplSegment 多段目录模板的单段推导产物：段锚定正则（^…$，匹配单个目录
+// 名）与该段捕获/重复段——绑定按段进行，各段命中各自目录名后逐段
+// bindCondxCaptures。
+type dirTplSegment struct {
+	expr     string
+	captures []string
+	repeats  []condxRepeatDesc
+}
+
+// dirSegGap 段距（两段之间的层距，裁决④）：Any=true 为「之下任意层」（//）；
+// 否则 N≥1 显式层距（/{N}；「/」=1 紧邻，缺省形态）。层距 0 不可书写。
+type dirSegGap struct {
+	Any bool `json:"any,omitempty"`
+	N   int  `json:"n,omitempty"`
+}
+
+// splitDirTplSegments 把目录模板按分隔符切分为段序列与段距序列（决策1 形态：
+// `/`=紧邻〔N=1〕、`//`=任意层距、`/{N}`〔花括号纯数字，N≥1〕=显式层距）。
+// 边界条件：首段前/末段后不得有分隔符；空段拒绝（相邻分隔符之间没有目录段，
+// 三个及以上连斜杠同理）；层距 0 不可书写、非纯数字花括号不作层距记号（回到
+// 段内词法，由既有词表校验处置）。单段（无分隔符）返回单段切片、段距序列
+// 为空——调用方走现行单段路径零变化。
+func splitDirTplSegments(tpl string) ([]string, []dirSegGap, error) {
+	var segs []string
+	var gaps []dirSegGap
+	start := 0
+	i := 0
+	for i < len(tpl) {
+		if tpl[i] != '/' {
+			i++
+			continue
+		}
+		// 分隔符候选：吃掉连续斜杠（>2 即夹空段）。
+		j := i
+		for j < len(tpl) && tpl[j] == '/' {
+			j++
+		}
+		slashes := j - i
+		if slashes > 2 {
+			return nil, nil, fmt.Errorf("目录模板在 %d 个连斜杠处存在空段：相邻分隔符之间没有目录名", slashes)
+		}
+		gap := dirSegGap{N: 1}
+		k := j
+		if slashes == 1 && j < len(tpl) && tpl[j] == '{' {
+			// /{N} 显式层距：花括号内纯数字才作层距记号，否则 `/` 按紧邻、
+			// 花括号内容留给段内词法（词表校验照常处置）。
+			m := j + 1
+			for m < len(tpl) && tpl[m] >= '0' && tpl[m] <= '9' {
+				m++
+			}
+			if m > j+1 && m < len(tpl) && tpl[m] == '}' {
+				n, aerr := strconv.Atoi(tpl[j+1 : m])
+				if aerr != nil || n < 1 {
+					return nil, nil, fmt.Errorf("目录模板层距记号 /{%s} 无效：层距须为 ≥1 的整数（紧邻写 /、之下任意层写 //）", tpl[j+1:m])
+				}
+				gap.N = n
+				k = m + 1
+			}
+		}
+		if slashes == 2 {
+			gap = dirSegGap{Any: true}
+		}
+		if i == 0 {
+			return nil, nil, fmt.Errorf("目录模板不得以分隔符开头：首段之前没有目录名")
+		}
+		if tpl[start:i] == "" {
+			return nil, nil, fmt.Errorf("目录模板存在空段：相邻分隔符之间没有目录名")
+		}
+		if k >= len(tpl) {
+			return nil, nil, fmt.Errorf("目录模板不得以分隔符结尾：末段之后没有目录名")
+		}
+		segs = append(segs, tpl[start:i])
+		gaps = append(gaps, gap)
+		start = k
+		i = k
+	}
+	last := tpl[start:]
+	if len(segs) == 0 {
+		return []string{last}, nil, nil
+	}
+	segs = append(segs, last)
+	return segs, gaps, nil
+}
+
+// deriveDirTplSegments 多段目录模板逐段推导（段内词表/量词/可选词位/惰性段
+// 语义原样）：共享一次出现序流（决策2——同一占位词跨段出现按整条模板出现序
+// 连续编号，段内出现序与段序拼接即整条书写序），返回段模式序列+段距序列。
+// 单段模板等价于 deriveCondxTemplate。
+func deriveDirTplSegments(tpl string) ([]dirTplSegment, []dirSegGap, error) {
+	segs, gaps, err := splitDirTplSegments(tpl)
+	if err != nil {
+		return nil, nil, err
+	}
+	st := &deriveState{occ: make(map[string]int)}
+	out := make([]dirTplSegment, 0, len(segs))
+	for _, seg := range segs {
+		expr, captures, repeats, _, err := deriveCondxTemplateState(seg, deriveOpts{}, st)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = append(out, dirTplSegment{expr: expr, captures: captures, repeats: repeats})
+	}
+	return out, gaps, nil
+}
+
 // deriveCondxContains 把包含词推导为锚定正则（含这个词：任意位置字面包含）。
 func deriveCondxContains(word string) (string, error) {
 	if word == "" {
@@ -882,10 +1014,25 @@ func deriveCondxContains(word string) (string, error) {
 }
 
 // condxCapturesOf 返回条件格式段推导出的捕获组英文名列表与重复段描述列表
-// （重复段机械透传给调用方，语义消费在阶段2 绑定层）。
+// （重复段机械透传给调用方，语义消费在阶段2 绑定层）。目录目标的模板可多段
+// （决策1）：捕获名与重复段按段序拼接（跨段出现序连续编号——决策2），供
+// 提取/when/值校验按整条模板口径引用（如 r1.tag__2 取第 2 段的第 2 处）。
 func condxCapturesOf(c *Condx) ([]string, []condxRepeatDesc, error) {
 	if c.Format.Mode == CondxFormatContains {
 		return nil, nil, nil
+	}
+	if c.Target == CondxTargetDir {
+		segs, _, err := deriveDirTplSegments(c.Format.Tpl)
+		if err != nil {
+			return nil, nil, err
+		}
+		var captures []string
+		var repeats []condxRepeatDesc
+		for _, s := range segs {
+			captures = append(captures, s.captures...)
+			repeats = append(repeats, s.repeats...)
+		}
+		return captures, repeats, nil
 	}
 	_, captures, repeats, _, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{allowKey: c.Target == CondxTargetSeq})
 	return captures, repeats, err
@@ -893,7 +1040,7 @@ func condxCapturesOf(c *Condx) ([]string, []condxRepeatDesc, error) {
 
 // validateCondx 校验单条条件：目标合法、格式可推导、值校验引用存在、终结谓词
 // 属目标封闭集且必填字段齐备、主体锚为 nil。
-func validateCondx(c *Condx, ownOrdinal int) error {
+func validateCondx(c *Condx) error {
 	switch c.Target {
 	case CondxTargetFile, CondxTargetDir, CondxTargetSeq:
 	default:
@@ -907,11 +1054,24 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 	}
 	switch c.Format.Mode {
 	case CondxFormatTemplate:
-		if _, _, _, _, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{
-			allowKey:   c.Target == CondxTargetSeq,
-			requireSeq: c.Target == CondxTargetSeq,
-		}); err != nil {
-			return fmt.Errorf("格式模板无效: %w", err)
+		if c.Target == CondxTargetDir {
+			// 目录目标：多段模板（决策1）——段界合法性（首尾/空段/层距值域）
+			// 与逐段推导共用一址（单段时与既有校验等价，零变化）。
+			if _, _, err := deriveDirTplSegments(c.Format.Tpl); err != nil {
+				return fmt.Errorf("格式模板无效: %w", err)
+			}
+		} else {
+			// 文件/序列目标：文件名不含「/」，含之即恒不命中的死写法——
+			// 保存期拒绝（自决3，静默死形态升级校验期拒绝）。
+			if strings.Contains(c.Format.Tpl, "/") {
+				return fmt.Errorf("格式模板不可含「/」：层级表达属目录行，文件名里没有这个字符，写了永不命中")
+			}
+			if _, _, _, _, err := deriveCondxTemplate(c.Format.Tpl, deriveOpts{
+				allowKey:   c.Target == CondxTargetSeq,
+				requireSeq: c.Target == CondxTargetSeq,
+			}); err != nil {
+				return fmt.Errorf("格式模板无效: %w", err)
+			}
 		}
 	case CondxFormatContains:
 		if c.Target == CondxTargetSeq {
@@ -919,6 +1079,11 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 		}
 		if c.Format.Word == "" {
 			return fmt.Errorf("包含词不能为空")
+		}
+		// 包含词按字面匹配单个目录名/文件名，含「/」恒不命中——保存期拒绝
+		//（自决3：「含这个词」问法不多段）。
+		if strings.Contains(c.Format.Word, "/") {
+			return fmt.Errorf("包含词不可含「/」：目录名与文件名里都没有这个字符，写了永不命中")
 		}
 	default:
 		return fmt.Errorf("未知的格式模式: %q（template / contains）", string(c.Format.Mode))
@@ -995,6 +1160,18 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 		if a.Kind == CondxAttachFileExt && a.Value == "" {
 			return fmt.Errorf("附加条件 fileExt 的扩展名不能为空")
 		}
+		if a.Kind == CondxAttachRefScope {
+			// 字段族：Value=供给方规则 ID（必填）；MinCount=层距（0=任意深度
+			// 哨兵、1=紧邻、N≥2 显式——负数无义拒绝）。供给方的存在性/合格性
+			// （悬空/自引用/链式/纯目录）属跨规则校验，见 rule_profile.go 的
+			// validateRefScopeWiring（第二遍）。
+			if a.Value == "" {
+				return fmt.Errorf("附加条件 refScope 的供给方规则 ID 不能为空")
+			}
+			if a.MinCount < 0 {
+				return fmt.Errorf("附加条件 refScope 的层距无效（0=任意深度、1=紧邻、N≥2=隔 N 级），得到 %d", a.MinCount)
+			}
+		}
 		if a.Kind == CondxAttachChildTypeIs || a.Kind == CondxAttachSeqMemberType {
 			if len(a.Types) == 0 {
 				return fmt.Errorf("附加条件 %q 的类型列表不能为空", a.Kind)
@@ -1008,23 +1185,6 @@ func validateCondx(c *Condx, ownOrdinal int) error {
 			}
 		}
 	}
-	// 「位于第 1 级」与父目录谓词互斥（N≥2 合法共存）：第 1 级目录的上面是
-	// 识别根（库根）本身，没有可匹配的父目录名——校验期即拦。
-	if c.Target == CondxTargetDir {
-		level1, hasParent := false, false
-		for _, a := range c.Attach {
-			if a.Kind == CondxAttachDirLevel && a.MinCount == 1 {
-				level1 = true
-			}
-			if a.Kind == CondxAttachParentFormat || a.Kind == CondxAttachParentContains {
-				hasParent = true
-			}
-		}
-		if level1 && hasParent {
-			return fmt.Errorf("「位于第 1 级」与父目录条件不能同用：第 1 级目录的上面是库根本身，没有可匹配的父目录名")
-		}
-	}
-	_ = ownOrdinal
 	return nil
 }
 
@@ -1057,7 +1217,7 @@ func validateCondxRowsAt(rows []CondxRow, base int) error {
 		}
 		if row.Condition != nil {
 			ordinal := base + prefix + 1
-			if err := validateCondx(row.Condition, ordinal); err != nil {
+			if err := validateCondx(row.Condition); err != nil {
 				return fmt.Errorf("第 %d 行: %w", ordinal, err)
 			}
 			for _, b := range row.Condition.Badges {
@@ -1179,7 +1339,7 @@ func compileCondxRow(row *CondxRow, counter *int) (Pattern, error) {
 // 主体终结谓词）+ 值校验门。fileSizeMin 因扫描快照暂无文件尺寸（数据缺口）
 // 显式拒绝；其余谓词与值校验全部接入求值。
 func compileCondx(c *Condx, ordinal int) (Pattern, error) {
-	if err := validateCondx(c, ordinal); err != nil {
+	if err := validateCondx(c); err != nil {
 		return nil, err
 	}
 	var gates []Pattern
@@ -1265,29 +1425,37 @@ func compileFileCondx(c *Condx) (Pattern, error) {
 }
 
 // compileDirCondx 编译目录主体：格式 + 终结谓词集（子女全部/至少N按迷你格式、
-// 子目录数、子女类型、父目录两式——父目录谓词作用于**命中层目录**的父）。
+// 子目录数、子女类型、父目录两式——父目录谓词作用于**命中层目录**的父；多段
+// 模板的命中层=落地段层，谓词随落地段求值，自决6）。模板可多段（决策1）：
+// 单段走现行 DirSubjectPattern 路径零变化；多段走 Segments 求值路径（段模式
+// 序列+段距序列）。
 func compileDirCondx(c *Condx) (Pattern, error) {
-	var expr string
-	var captures []string
-	var repeats []condxRepeatDesc
-	var err error
+	var subject *DirSubjectPattern
 	if c.Format.Mode == CondxFormatContains {
-		expr, err = deriveCondxContains(c.Format.Word)
+		expr, err := deriveCondxContains(c.Format.Word)
+		if err != nil {
+			return nil, err
+		}
+		subject, err = newDirSubjectPattern(expr, nil, nil)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		expr, captures, repeats, _, err = deriveCondxTemplate(c.Format.Tpl, deriveOpts{})
+		segs, gaps, err := deriveDirTplSegments(c.Format.Tpl)
+		if err != nil {
+			return nil, err
+		}
+		if len(segs) == 1 {
+			subject, err = newDirSubjectPattern(segs[0].expr, segs[0].captures, segs[0].repeats)
+		} else {
+			subject, err = newMultiDirSubjectPattern(c.Format.Tpl, segs, gaps)
+		}
 		if err != nil {
 			return nil, err
 		}
 	}
-	subject, err := newDirSubjectPattern(expr, captures, repeats)
-	if err != nil {
-		return nil, err
-	}
 	for _, a := range c.Attach {
-		assert := DirAssert{Kind: a.Kind, MinCount: a.MinCount, Types: a.Types, Word: a.Word}
+		assert := DirAssert{Kind: a.Kind, MinCount: a.MinCount, Types: a.Types, Word: a.Word, Value: a.Value}
 		switch a.Kind {
 		case CondxAttachChildrenAllFormat, CondxAttachChildrenAtLeastN, CondxAttachParentFormat:
 			mexpr, _, _, _, err := deriveCondxTemplate(a.Tpl, deriveOpts{allowKey: true})

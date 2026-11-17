@@ -137,6 +137,10 @@ func loadProfile(store ProfileStore) (*RuleProfile, []*skippedRuleEntry, []error
 // SaveProfile 把规则档案序列化为多态 JSON 后写入 KV；档案为 nil 时按空档案写入。
 // 写入前先把现行档案原文存入单代备份键（写前备份）：现行档案缺席（首次写入）时
 // 不产生备份；备份写入失败即中止保存——覆写前恒有一代档案可回退。
+// 载入跳过条目的原文（preservedSkipRaw，由 Load 族填充）在此原样回写——任何
+// 经 Load→改→Save 的写档往返（UpdateProfile 单点串行入口族等）都不物理丢弃
+// 跳过条目；同 ID 新条目已在规则列表（用户以同 ID 重写该条目）时旧原文被
+// 顶替退场（修复出口，不双写）。
 func SaveProfile(store ProfileStore, p *RuleProfile) error {
 	if store == nil {
 		return fmt.Errorf("规则档案存储不可用，无法保存档案")
@@ -149,6 +153,12 @@ func SaveProfile(store ProfileStore, p *RuleProfile) error {
 	if err != nil {
 		return fmt.Errorf("规则档案序列化失败: %w", err)
 	}
+	if len(profile.preservedSkipRaw) > 0 {
+		data, err = mergePreservedSkipRaw(data, profile.preservedSkipRaw, profile.Rules)
+		if err != nil {
+			return fmt.Errorf("规则档案序列化失败: %w", err)
+		}
+	}
 	if err := backupProfileBeforeOverwrite(store); err != nil {
 		return err
 	}
@@ -156,6 +166,47 @@ func SaveProfile(store ProfileStore, p *RuleProfile) error {
 		return fmt.Errorf("写入规则档案（键 %q）失败: %w", RuleProfileKVKey, err)
 	}
 	return nil
+}
+
+// rawProfileRuleEntries 读取档案原文的逐条目原文字节（与 rules 数组下标对齐）：
+// 写档保真通道的数据源——载入跳过条目凭此保留原文字节，SaveProfile 回写时
+// 原样落档。原文不可解析或条目数与已反序列化规则数对不上时返回 nil（防御：
+// 正常载入路径不可达——data 已成功反序列化为 ruleProfileJSON）。
+func rawProfileRuleEntries(data []byte, ruleCount int) []json.RawMessage {
+	var doc rawProfileEntriesJSON
+	if err := json.Unmarshal(data, &doc); err != nil || len(doc.Rules) != ruleCount {
+		return nil
+	}
+	return doc.Rules
+}
+
+// mergePreservedSkipRaw 把载入跳过条目的原文并入写档产物：跳过条目追加在
+// rules 数组尾部（不复活、不再造，字节原样）；ID 与已载入规则重复的原文被
+// 顶替退场（用户以同 ID 重写了该条目——修复出口，避免同 ID 双写）。顶层其余
+// 字段按写档产物原值保留（schemaVersion 归一等语义不变）。
+func mergePreservedSkipRaw(data []byte, raws []json.RawMessage, rules []RuleEntry) ([]byte, error) {
+	var doc rawProfileEntriesJSON
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("规则档案反序列化失败: %w", err)
+	}
+	present := make(map[string]bool, len(rules))
+	for i := range rules {
+		present[rules[i].ID] = true
+	}
+	for _, raw := range raws {
+		var idOnly struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(raw, &idOnly) == nil && idOnly.ID != "" && present[idOnly.ID] {
+			continue
+		}
+		doc.Rules = append(doc.Rules, raw)
+	}
+	out, err := json.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("规则档案序列化失败: %w", err)
+	}
+	return out, nil
 }
 
 // backupProfileBeforeOverwrite 写前备份：把现行档案原文存入单代备份键；现行

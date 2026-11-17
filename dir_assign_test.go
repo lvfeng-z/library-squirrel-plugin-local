@@ -6,7 +6,7 @@ package main
 // 全景目录的错误路径、clearDirAssignments 删本层及更深条目+计数=子树内清除前
 // 有效赋值非空文件数+应答范围判定增补（survivorDirKey/survivorDims）、泛化后
 // 赋值保留（双源互证——2026-10-25 用户裁决废除消费剥离；单文件与子树两作用
-// 域；标记置供值条目）、裁决生成物不标记、目录寻址的总结与泛化分派。
+// 域；标记置供值条目）、裁决赋值化不置已泛化标记、目录寻址的总结与泛化分派。
 // 断言形态：值口径全部经 resolveFileAssignment 就近解析取值（条目化后直查
 // 键位不再与写形态对应，解析断言=值语义保持的证明）；另辅条目结构断言锚定
 // 新表示形态（目录条目键在场、例外文件键不因目录赋值新造）。
@@ -432,9 +432,10 @@ func TestMarkScopedAssignmentsMarksSupplyingEntries(t *testing.T) {
 	}
 }
 
-// TestAdjudicateDoesNotConsumeAssignments 裁决生成物不消费赋值（负断言）：裁决
-// 规则声明的值与赋值一致时，赋值仍在场且不带已泛化标记。
-func TestAdjudicateDoesNotConsumeAssignments(t *testing.T) {
+// TestAdjudicateDoesNotMarkAssignmentsGeneralized 裁决赋值化不置已泛化标记：
+// 裁决写入的赋值（含并入的既有维度）不带 Generalized 标记（泛化标记专属
+// 泛化入口的谱系记录）。
+func TestAdjudicateDoesNotMarkAssignmentsGeneralized(t *testing.T) {
 	root := t.TempDir()
 	m, _ := dirAssignFixture(t, root)
 
@@ -442,7 +443,7 @@ func TestAdjudicateDoesNotConsumeAssignments(t *testing.T) {
 	if _, _, err := m.ApplyAssignment(root, rel, SessionAssignment{Title: "A"}); err != nil {
 		t.Fatalf("写入赋值失败: %v", err)
 	}
-	if _, err := m.ApplyAdjudication(root, rel, DimTitle, adjudicationInput{
+	if _, _, _, err := m.ApplyAdjudication(root, rel, DimTitle, adjudicationInput{
 		Mode: adjudicateModePick, PickIndex: 0,
 	}); err != nil {
 		t.Fatalf("裁决失败: %v", err)
@@ -453,7 +454,7 @@ func TestAdjudicateDoesNotConsumeAssignments(t *testing.T) {
 	}
 	assign := resolveOf(sess, rel)
 	if assign.Title != "A" || assign.Generalized {
-		t.Fatalf("裁决生成物不应消费赋值: %+v", assign)
+		t.Fatalf("裁决赋值不应置已泛化标记: %+v", assign)
 	}
 }
 

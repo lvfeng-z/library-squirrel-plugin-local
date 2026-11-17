@@ -313,9 +313,9 @@ func deriveWorkSetDraft(snap *RecognitionSnapshot, ws *workSetContext) (workSetD
 // 目录名分段（括号段+分隔符感知）取稳定格式（段数/包裹/分隔一致，数字段值
 // 可不同），类推断（纯数字段值→数字类 `\d+` 通配、其余→泛化段）；默认集名=
 // 末非数字段捕获、作者=一级目录 Artist 壳剥壳（壳在场时）。条目：作者条目
-// （structDirPlan 同款：层深锚定+ancestorDir 剥壳）+ 目录格式条目
-// （LocationPattern 层深+段格式正则带命名捕获，提取 FromCapture——内核层
-// ancestor 捕获绑入通路）。全员自检：每成员目录命中格式且集名捕获非空。
+// （structDirPlan 同款：目录行壳形模板+捕获剥壳）+ 目录格式条目
+// （目录行分段模板带命名捕获，提取 FromCapture）。全员自检：每成员目录命中
+// 格式且集名捕获非空。
 func deriveWorkSetDirDraft(snap *RecognitionSnapshot, ws *workSetContext) (workSetDraft, string) {
 	cand := ws.cand
 	rep := &cand.Members[ws.repIdx]
@@ -1165,8 +1165,8 @@ func buildWorkSetAdjustedRules(ws *workSetContext, snap *RecognitionSnapshot, pl
 		rules = append(rules, sibling)
 	}
 
-	// ② 目录层维度条目（同层合一条，复用 structDirPlan；锚定名取实际目录名、
-	// 行随层深锚——与总结器产物同款，AE 决策2）。
+	// ② 目录层维度条目（同层合一条，复用 structDirPlan；锚定名取实际目录名
+	//——普通目录行，不附层级锚）。
 	dirPlans := make(map[string]*structDirPlan)
 	var dirOrder []string
 	for _, d := range dims {
@@ -1439,8 +1439,9 @@ func segValueAtOrdinal(els []SnapEl, ordinal int) string {
 // condxTplFromEls 底座——集名组合区间 {集名} 一位占位（区间原文含边界括号
 // 一并入位）、维度指派段占该维度词（剥壳段括号留字面）、其余元素泛化消费
 // （语义元素同名词、序号 {序号}、普通位 {任意}）。目录锚定线索 → 行 1 目录
-// 字面/壳形模板（{任意} 盖内名，行随「位于第 N 级」层深锚——AE 决策5），
-// 文件行随其后（提取 Row 按实际行序引用）。
+// 字面/壳形模板（{任意} 盖内名；普通目录行——任意祖先层命中，同名异层目录
+// 也进锚定范围，收紧由文件名条目自身的模板承担），文件行随其后（提取 Row
+// 按实际行序引用）。
 // MemberOnly 勾选时集名提取附「仅序列成员产出」when 原子。自检由调用方的
 // 全员校验完成。
 func buildWorkSetFilenameRule(ws *workSetContext, rep *SnapCandMember, repFile *SnapFile, plan *workSetSegPlan, spanIdx []int, captureByEl map[int]string, anchor *SetRuleClue, in setRuleAdjustInput) (RuleEntry, error) {
@@ -1472,16 +1473,15 @@ func buildWorkSetFilenameRule(ws *workSetContext, rep *SnapCandMember, repFile *
 	fileOrdinal := 1
 	desc := ""
 	if anchor != nil {
-		anchorTpl, anchorLevel, aerr := workSetAnchorTemplate(rep.RelPath, anchor)
+		anchorTpl, aerr := workSetAnchorTemplate(rep.RelPath, anchor)
 		if aerr != nil {
 			return RuleEntry{}, aerr
 		}
-		// 层深锚（AE 决策5）：锚定行随附「位于第 N 级」——同名目录异层不再
-		// 跨层接管，回退=编辑弹窗删锚。
+		// 锚定行为普通目录行（自决7）：任意祖先层命中——同名异层目录也进
+		// 锚定范围，集规则文件名条件的收紧由文件行模板自身承担。
 		rows = append(rows, CondxRow{Condition: &Condx{
 			Target: CondxTargetDir,
 			Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: anchorTpl},
-			Attach: []CondxAttach{{Kind: CondxAttachDirLevel, MinCount: anchorLevel}},
 		}})
 		fileOrdinal = 2
 		desc = "；目录锚定「" + anchor.Value + "」"
@@ -1756,36 +1756,35 @@ func writeSeqElementCapture(b *strings.Builder, els []SnapEl, i int, captureByEl
 	writeSeqElementConsumption(b, els, i)
 }
 
-// workSetAnchorTemplate 目录锚定线索 → v4 目录行模板与层深（structDirPlan
-// 同款形态：剥壳变体=壳形模板前缀字面+{任意}+后缀字面（不引用，纯锚定）、
-// 原文名=整名字面）。返回层深供调用方随行附「位于第 N 级」层深锚——AE 决策5
-// ：锚定行为构造时取证（名+层）的忠实表达，同名目录异层不再跨层接管，回退=
-// 编辑弹窗删锚。锚定名取成员实际所在目录名，线索值与目录不符时回可读错误。
-func workSetAnchorTemplate(repRelPath string, anchor *SetRuleClue) (string, int, error) {
+// workSetAnchorTemplate 目录锚定线索 → v4 目录行模板（structDirPlan 同款
+// 形态：剥壳变体=壳形模板前缀字面+{任意}+后缀字面（不引用，纯锚定）、原名
+// =整名字面）。锚定行为普通目录行（任意祖先层命中）——锚定线索只有单层
+// 目录名，无从构造多段链；同名异层目录也进锚定范围，收紧由文件名条目自身
+// 的模板承担。锚定名取成员实际所在目录名，线索值与目录不符时回可读错误。
+func workSetAnchorTemplate(repRelPath string, anchor *SetRuleClue) (string, error) {
 	n := structClueLevelOf(anchor.Ref)
 	if n <= 0 {
-		return "", 0, fmt.Errorf("目录锚定线索 %q 的层级无法解析", anchor.Ref)
+		return "", fmt.Errorf("目录锚定线索 %q 的层级无法解析", anchor.Ref)
 	}
 	dirName := dirNameAtLevel(repRelPath, n)
 	if dirName == "" {
-		return "", 0, fmt.Errorf("成员路径上无第 %d 层目录，目录锚定 %q 无法指派", n, anchor.Ref)
+		return "", fmt.Errorf("成员路径上无第 %d 层目录，目录锚定 %q 无法指派", n, anchor.Ref)
 	}
 	tpl := dirName
 	literalOK := condxTemplateBraceOK(dirName)
 	if anchor.Kind == structClueDirLevelStripped {
 		shell, inner, ok := stripShell(dirName)
 		if !ok || inner != anchor.Value {
-			return "", 0, fmt.Errorf("目录锚定的剥壳线索 %q 与成员所在目录 %q 不符", anchor.Ref, dirName)
+			return "", fmt.Errorf("目录锚定的剥壳线索 %q 与成员所在目录 %q 不符", anchor.Ref, dirName)
 		}
 		tpl = shell.Prefix + "{任意}" + shell.Suffix
-		// 花括号守卫只对字面段（structDirPlan 同款）：{任意} 为合法占位词，
-		// 曾误查整条模板致剥壳锚定恒败（AE 阶段2 首个正例锚定测试暴露）。
+		// 花括号守卫只对字面段（structDirPlan 同款）：{任意} 为合法占位词。
 		literalOK = condxTemplateBraceOK(shell.Prefix) && condxTemplateBraceOK(shell.Suffix)
 	}
 	if !literalOK {
-		return "", 0, fmt.Errorf("目录锚定名 %q 含花括号，与格式模板词法冲突", dirName)
+		return "", fmt.Errorf("目录锚定名 %q 含花括号，与格式模板词法冲突", dirName)
 	}
-	return tpl, n, nil
+	return tpl, nil
 }
 
 // previewWorkSetRules 集规则命中预览（全库求值，与 previewSequenceFormRules

@@ -35,7 +35,10 @@ func (p *RowSubjectPattern) patternMarker() {}
 // 目录命中、并回群组产物，随后全部值校验门对主上下文求值（任一门未中整行不中；
 // 未绑定引用保守为假，与 CondExpr 的未绑定语义一致）。
 func (p *RowSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseContext) bool {
-	sub := &ParseContext{DirNames: ctx.DirNames, Depth: ctx.Depth}
+	// 行级子上下文透传供给方命中层集（风险6 继承面第二核对点）：目录行
+	// refScope 附件的层距阶梯谓词在行内主体求值中读 ParseContext.RefScopeDepths
+	//（文件级事实，只读；捕获/命中仍从空开始）。
+	sub := &ParseContext{DirNames: ctx.DirNames, Depth: ctx.Depth, RefScopeDepths: ctx.RefScopeDepths}
 	if !p.Inner.Evaluate(in, lib, sub) {
 		return false
 	}

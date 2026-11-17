@@ -76,10 +76,9 @@ const (
 	// 切分）与库内对应集合精确等值比对，命中者产出声明——查不到不提取
 	//（确认非线索口径）；多值与歧义语义见 rule_scan.go（图形帧收敛档 2026-10-23）。
 	FromScan ExtractionFrom = "scan"
-	// FromRefCapture 表示从被引用成员规则的捕获值取值（组合规则专用）：被引
-	// 成员规则由本规则 refs 声明、动作以 RefRule 指明成员——取值经限定键
-	//「成员ID.rN.组名」注入，成员捕获私有作用域不变（语义见规则组合引用方案
-	// 阶段3）。
+	// FromRefCapture 表示从供给方规则的捕获值取值（作用域附件消费规则专用）：
+	// 供给方由本规则目录行的 refScope 附件声明、动作以 RefRule 指明——取值经
+	// 限定键「供给方ID.rN.组名」注入，供给方捕获私有作用域不变。
 	FromRefCapture ExtractionFrom = "refCapture"
 )
 
@@ -104,8 +103,8 @@ const (
 	// RuleSourceQna 表示问答向导生成的规则；手动解析的泛化生成沿用此来源
 	//（「问答=规则生成器」语义：与用户交互产出规则的一切实入口同源标注）。
 	RuleSourceQna RuleSource = "qna"
-	// RuleSourceAdjudication 表示冲突裁决生成的规则（用户对声明冲突裁决后产出的
-	// 组合规则）。
+	// RuleSourceAdjudication 表示冲突裁决来源（历史词汇：裁决流已改写会话赋值、
+	// 不再产出规则；来源值保留供存量 v4 档条目载入解析）。
 	RuleSourceAdjudication RuleSource = "adjudication"
 	// RuleSourcePreset 表示预置种子规则：首次档案初始化写入的出厂条目，此后与
 	// 用户条目同权（可见、可启停、可编辑、可复制），「恢复预置」入口兜底误删。
@@ -261,10 +260,10 @@ type ExtractionAction struct {
 	Dimension MetadataDimension `json:"dimension"`
 	// From 为取值来源。
 	From ExtractionFrom `json:"from"`
-	// RefRule 为 From 为 refCapture 时的被引成员规则 ID：须为本规则 refs 列表
-	// 内的成员（组合规则专用；成员捕获以限定键「成员ID.rN.组名」注入，取值
-	// 见规则组合引用方案阶段3）。空串在非 refCapture 动作上无意义，载入时
-	// 对 refCapture 动作要求非空且属本条 refs。
+	// RefRule 为 From 为 refCapture 时的供给方规则 ID：须为本规则条件行
+	// refScope 附件引用的供给方（作用域附件消费规则专用；供给方捕获以限定键
+	// 「供给方ID.rN.组名」注入）。空串在非 refCapture 动作上无意义，载入时
+	// 对 refCapture 动作要求非空且属本规则供给方集。
 	RefRule string `json:"refRule,omitempty"`
 	// CaptureName 为 From 为 capture 时的捕获组名；v4 条件规则（Row>0）中为
 	// 占位词的英文组名，实际绑定名为行号前缀形态 rN.组名（见 Row 字段）。
@@ -313,13 +312,13 @@ func (a ExtractionAction) Apply(ruleID string, ctx *ParseContext) (MetadataDecla
 		}
 		value, source = values[len(values)-1], SourceFilename
 	case FromRefCapture:
-		// 被引规则捕获（组合规则专用）：取值序对齐 FromCapture——先库名单
-		// 小标的规范名限定键（成员ID.rN.组名#canon）后原始限定键；Row 缺省
-		//（0/负）按第 1 行兜底（validateExtractions 对 refCapture 不做行
-		// 存在性核——成员声明在该管线时点不可得，求值侧兜底与 FromCapture
-		// 分支同型）。限定键未注入/未绑定＝来源缺失，零产出不报错（保守
-		// 取向）；值来自成员规则对文件名/目录名的解析捕获，产出声明来源与
-		// FromCapture 同款 SourceFilename，归属组合规则自身 ID。
+		// 供给方捕获（作用域附件消费规则专用）：取值序对齐 FromCapture——先
+		// 库名单小标的规范名限定键（供给方ID.rN.组名#canon）后原始限定键；
+		// Row 缺省（0/负）按第 1 行兜底（validateExtractions 对 refCapture
+		// 不做行存在性核——供给方声明在该管线时点不可得，求值侧兜底与
+		// FromCapture 分支同型）。限定键未注入/未绑定＝来源缺失，零产出不
+		// 报错（保守取向）；值来自供给方规则对文件名/目录名的解析捕获，
+		// 产出声明来源与 FromCapture 同款 SourceFilename，归属消费规则自身 ID。
 		row := a.Row
 		if row <= 0 {
 			row = 1
@@ -522,21 +521,8 @@ type RuleEntry struct {
 	// Aggregate 为分轨入口（聚合规则专属）：类型先行+轨行角色分配+处置维度。
 	// 元数据规则不得携带（载入拒绝）。
 	Aggregate *AggregateProduction `json:"aggregate,omitempty"`
-	// Refs 为被引用的成员规则 ID 列表（组合规则）：非空即组合规则——求值前提
-	// 为全部成员规则命中，提取动作可经 refCapture 引用成员捕获值。空/缺省=
-	// 普通规则（omitempty 保证旧档零迁移、JSON 往返等价；档案结构版本维持 4）。
-	// 成员须在本档案规则集内、不得自引用、自身不得再携带 refs（一期禁止嵌套
-	// 组合引用），违规条目载入时跳过并告警。
-	//
-	// 门语义边界：门为严格门——全部成员命中才放行，任一成员未命中即组合规则
-	// 整体零产出、不进命中清单；成员停用、不在场、或属定群形态均按未命中。定群
-	// 形态的成员（恰一行序列条件且无提取动作，只把成套文件聚成群卡、不产生文件
-	// 级命中）在门段被跳过，组合引用它恒不命中。成员仍独立求值：自身提取动作
-	// 照常执行并产出声明、命中照常计入自身命中清单；要让它只作引用条件，须清空
-	// 其提取动作。
-	Refs []string `json:"refs,omitempty"`
 	// Conditions 为 v4 条件行列表（目标三分+格式+附加+小标）：v4 档案的
-	// 持久化语法。机器规则生产方（问答/泛化/裁决）与档案装载同一来源；
+	// 持久化语法。机器规则生产方（问答/泛化）与档案装载同一来源；
 	// Pattern 为其编译缓存。过渡期（生产方迁移完成为止）直接设置 Pattern
 	// 的内部构造仍可求值，但不可落档。
 	Conditions []CondxRow `json:"-"`
@@ -549,19 +535,28 @@ type RuleEntry struct {
 }
 
 // CurrentSchemaVersion 为规则档案当前的结构版本。
-// v4：机器规则一律为条件行组合形态（CondxRow 树：目标主体〔文件/目录/序列〕
-// +格式模板/包含词 +终结谓词与锚），生产方（泛化/裁决/问答/集规则）全部直出
-// v4，内置规则退休为例子模板、不再参与求值。v1..v3 旧档停用：结构版本不是 4
-// 的档案整体拒载（零迁移——旧机器规则对用户无保留价值，重置后由新一代生产
+// v5：目录条件行的多段模板与作用域附件（refScope）词汇落地（段界 `/`·`//`·
+// `/{N}`、目录行作用域附件）；规则级引用（refs/组合规则）退役——v4 档内 refs
+// 非空条目读入跳过+告警，「位于第 N 级」词条（dirLevel）随多段模板落地废弃，
+// 携带该词条的条目按未知词条先例载入即拒。v4 档案读入保留（升级用户自身存量
+// 的读入迁移）：读入照常、保存归一 v5；v1..v3 旧档停用：结构版本双读集外的
+// 档案整体拒载（零迁移——旧机器规则对用户无保留价值，重置后由新一代生产
 // 方重新生成）。
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // RuleProfile 为规则档案：一批规则的容器。
 type RuleProfile struct {
-	// SchemaVersion 为档案结构版本，载入时校验（非 v4 档案整体拒载）。
+	// SchemaVersion 为档案结构版本，载入时校验（v4/v5 双读，其余整体拒载）。
 	SchemaVersion int `json:"schemaVersion"`
 	// Rules 为档案内的规则列表。
 	Rules []RuleEntry `json:"rules"`
+	// preservedSkipRaw 为载入跳过条目的原文字节（逐条 json.RawMessage）——写档
+	// 保真通道（写档往返不物理丢弃跳过条目）：跳过条目不回填 Rules（不复活、
+	// 不参与求值），凭此字段随档案内存对象存续，SaveProfile 时原样回写档案，
+	// 后续载入照常跳过+告警，直到用户显式删除（原文层手术）或以同 ID 重写该
+	// 条目（写档侧顶替退场）。仅载入路径填充；MarshalJSON 不含（序列化形态
+	// 由 SaveProfile 的合并步骤决定）。
+	preservedSkipRaw []json.RawMessage
 }
 
 // 模式 JSON 的 kind 判别值。
@@ -610,9 +605,9 @@ type patternJSON struct {
 	Inner *patternJSON `json:"inner,omitempty"`
 }
 
-// ruleEntryJSON 为 RuleEntry 的序列化中间结构：v4 条目以 conditions（条件行
+// ruleEntryJSON 为 RuleEntry 的序列化中间结构：v4 起条目以 conditions（条件行
 // 列表）为唯一语法（pattern 缺席）；pattern（模式树多态中间表示）为 v3 及
-// 更早条目的旧形态，档案版本翻转为仅认 4 后载入侧即拒绝。
+// 更早条目的旧形态，档案版本翻转为仅认 v4+ 后载入侧即拒绝。
 type ruleEntryJSON struct {
 	ID          string               `json:"id"`
 	Description string               `json:"description"`
@@ -621,7 +616,6 @@ type ruleEntryJSON struct {
 	Category    RuleCategory         `json:"category,omitempty"`
 	Identity    []IdentityPart       `json:"identity,omitempty"`
 	Aggregate   *AggregateProduction `json:"aggregate,omitempty"`
-	Refs        []string             `json:"refs,omitempty"`
 	Conditions  []CondxRow           `json:"conditions,omitempty"`
 	Pattern     *patternJSON         `json:"pattern,omitempty"`
 	Extractions []ExtractionAction   `json:"extractions"`
@@ -913,7 +907,6 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 			Category:    rule.Category,
 			Identity:    rule.Identity,
 			Aggregate:   rule.Aggregate,
-			Refs:        rule.Refs,
 			Conditions:  rule.Conditions,
 			Extractions: rule.Extractions,
 			Synthesis:   rule.Synthesis,
@@ -931,7 +924,6 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 		Category:    rule.Category,
 		Identity:    rule.Identity,
 		Aggregate:   rule.Aggregate,
-		Refs:        rule.Refs,
 		Pattern:     pj,
 		Extractions: rule.Extractions,
 		Synthesis:   rule.Synthesis,
@@ -956,48 +948,24 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 			return nil, err
 		}
 	}
-	// 组合规则（refs 非空）的空条件表落档形态：omitempty 序列化把空数组写成
-	// 无 conditions 键（与 pattern 缺席同形），构造时补回空表走同款处理——
-	// 否则空条件组合「可存不可载」（2026-10-26 live-test 抓出的二次缺陷）。
-	if rj.Conditions == nil && rj.Pattern == nil && len(rj.Refs) > 0 {
-		rj.Conditions = []CondxRow{}
-	}
+	// 组合规则（refs 非空）的空条件表落档形态已随 refs 退役消亡：空条件表
+	// 一律拒绝（无条件行的普通规则=恒命中，违背 v4 语义）。
 	if rj.Conditions != nil {
 		if rj.Pattern != nil {
 			return nil, fmt.Errorf("规则 %q 同时携带 conditions 与 pattern（非法形态）", rj.ID)
 		}
-		// 组合规则（refs 非空）允许空条件表：命中前提全部由成员门段承担
-		//（剧本一·帧6「引用 N 条成员规则；（无条件行）」，前端编辑面同口径
-		// 放行），模式编译为恒真合取（And 零子式全真）；非组合规则空条件表
-		// 仍拒（无条件行的普通规则=恒命中，违背 v4 语义）。行引用存在性
-		// 校验照走（空声明集——组合的捕获引用只能走 refCapture 限定键）。
 		if len(rj.Conditions) == 0 {
-			if len(rj.Refs) == 0 {
-				return nil, fmt.Errorf("规则 %q 的条件行非法: 条件行列表不能为空", rj.ID)
-			}
-			if err := validateExtractions(rj.ID, rj.Refs, And{}, rj.Extractions, map[string]bool{}, true); err != nil {
-				return nil, err
-			}
-			return &RuleEntry{
-				ID:          rj.ID,
-				Description: rj.Description,
-				Source:      rj.Source,
-				Enabled:     rj.Enabled,
-				Category:    rj.Category,
-				Identity:    rj.Identity,
-				Aggregate:   rj.Aggregate,
-				Refs:        rj.Refs,
-				Conditions:  rj.Conditions,
-				Pattern:     And{},
-				Extractions: rj.Extractions,
-				Synthesis:   rj.Synthesis,
-			}, nil
+			return nil, fmt.Errorf("规则 %q 的条件行非法: 条件行列表不能为空", rj.ID)
 		}
 		pat, err := CompileRuleConditions(rj.Conditions)
 		if err != nil {
 			return nil, fmt.Errorf("规则 %q 的条件行非法: %w", rj.ID, err)
 		}
-		if err := validateExtractionsCore(rj.ID, rj.Refs, pat, rj.Extractions,
+		// 限定键/refCapture 的成员资格口径：本规则供给方集（refScope 行扫描）
+		// ——validateExpr 的限定名放行与 refCapture 的 refRule∈供给方集校验
+		// 共用；跨规则校验在第二遍（validateRefScopeWiring）。
+		providers := refScopeProvidersOfRows(rj.Conditions)
+		if err := validateExtractionsCore(rj.ID, providers, pat, rj.Extractions,
 			declaredConditionCaptures(rj.Conditions), declaredConditionRepeatCaptures(rj.Conditions), true); err != nil {
 			return nil, err
 		}
@@ -1009,7 +977,6 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 			Category:    rj.Category,
 			Identity:    rj.Identity,
 			Aggregate:   rj.Aggregate,
-			Refs:        rj.Refs,
 			Conditions:  rj.Conditions,
 			Pattern:     pat,
 			Extractions: rj.Extractions,
@@ -1023,7 +990,7 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("规则 %q 的模式非法: %w", rj.ID, err)
 	}
-	if err := validateExtractions(rj.ID, rj.Refs, pat, rj.Extractions, declaredPatternCaptures(pat), false); err != nil {
+	if err := validateExtractions(rj.ID, nil, pat, rj.Extractions, declaredPatternCaptures(pat), false); err != nil {
 		return nil, err
 	}
 	return &RuleEntry{
@@ -1034,7 +1001,6 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 		Category:    rj.Category,
 		Identity:    rj.Identity,
 		Aggregate:   rj.Aggregate,
-		Refs:        rj.Refs,
 		Pattern:     pat,
 		Extractions: rj.Extractions,
 		Synthesis:   rj.Synthesis,
@@ -1079,7 +1045,7 @@ func condxTplTailKnownExt(tpl string) (string, bool) {
 }
 
 // validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（轨行+作品标识
-// 声明+分轨入口）、与其他机制互斥（组合引用/提取动作/模式树旧形态）、轨行
+// 声明+分轨入口）、与其他机制互斥（提取动作/模式树旧形态）、轨行
 // 只收普通条件行（平行选择器——括号子组、行级非、跨行相等值校验均拒绝：
 // 轨行独立求值，相等门引用他行绑定恒不可得）、标识与分轨的行号及捕获名引用
 // 存在、处置维度 metadata 留位值载入即拒（沿未知词条「载入即拒绝」先例——
@@ -1092,9 +1058,6 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 	}
 	if len(rj.Identity) == 0 {
 		return fmt.Errorf("聚合规则 %q 缺少作品标识声明（identity）", rj.ID)
-	}
-	if len(rj.Refs) > 0 {
-		return fmt.Errorf("聚合规则 %q 不得为组合规则（聚合类别与 refs 互斥）", rj.ID)
 	}
 	if len(rj.Extractions) > 0 {
 		return fmt.Errorf("聚合规则 %q 不得携带提取动作（产出为聚合归属，非元数据声明）", rj.ID)
@@ -1129,6 +1092,13 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 		}
 		if row.Condition == nil {
 			return fmt.Errorf("聚合规则 %q 第 %d 行为括号子组：轨行须为普通条件行（平行选择器，无且/或组合）", rj.ID, i+1)
+		}
+		for _, a := range row.Condition.Attach {
+			// 聚合轨行禁作用域附件（自决4）：聚合段不跑门段通道，附件无处
+			// 求值——载入即拒，不留静默死形态。
+			if a.Kind == CondxAttachRefScope {
+				return fmt.Errorf("聚合规则 %q 第 %d 行携带作用域附件（refScope）：聚合段不跑门段通道，附件无处求值", rj.ID, i+1)
+			}
 		}
 		for _, b := range row.Condition.Badges {
 			if b.Kind == CondxBadgeEqual {
@@ -1205,15 +1175,15 @@ var knownDimensions = map[MetadataDimension]bool{
 // validateExtractions 逐条校验提取动作的承载字段（构造期静态校验，与条件
 // 编译同管线）：裁决取值缺常量、捕获引用不存在（v4 行引用指向未声明行/组名
 // ——Row 缺省按第 1 行兜底，与 validateCaptureExtractionDeclared 同口径；
-// 前端编辑面第 1 行省略 row 字段为合法形态）、被引规则捕获（refCapture）的
-// refRule 缺失/不在本规则 refs 内或缺少 captureName、条件表达式引用不存在
-// （谓词来源/维度、捕获组名不在声明集合内；限定键形操作数「成员ID.rN.组名」
-// 按本条 refs 放行，见 validateExpr）或类型不匹配时返回含规则 ID 与动作序号
-// 的中文错误。refs 为本条规则的被引成员 ID 列表（组合规则；普通
-// 规则为空），declaredCaptures 为该规则形态（条件行或模式树）声明的捕获组
-// 名集合（v4 为行号前缀形态，rowPrefixed=true）。
-func validateExtractions(ruleID string, refs []string, pattern Pattern, actions []ExtractionAction, declaredCaptures map[string]bool, rowPrefixed bool) error {
-	return validateExtractionsCore(ruleID, refs, pattern, actions, declaredCaptures, nil, rowPrefixed)
+// 前端编辑面第 1 行省略 row 字段为合法形态）、供给方捕获（refCapture）的
+// refRule 缺失/不在本规则供给方集内或缺少 captureName、条件表达式引用不存在
+// （谓词来源/维度、捕获组名不在声明集合内；限定键形操作数「供给方ID.rN.组名」
+// 按本规则供给方集放行，见 validateExpr）或类型不匹配时返回含规则 ID 与动作序号
+// 的中文错误。providers 为本条规则的作用域供给方 ID 集（refScope 行扫描，按
+// 出现序去重；无附件规则为空），declaredCaptures 为该规则形态（条件行或模式
+// 树）声明的捕获组名集合（v4 为行号前缀形态，rowPrefixed=true）。
+func validateExtractions(ruleID string, providers []string, pattern Pattern, actions []ExtractionAction, declaredCaptures map[string]bool, rowPrefixed bool) error {
+	return validateExtractionsCore(ruleID, providers, pattern, actions, declaredCaptures, nil, rowPrefixed)
 }
 
 // validateExtractionsCore 同 validateExtractions，另收 repeatCaptures（本条规则
@@ -1221,7 +1191,7 @@ func validateExtractions(ruleID string, refs []string, pattern Pattern, actions 
 // 动作引用重复段词照常放行（提取口径含重复段词），但生效条件（when）引用时按
 // 三面引用禁区的统一文案拒绝——条件口径=提取口径剔除重复段词。nil 视作无重复
 // 段词（v3 模式树等形态）。
-func validateExtractionsCore(ruleID string, refs []string, pattern Pattern, actions []ExtractionAction, declaredCaptures, repeatCaptures map[string]bool, rowPrefixed bool) error {
+func validateExtractionsCore(ruleID string, providers []string, pattern Pattern, actions []ExtractionAction, declaredCaptures, repeatCaptures map[string]bool, rowPrefixed bool) error {
 	// 条件可引用口径：提取口径剔除重复段词（when 的声明存在性校验用）。
 	conditionCaptures := declaredCaptures
 	if len(repeatCaptures) > 0 {
@@ -1236,18 +1206,18 @@ func validateExtractionsCore(ruleID string, refs []string, pattern Pattern, acti
 	for i := range actions {
 		action := &actions[i]
 		if action.From == FromRefCapture {
-			// 被引规则捕获（组合规则专用）：refRule 必填且须属本条 refs；
-			// captureName 必填（对齐 FromCapture 的必填口径）。
+			// 供给方捕获（作用域附件消费规则专用）：refRule 必填且须属本条
+			// 供给方集；captureName 必填（对齐 FromCapture 的必填口径）。
 			if action.RefRule == "" {
-				return fmt.Errorf("规则 %q 的第 %d 条提取动作为被引规则捕获（refCapture）但缺少被引规则 ID（refRule）",
+				return fmt.Errorf("规则 %q 的第 %d 条提取动作为供给方捕获（refCapture）但缺少被引规则 ID（refRule）",
 					ruleID, i+1)
 			}
-			if !containsString(refs, action.RefRule) {
-				return fmt.Errorf("规则 %q 的第 %d 条提取动作引用的规则 %q 不在本规则的 refs 列表内",
+			if !containsString(providers, action.RefRule) {
+				return fmt.Errorf("规则 %q 的第 %d 条提取动作引用的规则 %q 不在本规则的作用域供给方集内（refScope 附件未引用它）",
 					ruleID, i+1, action.RefRule)
 			}
 			if action.CaptureName == "" {
-				return fmt.Errorf("规则 %q 的第 %d 条提取动作为被引规则捕获（refCapture）但缺少捕获组名（captureName）",
+				return fmt.Errorf("规则 %q 的第 %d 条提取动作为供给方捕获（refCapture）但缺少捕获组名（captureName）",
 					ruleID, i+1)
 			}
 		}
@@ -1293,7 +1263,7 @@ func validateExtractionsCore(ruleID string, refs []string, pattern Pattern, acti
 		if action.When == nil {
 			continue
 		}
-		if _, err := validateExpr(ruleID, action.When, conditionCaptures, repeatCaptures, refs); err != nil {
+		if _, err := validateExpr(ruleID, action.When, conditionCaptures, repeatCaptures, providers); err != nil {
 			return fmt.Errorf("规则 %q 的第 %d 条提取动作条件非法: %w", ruleID, i+1, err)
 		}
 	}
@@ -1315,15 +1285,15 @@ const (
 // 逻辑组合接非布尔子式、相等比较两侧类型不一致）时返回中文错误。
 // declaredCaptures 为条件可引用口径的捕获组名集合（提取口径剔除重复段词）；
 // repeatCaptures 为重复段词捕获名标记集（其值多值产出、暂不能用于生效条件）；
-// refs 为本条规则的被引成员 ID 列表（组合规则）——限定键形捕获操作数
-// 「成员ID.rN.组名」（显式限定形，可带 #canon 后缀）按其放行为字符串操作数
-// （求值侧 conditionOperandValue 从注入区取值，两侧共用 parseRefCaptureName
-// 解析、口径一致），被引成员不在 refs 内即拒绝。行/组在被引成员声明中的
-// 存在性不做核验——成员声明在本管线时点不可得（逐规则构造先于跨规则汇集），
-// 求值侧未绑定即取值不可用、含该操作数的比较为假（保守取向，与 refCapture
-// 提取动作的形核口径一致）；被引成员侧的重复段词引用由跨规则校验
-// （validateRuleRefs）在第二遍拒绝。
-func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures map[string]bool, refs []string) (exprValueType, error) {
+// providers 为本条规则的作用域供给方 ID 集（refScope 行扫描）——限定键形
+// 捕获操作数「供给方ID.rN.组名」（显式限定形，可带 #canon 后缀）按其放行
+// 为字符串操作数（求值侧 conditionOperandValue 从注入区取值，两侧共用
+// parseRefCaptureName 解析、口径一致），被引供给方不在集内即拒绝。行/组在
+// 被引供给方声明中的存在性不做核验——供给方声明在本管线时点不可得（逐规则
+// 构造先于跨规则汇集），求值侧未绑定即取值不可用、含该操作数的比较为假
+// （保守取向，与 refCapture 提取动作的形核口径一致）；供给方侧的重复段词
+// 引用由跨规则校验（validateRefScopeWiring）在第二遍拒绝。
+func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures map[string]bool, providers []string) (exprValueType, error) {
 	if e == nil {
 		return "", fmt.Errorf("规则 %q 的条件表达式不能为空", ruleID)
 	}
@@ -1347,12 +1317,12 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures m
 				condxRepeatRefError(condxRepeatEnOfCapture(e.CaptureName)))
 		}
 		if memberID, _, ok := parseRefCaptureName(e.CaptureName); ok {
-			// 限定键形操作数（组合规则 when 引用成员捕获，显式形）：成员在
-			// 本条 refs 内即放行为字符串操作数；非组合规则（refs 空）恒拒绝
-			//——限定名不是自有捕获的旁路（发现6：限定键为引用成员捕获值的
-			// 唯一通道）。
-			if !containsString(refs, memberID) {
-				return "", fmt.Errorf("规则 %q 的条件表达式引用的成员规则 %q 不在本规则的 refs 列表内（限定名操作数「成员ID.rN.组名」只能引用被引成员的捕获）", ruleID, memberID)
+			// 限定键形操作数（消费规则 when 引用供给方捕获，显式形）：供给方
+			// 在本条供给方集内即放行为字符串操作数；无附件规则（供给方集空）
+			// 恒拒绝——限定名不是自有捕获的旁路（发现6：限定键为引用供给方
+			// 捕获值的唯一通道）。
+			if !containsString(providers, memberID) {
+				return "", fmt.Errorf("规则 %q 的条件表达式引用的供给方规则 %q 不在本规则的作用域供给方集内（限定名操作数「供给方ID.rN.组名」只能引用 refScope 附件所引供给方的捕获）", ruleID, memberID)
 			}
 			return exprTypeString, nil
 		}
@@ -1370,11 +1340,11 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures m
 		if e.Left == nil || e.Right == nil {
 			return "", fmt.Errorf("规则 %q 的比较表达式（%s）缺少左侧（left）或右侧（right）操作数", ruleID, e.Kind)
 		}
-		leftType, err := validateExpr(ruleID, e.Left, declaredCaptures, repeatCaptures, refs)
+		leftType, err := validateExpr(ruleID, e.Left, declaredCaptures, repeatCaptures, providers)
 		if err != nil {
 			return "", err
 		}
-		rightType, err := validateExpr(ruleID, e.Right, declaredCaptures, repeatCaptures, refs)
+		rightType, err := validateExpr(ruleID, e.Right, declaredCaptures, repeatCaptures, providers)
 		if err != nil {
 			return "", err
 		}
@@ -1389,7 +1359,7 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures m
 		if e.Operand == nil {
 			return "", fmt.Errorf("规则 %q 的数值区间比较缺少操作数（operand）", ruleID)
 		}
-		operandType, err := validateExpr(ruleID, e.Operand, declaredCaptures, repeatCaptures, refs)
+		operandType, err := validateExpr(ruleID, e.Operand, declaredCaptures, repeatCaptures, providers)
 		if err != nil {
 			return "", err
 		}
@@ -1408,7 +1378,7 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures m
 			return "", fmt.Errorf("规则 %q 的逻辑组合（%s）至少需要一个子表达式（subs）", ruleID, e.Kind)
 		}
 		for _, sub := range e.Subs {
-			subType, err := validateExpr(ruleID, sub, declaredCaptures, repeatCaptures, refs)
+			subType, err := validateExpr(ruleID, sub, declaredCaptures, repeatCaptures, providers)
 			if err != nil {
 				return "", err
 			}
@@ -1421,7 +1391,7 @@ func validateExpr(ruleID string, e *CondExpr, declaredCaptures, repeatCaptures m
 		if e.Inner == nil {
 			return "", fmt.Errorf("规则 %q 的逻辑非表达式缺少内层表达式（inner）", ruleID)
 		}
-		innerType, err := validateExpr(ruleID, e.Inner, declaredCaptures, repeatCaptures, refs)
+		innerType, err := validateExpr(ruleID, e.Inner, declaredCaptures, repeatCaptures, providers)
 		if err != nil {
 			return "", err
 		}
@@ -1524,7 +1494,7 @@ type skippedRuleEntry struct {
 	ID string
 	// Description 为条目原文的描述。
 	Description string
-	// Reason 为跳过原因：不含「跳过规则/组合规则」外层包装的原始校验错误文本。
+	// Reason 为跳过原因：不含「跳过规则」外层包装的原始校验错误文本。
 	Reason string
 	// Message 为完整告警文本：与既有告警渠道（ParseProfile 返回的 errs）逐字
 	// 同源，供需要文本形态的调用方复用。
@@ -1532,16 +1502,19 @@ type skippedRuleEntry struct {
 }
 
 // ParseProfile 从 JSON 数据载入规则档案：反序列化 + 逐条构造校验。
-// 结构版本不是当前版本（v4）的档案**整体拒载**——v1..v3 旧档已停用（机器
-// 规则一律由新一代生产方直出 v4，旧机器规则对用户无保留价值）；拒载档
+// 结构版本不在双读集（v4/v5）内的档案**整体拒载**——v1..v3 旧档已停用（机器
+// 规则一律由新一代生产方直出，旧机器规则对用户无保留价值）；拒载档
 // 案经 LoadProfile 自动重置（原文备份+空档覆写+知会警告），用户无需手动
 // 处置。结构版本高于当前版本（未来版本）按尽力解析载入——记一条版本告警
 // 错误（调用方落日志）、未知字段忽略、无法构造的规则逐条跳过，不中断整
-// 体。个别规则构造校验失败（条件行编译、正则、深度约束、提取引用不存在、
-// refCapture 的 refRule 缺失或不在本条 refs 内等）只产生含规则 ID 与描述的
-// 中文错误并跳过该规则，不阻塞其余规则载入；组合规则的跨规则引用校验（悬空
-// / 自引用 / 嵌套组合引用）同挂该出口——逐规则构造完成后对全部已构造规则
-// 统一校验，违规条目同样跳过并返回带规则 ID 的错误。无错误时错误列表为空。
+// 体。v4 存量档案照常读入（升级用户自身的读入迁移），其内 refs 非空条目
+// （组合规则旧词汇）跳过+告警、携带「位于第 N 级」词条的条目按未知词条
+// 先例构造拒绝——同为跳过+告警。个别规则构造校验失败（条件行编译、正则、
+// 深度约束、提取引用不存在、refCapture 的 refRule 缺失或不在本规则供给方集
+// 内等）只产生含规则 ID 与描述的中文错误并跳过该规则，不阻塞其余规则载入；
+// 作用域附件的跨规则校验（自引用/悬空/链式/聚合互斥/重复段接线/供给方合格
+// 性）同挂该出口——逐规则构造完成后对全部已构造规则统一校验，违规条目
+// 同样跳过并返回带规则 ID 的错误。无错误时错误列表为空。
 func ParseProfile(data []byte) (*RuleProfile, []error) {
 	profile, skips, errs := parseProfile(data)
 	for _, s := range skips {
@@ -1551,9 +1524,9 @@ func ParseProfile(data []byte) (*RuleProfile, []error) {
 }
 
 // parseProfile 载入主体（ParseProfile 的结构化变体）：被跳过的条目（逐条构造
-// 失败与组合规则跨引用违规两处出口）以 skippedRuleEntry 结构化返回，errs 不含
-// 其告警文本——呈现形态由调用方决定：ParseProfile 回填文本告警保持既有口径
-// （日志等文本消费面不变），规则管理视图以错误态行呈现（不双报）。
+// 失败与作用域附件跨引用违规两处出口）以 skippedRuleEntry 结构化返回，errs
+// 不含其告警文本——呈现形态由调用方决定：ParseProfile 回填文本告警保持既有
+// 口径（日志等文本消费面不变），规则管理视图以错误态行呈现（不双报）。
 func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 	var in ruleProfileJSON
 	if err := json.Unmarshal(data, &in); err != nil {
@@ -1565,7 +1538,7 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 		errs = append(errs, fmt.Errorf(
 			"规则档案结构版本为 %d，高于当前支持的版本 %d，按尽力解析载入：未知字段将被忽略、无法解析的规则将被跳过，重写后落盘为版本 %d",
 			in.SchemaVersion, CurrentSchemaVersion, CurrentSchemaVersion))
-	case in.SchemaVersion != CurrentSchemaVersion:
+	case in.SchemaVersion != CurrentSchemaVersion && in.SchemaVersion != legacyRefSchemaVersion:
 		// v1..v3 旧档整体停用：零迁移拒载（含可兼容升格的历史版本——机器
 		// 规则对用户无保留价值，重置后由新一代生产方重新生成）。
 		return nil, nil, []error{fmt.Errorf(
@@ -1579,13 +1552,32 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 	// 行模板改写为字面括号形态，其余丢弃并留描述注记——改写产物随正常
 	// 管线编译校验。
 	migrateLegacyStripRules(in.Rules)
+	// v4 存量 refs 条目防御（组合规则词汇已退役）：refs 非空条目跳过+告警
+	// ——条目形态（空条件行+成员门）在新语法中不可表达，载入侧按值跳过。
+	legacyRefs := legacyProfileRefsByIndex(data, in.SchemaVersion, len(in.Rules))
 	// 第一遍：逐规则构造（模式/条件行编译 + 提取动作校验，含 refCapture 的
-	// refRule∈refs、captureName 必填）。失败条目结构化跳过（原文条目携带
+	// refRule∈供给方集、captureName 必填）。失败条目结构化跳过（原文条目携带
 	// ID/描述，管理面错误态行与删除出口的数据源）。
 	var skips []*skippedRuleEntry
+	// skipIdx 与 skips 平行：各跳过条目在原文 rules 数组中的下标（写档保真的
+	// 原文定位）。
+	var skipIdx []int
 	constructed := make([]RuleEntry, 0, len(in.Rules))
+	// constructedIdx 与 constructed 平行：已构造规则在原文 rules 数组中的下标
+	//（第二遍跨引用校验的跳过条目凭此回指原文）。
+	constructedIdx := make([]int, 0, len(in.Rules))
 	for i := range in.Rules {
 		rj := &in.Rules[i]
+		if legacyRefs != nil && legacyRefs[i] {
+			skips = append(skips, &skippedRuleEntry{
+				ID:          rj.ID,
+				Description: rj.Description,
+				Reason:      refsRetiredReason,
+				Message:     fmt.Sprintf("跳过规则 %q（%s）: %s", rj.ID, rj.Description, refsRetiredReason),
+			})
+			skipIdx = append(skipIdx, i)
+			continue
+		}
 		rule, err := ruleFromJSON(rj)
 		if err != nil {
 			skips = append(skips, &skippedRuleEntry{
@@ -1594,15 +1586,17 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 				Reason:      err.Error(),
 				Message:     fmt.Sprintf("跳过规则 %q（%s）: %v", rj.ID, rj.Description, err),
 			})
+			skipIdx = append(skipIdx, i)
 			continue
 		}
 		constructed = append(constructed, *rule)
+		constructedIdx = append(constructedIdx, i)
 	}
-	// 第二遍：组合规则跨规则引用校验（悬空 / 自引用 / 嵌套组合引用）。以
-	// 第一遍已构造规则集为「本档案规则集」——被逐条构造拒收的规则不在场，
-	// 指向它的引用即按悬空处理。违规条目同走坏条目出口（结构化跳过，告警
-	// 点名组合规则——描述优先，缺失退回 ID；剧本二·帧5 文案＝组合规则
-	// 『<描述>』引用的成员规则 <成员ID> 不存在，已跳过）。
+	// 第二遍：跨规则引用校验——作用域附件 refScope 五则（自引用/悬空/链式/
+	// 聚合互斥/重复段接线 + 供给方纯目录合格性）。以第一遍已构造规则集为
+	//「本档案规则集」——被逐条构造拒收的规则不在场，指向它的引用即按悬空
+	// 处理。违规条目同走坏条目出口（结构化跳过，告警点名消费规则——描述
+	// 优先，缺失退回 ID）。
 	byID := make(map[string]int, len(constructed))
 	for i := range constructed {
 		if _, seen := byID[constructed[i].ID]; !seen {
@@ -1611,24 +1605,65 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 	}
 	for i := range constructed {
 		rule := &constructed[i]
-		if len(rule.Refs) > 0 {
-			if err := validateRuleRefs(rule, byID, constructed); err != nil {
-				label := rule.Description
-				if label == "" {
-					label = rule.ID
-				}
-				skips = append(skips, &skippedRuleEntry{
-					ID:          rule.ID,
-					Description: rule.Description,
-					Reason:      err.Error(),
-					Message:     fmt.Sprintf("组合规则『%s』%v", label, err),
-				})
-				continue
+		if err := validateRefScopeWiring(rule, byID, constructed); err != nil {
+			label := rule.Description
+			if label == "" {
+				label = rule.ID
 			}
+			skips = append(skips, &skippedRuleEntry{
+				ID:          rule.ID,
+				Description: rule.Description,
+				Reason:      err.Error(),
+				Message:     fmt.Sprintf("规则『%s』%v", label, err),
+			})
+			skipIdx = append(skipIdx, constructedIdx[i])
+			continue
 		}
 		profile.Rules = append(profile.Rules, *rule)
 	}
+	// 写档保真：跳过条目的原文字节随档案对象存续（SaveProfile 回写档案、后续
+	// 载入照常跳过+告警——写档往返不再物理丢弃）。原文对不上（防御：data 已
+	// 成功反序列化，正常不可达）时无原文可保真，跳过条目维持既告警口径。
+	if len(skips) > 0 {
+		if raws := rawProfileRuleEntries(data, len(in.Rules)); raws != nil {
+			for _, i := range skipIdx {
+				if i >= 0 && i < len(raws) {
+					profile.preservedSkipRaw = append(profile.preservedSkipRaw, raws[i])
+				}
+			}
+		}
+	}
 	return profile, skips, errs
+}
+
+// legacyRefSchemaVersion 为读入保留的历史结构版本（升级用户自身存量档案的
+// 读入迁移，非旧插件兼容）：该版本档案读入照常、保存归一为当前版本。
+const legacyRefSchemaVersion = 4
+
+// refsRetiredReason v4 存量 refs 条目（组合规则）的跳过原因文案。
+const refsRetiredReason = "条目携带已退役的规则引用（refs）——组合规则类别已消亡，引用复用请改用目录行作用域附件（refScope）重建规则"
+
+// legacyProfileRefsByIndex 探测档案原文内各条目是否携带非空 refs（组合规则
+// 旧词汇，反序列化中间结构已无该字段）：仅对历史版本档案（legacyRefSchema
+// Version）执行一次性探测——当前版本档案由新二进制写出，不含该键；其余版本
+// 返回 nil（零探测）。返回值按下标与 rules 数组对齐（true=该条携带非空 refs）。
+func legacyProfileRefsByIndex(data []byte, schemaVersion, ruleCount int) []bool {
+	if schemaVersion != legacyRefSchemaVersion || ruleCount == 0 {
+		return nil
+	}
+	var probe struct {
+		Rules []struct {
+			LegacyRefs []string `json:"refs"`
+		} `json:"rules"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil || len(probe.Rules) != ruleCount {
+		return nil
+	}
+	out := make([]bool, ruleCount)
+	for i := range probe.Rules {
+		out[i] = len(probe.Rules[i].LegacyRefs) > 0
+	}
+	return out
 }
 
 // migrateLegacyStripRules 存量档案剥壳字段（stripPrefix / stripSuffix，反序列
@@ -1759,38 +1794,10 @@ func profileDataHasLegacyStrip(data []byte) bool {
 	return bytes.Contains(data, []byte(`"stripPrefix"`)) || bytes.Contains(data, []byte(`"stripSuffix"`))
 }
 
-// validateRuleRefs 校验组合规则的 refs 引用（构造期跨规则静态校验）：自引用、
-// 悬空引用（被引成员 ID 不在本档案已构造规则集内）、嵌套组合引用（被引成员
-// 自身携带 refs，一期禁止组合引用组合）、组合接线引用被引成员的重复段词
-// （多值产出）四者任一违规即返回中文错误，调用方跳过该条并告警。byID 为已构造
-// 规则 ID 到 all 下标的索引（重复 ID 取先出现者）；all 供查看被引规则自身是否
-// 携带 refs、以及其条件行的重复段词声明（组合接线引用禁区）。
-func validateRuleRefs(rule *RuleEntry, byID map[string]int, all []RuleEntry) error {
-	for _, ref := range rule.Refs {
-		if ref == rule.ID {
-			return fmt.Errorf("引用了自身（refs 含本条 ID %q）", ref)
-		}
-		idx, ok := byID[ref]
-		if !ok {
-			return fmt.Errorf("引用的成员规则 %s 不存在，已跳过", ref)
-		}
-		if len(all[idx].Refs) > 0 {
-			return fmt.Errorf("引用的成员规则 %q 自身为组合规则（一期禁止嵌套组合引用）", ref)
-		}
-		if all[idx].Category == RuleCategoryAggregate {
-			return fmt.Errorf("引用的成员规则 %q 自身为聚合规则（轨行为平行选择器，不作组合门成员）", ref)
-		}
-		if err := validateRefRepeatWiring(rule, &all[idx], ref); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// validateRefRepeatWiring 校验组合接线引用被引成员的捕获不落在重复段词上
-// （三面引用禁区的组合接线面）：refCapture 提取动作（Row 缺省按第 1 行兜底，
-// 与 validateExtractions 同口径）与 when 表达式内限定名操作数「成员ID.rN.组名」
-// 两路都查；成员无条件行重复段词时零工作。取值面（refCaptureValue 从注入区取
+// validateRefRepeatWiring 校验作用域接线引用供给方的捕获不落在重复段词上
+// （三面引用禁区的作用域接线面）：refCapture 提取动作（Row 缺省按第 1 行兜底，
+// 与 validateExtractions 同口径）与 when 表达式内限定名操作数「供给方ID.rN.组名」
+// 两路都查；供给方无条件行重复段词时零工作。取值面（refCaptureValue 从注入区取
 // 单值）不动——契约要求构造期即拒，不留运行期空值。
 func validateRefRepeatWiring(rule *RuleEntry, member *RuleEntry, ref string) error {
 	repeatNames := declaredConditionRepeatCaptures(member.Conditions)
@@ -1813,14 +1820,14 @@ func validateRefRepeatWiring(rule *RuleEntry, member *RuleEntry, ref string) err
 		if !repeatNames[name] {
 			continue
 		}
-		return fmt.Errorf("第 %d 条提取动作引用的成员规则 %q 的捕获 %q: %w",
+		return fmt.Errorf("第 %d 条提取动作引用的供给方规则 %q 的捕获 %q: %w",
 			i+1, ref, name, condxRepeatRefError(condxRepeatEnOfCapture(name)))
 	}
 	return nil
 }
 
-// validateExprRefRepeat 递归检查条件表达式树中「成员ID.rN.组名」限定名操作数
-// 是否落在被引成员的重复段词上（组合接线的 when 通道）。非限定名操作数不走本
+// validateExprRefRepeat 递归检查条件表达式树中「供给方ID.rN.组名」限定名操作数
+// 是否落在被引供给方的重复段词上（作用域接线的 when 通道）。非限定名操作数不走本
 // 校验（自有捕获的重复段词引用由 validateExpr 的 repeatCaptures 分支拒绝）。
 func validateExprRefRepeat(e *CondExpr, ref string, repeatNames map[string]bool) error {
 	if e == nil {
@@ -1829,7 +1836,7 @@ func validateExprRefRepeat(e *CondExpr, ref string, repeatNames map[string]bool)
 	if e.Kind == ExprCapture {
 		if memberID, bindingName, ok := parseRefCaptureName(e.CaptureName); ok && memberID == ref {
 			if repeatNames[bindingName] {
-				return fmt.Errorf("引用的成员规则 %q 的捕获 %q: %w",
+				return fmt.Errorf("引用的供给方规则 %q 的捕获 %q: %w",
 					ref, bindingName, condxRepeatRefError(condxRepeatEnOfCapture(bindingName)))
 			}
 		}
@@ -1847,6 +1854,69 @@ func validateExprRefRepeat(e *CondExpr, ref string, repeatNames map[string]bool)
 	return nil
 }
 
+// validateRefScopeWiring 校验作用域附件（refScope）的跨规则接线（构造期跨
+// 规则静态校验）：①自引用（供给方=本条 ID）
+// ②悬空（供给方不在本档案已构造规则集内）③链式（供给方自身条件行含
+// refScope 附件）④聚合互斥（供给方非聚合；聚合轨行
+// 自身禁附件由 validateAggregateEntry 先行拦截——自决4）⑤重复段接线（消费
+// 规则的 refCapture 提取与 when 限定名不落供给方重复段词——
+// validateRefRepeatWiring）。另校验供给方合格
+// 性：纯目录规则（裁决③——全部条件行〔含括号子组递归〕目标=目录；行级非的
+// 目录行仍算目录行，其否定语义在求值面自然处理、命中层集只记实际命中层；
+// 定群〔全序列行〕与模式树旧形态天然不满足——自决2：判定只看行的目标类
+// 别，不猜布尔语义）。任一违规返回中文错误，调用方跳过该条并告警。byID 为
+// 已构造规则 ID 到 all 下标的索引（重复 ID 取先出现者）；无 refScope 附件
+// 的规则零工作。
+func validateRefScopeWiring(rule *RuleEntry, byID map[string]int, all []RuleEntry) error {
+	providers := refScopeProvidersOf(rule)
+	for _, ref := range providers {
+		if ref == rule.ID {
+			return fmt.Errorf("作用域附件引用了自身（供给方=本条 ID %q）", ref)
+		}
+		idx, ok := byID[ref]
+		if !ok {
+			return fmt.Errorf("作用域附件引用的供给方规则 %s 不存在，已跳过", ref)
+		}
+		member := &all[idx]
+		if member.Category == RuleCategoryAggregate {
+			return fmt.Errorf("作用域附件引用的供给方 %q 自身为聚合规则（聚合规则不作供给方）", ref)
+		}
+		if len(refScopeProvidersOf(member)) > 0 {
+			return fmt.Errorf("作用域附件引用的供给方 %q 自身携带作用域附件（禁止链式引用）", ref)
+		}
+		if !condxRowsAllDir(member.Conditions) {
+			return fmt.Errorf("作用域附件引用的供给方 %q 不是纯目录规则（供给方的全部条件行须为目录目标）", ref)
+		}
+		if err := validateRefRepeatWiring(rule, member, ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// condxRowsAllDir 判定条件行列表（含括号子组递归）是否全部为目录目标行且
+// 至少一行（纯目录规则判据，裁决③/自决2）。空表（v3 模式树旧形态）不满足
+// ——无法按行目标核验，不作供给方。
+func condxRowsAllDir(rows []CondxRow) bool {
+	any := false
+	for i := range rows {
+		row := &rows[i]
+		if row.Condition != nil {
+			any = true
+			if row.Condition.Target != CondxTargetDir {
+				return false
+			}
+		}
+		if len(row.Group) > 0 {
+			any = true
+			if !condxRowsAllDir(row.Group) {
+				return false
+			}
+		}
+	}
+	return any
+}
+
 // containsString 判断字符串切片是否含有目标值。
 func containsString(values []string, target string) bool {
 	for _, value := range values {
@@ -1861,7 +1931,7 @@ func containsString(values []string, target string) bool {
 
 // AnchorAggregateRules 聚合规则的类型锚定：引用的作品类型不在资源类型注册表
 // 投影（悬空——自定义类型可随其插件停用/卸载而注销）即停用该条目并返回告警
-// （识别求值随之跳过；沿组合规则悬空成员「跳过+载入告警」先例）。纯函数，
+// （识别求值随之跳过；沿悬空引用「跳过+载入告警」先例）。纯函数，
 // 改动只落在内存态档案对象、不回写存储——每次载入按当轮投影重新锚定；类型
 // 索引缺席（查询失败/上下文不可用）时全部聚合规则按悬空处理。
 func AnchorAggregateRules(profile *RuleProfile, types *resourceTypeIndex) []error {

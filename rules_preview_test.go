@@ -298,19 +298,21 @@ func TestPreviewRuleScanExtractionAlignment(t *testing.T) {
 	}
 }
 
-// TestPreviewRulePureGateComboSampleDegradation 纯门组合：引用成员、自身零提取
-// ——命中照常计数，样例退化为仅文件名+目录（无产出声明可显）；跨目录样例
-// 优先、不足回落同目录。
-func TestPreviewRulePureGateComboSampleDegradation(t *testing.T) {
+// TestPreviewRuleNoExtractionSampleDegradation 零提取草稿：命中照常计数，
+// 样例退化为仅文件名+目录（无产出声明可显）；跨目录样例优先、不足回落同目录。
+//（纯门组合〔refs 空 conditions〕形态随组合规则退役消亡，样例退化面由本
+// 零提取普通草稿承载。）
+func TestPreviewRuleNoExtractionSampleDegradation(t *testing.T) {
 	m, _, _, root := newPreviewFixture(t)
-	draft := []byte(`{"id":"preview-gate-combo","description":"预览草稿：纯门组合","source":"manual","enabled":true,` +
-		`"refs":["member-any-hua"],"conditions":[],"extractions":[],"synthesis":{}}`)
+	draft := []byte(`{"id":"preview-any-hua-plain","description":"预览草稿：零提取任意画","source":"manual","enabled":true,` +
+		`"conditions":[{"condition":{"target":"file","format":{"mode":"template","tpl":"{任意}画"}}}],` +
+		`"extractions":[],"synthesis":{}}`)
 
 	preview, err := m.PreviewRule(root, draft)
 	if err != nil {
 		t.Fatalf("命中预览失败: %v", err)
 	}
-	// 门段=成员（任意画）全体命中：人物画/风景画（画集）+ 静物画（静物）
+	// 「任意画」全体命中：人物画/风景画（画集）+ 静物画（静物）
 	if preview.HitCount != 3 {
 		t.Fatalf("命中数 = %d，期望 3", preview.HitCount)
 	}
@@ -320,7 +322,7 @@ func TestPreviewRulePureGateComboSampleDegradation(t *testing.T) {
 	dirs := map[string]int{}
 	for _, s := range preview.Samples {
 		if s.Result != "" {
-			t.Fatalf("纯门组合样例不应携带声明: %+v", s)
+			t.Fatalf("零提取草稿样例不应携带声明: %+v", s)
 		}
 		dirs[s.DirRelKey]++
 	}
@@ -328,7 +330,7 @@ func TestPreviewRulePureGateComboSampleDegradation(t *testing.T) {
 		t.Fatalf("样例目录分布不符（跨目录优先、不足回落同目录）: %v", dirs)
 	}
 	if strings.Contains(mustMarshalPreview(t, preview.Samples), "result") {
-		t.Fatalf("纯门组合样例应仅文件名+目录（result 键缺省）: %s", mustMarshalPreview(t, preview.Samples))
+		t.Fatalf("零提取草稿样例应仅文件名+目录（result 键缺省）: %s", mustMarshalPreview(t, preview.Samples))
 	}
 
 	conclusions, entry, err := m.previewRuleConclusions(root, draft)
@@ -349,7 +351,7 @@ func TestPreviewRulePureGateComboSampleDegradation(t *testing.T) {
 	afterHits := map[string]bool{}
 	for i := range sess.Snapshot.Files {
 		for _, id := range sess.Snapshot.Files[i].MatchedRuleIDs {
-			if id == "preview-gate-combo" {
+			if id == "preview-any-hua-plain" {
 				afterHits[sess.Snapshot.Files[i].RelPath] = true
 			}
 		}
@@ -643,9 +645,10 @@ func TestPreviewRuleFastPathByteEquality(t *testing.T) {
 	}
 }
 
-// TestPreviewRuleFastPathFallbackBins 等值锚·形态二/三/四/五：替换条目、组合
-// 草稿、被引用（替换与悬空引用新增）、定群草稿——全部显式回退整库全量路径
-//（探针增量 0），应答与强制全量路径等值。
+// TestPreviewRuleFastPathFallbackBins 等值锚·形态二/四/五：替换条目、被引用
+//（替换与悬空引用）、定群草稿——全部显式回退整库全量路径
+//（探针增量 0），应答与强制全量路径等值。（组合草稿〔refs 非空〕形态随
+// 组合规则退役消亡——refs 草稿在新语法中不可构造，构造期即拒。）
 func TestPreviewRuleFastPathFallbackBins(t *testing.T) {
 	// 形态二：替换条目（草稿 ID 与档案条目同 ID，原位替换）
 	m, root := newPreviewFastFixture(t)
@@ -655,15 +658,6 @@ func TestPreviewRuleFastPathFallbackBins(t *testing.T) {
 			`"extractions":[{"dimension":"author","from":"capture","captureName":"author","row":1}],"synthesis":{}}`))
 	if probeDelta != 0 {
 		t.Fatalf("形态二（替换条目）应回退整库全量（探针增量 %d，期望 0）", probeDelta)
-	}
-	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
-
-	// 形态三：组合草稿（refs 非空——门段成员先行求值，耦合面整体让给回退）
-	probeDelta, fastResp, fullResp = previewResponseOf(t, m, root, []byte(
-		`{"id":"fast-combo-draft","description":"组合草稿：引用冲突 A","source":"manual","enabled":true,`+
-			`"refs":["test-conflict-a"],"conditions":[],"extractions":[],"synthesis":{}}`))
-	if probeDelta != 0 {
-		t.Fatalf("形态三（组合草稿）应回退整库全量（探针增量 %d，期望 0）", probeDelta)
 	}
 	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
 
@@ -677,31 +671,83 @@ func TestPreviewRuleFastPathFallbackBins(t *testing.T) {
 	}
 	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
 
-	// 形态四甲：被引用替换——草稿 ID 被现行组合规则的 refs 引用
-	mReferenced, rootReferenced := newPreviewFastFixture(t, mustDraftEntryJSON(t,
-		`{"id":"fast-arch-combo","description":"档案组合规则：引用冲突 A","source":"manual","enabled":true,`+
-			`"refs":["test-conflict-a"],"conditions":[],"extractions":[],"synthesis":{}}`))
+	// 形态四甲：被引用替换——草稿 ID 被档案规则的条件行 refScope 附件引用
+	//（阶段2：组合 refs 直查改行扫描）。档案加一对供给方（线索层目录规则）
+	// 与消费方（目录行挂 refScope 附件引用供给方，替换供给方改其命中面→
+	// 消费规则门段语义随草稿在场而变）。
+	mReferenced, rootReferenced := newPreviewFastFixture(t,
+		mustDraftEntryJSON(t, `{"id":"arch-dir-provider","description":"档案供给方：含线索的目录","source":"manual","enabled":true,`+
+			`"conditions":[{"condition":{"target":"dir","format":{"mode":"contains","word":"线"}}}],"extractions":[],"synthesis":{}}`),
+		mustDraftEntryJSON(t, `{"id":"arch-scope-consumer","description":"档案消费规则：供给方之下的目录","source":"manual","enabled":true,`+
+			`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"{任意}"},"attach":[{"kind":"refScope","value":"arch-dir-provider","minCount":1}]}}],"extractions":[],"synthesis":{}}`))
 	probeDelta, fastResp, fullResp = previewResponseOf(t, mReferenced, rootReferenced, []byte(
-		`{"id":"test-conflict-a","description":"被引用替换草稿","source":"manual","enabled":true,`+
-			`"conditions":[{"condition":{"target":"file","format":{"mode":"template","tpl":"{任意}"}}}],`+
-			`"extractions":[{"dimension":"title","from":"constant","constant":"替换标题"}],"synthesis":{}}`))
+		`{"id":"arch-dir-provider","description":"被引用替换草稿","source":"manual","enabled":true,`+
+			`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"对齐"}}}],"extractions":[],"synthesis":{}}`))
 	if probeDelta != 0 {
 		t.Fatalf("形态四（被引用替换）应回退整库全量（探针增量 %d，期望 0）", probeDelta)
 	}
 	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
 
-	// 形态四乙：悬空引用的存量组合规则在档案载入时整条弃置（rule_profile.go
-	// 第二遍悬空校验——预览求值面=载入档案），引用面按载入档案即完备：新增
-	// 草稿即便恰好取悬空 ID，载入档案内也无引用者，快路径合法且等值。
+	// 形态四乙：悬空引用的存量条目（refScope 附件指向不存在规则）在档案载入
+	// 时整条弃置（rule_profile.go 第二遍悬空校验——预览求值面=载入档案），
+	// 引用面按载入档案即完备：新增草稿即便恰好取悬空 ID，载入档案内也无引用
+	// 者，快路径合法且等值。（组合 refs 悬空形态随 refs 退役消亡，承载面换
+	// refScope 悬空——同出口同语义。）
 	mDangle, rootDangle := newPreviewFastFixture(t, mustDraftEntryJSON(t,
-		`{"id":"fast-arch-dangle","description":"档案组合规则：悬空引用","source":"manual","enabled":true,`+
-			`"refs":["ghost-draft-id"],"conditions":[],"extractions":[],"synthesis":{}}`))
+		`{"id":"fast-arch-dangle","description":"档案消费规则：悬空引用","source":"manual","enabled":true,`+
+			`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"{任意}"},"attach":[{"kind":"refScope","value":"ghost-draft-id","minCount":1}]}}],"extractions":[],"synthesis":{}}`))
 	probeDelta, fastResp, fullResp = previewResponseOf(t, mDangle, rootDangle, []byte(
 		`{"id":"ghost-draft-id","description":"悬空引用目标草稿","source":"manual","enabled":true,`+
 			`"conditions":[{"condition":{"target":"file","format":{"mode":"template","tpl":"{任意}"}}}],`+
 			`"extractions":[{"dimension":"title","from":"constant","constant":"悬空标题"}],"synthesis":{}}`))
 	if probeDelta != 1 {
 		t.Fatalf("悬空引用组合载入即弃，引用面=载入档案，新增草稿应走快路径（探针增量 %d，期望 1）", probeDelta)
+	}
+	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
+}
+
+// TestPreviewRuleFastPathRefScopeBins 作用域附件（refScope·阶段2）的快路径
+// 形态分箱专测（风险5）：
+//   - 被引用态判定改行扫描——ruleReferencesRuleID 以条件行 refScope 附件（供给
+//     方=ruleID）识别引用，不再看规则级 refs；
+//   - 草稿自身含 refScope 附件 → 快路径不适用（门段在草稿独集上求值时供给方
+//     不在场，结论将偏离整库全量）→ 显式回退且应答等值；
+//   - 同夹具普通草稿仍走快路径（正向对照：回退归因于 refScope 而非夹具形态）。
+func TestPreviewRuleFastPathRefScopeBins(t *testing.T) {
+	// 单元面：行扫描识别引用（消费方条件行挂 refScope 附件引用供给方 ID）。
+	consumer := mustDraftEntryJSON(t, `{"id":"scope-consumer","description":"消费规则","source":"manual","enabled":true,`+
+		`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"{任意}"},"attach":[{"kind":"refScope","value":"arch-dir-provider","minCount":1}]}}],"extractions":[],"synthesis":{}}`)
+	if !ruleReferencesRuleID(&consumer, "arch-dir-provider") {
+		t.Fatal("refScope 行扫描应识别消费规则引用供给方")
+	}
+	if ruleReferencesRuleID(&consumer, "test-conflict-a") {
+		t.Fatal("未引用的规则 ID 不应被行扫描命中")
+	}
+	// 括号子组内附件照扫（递归行扫描口径）。
+	nested := mustDraftEntryJSON(t, `{"id":"scope-nested","description":"子组消费规则","source":"manual","enabled":true,`+
+		`"conditions":[{"group":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"{任意}"},"attach":[{"kind":"refScope","value":"arch-dir-provider"}]}}]}],"extractions":[],"synthesis":{}}`)
+	if !ruleReferencesRuleID(&nested, "arch-dir-provider") {
+		t.Fatal("括号子组内的 refScope 附件应被递归行扫描识别")
+	}
+
+	// 端到端：档案含纯目录供给方；含 refScope 附件的草稿回退整库全量且应答
+	// 等值；同夹具普通草稿走快路径（正向对照）。
+	m, root := newPreviewFastFixture(t, mustDraftEntryJSON(t,
+		`{"id":"arch-dir-provider","description":"档案供给方：含线索的目录","source":"manual","enabled":true,`+
+			`"conditions":[{"condition":{"target":"dir","format":{"mode":"contains","word":"线"}}}],"extractions":[],"synthesis":{}}`))
+	probeDelta, fastResp, fullResp := previewResponseOf(t, m, root, []byte(
+		`{"id":"fast-scope-draft","description":"作用域附件草稿：供给方之下","source":"manual","enabled":true,`+
+			`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"{任意}"},"attach":[{"kind":"refScope","value":"arch-dir-provider"}]}}],"extractions":[],"synthesis":{}}`))
+	if probeDelta != 0 {
+		t.Fatalf("含 refScope 附件的草稿应回退整库全量（探针增量 %d，期望 0）", probeDelta)
+	}
+	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
+
+	probeDelta, fastResp, fullResp = previewResponseOf(t, m, root, []byte(
+		`{"id":"fast-plain-draft","description":"普通目录草稿（正向对照）","source":"manual","enabled":true,`+
+			`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"对齐"}}}],"extractions":[],"synthesis":{}}`))
+	if probeDelta != 1 {
+		t.Fatalf("同夹具普通草稿应走快路径（探针增量 %d，期望 1——回退归因于 refScope）", probeDelta)
 	}
 	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
 }
@@ -822,83 +868,8 @@ func TestPreviewRuleFastPathGuardFallbacks(t *testing.T) {
 	assertPreviewResponsesByteEqual(t, fastResp, fullResp)
 }
 
-// TestPreviewRuleDirLevelAnchor 命中预览通道（声明5 第 6 路，AE 阶段5 核验）：
-// 预览求值走与保存后重识别同一合并求值入口，故带层级锚的草稿其命中数/样例即
-// 「锚定层形态命中的文件」——第 1 级 [路灯后辈] 子树两文件计入、样例「在
-// 目录/」为锚定层下实际位置；更深层同名形态目录（Art/[路灯后辈]）不命中。
-// 组合规则直译句（前端）只按成员目标类别成段、不含层级断言，锚定成员的呈现
-// 由成员自身摘要的层级小字承载（ruleFormModel.ts:577/616），本通道无需改动。
-func TestPreviewRuleDirLevelAnchor(t *testing.T) {
-	root := t.TempDir()
-	store := newFakeSessionStore()
-	ctx := &workbenchTestCtx{store: store}
-	m := NewSessionManagerWithStore(ctx, nil, store)
-	if err := SaveProfile(store, &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{}}); err != nil {
-		t.Fatalf("写入空规则档案失败: %v", err)
-	}
-	if _, err := m.CreateSession(root); err != nil {
-		t.Fatalf("建立会话失败: %v", err)
-	}
-	writeTestFile(t, root+"/[路灯后辈]/a.jpg", "a")
-	writeTestFile(t, root+"/[路灯后辈]/子/b.jpg", "b")
-	writeTestFile(t, root+"/Art/[路灯后辈]/c.jpg", "c")
-	if err := m.runFullRecognition(root); err != nil {
-		t.Fatalf("全量识别失败: %v", err)
-	}
+// 【已删除·决策6 改判】TestPreviewRuleDirLevelAnchor（命中预览通道的层级锚
+// 用例，原声明5 第 6 路 AE 阶段5 核验）随 dirLevel 词条退役删除：词条白名单
+// 已移除、携带该词条的草稿在保存闸即拒，锚定层命中预览语义失去构造入口；
+// 多段目录模板的预览通道由后续阶段用例承接（DirHit 记落地段层——自决6）。
 
-	draft := []byte(`{"id":"preview-level","description":"预览草稿：第 1 级括号目录→标签","source":"manual","enabled":true,` +
-		`"conditions":[{"condition":{"target":"dir","format":{"mode":"template","tpl":"[{标签}]"},` +
-		`"attach":[{"kind":"dirLevel","minCount":1}]}}],` +
-		`"extractions":[{"dimension":"tag","from":"capture","captureName":"tag","row":1}],"synthesis":{}}`)
-	preview, err := m.PreviewRule(root, draft)
-	if err != nil {
-		t.Fatalf("命中预览失败: %v", err)
-	}
-	if preview.HitTotal != 3 {
-		t.Fatalf("求值面总数 = %d，期望 3", preview.HitTotal)
-	}
-	if preview.HitCount != 2 {
-		t.Fatalf("命中数 = %d，期望 2（仅第 1 级括号目录子树）", preview.HitCount)
-	}
-	if len(preview.Samples) != 2 {
-		t.Fatalf("样例 = %d 条，期望 2（两命中分属不同目录）: %+v", len(preview.Samples), preview.Samples)
-	}
-	wantDirs := map[string]bool{"[路灯后辈]": true, "[路灯后辈]/子": true}
-	for _, s := range preview.Samples {
-		if !wantDirs[s.DirRelKey] || s.Result != "标签=路灯后辈" {
-			t.Fatalf("样例不符（锚定层下实际位置/内名声明）: %+v", s)
-		}
-	}
-
-	// 预览即保存后：入档并全量重识别，命中集与预览一致（a、b 命中，c 不命中）。
-	conclusions, entry, err := m.previewRuleConclusions(root, draft)
-	if err != nil {
-		t.Fatalf("预览求值失败: %v", err)
-	}
-	previewHits := previewConclusionsHitSet(conclusions, entry.ID)
-	if _, err := m.ApplySaveRule(draft); err != nil {
-		t.Fatalf("草稿入档失败: %v", err)
-	}
-	if err := m.runFullRecognition(root); err != nil {
-		t.Fatalf("全量重识别失败: %v", err)
-	}
-	sess, err := m.loadSession(root)
-	if err != nil {
-		t.Fatalf("读取会话失败: %v", err)
-	}
-	afterHits := map[string]bool{}
-	for i := range sess.Snapshot.Files {
-		for _, id := range sess.Snapshot.Files[i].MatchedRuleIDs {
-			if id == "preview-level" {
-				afterHits[sess.Snapshot.Files[i].RelPath] = true
-			}
-		}
-	}
-	want := map[string]bool{"[路灯后辈]/a.jpg": true, "[路灯后辈]/子/b.jpg": true}
-	if !relPathSetsEqual(afterHits, want) {
-		t.Fatalf("保存后重识别命中集不符: %v（期望 %v）", afterHits, want)
-	}
-	if !relPathSetsEqual(previewHits, afterHits) {
-		t.Fatalf("预览命中集与保存后重识别不一致: 预览=%v 重识别=%v", previewHits, afterHits)
-	}
-}

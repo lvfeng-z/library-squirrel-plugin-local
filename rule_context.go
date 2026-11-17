@@ -127,6 +127,14 @@ type ParseContext struct {
 	// 的唯一通道。ruleScopedContext 不继承（每规则从空开始）、absorbScoped 不并回
 	// （不外溢），贪婪识别的未覆盖片段排除也只读规则自身 Captures、不读此处。
 	RefCaptures []CaptureBinding
+	// RefScopeDepths 为作用域附件（refScope）供给方的门段求值结论：供给方
+	// 规则 ID → 该供给方目录行实际命中的层深集合（同链同层即同目录）。由
+	// 提取段门段（runRefGateStage）先行求值写入共享上下文，ruleScopedContext
+	// 继承（风险6 核对点：供给方层集是文件级事实，规则私有作用域内逐层槽位
+	// 的 refScope 谓词据此判层距阶梯）；absorbScoped 不并回（只读事实，无私
+	// 有变更）。规则条件行的 refScope 附件经 DirAssert.check 消费——供给方
+	// 未命中＝键缺席，附件谓词恒不满足（严格语义）。
+	RefScopeDepths map[string]map[int]bool
 }
 
 // Capture 返回组名为 name 的最后一条绑定值；不存在时返回 ("", false)。
@@ -173,12 +181,15 @@ func (c *ParseContext) LastDirHit() (DirHit, bool) {
 // FromPredicate 只读自身规则的锚定/谓词命中（跨规则不再共享累积：共享时代
 // 后求值的规则会读到先求值规则更深/更晚的命中，产出他目录剥壳的垃圾值，
 // 发现6）；「取最深/取最后」语义保留在规则作用域内（规则内多模式锚定取该
-// 规则内最深命中）。群组与目录名基座共享。
+// 规则内最深命中）。群组与目录名基座共享；供给方命中层集（RefScopeDepths）
+// 是文件级事实，一并继承（作用域附件的层距判据在规则私有作用域内可读——
+// 风险6 核对点）。
 func (c *ParseContext) ruleScopedContext() *ParseContext {
 	return &ParseContext{
-		Group:    c.Group,
-		DirNames: c.DirNames,
-		Depth:    c.Depth,
+		Group:          c.Group,
+		DirNames:       c.DirNames,
+		Depth:          c.Depth,
+		RefScopeDepths: c.RefScopeDepths,
 	}
 }
 

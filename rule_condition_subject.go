@@ -96,22 +96,29 @@ func fileTypeClassOf(fileName string) string {
 // DirAssert 为目录主体上的终结谓词实例（编译自 CondxAttach，目标=dir）。
 type DirAssert struct {
 	// Kind 为谓词类别（childrenAllFormat / childrenAtLeastN / childDirCount /
-	// childTypeIs / dirLevel / parentFormat / parentContains）。
+	// childTypeIs / parentFormat / parentContains / refScope）。
 	Kind string `json:"kind"`
 	// re 为迷你格式推导正则（childrenAllFormat / childrenAtLeastN 匹配子女
 	// 去扩展名基名；parentFormat 匹配父目录名）。终结格式不再捕获（R5）。
 	re *regexp.Regexp `json:"-"`
-	// MinCount 为数量门槛（≥）。
+	// MinCount 为数量门槛（≥）；refScope 复用为层距（0=任意深度哨兵、
+	// 1=紧邻、N≥2 显式——与模板段距记号不同，见 CondxAttachRefScope）。
 	MinCount int `json:"minCount,omitempty"`
 	// Types 为类型词表（childTypeIs）。
 	Types []string `json:"types,omitempty"`
 	// Word 为包含词（parentContains）。
 	Word string `json:"word,omitempty"`
+	// Value 为 refScope 的供给方规则 ID（作用域附件，阶段2）：供给方命中层集
+	// 经 ParseContext.RefScopeDepths 透传（门段先行求值产出），此处按层距
+	// 阶梯判据核对候选层。
+	Value string `json:"value,omitempty"`
 }
 
 // check 对「深度 depth 的命中目录」校验全部谓词；任一不满足返回 false。
 // 子女数据缺失（构造点未注入 AncestorFiles）时子女类谓词保守不命中。
-func (a DirAssert) check(in *MatchInput, depth int) bool {
+// ctx 为求值上下文——refScope（作用域附件）据其读供给方命中层集（层距阶梯
+// 判据，裁决⑥）；其余谓词不消费 ctx（签名统一为求值面不变式）。
+func (a DirAssert) check(in *MatchInput, depth int, ctx *ParseContext) bool {
 	switch a.Kind {
 	case CondxAttachChildrenAllFormat, CondxAttachChildrenAtLeastN:
 		children, ok := in.ancestorFilesAt(depth)
@@ -167,13 +174,28 @@ func (a DirAssert) check(in *MatchInput, depth int) bool {
 			return false
 		}
 		return strings.Contains(in.DirNames[depth-1], a.Word)
-	case CondxAttachDirLevel:
-		// 位于第 N 级（MinCount 承载 N）：depth 0 起、根直下=第 1 级，恰为第
-		// N 级即过、否则该层不中——深→浅扫描循环不动，非 N 级层被本谓词跳过、
-		// 自然落到 N 级层命中绑定（DirHit 记于 N 级层）；N 超深度（祖先链上无
-		// 第 N 级）整行不中（严格不回退）。
-		return depth+1 == a.MinCount
+	case CondxAttachRefScope:
+		// 作用域附件·层距阶梯判据（裁决⑥）：候选层 c(=depth) 合格 ⟺ 供给方命中且 ∃D∈供给方命中层集 s.t.
+		// 层距=0（任意深度）：c>D；层距=N：c−D=N。其身（c=D）与 above-form
+		//（c<D）在两分支下都天然不可成立——「之下不含其身」无需独立排除。
+		// 供给方未命中（停用/悬空/被跳过/被链式禁止的形态）＝层集缺席→恒不
+		// 满足（严格语义，不降级）；供给方命中但无目录锚定层（如全行级非的
+		// 纯目录规则）＝空层集，同样不可满足。
+		if ctx == nil || a.Value == "" {
+			return false
+		}
+		depths := ctx.RefScopeDepths[a.Value]
+		if a.MinCount <= 0 {
+			for d := range depths {
+				if d < depth {
+					return true
+				}
+			}
+			return false
+		}
+		return depths[depth-a.MinCount]
 	default:
+		// 未知类别（含已退役词条，构造期已拒）保守不命中。
 		return false
 	}
 }
@@ -187,15 +209,38 @@ func (a DirAssert) check(in *MatchInput, depth int) bool {
 // 命中这一层目录（不限直接父目录）；但只有进入求值面（批量扫描清单或磁盘重扫
 // 所得文件）的文件才被求值，不在清单内的文件不计。
 type DirSubjectPattern struct {
-	// Expr 为推导出的锚定正则原文（模板推导或包含词推导）。
+	// Expr 为推导出的锚定正则原文（模板推导或包含词推导）。多段模板时存
+	// 原始模板原文（仅作摘要显示，不编译——求值走 Segments 路径）。
 	Expr string `json:"expr"`
-	// Captures 为需要绑定的命名捕获组名列表（contains 问法为空）。
+	// Captures 为需要绑定的命名捕获组名列表（contains 问法为空；多段模板
+	// 不用此字段，捕获按段住 Segments）。
 	Captures []string `json:"captures"`
 	// Repeats 为重复段描述列表（量词占位词推导；机械透传存字段，语义消费
-	// 在阶段2 绑定层；contains 问法为空）。
+	// 在阶段2 绑定层；contains 问法为空；多段模板按段住 Segments）。
 	Repeats []condxRepeatDesc `json:"repeats,omitempty"`
 	// Asserts 为随主体的终结谓词实例列表。
 	Asserts []DirAssert `json:"asserts,omitempty"`
+	// Segments 为多段目录模板的逐段编译产物（段模式序列）：len≥2 时启用
+	// 多段求值路径；单段（无分隔符）模板不置此字段、走下方 re 现行路径
+	// 零变化。终结谓词（Asserts）按落地段层求值（自决6）。
+	Segments []DirSubjectSegment `json:"segments,omitempty"`
+	// SegGaps 为段距序列（SegGaps[i] 为 Segments[i] 与 Segments[i+1] 之间
+	// 的层距；len = len(Segments)-1）。
+	SegGaps []dirSegGap `json:"segGaps,omitempty"`
+	// re 为编译缓存，不参与序列化（多段路径不用）。
+	re *regexp.Regexp `json:"-"`
+}
+
+// DirSubjectSegment 多段目录模板的单段求值件：段的锚定正则与该段捕获/重复段
+// ——各段命中各自目录名后逐段 bindCondxCaptures（跨段出现序已在推导层连续
+// 编号，组名跨段唯一）。
+type DirSubjectSegment struct {
+	// Expr 为该段推导出的锚定正则原文（匹配单个目录名）。
+	Expr string `json:"expr"`
+	// Captures 为该段需要绑定的命名捕获组名列表。
+	Captures []string `json:"captures,omitempty"`
+	// Repeats 为该段重复段描述列表。
+	Repeats []condxRepeatDesc `json:"repeats,omitempty"`
 	// re 为编译缓存，不参与序列化。
 	re *regexp.Regexp `json:"-"`
 }
@@ -209,14 +254,36 @@ func newDirSubjectPattern(expr string, captures []string, repeats []condxRepeatD
 	return &DirSubjectPattern{Expr: expr, Captures: captures, Repeats: repeats, re: re}, nil
 }
 
+// newMultiDirSubjectPattern 构造多段目录主体模式：逐段编译正则失败返回中文
+// 错误。Expr 存原始模板原文（摘要显示用）；求值走 Segments/SegGaps 路径。
+func newMultiDirSubjectPattern(tpl string, segs []dirTplSegment, gaps []dirSegGap) (*DirSubjectPattern, error) {
+	if len(segs) < 2 || len(gaps) != len(segs)-1 {
+		return nil, fmt.Errorf("多段目录模板结构不符：%d 段 %d 距（段距须恰少一段）", len(segs), len(gaps))
+	}
+	out := &DirSubjectPattern{Expr: tpl, SegGaps: gaps}
+	for _, s := range segs {
+		re, err := regexp.Compile(s.expr)
+		if err != nil {
+			return nil, fmt.Errorf("目录格式正则 %q 编译失败: %w", s.expr, err)
+		}
+		out.Segments = append(out.Segments, DirSubjectSegment{Expr: s.expr, re: re, Captures: s.captures, Repeats: s.repeats})
+	}
+	return out, nil
+}
+
 // patternMarker 实现 Pattern 接口标记。
 func (p *DirSubjectPattern) patternMarker() {}
 
 // Evaluate 逐层（深→浅——最具体的祖先层优先：全通配目录模板（如整目录名
 // 捕获 {集名}）须绑文件直接父层而非更浅的任意匹配层；浅层形态模板在深层
 // 不匹配时自然回退浅层命中）试祖先目录名，格式与全部终结谓词同时满足的首
-// 个命中层绑定该层捕获、追加 DirHit 并返回 true；全层不中返回 false。
+// 个命中层绑定该层捕获、追加 DirHit 并返回 true；全层不中返回 false。多段
+// 模板（Segments≥2）改走 evaluateSegments：候选落地层自深向浅，全部段与谓词
+// 成立才命中，DirHit 记落地段层。
 func (p *DirSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *ParseContext) bool {
+	if len(p.Segments) >= 2 {
+		return p.evaluateSegments(in, ctx)
+	}
 	if p.re == nil {
 		return false
 	}
@@ -227,7 +294,7 @@ func (p *DirSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 		}
 		ok := true
 		for _, assert := range p.Asserts {
-			if !assert.check(in, depth) {
+			if !assert.check(in, depth, ctx) {
 				ok = false
 				break
 			}
@@ -240,6 +307,74 @@ func (p *DirSubjectPattern) Evaluate(in *MatchInput, lib *LibraryIndex, ctx *Par
 		return true
 	}
 	return false
+}
+
+// evaluateSegments 多段目录模板求值（技术要点一）：候选落地层 c 自深向浅
+// 遍历（最具体优先，与单段循环同向）——末段须匹配 DirNames[c]，其余段自
+// 落地层向上按段距放链（segChainUp）；固定段距时各段层=c−Σ(后方段距) 唯一
+// 确定，「任意」段距时回溯搜满足各段匹配的链（存在即成立，段位取最深）。
+// 全部段成立后终结谓词按落地层 c 校验、逐段（自上而下=整条模板书写序）
+// bindCondxCaptures 绑定各段捕获、DirHits 记落地段层恰一条（自决6：
+// FromAncestorDir 取最深语义自然对齐）。
+func (p *DirSubjectPattern) evaluateSegments(in *MatchInput, ctx *ParseContext) bool {
+	last := len(p.Segments) - 1
+	depths := make([]int, len(p.Segments))
+	for c := len(in.DirNames) - 1; c >= 0; c-- {
+		if !p.Segments[last].re.MatchString(in.DirNames[c]) {
+			continue
+		}
+		depths[last] = c
+		if last > 0 && !p.segChainUp(in, last-1, c, depths) {
+			continue
+		}
+		ok := true
+		for _, assert := range p.Asserts {
+			if !assert.check(in, c, ctx) {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		for i := 0; i <= last; i++ {
+			bindCondxCaptures(p.Segments[i].re, in.DirNames[depths[i]], p.Segments[i].Captures, p.Segments[i].Repeats, ctx)
+		}
+		ctx.DirHits = append(ctx.DirHits, DirHit{Depth: c, Name: in.DirNames[c]})
+		return true
+	}
+	return false
+}
+
+// segChainUp 自落地层向上放置第 i 段（下邻段 i+1 已落于层 lower，段距取
+// SegGaps[i]）：固定段距=恰 lower−N 层（唯一确定，N 超浅即不成链）；任意
+// 段距=lower−1 … 0 逐层试（最深优先），不匹配或上方续不成链即回溯再试
+// 浅层——多链并存时取「上段最深的可行链」。depths 按段序填好即成链。
+func (p *DirSubjectPattern) segChainUp(in *MatchInput, i, lower int, depths []int) bool {
+	try := func(t int) bool {
+		if !p.Segments[i].re.MatchString(in.DirNames[t]) {
+			return false
+		}
+		depths[i] = t
+		if i == 0 {
+			return true
+		}
+		return p.segChainUp(in, i-1, t, depths)
+	}
+	gap := p.SegGaps[i]
+	if gap.Any {
+		for t := lower - 1; t >= 0; t-- {
+			if try(t) {
+				return true
+			}
+		}
+		return false
+	}
+	t := lower - gap.N
+	if t < 0 {
+		return false
+	}
+	return try(t)
 }
 
 // SeqSubjectPattern 序列主体模式：成员格式模板（含 {序号}，可选 {键}）逐成员

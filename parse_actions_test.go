@@ -1,5 +1,6 @@
-// 手动解析动作族的单元测试：冲突裁决双模式的最简充分形式生成物结构断言
-// （双命中 And 组合 / 单侧缺席改绑的谓词条件策略，生成物不标记赋值）、泛化
+// 手动解析动作族的单元测试：冲突裁决赋值化（点选候选值按文件+维度写会话
+// 赋值——不产规则、回执=赋值呈现、按维度并入既有例外条目、条件改绑路径退役
+// 拒绝）、泛化
 // 规则按维度三态生成与泛化后赋值保留（2026-10-25 用户裁决废除「泛化即接
 // 管」消费剥离——赋值与新规则双源互证，赋值显式维度覆盖规则终选）、会话
 // 赋值写 API 与合并求值生效链路、生成入口的档案写并发无丢失、差异集计算
@@ -57,62 +58,49 @@ func newAdjudicationFixture(t *testing.T, root string) (*SessionManager, *workbe
 	return m, ctx
 }
 
-// —— 退出标准1：双命中冲突裁决产出 And 组合规则（最简充分形式）——
+// —— 裁决赋值化（点选候选值写会话赋值，不产规则） ——
 
-// TestAdjudicatePickGeneratesAndRule 双命中择一：生成规则的模式为候选规则模式的
-// And 组合、合成为恰一条裁决常量动作（无条件、无多余维度）；重识别后该文件
-// 待裁决消解、终选为裁决值、差异集命中该文件。
-func TestAdjudicatePickGeneratesAndRule(t *testing.T) {
+// TestAdjudicatePickWritesAssignment 点选候选值：按文件+维度写会话赋值（回执
+// =赋值呈现），不写档案（规则数不变、无 adjudication 来源条目）；重识别后
+// 该文件待裁决消散、终选含裁决值（来源=会话赋值）、差异集命中该文件——
+// 赋值按维度覆盖压待裁决项。
+func TestAdjudicatePickWritesAssignment(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newAdjudicationFixture(t, root)
+	profileBefore, _ := LoadProfile(m.store)
+	rulesBefore := len(profileBefore.Rules)
 
-	result, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
+	sess, view, started, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
 		Mode: adjudicateModePick, PickIndex: 0,
 	})
 	if err != nil {
 		t.Fatalf("双命中裁决失败: %v", err)
 	}
-	if result.Rule == nil || !result.VerificationStarted {
-		t.Fatalf("裁决结果形态不符: %+v", result)
+	if !started {
+		t.Fatalf("裁决后应排定识别刷新")
 	}
-	if !strings.HasPrefix(result.Rule.ID, "adj-") || result.Rule.Source != string(RuleSourceAdjudication) {
-		t.Fatalf("生成规则 ID/来源不符: %+v", result.Rule)
+	if view == nil || view.Title != "A" {
+		t.Fatalf("裁决回执应为赋值呈现（title=A）: %+v", view)
 	}
-
-	// 生成物结构断言（档案内，经 LoadProfile 往返）：refs 门 + 空条件行 + 恒真合取缓存
-	profile, errs := LoadProfile(m.store)
-	if len(errs) > 0 || profile == nil {
-		t.Fatalf("载入档案失败: %v", profile)
+	if resolved := resolveFileAssignment(sess.Assignments, "冲突/AB.jpg"); resolved.Title != "A" {
+		t.Fatalf("裁决值应写入会话赋值: %+v", resolved)
 	}
-	rule := findRuleByID(t, profile, result.Rule.ID)
-	if len(rule.Refs) != 2 {
-		t.Fatalf("生成规则 refs 应恰含双方候选规则，实际 %v", rule.Refs)
+	// 不产规则：档案规则数不变、无 adjudication 来源条目。
+	profileAfter, errs := LoadProfile(m.store)
+	if len(errs) > 0 || profileAfter == nil {
+		t.Fatalf("载入档案失败: %v", errs)
 	}
-	for _, want := range []string{"test-conflict-a", "test-conflict-b"} {
-		if !containsString(rule.Refs, want) {
-			t.Fatalf("生成规则 refs 应含候选 %q，实际 %v", want, rule.Refs)
+	if len(profileAfter.Rules) != rulesBefore {
+		t.Fatalf("裁决不应写档案：前 %d 条 后 %d 条", rulesBefore, len(profileAfter.Rules))
+	}
+	for _, rule := range profileAfter.Rules {
+		if rule.Source == RuleSourceAdjudication {
+			t.Fatalf("裁决不应产出规则: %+v", rule)
 		}
 	}
-	if rule.Conditions == nil || len(rule.Conditions) != 0 {
-		t.Fatalf("生成规则条件行应为空表（命中前提由成员门段承担），实际 %+v", rule.Conditions)
-	}
-	and, ok := rule.Pattern.(And)
-	if !ok || len(and) != 0 {
-		t.Fatalf("生成规则模式应为恒真合取（And 零子式），实际 %T %+v", rule.Pattern, rule.Pattern)
-	}
-	if len(rule.Extractions) != 1 {
-		t.Fatalf("生成规则提取动作应恰一条（合成=裁决结果），实际 %d 条", len(rule.Extractions))
-	}
-	action := rule.Extractions[0]
-	if action.Dimension != DimTitle || action.From != FromAdjudication || action.Constant != "A" || action.When != nil {
-		t.Fatalf("裁决动作形态不符（应为无条件的 title 常量 A）: %+v", action)
-	}
-	if rule.Source != RuleSourceAdjudication || !rule.Enabled {
-		t.Fatalf("生成规则来源/启用态不符: %+v", rule)
-	}
 
-	// 验证轮：重识别后冲突消解（裁决声明信任级压过双方）、差异高亮命中
-	sess := waitForVerificationRound(t, m, root)
+	// 验证轮：重识别后待裁决消散（赋值按维度覆盖）、终选含裁决值（会话赋值源）。
+	sess = waitForVerificationRound(t, m, root)
 	file := snapshotFileOf(sess.Snapshot, "冲突/AB.jpg")
 	if file == nil {
 		t.Fatal("重识别后缺冲突文件记录")
@@ -122,12 +110,12 @@ func TestAdjudicatePickGeneratesAndRule(t *testing.T) {
 	}
 	found := false
 	for _, decl := range file.Final {
-		if decl.Dimension == "title" && decl.Value == "A" && decl.Source == string(SourceAdjudication) {
+		if decl.Dimension == "title" && decl.Value == "A" && decl.Source == string(SourceAssignment) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("终选应含裁决值 title=A（裁决源），实际 %+v", file.Final)
+		t.Fatalf("终选应含裁决值 title=A（会话赋值源），实际 %+v", file.Final)
 	}
 	if len(sess.Snapshot.Pending) != 0 {
 		t.Fatalf("同类冲突不应再出现在待裁决清单，实际 %+v", sess.Snapshot.Pending)
@@ -142,7 +130,7 @@ func TestAdjudicatePickGeneratesAndRule(t *testing.T) {
 }
 
 // TestAdjudicateSameRuleCandidatesCollapse 候选同出一规则（同规则双动作产值）时
-// refs 门收敛为单引用（A∧A≡A 的最简形式）。
+// 点选照常按候选值写赋值（候选出处与赋值写入无耦合）。
 func TestAdjudicateSameRuleCandidatesCollapse(t *testing.T) {
 	root := t.TempDir()
 	store := newFakeSessionStore()
@@ -173,31 +161,28 @@ func TestAdjudicateSameRuleCandidatesCollapse(t *testing.T) {
 		t.Fatalf("应产出同规则双值待裁决项: %+v", snap.Pending)
 	}
 
-	result, err := m.ApplyAdjudication(root, "Dual.jpg", DimTitle, adjudicationInput{
+	sess, view, _, err := m.ApplyAdjudication(root, "Dual.jpg", DimTitle, adjudicationInput{
 		Mode: adjudicateModePick, PickIndex: 1,
 	})
 	if err != nil {
 		t.Fatalf("同规则候选裁决失败: %v", err)
 	}
+	if view == nil || view.Title != "乙" {
+		t.Fatalf("裁决回执应取所选候选值: %+v", view)
+	}
+	if resolved := resolveFileAssignment(sess.Assignments, "Dual.jpg"); resolved.Title != "乙" {
+		t.Fatalf("赋值应取所选候选值: %+v", resolved)
+	}
 	profile, _ := LoadProfile(store)
-	rule := findRuleByID(t, profile, result.Rule.ID)
-	if len(rule.Refs) != 1 || rule.Refs[0] != "dual-title" {
-		t.Fatalf("同规则候选的 refs 门应收敛为该规则单引用，实际 %v", rule.Refs)
-	}
-	and, ok := rule.Pattern.(And)
-	if !ok || len(and) != 0 {
-		t.Fatalf("生成规则模式应为恒真合取（And 零子式），实际 %T %+v", rule.Pattern, rule.Pattern)
-	}
-	if len(rule.Extractions) != 1 || rule.Extractions[0].Constant != "乙" {
-		t.Fatalf("裁决动作应恰一条且取所选候选值: %+v", rule.Extractions)
+	if len(profile.Rules) != 1 || profile.Rules[0].ID != "dual-title" {
+		t.Fatalf("裁决不应改变档案: %+v", profile.Rules)
 	}
 }
 
-// TestAdjudicateV4ConditionRulesRoundtrip 生产形态回归：v4 条件行候选（编译为
-// 行包装模式 RowSubjectPattern，不可按模式树序列化）冲突裁决后，档案写入与
-// 重载往返必须成功——2026-10-27 live-test 抓出的实机缺陷（裁决规则内嵌候选
-// 模式树 → 序列化失败「不支持序列化的模式类型: *main.RowSubjectPattern」），
-// 锚定改走 refs 门后由此测试锚定不再回退。
+// TestAdjudicateV4ConditionRulesRoundtrip 生产形态回归（裁决赋值化改判）：v4
+// 条件行候选（编译为行包装模式 RowSubjectPattern，不可按模式树序列化）冲突
+// 裁决不再构造规则——档案零触碰（原 2026-10-27 live-test 实机缺陷「裁决规则
+// 内嵌候选模式树 → 序列化失败」随规则产出退役消亡，本锚防止回退）。
 func TestAdjudicateV4ConditionRulesRoundtrip(t *testing.T) {
 	root := t.TempDir()
 	store := newFakeSessionStore()
@@ -238,87 +223,97 @@ func TestAdjudicateV4ConditionRulesRoundtrip(t *testing.T) {
 		t.Fatalf("应产出同层冲突待裁决项: %+v", snap.Pending)
 	}
 
-	result, err := m.ApplyAdjudication(root, "[集]_[77]_题_[01].jpg", DimTitle, adjudicationInput{
+	sess, view, _, err := m.ApplyAdjudication(root, "[集]_[77]_题_[01].jpg", DimTitle, adjudicationInput{
 		Mode: adjudicateModePick, PickIndex: 0,
 	})
 	if err != nil {
 		t.Fatalf("v4 形态候选裁决失败: %v", err)
 	}
-	// 档案往返：写入即重载（缺陷形态在此步即报序列化失败）
+	if view == nil || view.Title == "" {
+		t.Fatalf("裁决回执应含所选值: %+v", view)
+	}
+	if resolved := resolveFileAssignment(sess.Assignments, "[集]_[77]_题_[01].jpg"); resolved.Title == "" {
+		t.Fatalf("裁决值应写入赋值: %+v", resolved)
+	}
+	// 档案零触碰：规则数与序不变（无序列化面参与）。
 	profile, errs := LoadProfile(store)
 	if len(errs) > 0 || profile == nil {
 		t.Fatalf("裁决后档案重载失败: %v", errs)
 	}
-	rule := findRuleByID(t, profile, result.Rule.ID)
-	if len(rule.Refs) != 2 || rule.Conditions == nil || len(rule.Conditions) != 0 {
-		t.Fatalf("裁决规则应为 refs 门空条件形态，实际 refs=%v conditions=%+v", rule.Refs, rule.Conditions)
+	if len(profile.Rules) != 2 || profile.Rules[0].ID != "v4-title" || profile.Rules[1].ID != "v4-workid" {
+		t.Fatalf("裁决不应改变档案: %+v", profile.Rules)
 	}
-	// 验证轮：冲突消解、终选为裁决值
-	sess := waitForVerificationRound(t, m, root)
+	// 验证轮：冲突消解、终选为裁决值（会话赋值源）
+	sess = waitForVerificationRound(t, m, root)
 	file := snapshotFileOf(sess.Snapshot, "[集]_[77]_题_[01].jpg")
 	if file == nil || len(file.PendingDims) != 0 {
 		t.Fatalf("裁决后待裁决应消解: %+v", file)
 	}
 	found := false
 	for _, decl := range file.Final {
-		if decl.Dimension == "title" && decl.Source == string(SourceAdjudication) {
+		if decl.Dimension == "title" && decl.Source == string(SourceAssignment) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("终选应含裁决源 title 声明，实际 %+v", file.Final)
+		t.Fatalf("终选应含会话赋值源 title 声明，实际 %+v", file.Final)
 	}
 }
 
-// —— 退出标准1：缺席场景产出谓词条件策略（最简充分形式）——
+// TestAdjudicateConditionalRetired 条件改绑路径退役：conditional 模式（在场/
+// 缺席择分支改绑）不再存在，携带即回可读错误且赋值零写入。
+func TestAdjudicateConditionalRetired(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newAdjudicationFixture(t, root)
+	if _, _, _, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
+		Mode: "conditional",
+	}); err == nil || !strings.Contains(err.Error(), "条件改绑路径已退役") {
+		t.Fatalf("conditional 模式应回退役错误: %v", err)
+	}
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if resolved := resolveFileAssignment(sess.Assignments, "冲突/AB.jpg"); resolved.Title != "" {
+		t.Fatalf("被拒裁决不应写入赋值: %+v", resolved)
+	}
+}
 
-// TestAdjudicateConditionalGeneratesPredicateStrategy 单侧缺席改绑：生成规则的
-// 合成带在场/缺席谓词条件双分支，两分支各恰一条谓词；构造期校验拒绝未知来源。
-func TestAdjudicateConditionalGeneratesPredicateStrategy(t *testing.T) {
+// TestAdjudicateMergesAssignmentByDimension 裁决按维度并入既有例外条目：裁决
+// 维度取所选值并清其线索出处引用，其余维度（含出处）原样保留；重复裁决同维
+// 度为覆盖写。
+func TestAdjudicateMergesAssignmentByDimension(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newAdjudicationFixture(t, root)
 
-	result, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
-		Mode:               adjudicateModeConditional,
-		PredicateSource:    SourceDir,
-		PredicateDimension: DimAuthor,
-		PresentIndex:       0,
-		AbsentIndex:        1,
+	// 既有例外：作者（带出处）+标题（值恰为候选甲）。
+	if _, _, err := m.ApplyAssignment(root, "冲突/AB.jpg", SessionAssignment{
+		Author: "手作者", AuthorClueRef: "dirLevelStripped1",
+		Title: "A", TitleClueRef: "filenameSeg0",
+	}); err != nil {
+		t.Fatalf("写入既有赋值失败: %v", err)
+	}
+	sess, view, _, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
+		Mode: adjudicateModePick, PickIndex: 1,
 	})
 	if err != nil {
-		t.Fatalf("缺席改绑裁决失败: %v", err)
+		t.Fatalf("裁决失败: %v", err)
 	}
-
-	profile, _ := LoadProfile(m.store)
-	rule := findRuleByID(t, profile, result.Rule.ID)
-	if _, ok := rule.Pattern.(And); !ok {
-		t.Fatalf("缺席改绑生成规则模式应仍为 And 组合锚定，实际 %T", rule.Pattern)
+	if view == nil || view.Title != "B" {
+		t.Fatalf("裁决维度应取所选值: %+v", view)
 	}
-	if len(rule.Extractions) != 2 {
-		t.Fatalf("谓词条件策略应恰含在场/缺席两分支动作，实际 %d 条", len(rule.Extractions))
+	if view.Author != "手作者" || view.AuthorClueRef != "dirLevelStripped1" {
+		t.Fatalf("未裁决维度应原样保留: %+v", view)
 	}
-	present, absent := rule.Extractions[0], rule.Extractions[1]
-	if present.Constant != "A" || absent.Constant != "B" {
-		t.Fatalf("条件分支值应取自候选双值，实际 %q / %q", present.Constant, absent.Constant)
+	if view.TitleClueRef != "" {
+		t.Fatalf("裁决维度的旧线索出处应清空（新值不再对应旧段）: %+v", view)
 	}
-	for i, action := range []ExtractionAction{present, absent} {
-		if action.From != FromAdjudication || action.Dimension != DimTitle {
-			t.Fatalf("条件动作 %d 应为 title 裁决常量: %+v", i, action)
-		}
+	resolved := resolveOf(sess, "冲突/AB.jpg")
+	if resolved.Title != "B" || resolved.Author != "手作者" || resolved.TitleClueRef != "" {
+		t.Fatalf("按维度并入形态不符: %+v", resolved)
 	}
-	if present.When == nil || present.When.Kind != ExprPredicate ||
-		present.When.Source != SourceDir || present.When.Dimension != DimAuthor {
-		t.Fatalf("在场分支条件应为恰一条在场谓词节点（最简形式）: %+v", present.When)
-	}
-	if absent.When == nil || absent.When.Kind != ExprNot || !equalCondExpr(absent.When.Inner, present.When) {
-		t.Fatalf("缺席分支条件应为在场谓词节点的取反（最简形式）: %+v", absent.When)
-	}
-
-	// 非法谓词的构造期校验（中文错误 + 拒绝生成）
-	if _, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
-		Mode: adjudicateModeConditional, PredicateSource: "nope", PredicateDimension: DimAuthor,
-	}); err == nil || !strings.Contains(err.Error(), "未知的声明来源") {
-		t.Fatalf("未知来源谓词应被拒绝: %v", err)
+	if resolved.Generalized {
+		t.Fatalf("裁决赋值不应置已泛化标记: %+v", resolved)
 	}
 }
 
@@ -838,8 +833,9 @@ func TestAssignmentWriteAPIMergedRecognition(t *testing.T) {
 	}
 }
 
-// TestConcurrentGenerationEntriesNotLost 生成两入口（泛化/裁决）并发写档案：
-// 与既有 UpdateProfile 串行测试同构——并发下无规则丢失、无档案损坏。
+// TestConcurrentGenerationEntriesNotLost 档案写入口（泛化）与会话赋值写（裁决
+// /直接赋值）并发：档案写经 UpdateProfile 串行无丢失，赋值写经 SetAssignment
+// 串行互不覆盖——与既有 UpdateProfile 串行测试同构。
 func TestConcurrentGenerationEntriesNotLost(t *testing.T) {
 	root := t.TempDir()
 	m, _ := newAdjudicationFixture(t, root)
@@ -849,12 +845,14 @@ func TestConcurrentGenerationEntriesNotLost(t *testing.T) {
 	if err := m.runFullRecognition(root); err != nil {
 		t.Fatalf("全量识别失败: %v", err)
 	}
+	profileBefore, _ := LoadProfile(m.store)
+	rulesBefore := len(profileBefore.Rules)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if _, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
+		if _, _, _, err := m.ApplyAdjudication(root, "冲突/AB.jpg", DimTitle, adjudicationInput{
 			Mode: adjudicateModePick, PickIndex: 0,
 		}); err != nil {
 			t.Errorf("并发裁决一失败: %v", err)
@@ -878,20 +876,25 @@ func TestConcurrentGenerationEntriesNotLost(t *testing.T) {
 	if profile == nil || len(errs) > 0 {
 		t.Fatalf("并发后档案不可载入: %v %v", profile, errs)
 	}
-	adjCount, qnaCount := 0, 0
+	qnaCount := 0
 	for _, rule := range profile.Rules {
-		switch rule.Source {
-		case RuleSourceAdjudication:
-			adjCount++
-		case RuleSourceQna:
+		if rule.Source == RuleSourceQna {
 			qnaCount++
 		}
 	}
-	if adjCount != 1 {
-		t.Fatalf("并发裁决应恰留一条 adjudication 规则，实际 %d", adjCount)
+	if len(profile.Rules) < rulesBefore || qnaCount > 1 {
+		t.Fatalf("并发写后档案规则数不符：前 %d 后 %d（qna %d 条）", rulesBefore, len(profile.Rules), qnaCount)
 	}
-	if qnaCount > 1 {
-		t.Fatalf("并发泛化至多留一条 qna 规则，实际 %d", qnaCount)
+	// 裁决与赋值双双落会话（串行互不覆盖）。
+	sess, err := m.SessionOf(root)
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	if resolved := resolveFileAssignment(sess.Assignments, "冲突/AB.jpg"); resolved.Title != "A" {
+		t.Fatalf("并发裁决赋值应在场: %+v", resolved)
+	}
+	if resolved := resolveFileAssignment(sess.Assignments, "冲突/AyB.jpg"); resolved.Title != "并发标题" {
+		t.Fatalf("并发直接赋值应在场: %+v", resolved)
 	}
 }
 
@@ -1021,8 +1024,8 @@ func TestHandleFrontendRequestParseActions(t *testing.T) {
 		Dimension: string(DimTitle), AdjudicateMode: adjudicateModePick, PickIndex: 1,
 	}))
 	resp := ctx.lastResponse(t)
-	if !resp.OK || resp.Rule == nil || !resp.Started {
-		t.Fatalf("adjudicate 应答不符: %+v", resp)
+	if !resp.OK || resp.Assignment == nil || resp.Assignment.Title != "B" || !resp.Started {
+		t.Fatalf("adjudicate 应答应为赋值回执: %+v", resp)
 	}
 	waitForVerificationRound(t, m, root)
 

@@ -1,6 +1,6 @@
 // 可选词位（{词?}）缺席语义锚定：绑定层对未参与本次匹配的命名组跳过绑定登记，
 // 四个消费面按既有「取不到值」语义零改动——提取 FromCapture 缺席零声明、值级
-// 小标缺席门为假、when 引用缺席条件不成立、组合接线限定名缺席无声明。缺席≠
+// 小标缺席门为假、when 引用缺席条件不成立、作用域接线限定名缺席无声明。缺席≠
 // 空串绑定：手写 JSON 原生正则域（RegexPattern.matchWithCaptures）仍按历史行为
 // 绑定空串，两域缺席语义有意分叉。
 package main
@@ -112,17 +112,19 @@ func TestCondxOptionalAbsentWhenCondition(t *testing.T) {
 	}
 }
 
-// TestCondxOptionalAbsentRefCapture 组合接线面：被引成员的可选词缺席 → 成员捕获
-// 快照无该限定键 → 组合 refCapture 来源缺失零声明。
+// TestCondxOptionalAbsentRefCapture 作用域接线面：供给方的可选词缺席 → 供给方
+// 捕获快照无该限定键 → 消费规则 refCapture 来源缺失零声明。
 func TestCondxOptionalAbsentRefCapture(t *testing.T) {
-	member := refFileRowRule(t, "member-absent", "x{作者?}y", nil, nil)
-	combo := refComboRule(t, "combo-absent", []string{"member-absent"}, nil, []ExtractionAction{
-		{Dimension: DimAuthor, From: FromRefCapture, RefRule: "member-absent", CaptureName: "author", Row: 1},
-	})
-	in := &MatchInput{FileName: "xy.jpg", RelPath: "xy.jpg"}
-	decision := runRefEval(t, []RuleEntry{member, combo}, in, nil)
-	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "member-absent", "combo-absent")
-	if _, ok := declOf(decision, "combo-absent", DimAuthor); ok {
-		t.Fatalf("组合 refCapture 引用缺席可选词应来源缺失零声明")
+	provider := refDirRowRule(t, "provider-absent", "x{作者?}y", nil, nil)
+	consumer := refDirRowRule(t, "consumer-absent", "{集名}", []CondxAttach{refScopeAttach("provider-absent", 1)},
+		[]ExtractionAction{
+			{Dimension: DimAuthor, From: FromRefCapture, RefRule: "provider-absent", CaptureName: "author", Row: 1},
+		})
+	in := &MatchInput{FileName: "z.jpg", DirNames: []string{"xy", "SetA"},
+		RelPath: "xy/SetA/z.jpg", Siblings: []string{"z.jpg"}}
+	decision := runRefEval(t, []RuleEntry{provider, consumer}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "provider-absent", "consumer-absent")
+	if _, ok := declOf(decision, "consumer-absent", DimAuthor); ok {
+		t.Fatalf("作用域 refCapture 引用缺席可选词应来源缺失零声明")
 	}
 }

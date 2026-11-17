@@ -292,17 +292,18 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // 引用的声明在第一遍已全部在场）。贪婪识别（FromScan）动作第三遍执行：显式
 // 行先产出、scan 只补本规则尚未产出的维度，多值/歧义语义见 applyScanActions。
 //
-// 组合规则（refs 非空）门段先行：主循环前先对会被求值的组合规则的被引用成员
-// 全体求值（runRefGateStage），成员全体命中是组合规则的求值前提——任一未命中
-// （含停用/被跳过/不在场）即整体零产出、不进 MatchedRuleIDs（严格语义，不降
-// 级）；门段不写 MatchedRuleIDs，成员命中由其自身独立段单点登记（不重复计数），
-// 追加序保持既有规则序面。门过后成员捕获快照以限定键挂入组合规则私有作用域
-// 的注入区（ParseContext.RefCaptures，仅组合规则可见；refCapture 提取取值见
-// Apply 的 FromRefCapture 分支，when 限定名解析见 conditionOperandValue）。
-// 组合自身条件含目录行时另有「之下不含其身」约束（2026-10-29 用户拍板）：
-// 自身目录行锚定的层与被引目录成员的命中层重合（锚定目录即被引规则命中的
-// 目录）时整体不中——「位于被引规则命中的目录之下」不含其身；纯门组合与
-// 自身行非目录形态（无目录锚定）不受影响。非组合规则与非组合路径零变化。
+// 供给方门段先行（作用域附件）：主循环前对会被求值的规则条件行内
+// refScope 附件引用的全部供给方先求值（runRefGateStage——needed 收集为
+//「全部启用规则条件行递归扫描 refScope 附件」）；
+// 供给方命中层集（dirHitDepths）透传进共享上下文（ParseContext.RefScopeDepths，
+// ruleScopedContext 继承——风险6 核对点），消费规则目录行逐层槽位的 refScope
+// 谓词按层距阶梯判据核对（裁决⑥：候选层 c 合格 ⟺ 供给方命中且 ∃D∈供给方
+// 命中层集 s.t. 层距=0 时 c>D、层距=N 时 c−D=N——「之下不含其身」与
+// above-form 在该判据下天然不可成立）。供给方未命中
+//（停用/悬空/被跳过/链式形态）→ 附件谓词恒不满足→行不中（严格语义，不降级）。
+// 供给方捕获快照以限定键挂入消费规则私有作用域的注入区（ParseContext.
+// RefCaptures，按本规则的供给方集注入——injectRefSnapshots；refCapture 提取
+// 取值见 Apply 的 FromRefCapture 分支，when 限定名解析见 conditionOperandValue）。
 func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) {
 	type ruleMatch struct {
 		rule    *RuleEntry
@@ -311,6 +312,9 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 	var conditional []ruleMatch
 	var scans []ruleMatch
 	gate := runRefGateStage(rules, in, lib, ctx)
+	// 供给方命中层集透传进共享上下文：文件级事实（先行求值一次），规则私有
+	// 作用域经 ruleScopedContext 继承（风险6 核对点）。
+	ctx.RefScopeDepths = gate.dirHitDepths
 	for i := range rules {
 		rule := &rules[i]
 		if !rule.Enabled || rule.Pattern == nil {
@@ -325,25 +329,13 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 			continue
 		}
 		ruleCtx := ctx.ruleScopedContext()
-		if len(rule.Refs) > 0 {
-			// refs 门＝组合规则求值前提：任一成员门段未命中→整体零产出、
-			// 不进 MatchedRuleIDs（严格语义，不降级）。
-			if !gate.allHit(rule.Refs) {
-				continue
-			}
-			// 门过：成员捕获快照以限定键挂入本规则可见的注入区（仅组合规则）。
-			injectRefSnapshots(ruleCtx, gate, rule.Refs)
-		}
+		// 作用域附件消费规则：供给方捕获快照按本规则供给方集注入其私有作用域
+		//（限定键通道，refCapture 提取与 when 限定名可读；供给方未命中时快照
+		// 为空、注入零内容，行级层距谓词自然不满足——严格语义）。
+		injectRefSnapshots(ruleCtx, gate, refScopeProvidersOf(rule))
 		hit := rule.Pattern.Evaluate(in, lib, ruleCtx)
 		ctx.absorbScoped(ruleCtx)
 		if !hit {
-			continue
-		}
-		if anchor, ok := ruleCtx.LastDirHit(); ok && gate.anchorCoincides(rule.Refs, anchor.Depth) {
-			// 之下不含其身（2026-10-29 用户拍板）：组合自身目录行锚定的目录
-			// 同时是被引目录成员命中的目录（同链同层即同目录）→整体不中、
-			// 不进 MatchedRuleIDs。纯门组合与自身行非目录形态（文件/序列行，
-			// 无目录锚定）不受影响。
 			continue
 		}
 		decision.MatchedRuleIDs = append(decision.MatchedRuleIDs, rule.ID)
@@ -399,75 +391,53 @@ func hasConditionalAction(actions []ExtractionAction) bool {
 	return false
 }
 
-// refGateState 门段产物：被引用成员规则的先行求值结论——命中事实与限定键捕获
-// 快照。命中只在此登记为组合规则的门判据，不写 decision.MatchedRuleIDs（命中
-// 单点登记＝成员自身独立段，风险5：门段双求值不重复计数）；捕获快照只注入
-// 组合规则的私有作用域（捕获私有不变式不动，限定名通道为加法式注入——发现6）。
+// refGateState 门段产物：供给方（作用域附件引用的规则）的先行求值结论——
+// 命中事实与限定键捕获快照。命中
+// 只在此登记为消费侧判据数据，不写 decision.MatchedRuleIDs（命中单点登记＝
+// 供给方自身独立段，风险5：门段双求值不重复计数）；捕获快照只注入消费规则的
+// 私有作用域（捕获私有不变式不动，限定名通道为加法式注入——发现6）。
 type refGateState struct {
-	// hits 为成员 ID → 门段命中结论；缺席（不在场/停用/被跳过/未求值）按未命中。
+	// hits 为供给方 ID → 门段命中结论；缺席（不在场/停用/被跳过/未求值）按未命中。
 	hits map[string]bool
-	// snapshots 为成员 ID → 限定键捕获快照（命中成员私有作用域捕获的副本，
-	// 键形态「成员ID.rN.组名」，#canon 规范名变体一并快照）。
+	// snapshots 为供给方 ID → 限定键捕获快照（命中供给方私有作用域捕获的副本，
+	// 键形态「供给方ID.rN.组名」，#canon 规范名变体一并快照）。
 	snapshots map[string][]CaptureBinding
-	// dirHitDepths 为成员 ID → 该成员目录行实际命中的层深集合（同链同层即
-	// 同目录；Or 行短路只记实际发生命中的行）——「之下不含其身」判据的消费
-	// 数据。无目录行的成员（文件/序列行形态）缺席或空集，不构成约束。
+	// dirHitDepths 为供给方 ID → 该供给方目录行实际命中的层深集合（同链同层
+	// 即同目录；Or 行短路只记实际发生命中的行）——refScope 附件层距阶梯判据
+	//（裁决⑥）的消费数据（经 ParseContext.RefScopeDepths 透传）。仅命中且
+	// 有目录锚定层的供给方在场；供给方未命中＝缺席、命中但无目录行（如全行
+	// 级非形态）＝不进场——两者对附件谓词同为不可满足。
 	dirHitDepths map[string]map[int]bool
 }
 
-// allHit 门判据：refs 全体成员门段命中（严格语义，不降级——决策2）：任一
-// 未命中即组合规则整体零产出、不进 MatchedRuleIDs。
-func (g *refGateState) allHit(refs []string) bool {
-	for _, ref := range refs {
-		if !g.hits[ref] {
-			return false
-		}
-	}
-	return true
-}
-
-// anchorCoincides 判定组合自身目录行的锚定层（anchorDepth）是否与某被引目录
-// 成员的命中层重合——重合即锚定目录同时是该成员命中的目录（「之下不含其身」
-// 的排除判据，2026-10-29 用户拍板）：组合以目录行为自身条件时，集名等锚定
-// 不得落在被引规则命中的目录身上。无目录行的成员不参与判定。
-func (g *refGateState) anchorCoincides(refs []string, anchorDepth int) bool {
-	for _, ref := range refs {
-		if g.dirHitDepths[ref][anchorDepth] {
-			return true
-		}
-	}
-	return false
-}
-
-// snapshot 取某成员的限定键捕获快照（成员未命中时为空）。
+// snapshot 取某供给方的限定键捕获快照（供给方未命中时为空）。
 func (g *refGateState) snapshot(memberID string) []CaptureBinding {
 	return g.snapshots[memberID]
 }
 
 // runRefGateStage 门段（求值两段化的第一段，先于提取段主循环——与「定群段
-// 先于提取段」同款机制）：对本批规则中会被求值的组合规则（启用、模式在场、
-// 非定群形态、refs 非空）的被引用成员全体先求值。
-//   - 成员仍在各自私有作用域求值（ruleScopedContext）；求值结论不并回共享
-//     上下文（不调 absorbScoped——门段不得扰动主循环的求值次序面，非组合
+// 先于提取段」同款机制）：对本批规则中会被求值的规则（启用、模式在场、非定
+// 群形态、非聚合类别）的条件行递归扫描 refScope 附件，对引用到的供给方全体
+// 先求值（needed 收集自行扫描条件行）。
+//   - 供给方仍在各自私有作用域求值（ruleScopedContext）；求值结论不并回共享
+//     上下文（不调 absorbScoped——门段不得扰动主循环的求值次序面，非消费
 //     路径零变化；群组基线取门段时点即定群/结构群补位后的状态）；
-//   - 成员停用、被跳过（定群形态或模式缺失）或不在本规则集内＝未命中
-//     （决策2 严格语义：含成员删除后悬空引用的求值期形态）；
-//   - 门段不写 MatchedRuleIDs——成员命中由其自身独立段单点登记，追加序保持
-//     既有规则序面（风险2）。
+//   - 供给方停用、被跳过（定群形态或模式缺失）或不在本规则集内＝未命中
+//     （严格语义：含供给方删除后悬空引用的求值期形态——附件谓词恒不满足）；
+//   - 门段不写 MatchedRuleIDs——供给方命中由其自身独立段单点登记，追加序
+//     保持既有规则序面（风险2）。
 //
-// 本批无会被求值的组合规则时零工作（空门，主循环行为与既有完全一致）。
-// 成员求值彼此独立纯函数，needed 集合的遍历序不影响结论。
+// 本批无 refScope 附件时零工作（空门，主循环行为与既有完全一致）。
+// 供给方求值彼此独立纯函数，needed 集合的遍历序不影响结论。
 func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) *refGateState {
 	gate := &refGateState{hits: map[string]bool{}, snapshots: map[string][]CaptureBinding{}, dirHitDepths: map[string]map[int]bool{}}
 	needed := map[string]bool{}
 	for i := range rules {
 		rule := &rules[i]
-		if !rule.Enabled || rule.Pattern == nil || len(rule.Refs) == 0 || isGroupingRule(rule) {
+		if !rule.Enabled || rule.Pattern == nil || isGroupingRule(rule) || rule.Category == RuleCategoryAggregate {
 			continue
 		}
-		for _, ref := range rule.Refs {
-			needed[ref] = true
-		}
+		collectRefScopeProviders(rule.Conditions, needed)
 	}
 	if len(needed) == 0 {
 		return gate
@@ -488,7 +458,8 @@ func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *
 		gate.hits[memberID] = hit
 		if hit {
 			gate.snapshots[memberID] = refCaptureSnapshot(memberID, memberCtx)
-			// 目录行命中层集合留档（「之下不含其身」判据；空集=成员无目录行）。
+			// 目录行命中层集合留档（refScope 层距阶梯判据；空集=供给方无
+			// 目录锚定层，附件谓词不可满足）。
 			for _, dh := range memberCtx.DirHits {
 				if gate.dirHitDepths[memberID] == nil {
 					gate.dirHitDepths[memberID] = map[int]bool{}
@@ -500,12 +471,68 @@ func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *
 	return gate
 }
 
-// injectRefSnapshots 按 refs 序把门段捕获快照以限定键挂入组合规则的私有作用域
-// （仅本规则可见的注入区；非组合规则零注入）。
+// injectRefSnapshots 按传入的供给方集把门段捕获快照以限定键挂入消费规则的
+// 私有作用域（仅本规则可见的注入区；供给方缺席时快照为空、零注入）。
 func injectRefSnapshots(ruleCtx *ParseContext, gate *refGateState, refs []string) {
 	for _, ref := range refs {
 		ruleCtx.RefCaptures = append(ruleCtx.RefCaptures, gate.snapshot(ref)...)
 	}
+}
+
+// collectRefScopeProviders 递归扫描条件行列表（含括号子组），把 refScope 附件
+// 引用的供给方规则 ID 收进 out（门段 needed 收集的行扫描入口——阶段2 门段
+// 入口改造；行级非的行照扫：附件属行、随行求值，求值面语义由谓词槽位自然
+// 承接，自决1）。
+func collectRefScopeProviders(rows []CondxRow, out map[string]bool) {
+	for i := range rows {
+		row := &rows[i]
+		if row.Condition != nil {
+			for _, a := range row.Condition.Attach {
+				if a.Kind == CondxAttachRefScope && a.Value != "" {
+					out[a.Value] = true
+				}
+			}
+		}
+		if len(row.Group) > 0 {
+			collectRefScopeProviders(row.Group, out)
+		}
+	}
+}
+
+// refScopeProvidersOf 收集规则的供给方规则 ID 集（条件行递归扫描 refScope 附件，
+// 按出现序去重）：门段快照注入、命中预览被引用态判定（ruleReferencesRuleID
+// 行扫描）与构造校验（rule_profile.go 的供给方集口径）共用。
+func refScopeProvidersOf(rule *RuleEntry) []string {
+	if rule == nil {
+		return nil
+	}
+	return refScopeProvidersOfRows(rule.Conditions)
+}
+
+// refScopeProvidersOfRows 收集条件行列表（含括号子组递归）引用的供给方规则
+// ID 集，按出现序去重——refScopeProvidersOf 的行集直通版（构造校验在规则
+// 中间形态〔ruleEntryJSON〕上取供给方集）。
+func refScopeProvidersOfRows(rows []CondxRow) []string {
+	var providers []string
+	var walk func(rows []CondxRow)
+	walk = func(rows []CondxRow) {
+		for i := range rows {
+			row := &rows[i]
+			if row.Condition != nil {
+				for _, a := range row.Condition.Attach {
+					if a.Kind == CondxAttachRefScope && a.Value != "" &&
+						!containsString(providers, a.Value) {
+						providers = append(providers, a.Value)
+					}
+				}
+			}
+			if len(row.Group) > 0 {
+				walk(row.Group)
+			}
+		}
+	}
+	walk(rows)
+	return providers
 }
 
 // Holds 对求值时点已产出的声明集求值：Present 内谓词须全部在场、Absent 内

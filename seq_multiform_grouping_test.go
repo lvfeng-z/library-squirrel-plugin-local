@@ -12,7 +12,9 @@ import (
 )
 
 func TestRealProfileSeqRuleMultiRowGrouping(t *testing.T) {
-	profile, errs := ParseProfile([]byte(realComboProfile))
+	// 阶段2：档案锚随组合 refs 退役改用作用域附件版（realScopeProfile）——
+	// 序列定群规则两行 or 原文不变，定群断言不受门段入口改造影响。
+	profile, errs := ParseProfile([]byte(realScopeProfile))
 	if profile == nil {
 		t.Fatalf("档案不可载入: %v", errs)
 	}

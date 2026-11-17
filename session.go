@@ -223,8 +223,6 @@ type ArchiveWriteEntry string
 const (
 	// ArchiveWriteGeneralize 手动解析泛化成规则。
 	ArchiveWriteGeneralize ArchiveWriteEntry = "generalize"
-	// ArchiveWriteAdjudicate 冲突裁决生成组合规则。
-	ArchiveWriteAdjudicate ArchiveWriteEntry = "adjudicate"
 	// ArchiveWriteRuleEdit 规则编辑面（条目保存/启停/删除/全序重排与内置禁用清单维护）。
 	ArchiveWriteRuleEdit ArchiveWriteEntry = "rule-edit"
 )
@@ -236,8 +234,8 @@ type confirmAnswerHandler func(confirmSeq int64, accepted bool) bool
 // SessionManager 工作台会话管理器：会话增删改查、档案写与会的单点串行、库根
 // 获取、档案对账与前端事件协议的请求处理。
 //
-// 串行模型：mu 覆盖全部会话键写与档案读改写——会话赋值写、档案三入口写（泛化/
-// 裁决生成/规则编辑面）与同库根会话增删在同一锁上串行，无双写竞争。
+// 串行模型：mu 覆盖全部会话键写与档案读改写——会话赋值写、档案两入口写（泛化/
+// 规则编辑面）与同库根会话增删在同一锁上串行，无双写竞争。
 type SessionManager struct {
 	ctx    sdkdto.PluginContext
 	logger sdkdto.Logger
@@ -1579,7 +1577,7 @@ func (m *SessionManager) UnconfirmWorkSetCandidate(root, target string) (*Workbe
 	return sess, len(cand.Members), nil
 }
 
-// UpdateProfile 档案单点串行读改写：全部档案写（泛化/裁决生成/规则编辑面三入口）
+// UpdateProfile 档案单点串行读改写：全部档案写（泛化/规则编辑面两入口）
 // 一律经此入口，锁内 Load→mutate→Save 原子完成；mutate 返回错误即中止不落库；
 // 档案不可载入（损坏/版本不符）时拒绝写，不覆写既有档案。
 func (m *SessionManager) UpdateProfile(entry ArchiveWriteEntry, mutate func(p *RuleProfile) error) error {
@@ -1623,7 +1621,7 @@ const (
 	workbenchActionSetIgnored          = "setIgnored"          // 登记或解除忽略项
 	workbenchActionGeneralize          = "generalize"          // 泛化成规则（档案写+验证轮；mode=struct 为结构映射组合规则的确认入档）
 	workbenchActionSummarizeRule       = "summarizeRule"       // 规则总结器：赋值线索出处→组合规则建议（人话+全库命中预览+样例；不写档案）
-	workbenchActionAdjudicate          = "adjudicate"          // 冲突裁决生成组合规则
+	workbenchActionAdjudicate          = "adjudicate"          // 冲突裁决（点选候选值按文件+维度写会话赋值；不产规则）
 	workbenchActionGetDiff             = "getDiff"             // 最近一次重识别差异集
 	workbenchActionSetSelection        = "setSelection"        // 全量替换资源选择集（作品键）
 	workbenchActionCreateTasks         = "createTasks"         // 创建编排（异步：对账→置标记→goroutine 创建；立即应答 started，进度与终态经 createProgress/createDone 事件推送）
@@ -1741,19 +1739,11 @@ type workbenchFrontendRequest struct {
 	GeneralizeMode string `json:"generalizeMode,omitempty"`
 	// Dimension adjudicate 的裁决维度（待裁决项寻址）。
 	Dimension string `json:"dimension,omitempty"`
-	// AdjudicateMode adjudicate 的裁决方式：pick（双命中择一）/ conditional
-	//（单侧缺席改绑=谓词条件策略）。
+	// AdjudicateMode adjudicate 的裁决方式：pick（点选候选值写会话赋值）；
+	// 条件改绑（conditional）路径已退役，携带即拒。
 	AdjudicateMode string `json:"adjudicateMode,omitempty"`
 	// PickIndex pick 模式采纳的候选下标（待裁决项 candidates 序）。
 	PickIndex int `json:"pickIndex,omitempty"`
-	// PredicateSource / PredicateDimension conditional 模式的条件谓词
-	//（某来源在某维度上的声明是否在场）。
-	PredicateSource    string `json:"predicateSource,omitempty"`
-	PredicateDimension string `json:"predicateDimension,omitempty"`
-	// PresentIndex / AbsentIndex conditional 模式谓词在场/缺席时分别采纳的
-	// 候选下标。
-	PresentIndex int `json:"presentIndex,omitempty"`
-	AbsentIndex  int `json:"absentIndex,omitempty"`
 
 	// —— 资源选择族载荷（阶段4）——
 	// Works setSelection 的作品键全集（全量替换：集聚合/树递选/过滤全选等批量
@@ -2770,20 +2760,19 @@ func (m *SessionManager) HandleFrontendRequest(data []byte) {
 		}
 		resp.RuleSuggestion = sugg
 	case workbenchActionAdjudicate:
-		result, err := m.ApplyAdjudication(req.Root, req.RelPath, MetadataDimension(req.Dimension), adjudicationInput{
-			Mode:               req.AdjudicateMode,
-			PickIndex:          req.PickIndex,
-			PredicateSource:    SourceKind(req.PredicateSource),
-			PredicateDimension: MetadataDimension(req.PredicateDimension),
-			PresentIndex:       req.PresentIndex,
-			AbsentIndex:        req.AbsentIndex,
+		// 裁决赋值化：点选候选值按文件+维度写会话赋值（回执=赋值呈现，非
+		// 规则视图）；待裁决项随赋值按维度覆盖在重识别后消散。
+		sess, view, started, err := m.ApplyAdjudication(req.Root, req.RelPath, MetadataDimension(req.Dimension), adjudicationInput{
+			Mode:      req.AdjudicateMode,
+			PickIndex: req.PickIndex,
 		})
 		if err != nil {
 			resp.OK, resp.Error = false, err.Error()
 			break
 		}
-		resp.Rule = result.Rule
-		resp.Started = result.VerificationStarted
+		resp.Session = summarizeSession(sess)
+		resp.Assignment = view
+		resp.Started = started
 	case workbenchActionGetDiff:
 		sess, err := m.SessionOf(req.Root)
 		if err != nil {

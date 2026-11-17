@@ -243,9 +243,8 @@ func TestWorkSetRuleAdjustRuleAssembly(t *testing.T) {
 		dirRule.Conditions[0].Condition.Format.Tpl != "Artist[{作者}]" {
 		t.Fatalf("目录层条目应为 v4 目录行模板规则，实际 %T", dirRule.Pattern)
 	}
-	if att := dirRule.Conditions[0].Condition.Attach; len(att) != 1 ||
-		att[0].Kind != CondxAttachDirLevel || att[0].MinCount != 1 {
-		t.Fatalf("目录层条目应随附第 1 级层深锚（AE 决策2 同款继承）: %+v", att)
+	if att := dirRule.Conditions[0].Condition.Attach; len(att) != 0 {
+		t.Fatalf("目录层条目不应附任何层级锚（dirLevel 已废弃）: %+v", att)
 	}
 	if len(dirRule.Extractions) != 1 {
 		t.Fatalf("目录层条目应恰一条作者提取: %+v", dirRule.Extractions)
@@ -318,13 +317,11 @@ func TestWorkSetRuleAdjustRuleAssembly(t *testing.T) {
 	}
 }
 
-// TestWorkSetRuleAdjustDirAnchorLevel 集规则目录锚定行层深锚（AE 阶段2 决策5）
-// ：目录锚定（原名 dirLevel2=合集盒 / 剥壳 dirLevelStripped1=Artist[任意] 两
-// 模板）的行 1 目录行随附「位于第 N 级」（条件 JSON 含
-// attach:[{kind:"dirLevel",minCount:N}]），文件行提取 Row=2；同名目录异层
-// （更浅/更深）不再跨层接管——锚定行为构造时取证（名+层）的忠实表达
-//（风险3 行为变化在案，回退=编辑弹窗删锚）。
-func TestWorkSetRuleAdjustDirAnchorLevel(t *testing.T) {
+// TestWorkSetRuleAdjustDirAnchorPlainRow 集规则目录锚定行退化（自决7）：
+// 目录锚定（原名 dirLevel2=合集盒 / 剥壳 dirLevelStripped1=Artist[任意] 两
+// 模板）的行 1 为普通目录行——零附加、任意祖先层命中（同名异层目录也进锚定
+// 范围，收紧由文件名条目自身的模板承担），文件行提取 Row=2。
+func TestWorkSetRuleAdjustDirAnchorPlainRow(t *testing.T) {
 	root := t.TempDir()
 	m, target := workSetRuleFixture(t, root)
 
@@ -348,22 +345,22 @@ func TestWorkSetRuleAdjustDirAnchorLevel(t *testing.T) {
 	if anchorCond.Target != CondxTargetDir || anchorCond.Format.Tpl != "合集盒" {
 		t.Fatalf("行 1 应为原名锚定目录行: %+v", anchorCond)
 	}
-	if len(anchorCond.Attach) != 1 || anchorCond.Attach[0].Kind != CondxAttachDirLevel ||
-		anchorCond.Attach[0].MinCount != 2 {
-		t.Fatalf("原名锚定行应随附第 2 级层深锚: %+v", anchorCond.Attach)
+	if len(anchorCond.Attach) != 0 {
+		t.Fatalf("锚定行应为普通目录行（零附加）: %+v", anchorCond.Attach)
 	}
 	data, err := json.Marshal(rule.Conditions)
 	if err != nil {
 		t.Fatalf("序列化条件失败: %v", err)
 	}
-	if want := `"attach":[{"kind":"dirLevel","minCount":2}]`; !strings.Contains(string(data), want) {
-		t.Fatalf("锚定行 JSON 应含层深锚 %s:\n%s", want, data)
+	if strings.Contains(string(data), "attach") {
+		t.Fatalf("锚定行 JSON 不应含 attach: %s", data)
 	}
 	if rule.Extractions[0].Row != 2 {
 		t.Fatalf("集名提取应引用行 2（文件行随锚定行之后）: %+v", rule.Extractions[0])
 	}
 
-	// 同层同名照常命中；同名异层（第 1 级/第 3 级）不再跨层接管。
+	// 同层同名照常命中；同名异层（第 1 级/第 3 级）无层级锚也接管（自决7
+	// 放宽面——收紧由文件名条目模板承担）。
 	member := "[hakosaku]_[126794866]_AAA_BBB_[01].png"
 	if !rule.Pattern.Evaluate(&MatchInput{
 		FileName: member, DirNames: []string{"Artist[hakosaku]", "合集盒"},
@@ -371,18 +368,18 @@ func TestWorkSetRuleAdjustDirAnchorLevel(t *testing.T) {
 	}, nil, &ParseContext{}) {
 		t.Fatal("第 2 级同名目录应照常命中")
 	}
-	if rule.Pattern.Evaluate(&MatchInput{
+	if !rule.Pattern.Evaluate(&MatchInput{
 		FileName: member, DirNames: []string{"合集盒"}, RelPath: "合集盒/" + member,
 	}, nil, &ParseContext{}) {
-		t.Fatal("第 1 级同名目录不应被跨层接管")
+		t.Fatal("第 1 级同名目录应照常命中（任意祖先层）")
 	}
-	if rule.Pattern.Evaluate(&MatchInput{
+	if !rule.Pattern.Evaluate(&MatchInput{
 		FileName: member, DirNames: []string{"甲", "乙", "合集盒"}, RelPath: "甲/乙/合集盒/" + member,
 	}, nil, &ParseContext{}) {
-		t.Fatal("第 3 级深层同名目录不应被跨层接管")
+		t.Fatal("第 3 级深层同名目录应照常命中（任意祖先层）")
 	}
 
-	// 剥壳锚定模板同款带锚：dirLevelStripped1 → Artist[{任意}] + 第 1 级锚。
+	// 剥壳锚定模板同款普通目录行：dirLevelStripped1 → Artist[{任意}]。
 	root2 := t.TempDir()
 	m2, target2 := workSetRuleFixture(t, root2)
 	result2, err := m2.ApplyWorkSetRuleAdjust(root2, target2, setRuleAdjustInput{
@@ -398,15 +395,14 @@ func TestWorkSetRuleAdjustDirAnchorLevel(t *testing.T) {
 	if shellCond.Format.Tpl != "Artist[{任意}]" {
 		t.Fatalf("剥壳锚定行模板不符: %+v", shellCond.Format)
 	}
-	if len(shellCond.Attach) != 1 || shellCond.Attach[0].Kind != CondxAttachDirLevel ||
-		shellCond.Attach[0].MinCount != 1 {
-		t.Fatalf("剥壳锚定行应随附第 1 级层深锚: %+v", shellCond.Attach)
+	if len(shellCond.Attach) != 0 {
+		t.Fatalf("剥壳锚定行应为普通目录行（零附加）: %+v", shellCond.Attach)
 	}
-	if rule2.Pattern.Evaluate(&MatchInput{
+	if !rule2.Pattern.Evaluate(&MatchInput{
 		FileName: member, DirNames: []string{"外部", "Artist[hakosaku]", "合集盒"},
 		RelPath: "外部/Artist[hakosaku]/合集盒/" + member,
 	}, nil, &ParseContext{}) {
-		t.Fatal("第 2 级深层同名 Artist 壳目录不应被跨层接管")
+		t.Fatal("深层同名 Artist 壳目录应照常命中（任意祖先层）")
 	}
 }
 
