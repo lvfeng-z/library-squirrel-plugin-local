@@ -300,7 +300,8 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 // 谓词按层距阶梯判据核对（裁决⑥：候选层 c 合格 ⟺ 供给方命中且 ∃D∈供给方
 // 命中层集 s.t. 层距=0 时 c>D、层距=N 时 c−D=N——「之下不含其身」与
 // above-form 在该判据下天然不可成立）。供给方未命中
-//（停用/悬空/被跳过/链式形态）→ 附件谓词恒不满足→行不中（严格语义，不降级）。
+//（停用/悬空/被跳过——链式供给合法，环为唯一禁形、保存与载入两期同拒，
+// 成环条目不在求值场）→ 附件谓词恒不满足→行不中（严格语义，不降级）。
 // 供给方捕获快照以限定键挂入消费规则私有作用域的注入区（ParseContext.
 // RefCaptures，按本规则的供给方集注入——injectRefSnapshots；refCapture 提取
 // 取值见 Apply 的 FromRefCapture 分支，when 限定名解析见 conditionOperandValue）。
@@ -312,8 +313,9 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 	var conditional []ruleMatch
 	var scans []ruleMatch
 	gate := runRefGateStage(rules, in, lib, ctx)
-	// 供给方命中层集透传进共享上下文：文件级事实（先行求值一次），规则私有
-	// 作用域经 ruleScopedContext 继承（风险6 核对点）。
+	// 供给方命中层集挂共享上下文（门段入口已挂同一映射，此处同映射幂等）：
+	// 文件级事实（先行求值一次），规则私有作用域经 ruleScopedContext 继承
+	// （风险6 核对点）。
 	ctx.RefScopeDepths = gate.dirHitDepths
 	for i := range rules {
 		rule := &rules[i]
@@ -428,11 +430,18 @@ func (g *refGateState) snapshot(memberID string) []CaptureBinding {
 //     保持既有规则序面（风险2）。
 //
 // 本批无 refScope 附件时零工作（空门，主循环行为与既有完全一致）。
-// 供给方求值彼此独立纯函数，needed 集合的遍历序不影响结论。
+// 供给方按依赖拓扑序求值：自身携带作用域附件的供给方（多级链成员）经共享
+// 层集映射读到库根常量与先求值上游的命中层集；不带附件的独立供给方求值
+// 纯函数、次序不影响其结论。环成员（构造校验已拒的防御形态）不求值＝未命中。
 // 库根 sentinel（RefScopeLibraryRoot）例外：非供给方规则、无求值，命中层集
 // 恒按常量 {-1} 注入（绝对层级语义见 RefScopeLibraryRoot 注释）。
 func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) *refGateState {
 	gate := &refGateState{hits: map[string]bool{}, snapshots: map[string][]CaptureBinding{}, dirHitDepths: map[string]map[int]bool{}}
+	// 层集映射即刻挂共享上下文：门段内求值的供给方（自身携带作用域附件的
+	// 链式形态）经 ruleScopedContext 继承同一映射——库根常量与先求值供给方
+	// 登记的命中层集对后求值者可见（各调用面逐文件新建上下文，层集无跨文件
+	// 残留）；提取段主循环入口的同名赋值为同映射幂等。
+	ctx.RefScopeDepths = gate.dirHitDepths
 	needed := map[string]bool{}
 	for i := range rules {
 		rule := &rules[i]
@@ -457,23 +466,68 @@ func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *
 			byID[rules[i].ID] = &rules[i]
 		}
 	}
-	for memberID := range needed {
-		member, ok := byID[memberID]
-		if !ok || !member.Enabled || member.Pattern == nil || isGroupingRule(member) {
-			continue // 不在场/停用/被跳过＝未命中（hits 缺席即 false）
+	// 求值序=依赖拓扑序（Kahn）：供给方自身携带作用域附件（多级链）时，其
+	// 附件谓词读取上游供给方的命中层集，上游须先于下游求值。子图节点=needed
+	// 全体，边=成员→其规则来源供给方（refScopeProviderRuleIDs 取边滤除库根
+	// sentinel——非规则 ID 不构成依赖边；悬空引用不在规则集，不产生边）；
+	// 按规则序枚举节点与出边，出队序确定。环成员（构造校验已拒的防御形态）
+	// 入度恒正、不入队＝不求值＝未命中。
+	members := make([]string, 0, len(needed))
+	for i := range rules {
+		if id := rules[i].ID; needed[id] && !containsString(members, id) {
+			members = append(members, id)
 		}
-		memberCtx := ctx.ruleScopedContext()
-		hit := member.Pattern.Evaluate(in, lib, memberCtx)
-		gate.hits[memberID] = hit
-		if hit {
-			gate.snapshots[memberID] = refCaptureSnapshot(memberID, memberCtx)
-			// 目录行命中层集合留档（refScope 层距阶梯判据；空集=供给方无
-			// 目录锚定层，附件谓词不可满足）。
-			for _, dh := range memberCtx.DirHits {
-				if gate.dirHitDepths[memberID] == nil {
-					gate.dirHitDepths[memberID] = map[int]bool{}
+	}
+	// 边只连到在场节点：悬空引用（在 needed、不在规则集）不产生边——其消费
+	// 方照常求值、附件谓词按层集缺席不满足（与停用供给方同判未命中）。
+	memberSet := make(map[string]bool, len(members))
+	for _, id := range members {
+		memberSet[id] = true
+	}
+	indegree := make(map[string]int, len(members))
+	consumers := make(map[string][]string, len(members))
+	for _, id := range members {
+		member, ok := byID[id]
+		if !ok {
+			continue
+		}
+		for _, providerID := range refScopeProviderRuleIDs(member) {
+			if !memberSet[providerID] {
+				continue
+			}
+			indegree[id]++
+			consumers[providerID] = append(consumers[providerID], id)
+		}
+	}
+	queue := make([]string, 0, len(members))
+	for _, id := range members {
+		if indegree[id] == 0 {
+			queue = append(queue, id)
+		}
+	}
+	for len(queue) > 0 {
+		memberID := queue[0]
+		queue = queue[1:]
+		if member, ok := byID[memberID]; ok && member.Enabled && member.Pattern != nil && !isGroupingRule(member) {
+			memberCtx := ctx.ruleScopedContext()
+			hit := member.Pattern.Evaluate(in, lib, memberCtx)
+			gate.hits[memberID] = hit
+			if hit {
+				gate.snapshots[memberID] = refCaptureSnapshot(memberID, memberCtx)
+				// 目录行命中层集合留档（refScope 层距阶梯判据；空集=供给方无
+				// 目录锚定层，附件谓词不可满足）。
+				for _, dh := range memberCtx.DirHits {
+					if gate.dirHitDepths[memberID] == nil {
+						gate.dirHitDepths[memberID] = map[int]bool{}
+					}
+					gate.dirHitDepths[memberID][dh.Depth] = true
 				}
-				gate.dirHitDepths[memberID][dh.Depth] = true
+			}
+		} // 不在场/停用/被跳过＝未命中（hits 缺席即 false），其下游边照常放行
+		for _, consumer := range consumers[memberID] {
+			indegree[consumer]--
+			if indegree[consumer] == 0 {
+				queue = append(queue, consumer)
 			}
 		}
 	}

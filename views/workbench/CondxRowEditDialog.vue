@@ -335,8 +335,9 @@ const props = withDefaults(
     // 快照）
     occurDrift?: Record<number, { group: string; word: string }[]>
     // 作用域附件（refScope）的来源候选（首项「库根」恒在列，其后纯目录规则：
-    // 只含目录行、启用、非聚合、非本条自身——悬空/链式排除；主视图自档案规则
-    // 列表算得传入。无纯目录规则时仅库根一项——帧4，无空态红字拦）
+    // 只含目录行、启用、非聚合、非本条自身——携带作用域附件的链式供给方一并入
+    // 列，成环由保存期校验拒绝并点名环路路径；主视图自档案规则列表算得传入。无
+    // 纯目录规则时仅库根一项——帧4，无空态红字拦）
     refScopeCandidates?: { id: string; label: string }[]
   }>(),
   { mode: 'edit', rootRows: null, refScopeCandidates: () => [] }

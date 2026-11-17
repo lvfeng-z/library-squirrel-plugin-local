@@ -143,6 +143,45 @@ func TestDirMeaningReplayRefGateMatrix(t *testing.T) {
 // 白名单已移除、携带即校验拒绝，回放按命中层对照的锚定语义失去构造入口；
 // 多段目录模板的回放对照由后续阶段通道用例承接（DirHit 记落地段层——自决6）。
 
+// TestDirMeaningReplayChainLayers 多级链（供给方自身携带作用域附件）在目录
+// 层含义回放通道的逐层锚：三级链上目标层=第三级目录时消费规则覆盖该层并回放
+// 其含义；目标层=第二级时覆盖者为首两层规则（无提取动作、零含义）；链断裂
+//（首层目录缺席）时供给方不命中、零覆盖——回放与提取段同一门段入口，链式
+// 供给方按依赖序求值后层集逐级传递（直接构造规则对象，不经档案构造管线）。
+func TestDirMeaningReplayChainLayers(t *testing.T) {
+	l1 := refDirRowRule(t, "chain-l1", "L1[{集名}]", []CondxAttach{refScopeAttach(RefScopeLibraryRoot, 1)}, nil)
+	l2 := refDirRowRule(t, "chain-l2", "L2[{集名}]", []CondxAttach{refScopeAttach("chain-l1", 1)}, nil)
+	l3 := refDirRowRule(t, "chain-l3", "L3[{集名}]", []CondxAttach{refScopeAttach("chain-l2", 1)},
+		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
+	rules := []RuleEntry{l1, l2, l3}
+
+	// 目标层=第三级目录：三级规则命中恰落目标层，回放作品集含义=该层集名。
+	meanings, firstID := dirMeaningReplay(rules, []string{"L1[a]", "L2[b]", "L3[c]"}, nil)
+	if !meaningContains(meanings, string(PathTypeWorkSet), "c") {
+		t.Fatalf("三级链目标层应回放作品集含义 c: %+v", meanings)
+	}
+	if firstID != "chain-l3" {
+		t.Fatalf("首个覆盖规则应为第三级规则（首两层命中落祖先层）: %q", firstID)
+	}
+
+	// 目标层=第二级目录：覆盖者为第二级规则（无提取动作）→ 零含义。
+	meanings, firstID = dirMeaningReplay(rules, []string{"L1[a]", "L2[b]"}, nil)
+	for _, m := range meanings {
+		if m.Type == string(PathTypeWorkSet) {
+			t.Fatalf("第二级目标层不应回放作品集含义: %+v", meanings)
+		}
+	}
+	if firstID != "chain-l2" {
+		t.Fatalf("首个覆盖规则应为第二级规则: %q", firstID)
+	}
+
+	// 链断裂（首层目录缺席）：首层供给方未命中 → 二级附件不满足 → 零覆盖。
+	meanings, firstID = dirMeaningReplay(rules, []string{"Shell", "L2[b]"}, nil)
+	if len(meanings) != 0 || firstID != "" {
+		t.Fatalf("断链目录应零含义零覆盖: %+v %q", meanings, firstID)
+	}
+}
+
 // meaningContains 判断含义序列是否含（类型, 名字）对。
 func meaningContains(meanings []PathMeaning, typ, name string) bool {
 	for _, m := range meanings {

@@ -43,6 +43,9 @@ const (
 	perfStructuralPerDir = 6
 	// perfComboPerDir 每块作用域附件门段文件数：供给方+消费方双登记。
 	perfComboPerDir = 4
+	// perfChainPerDir 每块三级链样板末端文件数（嵌套链：库根→首层→二级→三级，
+	// 首层/二级供给方自身携带作用域附件、门段按依赖拓扑序求值）。
+	perfChainPerDir = 2
 	// perfPredicatePerDir 每块谓词索引命中文件数：本地/站点作者轨各 2（文件名
 	// 去扩展名精确等于库内作者名）。
 	perfPredicatePerDir = 4
@@ -58,9 +61,9 @@ const (
 // perfShape 合成库的形态计数：生成器与形态断言两面对账（期望值由规模常量
 // 推导，实际值由结论清点）——夹具任一形态静默退化即报错，防性能锚输入失真。
 type perfShape struct {
-	dirs, files                                 int
-	ruleGrouped, structuralIdentified           int
-	combo, predicateHits, assigned, clueless    int
+	dirs, files                                     int
+	ruleGrouped, structuralIdentified               int
+	combo, chain, predicateHits, assigned, clueless int
 }
 
 // syntheticEvalLibrary 合成大库生成器（eval_perf_test 专属，磁盘零依赖）：按块
@@ -135,6 +138,29 @@ func syntheticEvalLibrary() ([]ScanFile, map[string]SessionAssignment, perfShape
 	return files, assigns, want
 }
 
+// syntheticEvalLibraryWithChain 在既有六形态合成库之上追加三级链样板：每块在库
+// 根下建「链首NNN/链二NNN/链三NNN」三级目录、末端放 perfChainPerDir 个文件。
+// 三级链的三条规则首层挂库根附件（根直下第 1 级）、二级挂首层、三级挂二级——
+// 门段须按依赖拓扑序先求值首层/二级，三级行才读到中继层集（每文件一次拓扑排
+// 序，链上供给方数个位数），形态计数按新增目录/文件/全链命中数对账。
+func syntheticEvalLibraryWithChain() ([]ScanFile, map[string]SessionAssignment, perfShape) {
+	files, assigns, want := syntheticEvalLibrary()
+	for b := 0; b < perfBlockCount; b++ {
+		l1 := fmt.Sprintf("链首%03d", b)
+		l2 := fmt.Sprintf("链二%03d", b)
+		l3 := fmt.Sprintf("链三%03d", b)
+		for i := 1; i <= perfChainPerDir; i++ {
+			name := fmt.Sprintf("链样板 %02d.jpg", i)
+			rel := l1 + "/" + l2 + "/" + l3 + "/" + name
+			files = append(files, ScanFile{Path: rel, FileName: name, DirNames: []string{l1, l2, l3}, RelPath: rel})
+		}
+	}
+	want.dirs += perfBlockCount * 3
+	want.files += perfBlockCount * perfChainPerDir
+	want.chain = perfBlockCount * perfChainPerDir
+	return files, assigns, want
+}
+
 // perfEvalRules 性能锚规则集：recognitionTestRules 六条（兄弟定群/括号惯例/双
 // 冲突/谓词作者/目录含义）之上追加作用域附件规则对——供给方=组合目录行
 //（组合{序号} 匹配 组合NNN 层）、消费方=紧邻其下的 {标题} 目录行（refScope
@@ -145,6 +171,19 @@ func perfEvalRules(t *testing.T) []RuleEntry {
 	return append(rules,
 		refDirRowRule(t, "perf-gate-member", "组合{序号}", nil, nil),
 		refDirRowRule(t, "perf-gate-combo", "{标题}", []CondxAttach{refScopeAttach("perf-gate-member", 1)}, nil),
+	)
+}
+
+// perfNestedChainRules 嵌套链样板规则集：既有 perfEvalRules 之上追加三级链（库
+// 根→首层→二级→三级各挂紧邻层距、模板互异），首层/二级自身携带作用域附件作供
+// 给方——直接构造规则对象，不经档案构造校验管线（求值锚同款构造面）。
+func perfNestedChainRules(t *testing.T) []RuleEntry {
+	t.Helper()
+	rules := perfEvalRules(t)
+	return append(rules,
+		refDirRowRule(t, "perf-chain-l1", "链首{序号}", []CondxAttach{refScopeAttach(RefScopeLibraryRoot, 1)}, nil),
+		refDirRowRule(t, "perf-chain-l2", "链二{序号}", []CondxAttach{refScopeAttach("perf-chain-l1", 1)}, nil),
+		refDirRowRule(t, "perf-chain-l3", "链三{序号}", []CondxAttach{refScopeAttach("perf-chain-l2", 1)}, nil),
 	)
 }
 
@@ -171,20 +210,22 @@ func perfDeclHas(decls []MetadataDeclaration, dim MetadataDimension, value strin
 	return false
 }
 
-// assertPerfShape 六类形态在场断言（结论层清点对账，防夹具静默退化）：规则定群
+// assertPerfShape 形态在场断言（既有六形态 + 嵌套链样板；结论层清点对账，防夹
+// 具静默退化）：规则定群
 //（Group 非空且带定群规则 ID）/ 结构群全员已识别（Group 非空且规则 ID 空、每
 // 成员带 author 终选）/ 作用域附件门段（供给方与消费方双双进 MatchedRuleIDs）
-// / 赋值覆盖（终选含赋值标记值）/ 谓词索引命中（test-predicate-author +
-// author 终选=库内名）/ 无线索（无群、无终选、无命中规则）。另附两条赋值语义
-// 探针（author 改写 / title 改写且 author 保留）。形态间允许交叠（赋值文件同时
-// 是定群/结构群成员），各计数独立对账。
+// / 嵌套链样板（首层/二级/三级三条链规则同时命中，链形深度传递在场）/ 赋值覆
+// 盖（终选含赋值标记值）/ 谓词索引命中（test-predicate-author + author 终选=库
+// 内名）/ 无线索（无群、无终选、无命中规则）。另附两条赋值语义探针（author 改
+// 写 / title 改写且 author 保留）。形态间允许交叠（赋值文件同时是定群/结构群
+// 成员），各计数独立对账；无链夹具的 want.chain=0（恒不命中）。
 func assertPerfShape(t *testing.T, conclusions []FileConclusion, want perfShape) {
 	t.Helper()
 	if len(conclusions) != want.files {
 		t.Fatalf("结论数 %d ≠ 夹具文件数 %d", len(conclusions), want.files)
 	}
 	byRel := make(map[string]FileConclusion, len(conclusions))
-	ruleGrouped, structural, combo, predicate, assigned, clueless := 0, 0, 0, 0, 0, 0
+	ruleGrouped, structural, combo, chain, predicate, assigned, clueless := 0, 0, 0, 0, 0, 0, 0
 	for _, c := range conclusions {
 		byRel[c.RelPath] = c
 		matched := func(id string) bool {
@@ -204,6 +245,9 @@ func assertPerfShape(t *testing.T, conclusions []FileConclusion, want perfShape)
 		}
 		if matched("perf-gate-member") && matched("perf-gate-combo") {
 			combo++
+		}
+		if matched("perf-chain-l1") && matched("perf-chain-l2") && matched("perf-chain-l3") {
+			chain++
 		}
 		if matched("test-predicate-author") &&
 			(perfDeclHas(c.Final, DimAuthor, "库内作者甲") || perfDeclHas(c.Final, DimAuthor, "库内作者乙") ||
@@ -229,6 +273,7 @@ func assertPerfShape(t *testing.T, conclusions []FileConclusion, want perfShape)
 	check("规则定群成员", ruleGrouped, want.ruleGrouped)
 	check("结构群全员已识别成员", structural, want.structuralIdentified)
 	check("作用域附件门段命中", combo, want.combo)
+	check("三级链样板命中", chain, want.chain)
 	check("谓词索引命中", predicate, want.predicateHits)
 	check("赋值覆盖文件", assigned, want.assigned)
 	check("无线索文件", clueless, want.clueless)
@@ -247,6 +292,46 @@ func perfMedianOf(ds []time.Duration) time.Duration {
 	sorted := append([]time.Duration(nil), ds...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	return sorted[len(sorted)/2]
+}
+
+// measureEvalSpeedup 以既有计时协议（两模式各预热一轮不计时 + perfRounds 轮交
+// 错计时、轮前 runtime.GC 归一化堆态、各模式取中位）测量求值相两模式耗时并返
+// 回加速比——files/rules/lib/assigns 为求值相入口三输入。前置：调用方已把并行
+// 度覆写为 1、完成形态覆盖验证与逻辑核 ≥4 判定（本函数不重复这两步）；返回各
+// 轮耗时供留档。
+func measureEvalSpeedup(t *testing.T, files []ScanFile, rules []RuleEntry, lib *LibraryIndex, assigns map[string]SessionAssignment) (serialMedian, parallelMedian time.Duration, speedup float64, serials, parallels []time.Duration) {
+	t.Helper()
+	cores := runtime.GOMAXPROCS(0)
+	// —— 预热：两模式各一轮不计时（首跑分配/调度冷启动排除）——
+	MergedRecognitionWithTree(files, files, rules, lib, assigns) // 串行预热（覆写仍为 1）
+	withEvalWorkers(t, cores)
+	MergedRecognitionWithTree(files, files, rules, lib, assigns) // 并行预热
+
+	// —— 计时：perfRounds 轮交错（每轮先串行后并行，轮前 GC 归一化堆态）——
+	serials = make([]time.Duration, perfRounds)
+	parallels = make([]time.Duration, perfRounds)
+	for r := 0; r < perfRounds; r++ {
+		runtime.GC()
+		withEvalWorkers(t, 1)
+		start := time.Now()
+		out := MergedRecognitionWithTree(files, files, rules, lib, assigns)
+		serials[r] = time.Since(start)
+		if len(out) != len(files) {
+			t.Fatalf("串行轮 %d 结论数 %d ≠ 文件数 %d", r, len(out), len(files))
+		}
+
+		runtime.GC()
+		withEvalWorkers(t, cores)
+		start = time.Now()
+		out = MergedRecognitionWithTree(files, files, rules, lib, assigns)
+		parallels[r] = time.Since(start)
+		if len(out) != len(files) {
+			t.Fatalf("并行轮 %d 结论数 %d ≠ 文件数 %d", r, len(out), len(files))
+		}
+	}
+	serialMedian, parallelMedian = perfMedianOf(serials), perfMedianOf(parallels)
+	speedup = float64(serialMedian) / float64(parallelMedian)
+	return
 }
 
 // TestRecognitionEvalSpeedup 大库性能锚（测试矩阵第 7 项）：合成大库同输入两
@@ -279,35 +364,7 @@ func TestRecognitionEvalSpeedup(t *testing.T) {
 		t.Skipf("逻辑核 %d < 4：加速比门限（≥%.1f，方案风险2 宽门限）不判定；六类形态覆盖验证已于上文通过", cores, perfSpeedupFloor)
 	}
 
-	// —— 预热：两模式各一轮不计时（首跑分配/调度冷启动排除）——
-	MergedRecognitionWithTree(files, files, rules, lib, assigns) // 串行预热（覆写仍为 1）
-	withEvalWorkers(t, cores)
-	MergedRecognitionWithTree(files, files, rules, lib, assigns) // 并行预热
-
-	// —— 计时：perfRounds 轮交错（每轮先串行后并行，轮前 GC 归一化堆态）——
-	serials := make([]time.Duration, perfRounds)
-	parallels := make([]time.Duration, perfRounds)
-	for r := 0; r < perfRounds; r++ {
-		runtime.GC()
-		withEvalWorkers(t, 1)
-		start := time.Now()
-		out := MergedRecognitionWithTree(files, files, rules, lib, assigns)
-		serials[r] = time.Since(start)
-		if len(out) != len(files) {
-			t.Fatalf("串行轮 %d 结论数 %d ≠ 文件数 %d", r, len(out), len(files))
-		}
-
-		runtime.GC()
-		withEvalWorkers(t, cores)
-		start = time.Now()
-		out = MergedRecognitionWithTree(files, files, rules, lib, assigns)
-		parallels[r] = time.Since(start)
-		if len(out) != len(files) {
-			t.Fatalf("并行轮 %d 结论数 %d ≠ 文件数 %d", r, len(out), len(files))
-		}
-	}
-	serialMedian, parallelMedian := perfMedianOf(serials), perfMedianOf(parallels)
-	speedup := float64(serialMedian) / float64(parallelMedian)
+	serialMedian, parallelMedian, speedup, serials, parallels := measureEvalSpeedup(t, files, rules, lib, assigns)
 
 	// —— 留档（阶段4 转述入文档）：库规模与形态/核数/两模式各轮与中位/加速比 ——
 	t.Logf("合成大库：%d 块 × 5 目录 = %d 目录 / %d 文件（规则定群 %d · 结构群全员已识别 %d · 作用域附件门段 %d · 谓词索引命中 %d · 赋值覆盖 %d · 无线索 %d，无线索占比 %.1f%%）",
@@ -321,6 +378,53 @@ func TestRecognitionEvalSpeedup(t *testing.T) {
 
 	if speedup < perfSpeedupFloor {
 		t.Fatalf("求值相加速比 %.2f 低于门限 %.2f（逻辑核 %d）——如实报失败不放宽门限；串行中位 %v / 并行中位 %v，各轮 串行=%v 并行=%v",
+			speedup, perfSpeedupFloor, cores, serialMedian, parallelMedian, serials, parallels)
+	}
+}
+
+// TestEvalPerfNestedChain 嵌套链样板回归：在既有万级合成库之上按块
+// 追加三级链（库根→首层→二级→三级，首层/二级供给方自身携带作用域附件），以既
+// 有计时协议回归——门段对每个文件做一次依赖拓扑排序（needed=首层+二级，链上供
+// 给方数个位数），求值相加速比仍须不低于既有门限（对照基线锚
+// TestRecognitionEvalSpeedup 的加速比口径；-short 跳过）。形态覆盖先行断言三级
+// 链三条规则同时命中（链形深度传递在场），防样板静默退化。
+func TestEvalPerfNestedChain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("性能锚为万级合成库多轮计时（重负载），-short 短跑跳过")
+	}
+	cores := runtime.GOMAXPROCS(0)
+
+	files, assigns, want := syntheticEvalLibraryWithChain()
+	if want.files < 10000 {
+		t.Fatalf("合成库规模退化：%d 文件（万级门未达，性能锚量级失真）", want.files)
+	}
+	rules := perfNestedChainRules(t)
+	lib := perfLibraryIndex()
+
+	// —— 形态覆盖验证（任何核数环境先行完成，再谈计时）：六形态+三级链在场 ——
+	withEvalWorkers(t, 1)
+	warm := MergedRecognitionWithTree(files, files, rules, lib, assigns)
+	if len(warm) != len(files) {
+		t.Fatalf("串行预热轮结论数 %d ≠ 文件数 %d", len(warm), len(files))
+	}
+	assertPerfShape(t, warm, want)
+
+	if cores < 4 {
+		t.Skipf("逻辑核 %d < 4：加速比门限（≥%.1f）不判定；形态覆盖验证已于上文通过", cores, perfSpeedupFloor)
+	}
+
+	serialMedian, parallelMedian, speedup, serials, parallels := measureEvalSpeedup(t, files, rules, lib, assigns)
+
+	// —— 留档：嵌套链规模/形态、两模式各轮与中位、加速比（对照基线锚 TestRecognitionEvalSpeedup 同机日志）——
+	t.Logf("嵌套链样板：%d 块 × 3 目录 = %d 目录 / %d 文件（三级链全链命中 %d · 作用域附件门段 %d · 供给方 %d 个/文件）",
+		perfBlockCount, want.dirs, want.files, want.chain, want.combo, 3)
+	t.Logf("环境：GOMAXPROCS=%d（逻辑核，并行模式工作子数）", cores)
+	t.Logf("串行（1 工作子）各轮耗时：%v；中位 %v", serials, serialMedian)
+	t.Logf("并行（%d 工作子）各轮耗时：%v；中位 %v", cores, parallels, parallelMedian)
+	t.Logf("嵌套链求值相加速比 = %.2f（门限 ≥%.1f，既有基准口径；对照基线锚串行/并行中位量级）", speedup, perfSpeedupFloor)
+
+	if speedup < perfSpeedupFloor {
+		t.Fatalf("嵌套链求值相加速比 %.2f 低于门限 %.2f（逻辑核 %d）——如实报失败不放宽门限；串行中位 %v / 并行中位 %v，各轮 串行=%v 并行=%v",
 			speedup, perfSpeedupFloor, cores, serialMedian, parallelMedian, serials, parallels)
 	}
 }

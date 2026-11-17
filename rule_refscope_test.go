@@ -1,5 +1,5 @@
 // 作用域附件（refScope·阶段2）的构造期校验与门段行扫描锚：校验五则迁移
-//（自引用/悬空/链式/聚合互斥/重复段接线）+ 供给方纯目录合格性（裁决③）+
+//（自引用/悬空/环/聚合互斥/重复段接线）+ 供给方纯目录合格性（裁决③）+
 // 聚合轨行禁附件（自决4）+ 门段 needed 收集的行扫描口径（启用过滤、括号
 // 子组递归）+ 提取段与目录含义回放的双通道一致性（裁决⑦）。
 package main
@@ -63,9 +63,10 @@ func scopeLoadedIDs(profile *RuleProfile) map[string]bool {
 
 // —— 校验五则与供给方合格性（保存期/载入期同一构造管线）——
 
-// TestRefScopeValidationMatrix 作用域附件的跨规则校验矩阵：自引用/悬空/链式/
-// 聚合互斥/重复段接线五则与供给方纯目录合格性——违规条目跳过+告警，合法
-// 形态（含括号子组递归目录行、带提取动作的供给方）照常载入。
+// TestRefScopeValidationMatrix 作用域附件的跨规则校验矩阵：自引用/悬空/环/
+// 聚合互斥/重复段接线五则与供给方纯目录合格性——违规条目跳过+告警（环文案
+// 点名环路路径），合法形态（含括号子组递归目录行、带提取动作的供给方、多级
+// 供给链〔两链/三链〕与库根附件供给方）照常载入。
 func TestRefScopeValidationMatrix(t *testing.T) {
 	artistRow := scopeDirRow("Artist[{作者}]", nil)
 
@@ -77,6 +78,9 @@ func TestRefScopeValidationMatrix(t *testing.T) {
 		}
 		if len(errs) != 1 || !strings.Contains(scopeErrText(errs), "引用了自身") {
 			t.Fatalf("自引用应恰一条告警点名自身: %v", errs)
+		}
+		if strings.Contains(scopeErrText(errs), "链成环") {
+			t.Fatalf("自引用应保留五则①文案（=深度1 的环，不被环文案顶替）: %v", errs)
 		}
 	})
 	t.Run("悬空拒绝", func(t *testing.T) {
@@ -94,21 +98,92 @@ func TestRefScopeValidationMatrix(t *testing.T) {
 			t.Fatalf("悬空应点名供给方不存在: %v", errs)
 		}
 	})
-	t.Run("链式拒绝", func(t *testing.T) {
-		// provider 自身携带 refScope（消费 chainRoot）→ 作为供给方被链式禁止。
+	t.Run("两链合法", func(t *testing.T) {
+		// middle 自身携带 refScope（消费 chain-root）——禁链解除后供给方仅
+		// 要求全档案无环，三级消费链照常载入。
 		chainRoot := scopeRuleJSON("chain-root", []CondxRow{artistRow}, nil)
 		middle := scopeRuleJSON("middle", []CondxRow{scopeDirRow("Mid", []CondxAttach{refScopeAttach("chain-root", 1)})}, nil)
 		tail := scopeRuleJSON("tail", []CondxRow{scopeDirRow("{集名}", []CondxAttach{refScopeAttach("middle", 1)})}, nil)
 		profile, errs := ParseProfile(scopeProfileJSON(t, chainRoot, middle, tail))
+		if len(errs) != 0 {
+			t.Fatalf("两链供给不应报错: %v", errs)
+		}
 		ids := scopeLoadedIDs(profile)
-		if ids["tail"] {
-			t.Fatalf("链式引用条目应跳过（供给方自身携带作用域附件）")
+		if !ids["chain-root"] || !ids["middle"] || !ids["tail"] {
+			t.Fatalf("两链三条均应载入: %v", ids)
 		}
-		if !ids["chain-root"] || !ids["middle"] {
-			t.Fatalf("合法两环不应被阻塞: %v", ids)
+	})
+	t.Run("三链合法", func(t *testing.T) {
+		root := scopeRuleJSON("lv1", []CondxRow{artistRow}, nil)
+		mid1 := scopeRuleJSON("lv2", []CondxRow{scopeDirRow("A", []CondxAttach{refScopeAttach("lv1", 1)})}, nil)
+		mid2 := scopeRuleJSON("lv3", []CondxRow{scopeDirRow("B", []CondxAttach{refScopeAttach("lv2", 1)})}, nil)
+		tail := scopeRuleJSON("lv4", []CondxRow{scopeDirRow("{集名}", []CondxAttach{refScopeAttach("lv3", 1)})}, nil)
+		profile, errs := ParseProfile(scopeProfileJSON(t, root, mid1, mid2, tail))
+		if len(errs) != 0 {
+			t.Fatalf("三链供给不应报错: %v", errs)
 		}
-		if len(errs) != 1 || !strings.Contains(scopeErrText(errs), "链式") {
-			t.Fatalf("链式应恰一条告警: %v", errs)
+		ids := scopeLoadedIDs(profile)
+		for _, id := range []string{"lv1", "lv2", "lv3", "lv4"} {
+			if !ids[id] {
+				t.Fatalf("三链四条均应载入: %v", ids)
+			}
+		}
+	})
+	t.Run("A↔B 环拒绝", func(t *testing.T) {
+		// cyc-a 消费 cyc-b、cyc-b 又消费 cyc-a——全档案供给方图成环，环上
+		// 各条跳过+告警（文案点名以自身起讫的环路路径）；环外条目（含消费
+		// 环成员的 outsider——链上级被跳过、下级求值期不中，载入期不拖累）
+		// 照常载入。
+		a := scopeRuleJSON("cyc-a", []CondxRow{scopeDirRow("A", []CondxAttach{refScopeAttach("cyc-b", 1)})}, nil)
+		b := scopeRuleJSON("cyc-b", []CondxRow{scopeDirRow("B", []CondxAttach{refScopeAttach("cyc-a", 1)})}, nil)
+		outsider := scopeRuleJSON("outsider", []CondxRow{scopeDirRow("{集名}", []CondxAttach{refScopeAttach("cyc-b", 1)})}, nil)
+		profile, errs := ParseProfile(scopeProfileJSON(t, a, b, outsider))
+		ids := scopeLoadedIDs(profile)
+		if ids["cyc-a"] || ids["cyc-b"] {
+			t.Fatalf("环上条目均应跳过: %v", ids)
+		}
+		if !ids["outsider"] {
+			t.Fatalf("环外条目不应被拖累: %v", ids)
+		}
+		if len(errs) != 2 {
+			t.Fatalf("环上两条应各恰一条告警，实际 %d 条: %v", len(errs), errs)
+		}
+		msg := scopeErrText(errs)
+		if !strings.Contains(msg, "作用域附件引用的供给方链成环（cyc-a → cyc-b → cyc-a）") ||
+			!strings.Contains(msg, "作用域附件引用的供给方链成环（cyc-b → cyc-a → cyc-b）") {
+			t.Fatalf("环告警应逐字点名各自环路路径（帧5 文案）: %v", errs)
+		}
+	})
+	t.Run("多级回环拒绝", func(t *testing.T) {
+		// ring-a→ring-b→ring-c→ring-a：经多级回到本条（边界条件形态），
+		// 三条均跳过且各告警点名闭合环路路径。
+		a := scopeRuleJSON("ring-a", []CondxRow{scopeDirRow("A", []CondxAttach{refScopeAttach("ring-b", 1)})}, nil)
+		b := scopeRuleJSON("ring-b", []CondxRow{scopeDirRow("B", []CondxAttach{refScopeAttach("ring-c", 1)})}, nil)
+		c := scopeRuleJSON("ring-c", []CondxRow{scopeDirRow("C", []CondxAttach{refScopeAttach("ring-a", 1)})}, nil)
+		profile, errs := ParseProfile(scopeProfileJSON(t, a, b, c))
+		ids := scopeLoadedIDs(profile)
+		if ids["ring-a"] || ids["ring-b"] || ids["ring-c"] {
+			t.Fatalf("多级回环条目均应跳过: %v", ids)
+		}
+		if len(errs) != 3 {
+			t.Fatalf("环上三条应各恰一条告警，实际 %d 条: %v", len(errs), errs)
+		}
+		if msg := scopeErrText(errs); !strings.Contains(msg, "作用域附件引用的供给方链成环（ring-a → ring-b → ring-c → ring-a）") {
+			t.Fatalf("环告警应逐字点名闭合环路路径（帧5 文案）: %v", errs)
+		}
+	})
+	t.Run("库根附件供给方合法", func(t *testing.T) {
+		// 供给方自身携带库根附件（$root 哨兵不是规则 ID、不构成依赖边）——
+		// 不触发环检测（旧禁链曾连带拒收），供给方/消费方照常载入。
+		provider := scopeRuleJSON("root-provider", []CondxRow{scopeDirRow("Area", []CondxAttach{refScopeAttach(RefScopeLibraryRoot, 1)})}, nil)
+		consumer := scopeRuleJSON("consumer", []CondxRow{scopeDirRow("{集名}", []CondxAttach{refScopeAttach("root-provider", 1)})}, nil)
+		profile, errs := ParseProfile(scopeProfileJSON(t, provider, consumer))
+		if len(errs) != 0 {
+			t.Fatalf("库根附件供给方不应报错: %v", errs)
+		}
+		ids := scopeLoadedIDs(profile)
+		if !ids["root-provider"] || !ids["consumer"] {
+			t.Fatalf("供给方与消费方均应载入: %v", ids)
 		}
 	})
 	t.Run("聚合供给方拒绝", func(t *testing.T) {

@@ -1167,16 +1167,16 @@ const refScopeProviderIds = computed<string[]>(() => condxRefScopeProviders(acti
 // 供给方候选（剧本2 帧2 / 剧本A 帧3-4）：「库根」恒在列、排首位、缺省选中
 //（sentinel，无供给方求值/悬空）；其后只列纯目录规则（只含目录行的规则——
 // 定群/聚合/混合目标天然出局）、启用、非本条自身；停用/悬空（conditions
-// 缺席）与自身携带附件的链式形态排除（保存期跨规则校验同口径）。规则项
-// 文本=规则描述；无纯目录规则时仅库根一项（帧4，无空态红字）。
+// 缺席）排除。候选可携带任意作用域附件（规则来源或库根，嵌套多层皆入列）；
+// 环不在前端拦截，保存期由后端构造校验报错兜底（弹窗保留、可改选重存）。
+// 规则项文本=规则描述；无纯目录规则时仅库根一项（帧4，无空态红字）。
 const refScopeCandidates = computed<{ id: string; label: string }[]>(() => {
   const selfId = props.rule && !props.rule.isNew ? props.rule.id : ''
   const rules = (props.allRules || [])
     .filter((r) => {
       if (!r || r.id === selfId || r.enabled === false || r.category === 'aggregate') return false
       if (!Array.isArray(r.conditions) || !r.conditions.length) return false
-      if (!condxRowsAllDirTarget(r.conditions)) return false
-      return condxRefScopeProviders(r.conditions).length === 0
+      return condxRowsAllDirTarget(r.conditions)
     })
     .map((r) => ({ id: r.id, label: r.description || r.id }))
   return [{ id: REFSCOPE_LIBRARY_ROOT, label: '库根' }, ...rules]

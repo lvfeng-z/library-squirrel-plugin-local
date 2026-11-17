@@ -670,3 +670,81 @@ func TestRulesAdminSkippedEntryErrorRowAndDelete(t *testing.T) {
 			len(view3.Skipped), len(view3.Warnings), len(view3.Rules))
 	}
 }
+
+// —— 保存通路的作用域附件环拒与合法嵌套链锚 ——
+
+// mustApplySaveRuleJSON 序列化规则条目为编辑面提交 JSON（失败即测试中止）。
+func mustApplySaveRuleJSON(t *testing.T, r ruleEntryJSON) []byte {
+	t.Helper()
+	data, err := json.Marshal(&r)
+	if err != nil {
+		t.Fatalf("序列化规则条目失败: %v", err)
+	}
+	return data
+}
+
+// TestRefScopeSaveCycleRejected 保存通路环拒：先以合法链入档（dir-a ← dir-b），
+// 再编辑 dir-a 改挂 dir-b——替换后视图 dir-a→dir-b→dir-a 成环，保存被拒且
+// 错误文案与载入期构造管线逐字一致（点名环路路径、无包装前缀），档案不落盘
+//（条数不变、dir-a 保持原样、载入零告警）。
+func TestRefScopeSaveCycleRejected(t *testing.T) {
+	store := newFakeSessionStore()
+	mgr, _ := newTestManager(t, store)
+
+	root := scopeRuleJSON("dir-a", []CondxRow{scopeDirRow("Area", nil)}, nil)
+	if _, err := mgr.ApplySaveRule(mustApplySaveRuleJSON(t, root)); err != nil {
+		t.Fatalf("纯目录规则入档失败: %v", err)
+	}
+	lower := scopeRuleJSON("dir-b", []CondxRow{scopeDirRow("Box", []CondxAttach{refScopeAttach("dir-a", 1)})}, nil)
+	if _, err := mgr.ApplySaveRule(mustApplySaveRuleJSON(t, lower)); err != nil {
+		t.Fatalf("嵌套供给规则入档失败: %v", err)
+	}
+
+	edited := scopeRuleJSON("dir-a", []CondxRow{scopeDirRow("Area", []CondxAttach{refScopeAttach("dir-b", 1)})}, nil)
+	_, err := mgr.ApplySaveRule(mustApplySaveRuleJSON(t, edited))
+	if err == nil {
+		t.Fatalf("供给方链成环的保存应被拒绝")
+	}
+	want := "作用域附件引用的供给方链成环（dir-a → dir-b → dir-a）"
+	if err.Error() != want {
+		t.Fatalf("环拒文案应与构造管线逐字一致:\n got: %s\nwant: %s", err.Error(), want)
+	}
+
+	// 档案不落盘：条数不变、dir-a 保持无附件原样、载入零告警。
+	profile := loadAdminProfile(t, store)
+	if len(profile.Rules) != 2 {
+		t.Fatalf("环拒后档案条数应保持 2，实际 %d", len(profile.Rules))
+	}
+	if got := refScopeProvidersOf(&profile.Rules[0]); len(got) != 0 {
+		t.Fatalf("dir-a 应保持原样（无作用域附件），实际供给方 %v", got)
+	}
+}
+
+// TestRefScopeSaveNestedChain 合法嵌套链保存锚（防矫枉过正）：三级供给链
+//（middle 自身携带附件、tail 挂 middle）逐条经保存通路入档——全部接受、
+// 档案载入零告警、三条均在档。
+func TestRefScopeSaveNestedChain(t *testing.T) {
+	store := newFakeSessionStore()
+	mgr, _ := newTestManager(t, store)
+
+	chain := []ruleEntryJSON{
+		scopeRuleJSON("chain-root", []CondxRow{scopeDirRow("Artist[{作者}]", nil)}, nil),
+		scopeRuleJSON("middle", []CondxRow{scopeDirRow("Mid", []CondxAttach{refScopeAttach("chain-root", 1)})}, nil),
+		scopeRuleJSON("tail", []CondxRow{scopeDirRow("{集名}", []CondxAttach{refScopeAttach("middle", 1)})}, nil),
+	}
+	for _, r := range chain {
+		if _, err := mgr.ApplySaveRule(mustApplySaveRuleJSON(t, r)); err != nil {
+			t.Fatalf("合法嵌套链条目 %q 保存应成功: %v", r.ID, err)
+		}
+	}
+	profile := loadAdminProfile(t, store)
+	if len(profile.Rules) != 3 {
+		t.Fatalf("三级链应全部入档，实际 %d 条", len(profile.Rules))
+	}
+	ids := scopeLoadedIDs(profile)
+	for _, id := range []string{"chain-root", "middle", "tail"} {
+		if !ids[id] {
+			t.Fatalf("链上条目 %q 应在档: %v", id, ids)
+		}
+	}
+}

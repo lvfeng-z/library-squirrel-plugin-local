@@ -515,3 +515,172 @@ func refIDsEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// —— 多级链：依赖拓扑序求值与层集逐级传递 ——
+
+// chainDepthRules 构造三级链规则（各层模板互异、每层挂紧邻层距附件）：
+// 首层挂库根附件（根直下第 1 级）、二级挂首层、三级挂二级——首层供给方自身
+// 携带库根附件，正是「供给方可携带作用域附件」的多级链形态。直接构造规则
+// 对象（不经档案构造管线）。
+func chainDepthRules(t *testing.T) (l1, l2, l3 RuleEntry) {
+	t.Helper()
+	capAction := []ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}}
+	l1 = refDirRowRule(t, "chain-l1", "L1[{集名}]", []CondxAttach{refScopeAttach(RefScopeLibraryRoot, 1)}, capAction)
+	l2 = refDirRowRule(t, "chain-l2", "L2[{集名}]", []CondxAttach{refScopeAttach("chain-l1", 1)}, capAction)
+	l3 = refDirRowRule(t, "chain-l3", "L3[{集名}]", []CondxAttach{refScopeAttach("chain-l2", 1)}, capAction)
+	return l1, l2, l3
+}
+
+// chainDepthInput 三级链目录输入（文件直属第三级）。
+func chainDepthInput() *MatchInput {
+	return &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"L1[a]", "L2[b]", "L3[c]"},
+		RelPath: "L1[a]/L2[b]/L3[c]/x.jpg", Siblings: []string{"x.jpg"},
+	}
+}
+
+// TestRefGateChainDepthPropagation 三级链层集逐级传递：库根常量 {-1} → 首层
+// 命中 D=0 → 二级候选层 c=1 → 三级候选层 c=2——门段按依赖拓扑序求值，先求值
+// 供给方登记的命中层集经共享映射对后求值者可见；规则传入序倒置（消费方在前、
+// 供给方殿后）不改变结论，各层取值锚定各自目录层。
+func TestRefGateChainDepthPropagation(t *testing.T) {
+	l1, l2, l3 := chainDepthRules(t)
+	in := chainDepthInput()
+
+	// 门段级锚：needed=被引用的供给方（l1、l2），层集恰为 {0}/{1}——库根
+	// 常量 {-1} 使首层命中 D=0、二级紧邻判据 c−D=1 使其命中 D=1；三级
+	//（chain-l3）不被引用、不进门段，其行在主循环求值（下方端到端锚）。
+	ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+	gate := runRefGateStage([]RuleEntry{l3, l2, l1}, in, nil, ctx)
+	for id, wantDepth := range map[string]int{"chain-l1": 0, "chain-l2": 1} {
+		if !gate.hits[id] {
+			t.Fatalf("链供给方 %s 应在门段命中: %+v", id, gate.hits)
+		}
+		if !gate.dirHitDepths[id][wantDepth] || len(gate.dirHitDepths[id]) != 1 {
+			t.Fatalf("链供给方 %s 命中层集应恰为 {%d}: %+v", id, wantDepth, gate.dirHitDepths)
+		}
+	}
+	if _, evaluated := gate.hits["chain-l3"]; evaluated {
+		t.Fatalf("未被引用的三级规则不应进门段求值: %+v", gate.hits)
+	}
+
+	// 端到端锚：三级全命中（主循环登记序=规则传入序），取值逐层落位。
+	decision := runRefEval(t, []RuleEntry{l3, l2, l1}, in, nil)
+	assertRefMatchedIDs(t, decision.MatchedRuleIDs, "chain-l3", "chain-l2", "chain-l1")
+	for id, want := range map[string]string{"chain-l1": "a", "chain-l2": "b", "chain-l3": "c"} {
+		if v, ok := declOf(decision, id, DimCollection); !ok || v != want {
+			t.Fatalf("链成员 %s 集名应取自本层目录（%q）: %q %v", id, want, v, ok)
+		}
+	}
+
+	// 链形断链：二级目录缺席（文件直属首层）→ 二/三级不中，首层照常命中。
+	inDirect := &MatchInput{
+		FileName: "x.jpg", DirNames: []string{"L1[a]"},
+		RelPath: "L1[a]/x.jpg", Siblings: []string{"x.jpg"},
+	}
+	decisionDirect := runRefEval(t, []RuleEntry{l3, l2, l1}, inDirect, nil)
+	assertRefMatchedIDs(t, decisionDirect.MatchedRuleIDs, "chain-l1")
+}
+
+// TestRefGateChainUpstreamDisabled 链上级停用→下级行不中（严格语义传递）：
+// 停用首层（库根附件供给方）→ 二、三级全不中；停用中层 → 三级不中、首层
+// 照常命中（库根常量可见与中层无关）。
+func TestRefGateChainUpstreamDisabled(t *testing.T) {
+	l1, l2, l3 := chainDepthRules(t)
+	in := chainDepthInput()
+
+	t.Run("停用首层全链不中", func(t *testing.T) {
+		l1.Enabled = false
+		defer func() { l1.Enabled = true }()
+		decision := runRefEval(t, []RuleEntry{l3, l2, l1}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs)
+	})
+	t.Run("停用中层三级不中", func(t *testing.T) {
+		l2.Enabled = false
+		defer func() { l2.Enabled = true }()
+		decision := runRefEval(t, []RuleEntry{l3, l2, l1}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "chain-l1")
+	})
+}
+
+// TestRefGateChainCycleDefensiveMiss 环成员防御性未命中：互引成环（构造校验
+// 拒绝的形态，此处直接构造规则对象绕过校验管线下探运行期防御）与自引用
+//（深度 1 的环）成员都不进门段求值＝未命中，端到端行不中。
+func TestRefGateChainCycleDefensiveMiss(t *testing.T) {
+	t.Run("互引环不求值", func(t *testing.T) {
+		cycA := refDirRowRule(t, "cyc-a", "A[{集名}]", []CondxAttach{refScopeAttach("cyc-b", 1)}, nil)
+		cycB := refDirRowRule(t, "cyc-b", "B[{集名}]", []CondxAttach{refScopeAttach("cyc-a", 1)}, nil)
+		in := &MatchInput{
+			FileName: "x.jpg", DirNames: []string{"A[m]", "B[n]"},
+			RelPath: "A[m]/B[n]/x.jpg", Siblings: []string{"x.jpg"},
+		}
+		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+		gate := runRefGateStage([]RuleEntry{cycA, cycB}, in, nil, ctx)
+		if len(gate.hits) != 0 || len(gate.dirHitDepths) != 0 {
+			t.Fatalf("环成员不应进求值（hits/层集全空）: %+v", gate)
+		}
+		decision := runRefEval(t, []RuleEntry{cycA, cycB}, in, nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs)
+	})
+	t.Run("自引用不入队", func(t *testing.T) {
+		self := refDirRowRule(t, "cyc-self", "A[{集名}]", []CondxAttach{refScopeAttach("cyc-self", 1)}, nil)
+		in := &MatchInput{
+			FileName: "x.jpg", DirNames: []string{"A[m]"},
+			RelPath: "A[m]/x.jpg", Siblings: []string{"x.jpg"},
+		}
+		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+		gate := runRefGateStage([]RuleEntry{self}, in, nil, ctx)
+		if len(gate.hits) != 0 || len(gate.dirHitDepths) != 0 {
+			t.Fatalf("自引用成员不应进求值: %+v", gate)
+		}
+	})
+}
+
+// TestRefGateChainThreeChannelConsistency 三级链的三通道一致性（批量识别 /
+// 增量识别 / 执行期单文件重算）：全链文件三级全中、中链文件（缺第三级目录）
+// 两级中、无链文件全空，三通道命中序列逐文件全等。
+func TestRefGateChainThreeChannelConsistency(t *testing.T) {
+	root := t.TempDir()
+	files := []struct {
+		dir      string
+		dirNames []string
+		want     []string
+	}{
+		{"L1[a]/L2[b]/L3[c]", []string{"L1[a]", "L2[b]", "L3[c]"}, []string{"chain-l1", "chain-l2", "chain-l3"}},
+		{"L1[a]/L2[b]", []string{"L1[a]", "L2[b]"}, []string{"chain-l1", "chain-l2"}},
+		{"Plain", []string{"Plain"}, nil},
+	}
+	scanFiles := make([]ScanFile, 0, len(files))
+	for _, f := range files {
+		dir := root + "/" + f.dir
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("建目录失败: %v", err)
+		}
+		full := dir + "/x.jpg"
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatalf("写文件失败: %v", err)
+		}
+		scanFiles = append(scanFiles, ScanFile{
+			Path: full, FileName: "x.jpg", DirNames: f.dirNames, RelPath: f.dir + "/x.jpg",
+		})
+	}
+
+	l1, l2, l3 := chainDepthRules(t)
+	rules := []RuleEntry{l1, l2, l3}
+
+	batch := MergedRecognition(scanFiles, rules, nil, nil)
+	incremental := MergedRecognitionWithTree(scanFiles[:1], scanFiles, rules, nil, nil)
+	h := &LocalImportWorkFetcher{}
+
+	for i, f := range files {
+		fp := &FilePluginData{FullPath: scanFiles[i].Path, RelPath: scanFiles[i].RelPath}
+		recomputed, _ := h.recomputeFileDecision(fp, rules, nil)
+		assertRefMatchedIDs(t, batch[i].MatchedRuleIDs, f.want...)
+		if !refIDsEqual(recomputed.MatchedRuleIDs, batch[i].MatchedRuleIDs) {
+			t.Fatalf("%s：重算通道与批量通道命中序列不一致: %v vs %v", f.dir, recomputed.MatchedRuleIDs, batch[i].MatchedRuleIDs)
+		}
+	}
+	if !refIDsEqual(incremental[0].MatchedRuleIDs, batch[0].MatchedRuleIDs) {
+		t.Fatalf("增量通道与批量通道命中序列不一致: %v vs %v", incremental[0].MatchedRuleIDs, batch[0].MatchedRuleIDs)
+	}
+}

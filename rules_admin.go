@@ -216,9 +216,11 @@ var knownRuleSources = map[RuleSource]bool{
 
 // ApplySaveRule 规则条目保存事务（规则编辑面入口）：ruleJSON 为一条规则条目的
 // 完整 JSON（ruleEntryJSON 形态），经构造期校验管线（ruleFromJSON：模式构造 +
-// 提取动作与条件表达式静态校验）单条即时报错——非法条目拒绝且不落盘。ID 命中
-// 档案既有条目时原位替换（保持档案顺序），否则追加；ID 缺省时按 manual 来源
-// 自动生成去重。返回保存后的规则管理视图。
+// 提取动作与条件表达式静态校验）单条即时报错——非法条目拒绝且不落盘。作用域
+// 附件的供给方链成环在保存期同拒（refScopeSaveCycleError，档案∪本条视图），
+// 错误文案与载入期构造管线一致（编辑弹窗逐字呈现）。ID 命中档案既有条目时
+// 原位替换（保持档案顺序），否则追加；ID 缺省时按 manual 来源自动生成去重。
+// 返回保存后的规则管理视图。
 func (m *SessionManager) ApplySaveRule(ruleJSON []byte) (*rulesAdminView, error) {
 	var rj ruleEntryJSON
 	if err := json.Unmarshal(ruleJSON, &rj); err != nil {
@@ -234,22 +236,62 @@ func (m *SessionManager) ApplySaveRule(ruleJSON []byte) (*rulesAdminView, error)
 	if err := validateCaptureExtractionDeclared(entry); err != nil {
 		return nil, err
 	}
+	var cycleErr error
 	if err := m.UpdateProfile(ArchiveWriteRuleEdit, func(p *RuleProfile) error {
 		if entry.ID == "" {
 			entry.ID = ensureRuleIDUnique(p, generatedRuleID("manual", entry.Description))
 		}
+		replaced := false
 		for i := range p.Rules {
 			if p.Rules[i].ID == entry.ID {
 				p.Rules[i] = *entry
-				return nil
+				replaced = true
+				break
 			}
 		}
-		p.Rules = append(p.Rules, *entry)
+		if !replaced {
+			p.Rules = append(p.Rules, *entry)
+		}
+		// 环拒在「档案∪本条」替换后视图上判定；mutate 报错即中止不落盘。
+		cycleErr = refScopeSaveCycleError(p, entry.ID)
+		if cycleErr != nil {
+			return cycleErr
+		}
 		return nil
 	}); err != nil {
+		if cycleErr != nil {
+			// 环拒错误按构造管线原文返回（不套 UpdateProfile 的中止包装
+			// 前缀）——编辑弹窗 saveError 通路逐字呈现。
+			return nil, cycleErr
+		}
 		return nil, err
 	}
 	return m.RulesAdminView()
+}
+
+// refScopeSaveCycleError 保存期作用域附件环拒：在「现有档案 ∪ 本次条目」（同
+// ID 旧条目已原位替换、新条目已入列）的视图上建供给方图，判定本次保存的条目
+// 是否参与供给方链环路。判定与文案复用载入期构造管线同一套（refScopeCyclePaths
+// 取边滤库根 sentinel；文案=校验③原文），保存与载入对环同拒。只判本条参与的
+// 环：档案既有边未经本次保存改动，与本条无关的环不牵连本次保存。合法嵌套链
+// （无环多级供给）返回 nil 照常落档。纯函数。
+func refScopeSaveCycleError(profile *RuleProfile, entryID string) error {
+	if profile == nil || entryID == "" {
+		return nil
+	}
+	byID := make(map[string]int, len(profile.Rules))
+	for i := range profile.Rules {
+		if _, seen := byID[profile.Rules[i].ID]; !seen {
+			byID[profile.Rules[i].ID] = i
+		}
+	}
+	if _, ok := byID[entryID]; !ok {
+		return nil
+	}
+	if path, cyclic := refScopeCyclePaths(profile.Rules, byID)[entryID]; cyclic {
+		return fmt.Errorf("作用域附件引用的供给方链成环（%s）", path)
+	}
+	return nil
 }
 
 // validateCaptureExtractionDeclared 校验取值来源为捕获组的提取动作所引用的捕获

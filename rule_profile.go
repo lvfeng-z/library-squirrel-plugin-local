@@ -1512,7 +1512,7 @@ type skippedRuleEntry struct {
 // 先例构造拒绝——同为跳过+告警。个别规则构造校验失败（条件行编译、正则、
 // 深度约束、提取引用不存在、refCapture 的 refRule 缺失或不在本规则供给方集
 // 内等）只产生含规则 ID 与描述的中文错误并跳过该规则，不阻塞其余规则载入；
-// 作用域附件的跨规则校验（自引用/悬空/链式/聚合互斥/重复段接线/供给方合格
+// 作用域附件的跨规则校验（自引用/悬空/环/聚合互斥/重复段接线/供给方合格
 // 性）同挂该出口——逐规则构造完成后对全部已构造规则统一校验，违规条目
 // 同样跳过并返回带规则 ID 的错误。无错误时错误列表为空。
 func ParseProfile(data []byte) (*RuleProfile, []error) {
@@ -1592,7 +1592,7 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 		constructed = append(constructed, *rule)
 		constructedIdx = append(constructedIdx, i)
 	}
-	// 第二遍：跨规则引用校验——作用域附件 refScope 五则（自引用/悬空/链式/
+	// 第二遍：跨规则引用校验——作用域附件 refScope 五则（自引用/悬空/环/
 	// 聚合互斥/重复段接线 + 供给方纯目录合格性）。以第一遍已构造规则集为
 	//「本档案规则集」——被逐条构造拒收的规则不在场，指向它的引用即按悬空
 	// 处理。违规条目同走坏条目出口（结构化跳过，告警点名消费规则——描述
@@ -1603,9 +1603,14 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 			byID[constructed[i].ID] = i
 		}
 	}
+	// 供给方图环检测（校验③环化）：节点=已构造规则、边=规则 → 其规则来源
+	// 供给方（滤除库根 sentinel——非规则 ID 不成依赖边；悬空引用不在 byID、
+	// 不成边）。一次建图一次 DFS 判定，逐消费条目在 validateRefScopeWiring
+	// 的③分支消费各自参与的环路路径。
+	cyclePaths := refScopeCyclePaths(constructed, byID)
 	for i := range constructed {
 		rule := &constructed[i]
-		if err := validateRefScopeWiring(rule, byID, constructed); err != nil {
+		if err := validateRefScopeWiring(rule, byID, constructed, cyclePaths); err != nil {
 			label := rule.Description
 			if label == "" {
 				label = rule.ID
@@ -1856,8 +1861,10 @@ func validateExprRefRepeat(e *CondExpr, ref string, repeatNames map[string]bool)
 
 // validateRefScopeWiring 校验作用域附件（refScope）的跨规则接线（构造期跨
 // 规则静态校验）：①自引用（供给方=本条 ID）
-// ②悬空（供给方不在本档案已构造规则集内）③链式（供给方自身条件行含
-// refScope 附件）④聚合互斥（供给方非聚合；聚合轨行
+// ②悬空（供给方不在本档案已构造规则集内）③环（全档案「规则→规则来源
+// 供给方」图有环且本条在环上——供给方自身可携带作用域附件〔两链/三链合法〕，
+// 环路路径由 cyclePaths 点名；自引用=深度 1 的环，由①先行拒绝、文案不动）
+// ④聚合互斥（供给方非聚合；聚合轨行
 // 自身禁附件由 validateAggregateEntry 先行拦截——自决4）⑤重复段接线（消费
 // 规则的 refCapture 提取与 when 限定名不落供给方重复段词——
 // validateRefRepeatWiring）。另校验供给方合格
@@ -1865,15 +1872,18 @@ func validateExprRefRepeat(e *CondExpr, ref string, repeatNames map[string]bool)
 // 目录行仍算目录行，其否定语义在求值面自然处理、命中层集只记实际命中层；
 // 定群〔全序列行〕与模式树旧形态天然不满足——自决2：判定只看行的目标类
 // 别，不猜布尔语义）。任一违规返回中文错误，调用方跳过该条并告警。byID 为
-// 已构造规则 ID 到 all 下标的索引（重复 ID 取先出现者）；无 refScope 附件
-// 的规则零工作。库根 sentinel（RefScopeLibraryRoot）对①-⑤与供给方合格性
-// 全部放行——非供给方规则、无捕获与层集求值形态可判（层集门段常量注入）。
-func validateRefScopeWiring(rule *RuleEntry, byID map[string]int, all []RuleEntry) error {
+// 已构造规则 ID 到 all 下标的索引（重复 ID 取先出现者）；cyclePaths 为
+// refScopeCyclePaths 的输出（成环节点 ID → 以其起讫的环路路径）。无 refScope
+// 附件的规则零工作。库根 sentinel（RefScopeLibraryRoot）对①-⑤与供给方合格性
+// 全部放行——非供给方规则、无捕获与层集求值形态可判（层集门段常量注入，
+// 亦不成图边——取边滤除）。
+func validateRefScopeWiring(rule *RuleEntry, byID map[string]int, all []RuleEntry, cyclePaths map[string]string) error {
 	providers := refScopeProvidersOf(rule)
 	for _, ref := range providers {
 		if ref == RefScopeLibraryRoot {
-			// 库根 sentinel：非供给方规则，无悬空/自引用/链式/纯目录合格性
-			// 可判（层集门段常量注入），无重复段接线面（无捕获）——放行。
+			// 库根 sentinel：非供给方规则，无悬空/自引用/环/纯目录合格性
+			// 可判（层集门段常量注入、不成图边），无重复段接线面（无捕获）
+			// ——放行。
 			continue
 		}
 		if ref == rule.ID {
@@ -1887,8 +1897,8 @@ func validateRefScopeWiring(rule *RuleEntry, byID map[string]int, all []RuleEntr
 		if member.Category == RuleCategoryAggregate {
 			return fmt.Errorf("作用域附件引用的供给方 %q 自身为聚合规则（聚合规则不作供给方）", ref)
 		}
-		if len(refScopeProvidersOf(member)) > 0 {
-			return fmt.Errorf("作用域附件引用的供给方 %q 自身携带作用域附件（禁止链式引用）", ref)
+		if path, cyclic := cyclePaths[rule.ID]; cyclic {
+			return fmt.Errorf("作用域附件引用的供给方链成环（%s）", path)
 		}
 		if !condxRowsAllDir(member.Conditions) {
 			return fmt.Errorf("作用域附件引用的供给方 %q 不是纯目录规则（供给方的全部条件行须为目录目标）", ref)
@@ -1921,6 +1931,96 @@ func condxRowsAllDir(rows []CondxRow) bool {
 		}
 	}
 	return any
+}
+
+// refScopeProviderRuleIDs 收集规则的供给方规则 ID 集，滤除库根 sentinel
+// （RefScopeLibraryRoot——非规则 ID、不构成依赖边）：供给方图的取边唯一
+// 口径，构造期环检测（refScopeCyclePaths）与门段拓扑排序（阶段2）共用。
+// 去重与出现序口径随 refScopeProvidersOf。
+func refScopeProviderRuleIDs(rule *RuleEntry) []string {
+	providers := refScopeProvidersOf(rule)
+	ids := make([]string, 0, len(providers))
+	for _, id := range providers {
+		if id != RefScopeLibraryRoot {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// refScopeCyclePaths 全档案「规则→规则来源供给方」图的环检测（DFS 三色标记）：
+// 节点=rules（已构造规则，按传入序），边=规则 → 其供给方规则下标
+// （refScopeProviderRuleIDs 取边滤除库根 sentinel；悬空引用不在 byID、不成
+// 边）。返回成环节点 ID → 以该节点起讫的环路路径文本（「A → B → … → A」；
+// 同一节点落在多个环上时取 DFS 首个命中）。环上每个成员各得一条以自身起讫
+// 的路径——第二遍逐消费条目按此点名其参与的环路（校验③）。自引用=深度 1
+// 的环亦被检出，但由校验①先行拒绝（文案不动）。按构造序与附件出现序遍历，
+// 同档案结论确定。纯函数。
+func refScopeCyclePaths(rules []RuleEntry, byID map[string]int) map[string]string {
+	edges := make([][]int, len(rules))
+	for i := range rules {
+		for _, id := range refScopeProviderRuleIDs(&rules[i]) {
+			if j, ok := byID[id]; ok {
+				edges[i] = append(edges[i], j)
+			}
+		}
+	}
+	const (
+		colorWhite = iota // 未访问
+		colorGray         // 在当前 DFS 路径上
+		colorBlack        // 已完结（其可达子图的环已全部记录）
+	)
+	color := make([]uint8, len(rules))
+	cycles := map[string]string{}
+	var path []int                   // 当前 DFS 路径（节点下标）
+	onPath := make([]int, len(rules)) // 节点在 path 中的下标（仅 colorGray 时有效）
+	var visit func(i int)
+	visit = func(i int) {
+		color[i] = colorGray
+		path = append(path, i)
+		onPath[i] = len(path) - 1
+		for _, j := range edges[i] {
+			switch color[j] {
+			case colorWhite:
+				visit(j)
+			case colorGray:
+				// 回边 j：path[onPath[j]:] + j 构成起讫同节点的环路。
+				cyc := make([]int, 0, len(path)-onPath[j]+1)
+				cyc = append(cyc, path[onPath[j]:]...)
+				cyc = append(cyc, j)
+				refScopeRecordCyclePath(rules, cyc, cycles)
+			}
+		}
+		path = path[:len(path)-1]
+		color[i] = colorBlack
+	}
+	for i := range rules {
+		if color[i] == colorWhite {
+			visit(i)
+		}
+	}
+	return cycles
+}
+
+// refScopeRecordCyclePath 为环上每个成员各记一条以自身起讫的环路路径
+// （cyc=环路下标序列，末位与首位同节点=起讫闭合；已有记录的成员不动——
+// 同一节点多环取首个命中）。
+func refScopeRecordCyclePath(rules []RuleEntry, cyc []int, cycles map[string]string) {
+	members := len(cyc) - 1
+	ids := make([]string, members)
+	for p, idx := range cyc[:members] {
+		ids[p] = rules[idx].ID
+	}
+	parts := make([]string, 0, members+1)
+	for p := 0; p < members; p++ {
+		if _, seen := cycles[ids[p]]; seen {
+			continue
+		}
+		parts = append(parts[:0], ids[p:]...)
+		parts = append(parts, ids[:p]...)
+		parts = append(parts, ids[p])
+		cycles[ids[p]] = strings.Join(parts, " → ")
+	}
 }
 
 // containsString 判断字符串切片是否含有目标值。

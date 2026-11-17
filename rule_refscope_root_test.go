@@ -189,3 +189,38 @@ func TestRefScopeAssertPhrase(t *testing.T) {
 		}
 	}
 }
+
+// TestRefScopeRootAttachedProviderGate 携带库根附件的供给方在门段求值期常量
+// 可见：供给方自身的附件谓词在门段内求值时读得到库根常量层集 {-1}——根直下
+// 壳层命中并登记 D=0，其下紧邻消费行经规则来源附件成立；非根直下的同名壳层
+// 因常量判据（c=0）不中，其下游全链不中。
+func TestRefScopeRootAttachedProviderGate(t *testing.T) {
+	provider := refDirRowRule(t, "provider-root", "Artist[{作者}]", []CondxAttach{refScopeAttach(RefScopeLibraryRoot, 1)}, nil)
+	consumer := refDirRowRule(t, "consumer", "Set{集名}", []CondxAttach{refScopeAttach("provider-root", 1)},
+		[]ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}})
+	rules := []RuleEntry{provider, consumer}
+
+	t.Run("门段内常量可见供给方命中", func(t *testing.T) {
+		in := rootEvalInput("Artist[foo]", "SetA")
+		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+		gate := runRefGateStage(rules, in, nil, ctx)
+		if !gate.hits["provider-root"] {
+			t.Fatalf("库根附件供给方应在门段求值期命中（常量层集可见）: %+v", gate.hits)
+		}
+		if !gate.dirHitDepths["provider-root"][0] || len(gate.dirHitDepths["provider-root"]) != 1 {
+			t.Fatalf("供给方命中层集应恰为 {0}: %+v", gate.dirHitDepths)
+		}
+	})
+	t.Run("端到端消费命中", func(t *testing.T) {
+		decision := runRefEval(t, rules, rootEvalInput("Artist[foo]", "SetA"), nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs, "provider-root", "consumer")
+		if v, ok := declOf(decision, "consumer", DimCollection); !ok || v != "A" {
+			t.Fatalf("紧邻集名应为 A（模板字面前缀 Set 之外）: %q %v", v, ok)
+		}
+	})
+	t.Run("非根直下壳层全链不中", func(t *testing.T) {
+		// Artist 壳不在根直下（c=1≠0）→ 供给方库根附件不满足 → 消费行不中。
+		decision := runRefEval(t, rules, rootEvalInput("Shell", "Artist[foo]", "SetA"), nil)
+		assertRefMatchedIDs(t, decision.MatchedRuleIDs)
+	})
+}
