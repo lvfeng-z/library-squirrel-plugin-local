@@ -1238,9 +1238,10 @@ func dirSegLevelPhrase(tpl string, gaps []dirSegGap) string {
 	return b.String()
 }
 
-// refScopeAssertPhrase 作用域附件谓词的人话句式（决策7 后端面）：「位于规则 X
-// 命中的目录之下（紧邻/任意深度/隔N级）」——供给方规则描述的解析需档案在场，
-// 此处以供给方 ID 直读（呈现面由前端镜像承载完整描述形态）。
+// refScopeAssertPhrase 作用域附件谓词的人话句式（决策7 后端面）：库根来源
+//「位于库根之下（紧邻/任意深度/隔N级）」、规则来源「位于规则 X 之下（…）」
+//——供给方规则描述的解析需档案在场，此处以供给方 ID 直读（呈现面由前端镜像
+// 承载完整描述形态）。
 func refScopeAssertPhrase(a DirAssert) string {
 	gap := "紧邻"
 	switch {
@@ -1249,5 +1250,8 @@ func refScopeAssertPhrase(a DirAssert) string {
 	case a.MinCount >= 2:
 		gap = fmt.Sprintf("隔%d级", a.MinCount)
 	}
-	return fmt.Sprintf("位于规则 %s 命中的目录之下（%s）", a.Value, gap)
+	if a.Value == RefScopeLibraryRoot {
+		return fmt.Sprintf("位于库根之下（%s）", gap)
+	}
+	return fmt.Sprintf("位于规则 %s 之下（%s）", a.Value, gap)
 }

@@ -108,9 +108,10 @@ type DirAssert struct {
 	Types []string `json:"types,omitempty"`
 	// Word 为包含词（parentContains）。
 	Word string `json:"word,omitempty"`
-	// Value 为 refScope 的供给方规则 ID（作用域附件，阶段2）：供给方命中层集
-	// 经 ParseContext.RefScopeDepths 透传（门段先行求值产出），此处按层距
-	// 阶梯判据核对候选层。
+	// Value 为 refScope 的来源（作用域附件，阶段2）：供给方规则 ID（命中层集
+	// 经 ParseContext.RefScopeDepths 透传——门段先行求值产出，按层距阶梯判据
+	// 核对候选层）或库根 sentinel RefScopeLibraryRoot（层集 {-1} 门段常量
+	// 注入，同一判据得绝对层级语义）。
 	Value string `json:"value,omitempty"`
 }
 
@@ -180,7 +181,10 @@ func (a DirAssert) check(in *MatchInput, depth int, ctx *ParseContext) bool {
 		//（c<D）在两分支下都天然不可成立——「之下不含其身」无需独立排除。
 		// 供给方未命中（停用/悬空/被跳过/被链式禁止的形态）＝层集缺席→恒不
 		// 满足（严格语义，不降级）；供给方命中但无目录锚定层（如全行级非的
-		// 纯目录规则）＝空层集，同样不可满足。
+		// 纯目录规则）＝空层集，同样不可满足。库根 sentinel
+		//（RefScopeLibraryRoot）例外：门段为其恒注入层集 {-1}，本判据零改动
+		// 即得绝对层级语义——紧邻=根直下第 1 级（c=0）、隔 N=自根数起第 N 级
+		//（c=N−1）、任意=恒真（c 恒 ≥0>D=−1）。
 		if ctx == nil || a.Value == "" {
 			return false
 		}

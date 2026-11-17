@@ -286,7 +286,7 @@ export const CONDX_ATTACH_OPTIONS: Record<string, { value: string; label: string
     { value: 'childTypeIs', label: '子女类型是', needs: ['types'] },
     { value: 'parentFormat', label: '父目录名按模板', needs: ['tpl'] },
     { value: 'parentContains', label: '父目录名含词', needs: ['word'] },
-    { value: 'refScope', label: '位于某规则命中的目录之下', needs: ['refRule', 'gap'] }
+    { value: 'refScope', label: '位于此目录下', needs: ['refRule', 'gap'] }
   ],
   seq: [
     { value: 'seqMinLength', label: '序列长度 ≥N', needs: ['count'] },
@@ -303,6 +303,13 @@ export const REFSCOPE_GAP_OPTIONS: { value: 'adjacent' | 'any' | 'n'; label: str
   { value: 'any', label: '之下任意层' },
   { value: 'n', label: '之下隔 N 级' }
 ]
+
+// 库根 sentinel（与内核 RefScopeLibraryRoot 同源）：来源=库的最顶层目录，
+// 无供给方求值/悬空（门段恒注入命中层集 {-1}），层距即绝对层级——紧邻=根
+// 直下第 1 级、隔 N=自根数起第 N 级、任意=恒真。保留串 $root 与规则 ID
+// 形态不冲突（规则 ID 不以 $ 起首）；来源下拉「库根」恒在列、排首位、缺省
+// 选中（帧2/帧4）。
+export const REFSCOPE_LIBRARY_ROOT = '$root'
 
 // 层距档判定：MinCount → 三选档位（缺省/1=紧邻、0=任意、≥2=隔 N 级）。
 export function refScopeGapKeyOf(minCount: number | undefined): 'adjacent' | 'any' | 'n' {
@@ -530,14 +537,16 @@ export function refScopeGapWord(minCount: number | undefined): string {
   return '紧邻'
 }
 
-// refScopeAssertPhrase 作用域附件谓词的人话句式（决策7 前端镜像）：完整描述
-// 形态「位于「〈供给方规则描述〉」命中的目录之下（紧邻/任意深度/隔N级）」
-//（labelOf 解析供给方 ID→规则描述）；labelOf 缺席时回落供给方 ID 直读形态
-//「位于规则 X 命中的目录之下（…）」——与后端 refScopeAssertPhrase 同源。
+// refScopeAssertPhrase 作用域附件谓词的人话句式（决策7 前端镜像）：库根来源
+//「位于库根之下（紧邻/任意深度/隔N级）」（sentinel 分支不问 labelOf）；
+// 规则来源完整描述形态「位于「〈供给方规则描述〉」之下（…）」（labelOf 解析
+// 供给方 ID→规则描述）；labelOf 缺席时回落供给方 ID 直读形态
+//「位于规则 X 之下（…）」——与后端 refScopeAssertPhrase 同源。
 export function refScopeAssertPhrase(attach: CondxAttachForm, labelOf?: (ruleId: string) => string): string {
-  const id = attach.value || '?'
   const gap = refScopeGapWord(attach.minCount)
-  return labelOf ? `位于「${labelOf(id)}」命中的目录之下（${gap}）` : `位于规则 ${id} 命中的目录之下（${gap}）`
+  if ((attach.value || '') === REFSCOPE_LIBRARY_ROOT) return `位于库根之下（${gap}）`
+  const id = attach.value || '?'
+  return labelOf ? `位于「${labelOf(id)}」之下（${gap}）` : `位于规则 ${id} 之下（${gap}）`
 }
 
 // 一条目录行的全部作用域附件直译句（按附加条件序以「 · 」并列；非目录行恒空）。
@@ -1485,10 +1494,12 @@ export function condxRowError(rowNum: number, condx: CondxForm | null | undefine
   const placeholders = condxRowPlaceholders(condx)
   for (const a of condx.attach || []) {
     if (allowed.indexOf(a.kind) < 0) return `终结谓词「${a.kind}」不适用于${target === 'file' ? '文件名' : target === 'dir' ? '目录名' : '序列'}目标`
-    // 作用域附件（refScope）：供给方规则 ID 非空 + 层距值域（0=任意深度、
-    // 1=紧邻、N≥2 显式隔 N 级——与内核 validateCondx 同口径同文案方向）。
+    // 作用域附件（refScope）：来源值（供给方规则 ID 或库根 sentinel）非空 +
+    // 层距值域（0=任意深度、1=紧邻、N≥2 显式隔 N 级——与内核 validateCondx
+    // 同口径同文案方向）。缺省=库根后不再有未选态（sentinel 恒合法），空值
+    // 仅为 JSON 手写兜底。
     if (a.kind === 'refScope') {
-      if (!(a.value || '').trim()) return '附加条件「位于某规则命中的目录之下」须选择规则'
+      if (!(a.value || '').trim()) return '附加条件「位于此目录下」须选择来源'
       const n = a.minCount == null ? 1 : a.minCount
       if (!(n === 0 || n === 1 || n >= 2)) return '附加条件 refScope 的层距无效（0=任意深度、1=紧邻、N≥2=隔 N 级）'
       continue

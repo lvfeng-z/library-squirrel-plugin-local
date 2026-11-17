@@ -102,14 +102,28 @@ const (
 	CondxAttachChildDirCount = "childDirCount"
 	// 目录：子女类型是指定类型之一。
 	CondxAttachChildTypeIs = "childTypeIs"
-	// 目录：位于某条规则命中的目录之下（作用域附件，目录行专属——阶段2）。
-	// Value 复用为供给方规则 ID（须为纯目录规则，保存期校验）；MinCount 复用
-	// 为层距：1=紧邻（下一级，UI 缺省档）、N≥2=显式隔 N 级、0=任意深度哨兵
-	// 值（与多段模板段距记号不同——模板段距不可写 0，附件的 0 是合法哨兵）。
+	// 目录：位于此目录下（作用域附件，目录行专属——阶段2；来源=库根或某条
+	// 供给方规则）。Value 复用为来源：供给方规则 ID（须为纯目录规则，保存期
+	// 校验）或库根 sentinel RefScopeLibraryRoot；MinCount 复用为层距：
+	// 1=紧邻（下一级，UI 缺省档）、N≥2=显式隔 N 级、0=任意深度哨兵值（与
+	// 多段模板段距记号不同——模板段距不可写 0，附件的 0 是合法哨兵）。
 	// 层距阶梯判据（裁决⑥）：候选层 c 合格 ⟺ 供给方命中且 ∃D∈供给方命中层集
 	// s.t. 层距=0 时 c>D、层距=N 时 c−D=N——其身（c=D）与 above-form 天然
-	// 不可成立。
+	// 不可成立。库根来源的命中层集恒为 {-1}（门段注入，无供给方求值），同一
+	// 判据零改动即得绝对层级语义：紧邻=自根数起第 1 级（c=0）、隔 N=第 N 级
+	//（c=N−1）、任意=恒真。
 	CondxAttachRefScope = "refScope"
+
+	// RefScopeLibraryRoot 作用域附件（refScope）的库根 sentinel：CondxAttach.
+	// Value 取此值时来源=库的最顶层目录（非供给方规则），门段为其注入命中层集
+	// {-1}（库根之上的虚拟层），层距阶梯谓词按同一算术得出绝对层级语义——
+	// 紧邻=根直下第 1 级、隔 N=自根数起第 N 级、任意=恒真。保留串形态 $root
+	// 与规则 ID 形态不冲突：规则 ID 由系统生成（手工=「manual-描述-时间戳」、
+	// 预置=「preset-…」前缀族），不以 $ 起首，且保存期不会接受以 $ 起首的
+	// 手写供给方 ID（除非恰等于本 sentinel——此时即库根语义本身）。sentinel
+	// 无供给方求值、无悬空/自引用/链式/纯目录合格性问题（校验放行）。
+	RefScopeLibraryRoot = "$root"
+
 	// 目录/文件/序列：父目录名整条按迷你模板（上级断言，1 级）。
 	CondxAttachParentFormat = "parentFormat"
 	// 目录/文件/序列：父目录名含某词（上级断言，1 级）。
@@ -1161,10 +1175,11 @@ func validateCondx(c *Condx) error {
 			return fmt.Errorf("附加条件 fileExt 的扩展名不能为空")
 		}
 		if a.Kind == CondxAttachRefScope {
-			// 字段族：Value=供给方规则 ID（必填）；MinCount=层距（0=任意深度
-			// 哨兵、1=紧邻、N≥2 显式——负数无义拒绝）。供给方的存在性/合格性
-			// （悬空/自引用/链式/纯目录）属跨规则校验，见 rule_profile.go 的
-			// validateRefScopeWiring（第二遍）。
+			// 字段族：Value=供给方规则 ID 或库根 sentinel（必填，见
+			// RefScopeLibraryRoot）；MinCount=层距（0=任意深度哨兵、1=紧邻、
+			// N≥2 显式——负数无义拒绝）。供给方的存在性/合格性（悬空/自引用/
+			// 链式/纯目录）属跨规则校验，见 rule_profile.go 的
+			// validateRefScopeWiring（第二遍；库根 sentinel 放行不判）。
 			if a.Value == "" {
 				return fmt.Errorf("附加条件 refScope 的供给方规则 ID 不能为空")
 			}

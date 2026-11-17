@@ -429,6 +429,8 @@ func (g *refGateState) snapshot(memberID string) []CaptureBinding {
 //
 // 本批无 refScope 附件时零工作（空门，主循环行为与既有完全一致）。
 // 供给方求值彼此独立纯函数，needed 集合的遍历序不影响结论。
+// 库根 sentinel（RefScopeLibraryRoot）例外：非供给方规则、无求值，命中层集
+// 恒按常量 {-1} 注入（绝对层级语义见 RefScopeLibraryRoot 注释）。
 func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *ParseContext) *refGateState {
 	gate := &refGateState{hits: map[string]bool{}, snapshots: map[string][]CaptureBinding{}, dirHitDepths: map[string]map[int]bool{}}
 	needed := map[string]bool{}
@@ -438,6 +440,13 @@ func runRefGateStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *
 			continue
 		}
 		collectRefScopeProviders(rule.Conditions, needed)
+	}
+	// 库根 sentinel（RefScopeLibraryRoot）：命中层集恒为 {-1}（库根之上的
+	// 虚拟层），无供给方求值——自 needed 摘除后按常量注入，层距阶梯谓词同一
+	// 算术即得绝对层级语义（紧邻=第 1 级、隔 N=第 N 级、任意=恒真）。
+	if needed[RefScopeLibraryRoot] {
+		gate.dirHitDepths[RefScopeLibraryRoot] = map[int]bool{-1: true}
+		delete(needed, RefScopeLibraryRoot)
 	}
 	if len(needed) == 0 {
 		return gate

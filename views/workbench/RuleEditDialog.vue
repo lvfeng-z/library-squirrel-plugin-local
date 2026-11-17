@@ -75,6 +75,7 @@
               :extractions-json-mode="extractionsJsonMode"
               :add-label="isAggregate ? '+ 加轨' : '+ 加条件'"
               :agg-mode="isAggregate"
+              :ref-label-of="refRuleLabel"
               @edit-row="openCondxRowEdit"
               @moved="onCondxRowsMoved"
             />
@@ -596,6 +597,7 @@ import CondxRowsEditor from './CondxRowsEditor.vue'
 import {
   DIMENSION_OPTIONS,
   FROM_OPTIONS,
+  REFSCOPE_LIBRARY_ROOT,
   SCAN_DIMENSIONS,
   SCAN_SCOPE_OPTIONS,
   SOURCE_KIND_OPTIONS,
@@ -1162,12 +1164,14 @@ function refRuleLabel(ruleId: string): string {
 // 模式=最近一次成功解析的行表）
 const refScopeProviderIds = computed<string[]>(() => condxRefScopeProviders(activeCondxRows.value))
 
-// 供给方候选（剧本2 帧2）：只列纯目录规则（只含目录行的规则——定群/聚合/混合
-// 目标天然出局）、启用、非本条自身；停用/悬空（conditions 缺席）与自身携带
-// 附件的链式形态排除（保存期跨规则校验同口径）。选项文本=规则描述。
+// 供给方候选（剧本2 帧2 / 剧本A 帧3-4）：「库根」恒在列、排首位、缺省选中
+//（sentinel，无供给方求值/悬空）；其后只列纯目录规则（只含目录行的规则——
+// 定群/聚合/混合目标天然出局）、启用、非本条自身；停用/悬空（conditions
+// 缺席）与自身携带附件的链式形态排除（保存期跨规则校验同口径）。规则项
+// 文本=规则描述；无纯目录规则时仅库根一项（帧4，无空态红字）。
 const refScopeCandidates = computed<{ id: string; label: string }[]>(() => {
   const selfId = props.rule && !props.rule.isNew ? props.rule.id : ''
-  return (props.allRules || [])
+  const rules = (props.allRules || [])
     .filter((r) => {
       if (!r || r.id === selfId || r.enabled === false || r.category === 'aggregate') return false
       if (!Array.isArray(r.conditions) || !r.conditions.length) return false
@@ -1175,6 +1179,7 @@ const refScopeCandidates = computed<{ id: string; label: string }[]>(() => {
       return condxRefScopeProviders(r.conditions).length === 0
     })
     .map((r) => ({ id: r.id, label: r.description || r.id }))
+  return [{ id: REFSCOPE_LIBRARY_ROOT, label: '库根' }, ...rules]
 })
 
 // 供给方·占位词分组：按供给方顺序分组列出各供给方上半声明的「第 N 行 · {词}」；

@@ -1866,10 +1866,16 @@ func validateExprRefRepeat(e *CondExpr, ref string, repeatNames map[string]bool)
 // 定群〔全序列行〕与模式树旧形态天然不满足——自决2：判定只看行的目标类
 // 别，不猜布尔语义）。任一违规返回中文错误，调用方跳过该条并告警。byID 为
 // 已构造规则 ID 到 all 下标的索引（重复 ID 取先出现者）；无 refScope 附件
-// 的规则零工作。
+// 的规则零工作。库根 sentinel（RefScopeLibraryRoot）对①-⑤与供给方合格性
+// 全部放行——非供给方规则、无捕获与层集求值形态可判（层集门段常量注入）。
 func validateRefScopeWiring(rule *RuleEntry, byID map[string]int, all []RuleEntry) error {
 	providers := refScopeProvidersOf(rule)
 	for _, ref := range providers {
+		if ref == RefScopeLibraryRoot {
+			// 库根 sentinel：非供给方规则，无悬空/自引用/链式/纯目录合格性
+			// 可判（层集门段常量注入），无重复段接线面（无捕获）——放行。
+			continue
+		}
 		if ref == rule.ID {
 			return fmt.Errorf("作用域附件引用了自身（供给方=本条 ID %q）", ref)
 		}

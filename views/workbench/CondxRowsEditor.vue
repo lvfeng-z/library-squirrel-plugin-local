@@ -135,6 +135,7 @@
         :extractions-json-mode="extractionsJsonMode"
         :add-label="addLabel"
         :agg-mode="aggMode"
+        :ref-label-of="refLabelOf"
         @edit-row="(r, no) => emit('editRow', r, no)"
         @moved="emit('moved', $event)"
         @emptied="onGroupEmptied(row)"
@@ -220,6 +221,11 @@ const props = withDefaults(
     // 聚合轨行区形态：卡片模板文本尾接扩展名谓词取值（模板对去扩展名的文件名
     // 正文求值，轨行整体形态=模板+扩展名，如 {作品标识}.{任意}+.srt）
     aggMode?: boolean
+    // 作用域附件供给方 ID→规则描述的解析器（RuleEditDialog 的 refRuleLabel 下传、
+    // 组框内透传）：行卡作用域句与摘要线同源同函数（condxRowCardView→
+    // condxRefScopeNotes→refScopeAssertPhrase）——传入呈完整描述形态
+    //「位于「…」之下（…）」，缺席回落 ID 直读「位于规则 X 之下」
+    refLabelOf?: (ruleId: string) => string
   }>(),
   { rootRows: null, extractionsJsonMode: false, addLabel: '+ 加条件', aggMode: false }
 )
@@ -240,10 +246,15 @@ const emit = defineEmits<{
 const cardNos = computed(() => condxRowNos(rows.value, props.baseNo ?? 0))
 
 // 卡片摘要字段（纯函数派生：序号+目标词+模板文本截断+复杂度徽标计数+接词）；
-// 聚合形态（aggMode）模板文本尾接扩展名谓词取值
+// 聚合形态（aggMode）模板文本尾接扩展名谓词取值；作用域句经 refLabelOf 与
+// 摘要线（RuleEditDialog 的 condxRowsSummary）同源同形态（库根 sentinel 分支
+// 不问 labelOf，自然呈「位于库根之下（…）」）
 function cardView(i: number) {
   const row = rows.value[i]
-  return condxRowCardView(row || { condition: null }, cardNos.value[i] ?? i + 1, { appendExt: props.aggMode })
+  return condxRowCardView(row || { condition: null }, cardNos.value[i] ?? i + 1, {
+    appendExt: props.aggMode,
+    refLabelOf: props.refLabelOf
+  })
 }
 
 // 全局先序展平（行级校验用）：顶层=本容器即全树；组框内经 rootRows 传顶层行表

@@ -157,15 +157,15 @@
                 <el-option v-for="t in CONDX_TYPE_OPTIONS" :key="t" :label="t" :value="t" />
               </el-select>
               <el-input v-if="attachNeeds(a, 'value') && a.kind !== 'refScope'" v-model="a.value" size="small" placeholder=".jpg" class="li-condx-mini" />
-              <!-- 作用域附件（refScope·决策8 甲案）：规则选择下拉（只列纯目录规则，
-                   选项文本=规则描述）+层距三选下拉（隔 N 级档配数字输入 N≥2）；
-                   无候选时空态（帧3：下拉呈「（暂无可引用的目录规则）」+指路文案） -->
+              <!-- 作用域附件（refScope·决策8 甲案）：来源下拉（「库根」恒在列、
+                   排首位、缺省选中；其后纯目录规则，选项文本=规则描述——帧2/帧3/帧4）
+                   +层距三选下拉（隔 N 级档配数字输入 N≥2） -->
               <template v-if="a.kind === 'refScope'">
                 <el-select
                   :model-value="a.value || ''"
                   size="small"
                   class="li-condx-refsel"
-                  :placeholder="refScopeCandidates.length ? '选择要引用的目录规则' : '（暂无可引用的目录规则）'"
+                  placeholder="选择要引用的目录规则"
                   @update:model-value="a.value = String($event)"
                 >
                   <el-option v-for="c in refScopeCandidates" :key="c.id" :label="c.label" :value="c.id" />
@@ -201,8 +201,6 @@
               </template>
               <el-button size="small" text type="danger" @click="removeAttach(ai)">删</el-button>
             </div>
-            <!-- 作用域附件无候选空态指路（帧3 逐字）：保留附件行点确定由行级红字拦 -->
-            <p v-if="refScopeEmptyHint" class="li-condx-refempty">{{ refScopeEmptyHint }}</p>
             <div class="li-condx-extra-head">
               <span class="li-condx-label">值校验（占位词上的断言）</span>
               <el-select
@@ -298,6 +296,7 @@ import {
   CONDX_BADGE_DIMS,
   CONDX_EXAMPLES,
   REFSCOPE_GAP_OPTIONS,
+  REFSCOPE_LIBRARY_ROOT,
   refScopeGapKeyOf,
   refScopeGapCountOf,
   cloneJSON,
@@ -335,9 +334,9 @@ const props = withDefaults(
     // equal 值校验的对方行漂移提示读取；本行模板漂移在弹窗内就地 diff（基线=开窗
     // 快照）
     occurDrift?: Record<number, { group: string; word: string }[]>
-    // 作用域附件（refScope）的供给方候选（纯目录规则：只含目录行、启用、非聚合、
-    // 非本条自身——悬空/链式排除；主视图自档案规则列表算得传入）。无候选时附件行
-    // 呈空态（剧本2 帧3）
+    // 作用域附件（refScope）的来源候选（首项「库根」恒在列，其后纯目录规则：
+    // 只含目录行、启用、非聚合、非本条自身——悬空/链式排除；主视图自档案规则
+    // 列表算得传入。无纯目录规则时仅库根一项——帧4，无空态红字拦）
     refScopeCandidates?: { id: string; label: string }[]
   }>(),
   { mode: 'edit', rootRows: null, refScopeCandidates: () => [] }
@@ -512,9 +511,9 @@ function addRowAttach(kind: string): void {
   const c = condx.value
   if (!c) return
   if (!c.attach) c.attach = []
-  // 作用域附件缺省紧邻（层距 1=紧邻缺省——MinCount 0 为「任意深度」哨兵，
-  // 缺省值必须显式落档，不可省略）
-  c.attach.push(kind === 'refScope' ? { kind, minCount: 1 } : { kind })
+  // 作用域附件缺省=库根（帧2：来源首项恒在列，无未选态）+紧邻（层距 1=紧邻
+  // 缺省——MinCount 0 为「任意深度」哨兵，缺省值必须显式落档，不可省略）
+  c.attach.push(kind === 'refScope' ? { kind, value: REFSCOPE_LIBRARY_ROOT, minCount: 1 } : { kind })
 }
 function removeAttach(ai: number): void {
   const c = condx.value
@@ -565,15 +564,6 @@ function refScopeStaleValue(a: CondxAttachForm): string {
   if (!a.value) return ''
   return props.refScopeCandidates.some((c) => c.id === a.value) ? '' : a.value
 }
-
-// 无候选空态指路（帧3 逐字）：本行挂有 refScope 附件且候选为空时常驻。
-const refScopeEmptyHint = computed(() => {
-  const c = condx.value
-  if (!c || props.refScopeCandidates.length) return ''
-  return (c.attach || []).some((a) => a && a.kind === 'refScope')
-    ? '档案中没有可作来源的规则——先建一条只含目录行的规则'
-    : ''
-})
 
 // 占位词 chip 的悬浮说明：位≥2 注记位次与寻址组名；重复段位注记多值禁引。
 function tplTokTitle(t: CondxTplTok): string {
@@ -814,13 +804,6 @@ function dimNameOf(dim: string): string {
 /* 作用域附件层距三选下拉 */
 .li-condx-gap {
   width: 150px;
-}
-
-/* 作用域附件无候选空态指路（帧3 逐字文案） */
-.li-condx-refempty {
-  margin: 0;
-  font-size: 12px;
-  color: var(--app-text-secondary);
 }
 
 .li-condx-chip {
