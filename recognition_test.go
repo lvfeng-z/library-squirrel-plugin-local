@@ -4434,6 +4434,301 @@ func TestMergeWorkDeclarations(t *testing.T) {
 	})
 }
 
+// TestMergeWorkDeclarationsAssignedLeadDim 主导侧已定值维度的冲突不重挂锚：
+// 主导侧该维声明全为会话赋值来源（裁决/手工赋值写入、按维度覆盖）时，成员
+// 内容声明互异不再进待裁决——并入只保主导值；主导侧含推导来源（未显式定值）
+// 时冲突照旧挂主导文件。
+func TestMergeWorkDeclarationsAssignedLeadDim(t *testing.T) {
+	content := func(val string) SnapDecl {
+		return SnapDecl{Dimension: string(DimAuthor), Value: val, Source: string(SourceContent)}
+	}
+	assigned := SnapDecl{Dimension: string(DimAuthor), Value: "いせる", Source: string(SourceAssignment)}
+	derived := SnapDecl{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)}
+
+	merged, conflicts := mergeWorkDeclarations("d/cover.jpg", "cover.jpg",
+		[]SnapDecl{assigned}, []SnapDecl{content("别的取值")})
+	if len(conflicts) != 0 || len(merged) != 1 || merged[0].Source != string(SourceAssignment) {
+		t.Fatalf("已定值维度不应重挂待裁决（并入只保主导赋值声明）: merged=%+v conflicts=%+v", merged, conflicts)
+	}
+
+	merged, conflicts = mergeWorkDeclarations("d/cover.jpg", "cover.jpg",
+		[]SnapDecl{derived}, []SnapDecl{content("いける")})
+	if len(conflicts) != 1 || len(merged) != 1 || merged[0].Value != "Isel" {
+		t.Fatalf("主导侧推导来源的互异冲突应照旧挂待裁决: merged=%+v conflicts=%+v", merged, conflicts)
+	}
+
+	_, conflicts = mergeWorkDeclarations("d/cover.jpg", "cover.jpg",
+		[]SnapDecl{assigned, derived}, []SnapDecl{content("第三值")})
+	if len(conflicts) != 1 {
+		t.Fatalf("主导侧赋值与推导混居（未全显式定值）冲突应照旧: conflicts=%+v", conflicts)
+	}
+}
+
+// TestPrevContentDeclarationsRecovery 上轮快照的内容声明复原：终选内容声明
+// 与待裁决候选中的内容声明并集复原（两面按维度互斥），推导侧候选不带、截断
+// 与规则出处随声明保真；无上轮快照复原为空。
+func TestPrevContentDeclarationsRecovery(t *testing.T) {
+	if got := prevContentDeclarations(nil); got != nil {
+		t.Fatalf("无上轮快照应复原为空: %+v", got)
+	}
+	prev := &RecognitionSnapshot{
+		Files: []SnapFile{
+			{RelPath: "a.txt", Final: []SnapDecl{
+				{Dimension: string(DimDescription), Value: "说明正文", Source: string(SourceContent), Truncated: true, RuleID: "r1"},
+				{Dimension: string(DimAuthor), Value: "推导作者", Source: string(SourceFilename)},
+			}},
+		},
+		Pending: []SnapPending{{RelPath: "b.txt", Dimension: string(DimTitle), Candidates: []SnapDecl{
+			{Dimension: string(DimTitle), Value: "文件名推导标题", Source: string(SourceFilename)},
+			{Dimension: string(DimTitle), Value: "正文标题", Source: string(SourceContent), RuleID: "r2"},
+		}}},
+	}
+	got := prevContentDeclarations(prev)
+	if len(got) != 2 {
+		t.Fatalf("复原面应恰两个文件: %+v", got)
+	}
+	a := got["a.txt"]
+	if len(a) != 1 || a[0].Dimension != DimDescription || a[0].Value != "说明正文" ||
+		!a[0].Truncated || a[0].RuleID != "r1" || a[0].Source != SourceContent {
+		t.Fatalf("终选内容声明应整条复原（截断/规则出处随行）: %+v", a)
+	}
+	b := got["b.txt"]
+	if len(b) != 1 || b[0].Value != "正文标题" || b[0].RuleID != "r2" {
+		t.Fatalf("待裁决候选中的内容声明应复原、推导侧候选不带: %+v", b)
+	}
+}
+
+// workMergeConflictRules 跨文件并入冲突的规则对：同名 jpg+txt 聚合成组（txt
+// 行绑定→作者、说明成员）+ 主导文件常量作者规则（推导侧取值）。
+func workMergeConflictRules(t *testing.T) []RuleEntry {
+	t.Helper()
+	rows := []CondxRow{
+		{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+			Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".jpg"}}}},
+		{Connector: "and", Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+			Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".txt"}}}},
+	}
+	aggPat, err := CompileRuleConditions(rows)
+	if err != nil {
+		t.Fatalf("构造聚合规则条件失败: %v", err)
+	}
+	return []RuleEntry{
+		{
+			ID: "merge-agg", Description: "测试：单图+说明（说明行绑定作者）",
+			Source: RuleSourceManual, Enabled: true,
+			Category: RuleCategoryAggregate, Conditions: rows, Pattern: aggPat,
+			Identity: []IdentityPart{{Row: 1, Capture: "work"}},
+			Aggregate: &AggregateProduction{
+				WorkType:        sdkdto.ResourceTypeImage,
+				Tracks:          []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}},
+				ContentBindings: []ContentBinding{{Row: 2, Dimension: DimAuthor}},
+			},
+		},
+		{
+			ID: "merge-lead-author", Description: "测试：主导文件常量作者",
+			Source: RuleSourceManual, Enabled: true,
+			Pattern:     mustRegexPattern(t, `^cover\.jpg$`, nil),
+			Extractions: []ExtractionAction{{Dimension: DimAuthor, From: FromConstant, Constant: "Isel"}},
+		},
+	}
+}
+
+// imageTypeSpec 单图类型的注册表投影（会话级聚合规则的类型锚定供给）。
+func imageTypeSpec() *sdkdto.ResourceTypeSpec {
+	return &sdkdto.ResourceTypeSpec{
+		ResourceType: sdkdto.ResourceTypeImage,
+		Roles:        []*sdkdto.StoreRoleSpec{{StoreType: sdkdto.StoreRoleImage, Min: 1, Max: 1}},
+	}
+}
+
+// newWorkMergeConflictSession 跨文件并入冲突会话环境：同名 jpg+txt 聚合成组
+//（txt 行绑定→作者、说明成员）+ 主导常量作者——主导推导值与说明内容值互异，
+// 冲突只在全景投影呈现；返回完成首轮全量识别的管理器与库根。
+func newWorkMergeConflictSession(t *testing.T) (*SessionManager, string) {
+	t.Helper()
+	root := t.TempDir()
+	store := newFakeSessionStore()
+	ctx := &workbenchTestCtx{store: store, resourceTypes: []*sdkdto.ResourceTypeSpec{imageTypeSpec()}}
+	m := NewSessionManagerWithStore(ctx, nil, store)
+	if err := SaveProfile(store, &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: workMergeConflictRules(t)}); err != nil {
+		t.Fatalf("写入规则档案失败: %v", err)
+	}
+	if _, err := m.CreateSession(root); err != nil {
+		t.Fatalf("建立会话失败: %v", err)
+	}
+	writeTestFile(t, root+"/cover.jpg", "img")
+	writeTestFile(t, root+"/cover.txt", "いせる")
+	if err := m.runFullRecognition(root); err != nil {
+		t.Fatalf("全量识别失败: %v", err)
+	}
+	return m, root
+}
+
+// TestAdjudicateWorkMergeConflictPickMember 聚合作品级并入冲突的裁决链（点选
+// 成员侧候选值）：冲突只在全景投影呈现（持久快照待裁决清单不含），裁决按
+// 投影层同址寻址不被拒；点选写入会话赋值，赋值增量重算轮后终选更新为所选
+// 值、投影冲突消散、说明成员的内容声明经上轮快照复原保持在场；清除赋值后
+// 主导侧回推导值、互异冲突随投影复现。
+func TestAdjudicateWorkMergeConflictPickMember(t *testing.T) {
+	m, root := newWorkMergeConflictSession(t)
+
+	snap := mustSessionSnapshot(t, m, root)
+	if len(snap.Pending) != 0 {
+		t.Fatalf("文件级待裁决应为空（并入冲突只在投影层）: %+v", snap.Pending)
+	}
+	lead := snapshotFileOf(snap, "cover.jpg")
+	member := snapshotFileOf(snap, "cover.txt")
+	if lead == nil || !finalHasDecl(lead, DimAuthor, "Isel", SourceConstant) {
+		t.Fatalf("主导文件应含常量作者声明: %+v", lead)
+	}
+	if member == nil || !member.AggCompanion || !finalHasDecl(member, DimAuthor, "いせる", SourceContent) {
+		t.Fatalf("说明成员应含内容来源作者声明: %+v", member)
+	}
+	overview := panoramaOverviewViewOf(snap)
+	var item *SnapPending
+	for i := range overview.Pending {
+		if overview.Pending[i].RelPath == "cover.jpg" && overview.Pending[i].Dimension == string(DimAuthor) {
+			item = &overview.Pending[i]
+		}
+	}
+	if item == nil || len(item.Candidates) != 2 ||
+		item.Candidates[0].Value != "Isel" || item.Candidates[1].Value != "いせる" {
+		t.Fatalf("投影层应含主导作者并入冲突（两值两来源）: %+v", item)
+	}
+
+	before := assignIncrementalTaken.Load()
+	_, view, started, err := m.ApplyAdjudication(root, "cover.jpg", DimAuthor, adjudicationInput{
+		Mode: adjudicateModePick, PickIndex: 1,
+	})
+	if err != nil {
+		t.Fatalf("投影层并入冲突的裁决不应被拒: %v", err)
+	}
+	if !started {
+		t.Fatalf("裁决后应排定识别刷新")
+	}
+	if view == nil || view.Author != "いせる" {
+		t.Fatalf("裁决回执应为赋值呈现（author=いせる）: %+v", view)
+	}
+	sess := waitIncrementalRoundLanded(t, m, root)
+	if got := assignIncrementalTaken.Load(); got < before+1 {
+		t.Fatalf("裁决触发的刷新轮应走赋值增量: %d → %d", before, got)
+	}
+	lead = snapshotFileOf(sess.Snapshot, "cover.jpg")
+	if !finalHasDecl(lead, DimAuthor, "いせる", SourceAssignment) || len(lead.PendingDims) != 0 {
+		t.Fatalf("增量轮后主导终选应为裁决值且无待裁决维: %+v", lead)
+	}
+	member = snapshotFileOf(sess.Snapshot, "cover.txt")
+	if !finalHasDecl(member, DimAuthor, "いせる", SourceContent) {
+		t.Fatalf("增量轮后说明成员的内容声明应在场（上轮快照复原）: %+v", member)
+	}
+	for _, p := range panoramaOverviewViewOf(sess.Snapshot).Pending {
+		if p.RelPath == "cover.jpg" && p.Dimension == string(DimAuthor) {
+			t.Fatalf("取值一致后投影冲突应消散: %+v", p)
+		}
+	}
+
+	// 清除赋值：主导侧回推导值，互异冲突随投影复现（可再改）
+	if _, _, err := m.ApplyAssignment(root, "cover.jpg", SessionAssignment{}); err != nil {
+		t.Fatalf("清除赋值失败: %v", err)
+	}
+	sess = waitIncrementalRoundLanded(t, m, root)
+	found := false
+	for _, p := range panoramaOverviewViewOf(sess.Snapshot).Pending {
+		if p.RelPath == "cover.jpg" && p.Dimension == string(DimAuthor) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("清除赋值后互异冲突应随推导值复现")
+	}
+}
+
+// TestAdjudicateWorkMergeConflictPickLeadValue 点选主导侧候选值（两键等权）：
+// 裁决写入会话赋值后主导该维为赋值声明（用户显式定值），并入不再重挂待裁决
+// ——终选与投影主导行保持所选值；说明成员内容声明照常在场。
+func TestAdjudicateWorkMergeConflictPickLeadValue(t *testing.T) {
+	m, root := newWorkMergeConflictSession(t)
+
+	if _, _, _, err := m.ApplyAdjudication(root, "cover.jpg", DimAuthor, adjudicationInput{
+		Mode: adjudicateModePick, PickIndex: 0,
+	}); err != nil {
+		t.Fatalf("点选主导侧候选值不应被拒: %v", err)
+	}
+	sess := waitIncrementalRoundLanded(t, m, root)
+	lead := snapshotFileOf(sess.Snapshot, "cover.jpg")
+	if !finalHasDecl(lead, DimAuthor, "Isel", SourceAssignment) || len(lead.PendingDims) != 0 {
+		t.Fatalf("主导终选应为所选裁决值: %+v", lead)
+	}
+	if member := snapshotFileOf(sess.Snapshot, "cover.txt"); !finalHasDecl(member, DimAuthor, "いせる", SourceContent) {
+		t.Fatalf("说明成员内容声明应在场: %+v", member)
+	}
+	for _, p := range panoramaOverviewViewOf(sess.Snapshot).Pending {
+		if p.RelPath == "cover.jpg" && p.Dimension == string(DimAuthor) {
+			t.Fatalf("显式定值维度的并入冲突不应重挂: %+v", p)
+		}
+	}
+	view := panoramaViewOf(sess.Snapshot)
+	vlead := snapshotFileOf(&view, "cover.jpg")
+	if vlead == nil || !finalHasDecl(vlead, DimAuthor, "Isel", SourceAssignment) {
+		t.Fatalf("投影主导行应保持所选值（冲突不双呈）: %+v", vlead)
+	}
+}
+
+// TestAssignmentIncrementalContentDeclarationEquivalence 内容声明复原的赋值
+// 增量等值锚：内容绑定产出声明在库时，赋值保存触发的增量重算轮与整库全量
+// 重识别两侧快照逐字节全等（等值锚契约同 TestAssignmentIncrementalEquivalenceBins）
+// ——复原面=上轮快照终选与待裁决候选的内容声明，差异轮零噪音。
+func TestAssignmentIncrementalContentDeclarationEquivalence(t *testing.T) {
+	root := t.TempDir()
+	m0, ctx := newRecognitionFixture(t, root, nil)
+	ctx.resourceTypes = []*sdkdto.ResourceTypeSpec{imageTypeSpec()}
+	recognitionSampleTree(t, root)
+	writeTestFile(t, root+"/cover.jpg", "img")
+	writeTestFile(t, root+"/cover.txt", "いせる")
+	profile, errs := LoadProfile(m0.store)
+	if len(errs) > 0 || profile == nil {
+		t.Fatalf("载入规则档案失败: %v", errs)
+	}
+	profile.Rules = append(profile.Rules, workMergeConflictRules(t)...)
+	if err := SaveProfile(m0.store, profile); err != nil {
+		t.Fatalf("写入规则档案失败: %v", err)
+	}
+	if err := m0.runFullRecognition(root); err != nil {
+		t.Fatalf("基准首轮识别失败: %v", err)
+	}
+	// 基准锚：说明成员的内容声明在场（复原面非空——防空转）
+	if f := snapshotFileOf(mustSessionSnapshot(t, m0, root), "cover.txt"); f == nil ||
+		!finalHasDecl(f, DimAuthor, "いせる", SourceContent) {
+		t.Fatalf("基准快照应含说明成员的内容声明: %+v", f)
+	}
+	h := &assignIncrementalHarness{root: root}
+	h.fast = NewSessionManagerWithStore(ctx, nil, cloneFakeStore(m0.store))
+	h.full = NewSessionManagerWithStore(ctx, nil, cloneFakeStore(m0.store))
+	for _, m := range []*SessionManager{h.fast, h.full} {
+		warmAssignmentIncremental(t, m, root)
+	}
+	act := func(t *testing.T, m *SessionManager, root string) {
+		if _, err := m.SetAssignment(root, "cover.jpg", SessionAssignment{Author: "いせる"}); err != nil {
+			t.Fatalf("写入赋值失败: %v", err)
+		}
+		if err := m.runFullRecognition(root); err != nil {
+			t.Fatalf("重识别失败: %v", err)
+		}
+	}
+	before := assignIncrementalTaken.Load()
+	act(t, h.fast, h.root)
+	if got := assignIncrementalTaken.Load(); got < before+1 {
+		t.Fatalf("增量侧应命中快分支: %d → %d", before, got)
+	}
+	fastCap := captureAssignIncremental(t, h.fast, h.root)
+	restore := assignIncrementalDisabled
+	assignIncrementalDisabled = true
+	act(t, h.full, h.root)
+	assignIncrementalDisabled = restore
+	fullCap := captureAssignIncremental(t, h.full, h.root)
+	assertAssignIncrementalEqual(t, "内容声明复原", fastCap, fullCap, []string{"cover.jpg"})
+}
+
 // companionProjectionSnap 全景投影测试快照：聚合作品「主导+轨道成员+说明成员」
 // （说明成员携内容声明，作者与主导文件名推导互异）+ 拒读/未采集两形态说明成员
 // + 独立落单文件。

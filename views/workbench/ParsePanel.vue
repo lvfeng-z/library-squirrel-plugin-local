@@ -1412,6 +1412,7 @@ const dimLabel = (dim: string): string => {
     case 'title': return '作品名'
     case 'tag': return '标签'
     case 'collection': return '作品集'
+    case 'description': return '描述'
     default: return dim
   }
 }

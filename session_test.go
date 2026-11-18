@@ -76,9 +76,13 @@ func (c *workbenchTestCtx) Infof(string, ...any) {}
 func (c *workbenchTestCtx) Warnf(string, ...any) {}
 
 // ListResourceTypes 资源类型注册表投影桩（识别轮的类型锚定拉取）：缺省回空
-// 投影——聚合规则按类型悬空停用，既有测试档案无聚合条目、行为零变化；需要
-// 在册类型的聚合锚测试经 RunPipelineWithTypes 直供索引，不经此桩。
+// 投影——聚合规则按类型悬空停用，既有测试档案无聚合条目、行为零变化；
+// resourceTypes 预置时回告在册面（会话级聚合规则测试用），需要在册类型的
+// 聚合锚测试也可经 RunPipelineWithTypes 直供索引，不经此桩。
 func (c *workbenchTestCtx) ListResourceTypes() (*sdkdto.ListResourceTypesResponse, error) {
+	if c.resourceTypes != nil {
+		return &sdkdto.ListResourceTypesResponse{Items: c.resourceTypes}, nil
+	}
 	return &sdkdto.ListResourceTypesResponse{}, nil
 }
 
@@ -114,6 +118,11 @@ type workbenchTestCtx struct {
 	// 未配置（未打标语义，识别增量闸门与恢复对账按缺席放行）；非空=指向测试
 	// 预置的插件根目录（内含带 buildId 的 plugin.json，模拟打标构建）。
 	pluginRootDir string
+
+	// resourceTypes 资源类型注册表桩应答（识别轮的类型锚定拉取）：nil=空投影
+	// （聚合规则按类型悬空停用，既有测试档案无聚合条目、行为零变化）；非空=
+	// 会话级聚合规则测试的在册类型面。
+	resourceTypes []*sdkdto.ResourceTypeSpec
 
 	mu        sync.Mutex
 	published []publishedEvent

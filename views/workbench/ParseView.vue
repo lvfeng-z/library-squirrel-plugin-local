@@ -688,6 +688,15 @@
                       >用{{ pendingCandidateWord(p, j) }}</button>
                     </div>
                   </div>
+                  <!-- 快裁失败提示（错误路径可见：后端拒绝时不静默，卡面不动） -->
+                  <el-alert
+                    v-if="adjudicateError"
+                    class="li-ws-quick-error"
+                    type="error"
+                    :closable="false"
+                    show-icon
+                    :title="adjudicateError"
+                  />
                   <template v-if="selectedFile.final && selectedFile.final.length">
                     <div v-for="(d, i) in selectedFile.final" :key="i" class="li-ws-decl">
                       <span class="li-ws-decl-main">{{ declLabel(d) }}{{ adjudicationSuffix(d) }}</span>
@@ -1620,6 +1629,9 @@ function pendingCandidatesText(p: SnapPending): string {
 // 不区分赋值来路，取值+维度+侧词在前端随裁决动作记录；值失配=记忆失效不呈现）
 const adjudicationMemo = new Map<string, { word: string; value: string }>()
 const adjudicatingQuick = ref(false)
+// 快裁失败可见（后端拒绝=待裁决项已被处置/规则已变化等）：后端错误句锚片段
+// 命中时按同款句式呈现、其余直通；下一次点键发起时先行清空
+const adjudicateError = ref('')
 
 // 快裁键（帧3 你做=点「用说明文件」单次点）：接既有 adjudicate 通路——按文件+
 // 维度写会话赋值（pickIndex=候选序），点了立即生效、可再改；增量重识别经既有
@@ -1629,6 +1641,7 @@ async function adjudicateCandidate(p: SnapPending, idx: number): Promise<void> {
   const c = (p.candidates || [])[idx]
   if (!c) return
   adjudicatingQuick.value = true
+  adjudicateError.value = ''
   const resp = await request('adjudicate', {
     root: session.value.rootPath,
     relPath: p.relPath,
@@ -1637,7 +1650,13 @@ async function adjudicateCandidate(p: SnapPending, idx: number): Promise<void> {
     pickIndex: idx
   })
   adjudicatingQuick.value = false
-  if (!resp.ok) return
+  if (!resp.ok) {
+    const err = resp.error || ''
+    adjudicateError.value = err.indexOf('可能已被处置或规则已变化') >= 0
+      ? '该待裁决项可能已被处置或规则已变化，请刷新识别全景'
+      : err || '快裁未记录，请重试'
+    return
+  }
   adjudicationMemo.set(`${p.relPath}|${p.dimension}`, {
     word: pendingCandidateWord(p, idx),
     value: c.value
@@ -3216,6 +3235,7 @@ const dimLabel = (dim: string): string => {
     case 'title': return '作品名'
     case 'tag': return '标签'
     case 'collection': return '作品集'
+    case 'description': return '描述'
     default: return dim
   }
 }
@@ -4836,6 +4856,11 @@ onUnmounted(() => {
 .li-ws-pending-pick:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* 快裁失败提示（快裁键行下的错误横幅，间距与声明区同拍） */
+.li-ws-quick-error {
+  margin: 2px 0 6px;
 }
 
 /* 同值折叠标签：终选声明来源行尾 [同值 +N]（展开态 [同值 +N ▴]），点击展开/收起 */

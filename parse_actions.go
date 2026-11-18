@@ -847,13 +847,15 @@ type adjudicationInput struct {
 	PickIndex int
 }
 
-// ApplyAdjudication 裁决动作：按当前识别快照的待裁决项（relPath+dimension 寻址）
-// 呈双方候选，用户点选采纳其一——按文件+维度写会话赋值（复用赋值通道，经
-// SetAssignment 同点串行；赋值是求值输入而非产物：信任级顶格、按维度覆盖，
-// 重识别与增量轮不会冲掉，会话按库根持久化、跨重启恢复，清除赋值为唯一
-// 显式解除口）。写入按维度并入该文件既有例外条目（未裁决维度不动，裁决维度
-// 的既有线索出处引用随值一并清空——新值不再对应旧出处段）。待裁决项随赋值
-// 按维度覆盖在重识别后消散。返回会话、赋值回执与识别刷新启动结论。
+// ApplyAdjudication 裁决动作：按当前识别快照的待裁决项（relPath+dimension 寻址；
+// 识别期合成冲突在持久快照待裁决清单，聚合作品级并入冲突只随全景投影呈现——
+// 两处同址寻址，候选均为两值两来源）呈双方候选，用户点选采纳其一——按文件+
+// 维度写会话赋值（复用赋值通道，经 SetAssignment 同点串行；赋值是求值输入而非
+// 产物：信任级顶格、按维度覆盖，重识别与增量轮不会冲掉，会话按库根持久化、
+// 跨重启恢复，清除赋值为唯一显式解除口）。写入按维度并入该文件既有例外条目
+// （未裁决维度不动，裁决维度的既有线索出处引用随值一并清空——新值不再对应
+// 旧出处段）。待裁决项随赋值按维度覆盖在重识别后消散。返回会话、赋值回执与
+// 识别刷新启动结论。
 func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDimension, in adjudicationInput) (*WorkbenchSession, *workbenchAssignmentView, bool, error) {
 	if in.Mode != adjudicateModePick {
 		return nil, nil, false, fmt.Errorf("未知的裁决方式 %q（可用：%s；条件改绑路径已退役，裁决收敛为点选候选值）", in.Mode, adjudicateModePick)
@@ -873,6 +875,19 @@ func (m *SessionManager) ApplyAdjudication(root, relPath string, dim MetadataDim
 		if p.RelPath == relPath && MetadataDimension(p.Dimension) == dim {
 			item = p
 			break
+		}
+	}
+	if item == nil {
+		// 聚合作品级并入冲突不落持久快照的待裁决清单（只在全景投影呈现）：
+		// 按与 overview 待裁决分节同一推导寻址——主导文件终选 ∪ 成员伴随说明
+		// 内容声明的同维互异明细，呈现面与裁决面同源。
+		if extra := workMergePendingOf(sess.Snapshot, workContentDeclsByWork(sess.Snapshot)); len(extra) > 0 {
+			for i := range extra {
+				if extra[i].RelPath == relPath && MetadataDimension(extra[i].Dimension) == dim {
+					item = &extra[i]
+					break
+				}
+			}
 		}
 	}
 	if item == nil {

@@ -2594,6 +2594,9 @@ func contentDeclsByWork(snap *RecognitionSnapshot, includeLead bool) map[string]
 //     去重保首——两值两来源的裁决数据面），并入结果只保留主导侧该维声明
 //     （主导侧亦缺席则该维整体缺席）——创建链据此按主导值落库，裁决经会话
 //     赋值走既有覆盖通路；
+//   - 已定值维度不重挂：主导侧该维声明全为会话赋值来源（用户显式定值，按
+//     维度覆盖、重识别不冲掉）时只保主导值、不再记待裁决——清除赋值后主导
+//     侧回到推导值，若仍与成员互异则冲突自然再现；
 //   - 无成员声明零工作：主导终选原样返回（不复制，调用方只读）。
 //
 // 冲突不区分维度策略（union 维度的跨文件互异值同样进待裁决——说明文件人工
@@ -2666,18 +2669,35 @@ func mergeWorkDeclarations(leadRelPath, leadFileName string, leadFinal []SnapDec
 			}
 			continue
 		}
-		conflicts = append(conflicts, SnapPending{
-			RelPath:    leadRelPath,
-			FileName:   leadFileName,
-			Dimension:  dim,
-			Reason:     fmt.Sprintf("维度 %s 跨文件冲突：主导文件结论与伴随说明成员声明存在 %d 个不同取值，需裁决后合成", dim, len(distinct)),
-			Candidates: candidates,
-		})
+		if !leadDimAssigned(leadFinal, b.leadIdx) {
+			conflicts = append(conflicts, SnapPending{
+				RelPath:    leadRelPath,
+				FileName:   leadFileName,
+				Dimension:  dim,
+				Reason:     fmt.Sprintf("维度 %s 跨文件冲突：主导文件结论与伴随说明成员声明存在 %d 个不同取值，需裁决后合成", dim, len(distinct)),
+				Candidates: candidates,
+			})
+		}
 		for _, i := range b.leadIdx {
 			merged = append(merged, leadFinal[i])
 		}
 	}
 	return merged, conflicts
+}
+
+// leadDimAssigned 主导侧该维声明是否全为会话赋值来源（赋值覆盖只保留赋值
+// 声明——全量赋值来源即该维已被用户显式定值）：定值维度的跨文件互异不再进
+// 待裁决（值以赋值为准）；主导侧缺席该维（无声明可判）恒为否。
+func leadDimAssigned(leadFinal []SnapDecl, leadIdx []int) bool {
+	if len(leadIdx) == 0 {
+		return false
+	}
+	for _, i := range leadIdx {
+		if leadFinal[i].Source != string(SourceAssignment) && leadFinal[i].Source != string(SourceAdjudication) {
+			return false
+		}
+	}
+	return true
 }
 
 // projectWorkMergedFile 单文件投影的作品级并入改写（投影层专用，不动持久
@@ -3195,15 +3215,25 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 		assignIdx = newAssignmentDirIndex(sess.Assignments, dirKeyList)
 	}
 	// 逐文件结论重建：基座规则段原始声明 → 同一 Synthesize → 赋值按维度覆盖
-	//（与 mergedFileConclusionWithStructural 的合成段同链同序）；定群群成员的
+	//（与 mergedFileConclusionWithStructural 的合成段同链同序）；内容绑定的取值
+	// 面零读盘——绑定行命中的内容声明自上轮快照终选与待裁决候选复原后并入
+	// 合成输入（复原面与整库重识别的第二相产出一致）；定群群成员的
 	// 元素数组与快路径同口径（预铸副本、缺席现场拆分——公共性终判前的原始
 	// 类别，终判由装配段 markCommonElements 统一落格），结构群成员直取段携带
 	// 值（对齐装配内已终判）。
+	prevContentDecls := prevContentDeclarations(prev)
 	conclusions := make([]FileConclusion, len(files))
 	rebuildAt := func(i int) {
 		file := files[i]
 		seg := layer.segmentsByRel[file.RelPath]
-		final, pending := Synthesize(seg.declarations, policy)
+		decls := seg.declarations
+		if extra := prevContentDecls[file.RelPath]; len(extra) > 0 {
+			merged := make([]MetadataDeclaration, 0, len(decls)+len(extra))
+			merged = append(merged, decls...)
+			merged = append(merged, extra...)
+			decls = merged
+		}
+		final, pending := Synthesize(decls, policy)
 		if assignIdx != nil {
 			if a := assignIdx.resolveFile(file.RelPath); len(a.coveredDimensions()) > 0 {
 				final, pending = applyAssignmentToConclusion(final, pending, &a)
@@ -3272,7 +3302,8 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 		confirmedTargets: targetSetOf(sess.ConfirmedCandidates),
 		confirmedSetIDs:  sess.ConfirmedSetIDs,
 		// 规则未变（档案指纹闸门）则内容命中集未变，上轮游标继续有效，随
-		// 重铸快照携带——合成重放零读盘，不做内容再采集。
+		// 重铸快照携带——合成重放零读盘，不做内容再采集；内容声明同自上轮
+		// 快照复原（合成输入侧，见 prevContentDeclarations）。
 		contentCursors: prevCompanionContentCursors(prev),
 	})
 	diff := ComputeSnapshotDiff(prev, snapshot)
@@ -3391,6 +3422,45 @@ func prevCompanionContentCursors(prev *RecognitionSnapshot) map[string]companion
 			out = make(map[string]companionContentCursor)
 		}
 		out[f.RelPath] = companionContentCursor{Size: f.ContentSize, ModTime: f.ContentModTime}
+	}
+	return out
+}
+
+// prevContentDeclarations 上轮快照的内容来源声明复原（相对路径 → 声明序列）：
+// 合成重放零读盘的取值面——绑定行命中的内容声明自上轮终选与待裁决候选复原。
+// 终选与待裁决候选按维度互斥（highTrust 维冲突不产终选、union 维不产待裁决），
+// 并集即上轮第二相产出的内容声明全集（同维同值被终选合成吞并的声明除外——
+// 吞并不改变重合成结果）；复原序=终选维度序，重合成按维度归组后与采集序同构
+// 收敛。赋值覆盖维度的内容声明已按覆盖语义自终选与候选清场，复原集与「整库
+// 重识别后走赋值覆盖」的合成输入面一致。旧快照（内容声明缺席）复原为空集，
+// 语义同未采集——下一整库轮采集后即随快照在场。
+func prevContentDeclarations(prev *RecognitionSnapshot) map[string][]MetadataDeclaration {
+	if prev == nil {
+		return nil
+	}
+	var out map[string][]MetadataDeclaration
+	for i := range prev.Files {
+		f := &prev.Files[i]
+		for _, decl := range f.Final {
+			if decl.Source != string(SourceContent) {
+				continue
+			}
+			if out == nil {
+				out = make(map[string][]MetadataDeclaration)
+			}
+			out[f.RelPath] = append(out[f.RelPath], declOfSnap(decl))
+		}
+	}
+	for _, p := range prev.Pending {
+		for _, c := range p.Candidates {
+			if c.Source != string(SourceContent) {
+				continue
+			}
+			if out == nil {
+				out = make(map[string][]MetadataDeclaration)
+			}
+			out[p.RelPath] = append(out[p.RelPath], declOfSnap(c))
+		}
 	}
 	return out
 }
