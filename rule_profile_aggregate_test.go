@@ -82,3 +82,63 @@ func TestValidateAggregateTailExtLoadSkip(t *testing.T) {
 		t.Fatalf("跳过告警应携带规则 ID 与尾部扩展名文案: %s", msg)
 	}
 }
+
+// —— 元数据类别行式底盘的模板尾内联扩展名守卫（决策8 甲案）——
+
+// metaTailExtEntry 构造元数据类别规则条目（JSON 中间形态）：行式与决策8 剧本
+// 形态对齐（行1 资源行+行2 说明行带显式连接词）。
+func metaTailExtEntry(id string, row2Tpl string, row2Attach []CondxAttach) *ruleEntryJSON {
+	return &ruleEntryJSON{
+		ID:          id,
+		Description: "元数据行模板尾部扩展名测试",
+		Source:      RuleSourceManual,
+		Enabled:     true,
+		Conditions: []CondxRow{
+			{Condition: &Condx{
+				Target: CondxTargetSeq,
+				Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "{作品标识}_{序号}"},
+				Attach: []CondxAttach{{Kind: CondxAttachSeqMemberType, Types: []string{"image"}}},
+			}},
+			{Connector: "and", Condition: &Condx{
+				Target: CondxTargetFile,
+				Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: row2Tpl},
+				Attach: row2Attach,
+			}},
+		},
+	}
+}
+
+// TestValidateMetadataFileTplTailExt 元数据类别守卫三形态（决策8 甲案·与聚合
+// 轨行守卫同口径）：内联扩展名（剧本A 原行2 写法 {作品标识}_{序号}.txt）拒收
+// 并指路「扩展名是」附加条件；正确拆分形态（模板+fileExt 附加）放行；聚合类
+// 别路径零变化（聚合守卫文案含「文件轨行」措辞、由 validateAggregateEntry 拦）。
+func TestValidateMetadataFileTplTailExt(t *testing.T) {
+	// 内联形态拒：{作品标识}_{序号}.txt（尾字面 .txt 命中白名单）
+	_, err := ruleFromJSON(metaTailExtEntry("meta-dead-txt", "{作品标识}_{序号}.txt", nil))
+	if err == nil || !strings.Contains(err.Error(), "第 2 行的文件名行模板尾部误写扩展名 .txt") ||
+		!strings.Contains(err.Error(), "改用「扩展名是」附加条件承载扩展名") {
+		t.Fatalf("内联扩展名应拒并指路扩展名谓词: %v", err)
+	}
+	// 正确拆分形态放行：模板无尾扩展名 + fileExt 谓词承载（决策8 后剧本行式）
+	entry := metaTailExtEntry("meta-split", "{作品标识}_{序号}",
+		[]CondxAttach{{Kind: CondxAttachFileExt, Value: ".txt"}})
+	entry.MetadataFile = &MetadataFileProduction{
+		Pairing:         &PairingKey{Mode: PairingModeIdentity, Identity: []IdentityPart{{Row: 1, Capture: "work"}, {Row: 1, Capture: "seq"}}},
+		ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
+	}
+	if _, err = ruleFromJSON(entry); err != nil {
+		t.Fatalf("正确拆分形态不应拒: %v", err)
+	}
+	// dir/seq 目标行带点尾合法（名不去扩展名）——行1 序列模板不动、直接复用
+	// 上面放行结论；dir 行单独验证：
+	dirEntry := metaTailExtEntry("meta-dir-tail", "{作品标识}.mp4", nil)
+	dirEntry.Conditions[1].Condition.Target = CondxTargetDir
+	if _, err = ruleFromJSON(dirEntry); err != nil {
+		t.Fatalf("dir 目标行带点尾不应误报: %v", err)
+	}
+	// 聚合路径零变化：聚合条目同形态由聚合守卫拦截（「文件轨行」措辞）
+	aggErr := validateAggregateEntry(aggTailExtEntry("agg-dead-mp4", CondxTargetFile, "{任意} - {任意}({标题}).mp4", nil, "title"))
+	if aggErr == nil || !strings.Contains(aggErr.Error(), "文件轨行模板尾部误写扩展名 .mp4") {
+		t.Fatalf("聚合守卫应维持原措辞拦截: %v", aggErr)
+	}
+}

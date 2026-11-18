@@ -1,5 +1,5 @@
 // 伴随说明内容绑定与声明产出通路的单元测试：绑定结构载入校验（行号范围/
-// 维度合法/同行不重复/元数据规则内容取值拒绝/存量零值兼容）、两相提取的
+// 维度合法/同行同维唯一/元数据规则内容取值拒绝/存量零值兼容）、两相提取的
 // 命中集登记与汇流后整段取值产声明（空内容零声明、截断标注、赋值覆盖重放）。
 package main
 
@@ -25,7 +25,7 @@ func contentFileRow(tpl, ext string) CondxRow {
 }
 
 // contentAggregateEntryJSON 构造带内容绑定的聚合规则中间形态（两行：图片轨行
-// + 文本行，绑定文本行内容→描述）。
+// + 文本行，绑定文本行内容→描述；绑定住规则级「元数据文件」产出落档位）。
 func contentAggregateEntryJSON(bindings []ContentBinding) *ruleEntryJSON {
 	return &ruleEntryJSON{
 		ID:          "agg-content",
@@ -43,41 +43,54 @@ func contentAggregateEntryJSON(bindings []ContentBinding) *ruleEntryJSON {
 				{Row: 1, Role: contract.StoreTypeImage},
 				{Row: 2, Role: contract.StoreTypeDocument},
 			},
-			ContentBindings: bindings,
 		},
+		MetadataFile: &MetadataFileProduction{ContentBindings: bindings},
 	}
 }
 
 // TestContentSourceBindingLoadValidation 内容绑定的载入校验：合法形态载入并
-// 往返保真；行号越界/维度非法/同行重复指派拒绝；元数据规则的提取动作携带
-// 内容取值拒绝；旧档无绑定键零值兼容。
+// 往返保真；行号越界/维度非法/同行同维重复指派拒绝、同行多目标（同维互异）
+// 放行；元数据规则的提取动作携带内容取值拒绝；无绑定键的旧档零值兼容。
 func TestContentSourceBindingLoadValidation(t *testing.T) {
 	ok := contentAggregateEntryJSON([]ContentBinding{{Row: 2, Dimension: DimDescription}})
 	entry, err := ruleFromJSON(ok)
 	if err != nil {
 		t.Fatalf("合法内容绑定应载入: %v", err)
 	}
-	if len(entry.Aggregate.ContentBindings) != 1 ||
-		entry.Aggregate.ContentBindings[0].Row != 2 ||
-		entry.Aggregate.ContentBindings[0].Dimension != DimDescription {
-		t.Fatalf("内容绑定应原样载入: %+v", entry.Aggregate.ContentBindings)
+	if len(entry.MetadataFile.ContentBindings) != 1 ||
+		entry.MetadataFile.ContentBindings[0].Row != 2 ||
+		entry.MetadataFile.ContentBindings[0].Dimension != DimDescription {
+		t.Fatalf("内容绑定应原样载入: %+v", entry.MetadataFile.ContentBindings)
 	}
 	// 序列化往返：绑定结构不丢。
 	rj2, err := ruleToJSON(*entry)
 	if err != nil {
 		t.Fatalf("序列化失败: %v", err)
 	}
-	if !reflect.DeepEqual(rj2.Aggregate.ContentBindings, ok.Aggregate.ContentBindings) {
-		t.Fatalf("内容绑定序列化往返应保真: %+v", rj2.Aggregate.ContentBindings)
+	if !reflect.DeepEqual(rj2.MetadataFile.ContentBindings, ok.MetadataFile.ContentBindings) {
+		t.Fatalf("内容绑定序列化往返应保真: %+v", rj2.MetadataFile.ContentBindings)
 	}
-	// 旧档零值兼容：无绑定键的聚合规则照常载入，绑定为空。
+	// 一行多目标：同一行整段同时映射多个维度（多目标=同行多条目），载入放行。
+	multi := contentAggregateEntryJSON([]ContentBinding{
+		{Row: 2, Dimension: DimDescription},
+		{Row: 2, Dimension: DimTag},
+	})
+	multiEntry, err := ruleFromJSON(multi)
+	if err != nil {
+		t.Fatalf("一行多目标绑定应载入: %v", err)
+	}
+	if len(multiEntry.MetadataFile.ContentBindings) != 2 {
+		t.Fatalf("一行多目标应保留两条绑定: %+v", multiEntry.MetadataFile.ContentBindings)
+	}
+	// 旧档零值兼容：无绑定键的聚合规则照常载入，无「元数据文件」产出。
 	legacy := contentAggregateEntryJSON(nil)
+	legacy.MetadataFile = nil
 	legacyEntry, err := ruleFromJSON(legacy)
 	if err != nil {
 		t.Fatalf("无绑定的聚合规则应照常载入: %v", err)
 	}
-	if len(legacyEntry.Aggregate.ContentBindings) != 0 {
-		t.Fatalf("无绑定键载入应零值: %+v", legacyEntry.Aggregate.ContentBindings)
+	if legacyEntry.MetadataFile != nil {
+		t.Fatalf("无绑定键载入应无元数据文件产出: %+v", legacyEntry.MetadataFile)
 	}
 
 	cases := []struct {
@@ -89,10 +102,10 @@ func TestContentSourceBindingLoadValidation(t *testing.T) {
 		{"行号零值", []ContentBinding{{Row: 0, Dimension: DimDescription}}, "越界"},
 		{"维度非法", []ContentBinding{{Row: 2, Dimension: MetadataDimension("bogus")}}, "维度非法"},
 		{"维度空串", []ContentBinding{{Row: 2}}, "维度非法"},
-		{"同行重复指派", []ContentBinding{
+		{"同行同维重复指派", []ContentBinding{
 			{Row: 2, Dimension: DimDescription},
-			{Row: 2, Dimension: DimTag},
-		}, "重复指派"},
+			{Row: 2, Dimension: DimDescription},
+		}, "同一行同一维度唯一"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,7 +120,8 @@ func TestContentSourceBindingLoadValidation(t *testing.T) {
 		})
 	}
 
-	// 元数据规则限定：提取动作携带内容取值载入即拒（内容来源只经聚合绑定面成立）。
+	// 元数据规则限定：提取动作携带内容取值载入即拒（内容来源只经「元数据
+	// 文件」产出绑定面成立）。
 	meta := &ruleEntryJSON{
 		ID:          "meta-content",
 		Enabled:     true,
@@ -117,11 +131,11 @@ func TestContentSourceBindingLoadValidation(t *testing.T) {
 	if _, err := ruleFromJSON(meta); err == nil || !strings.Contains(err.Error(), "不得声明内容来源") {
 		t.Fatalf("元数据规则的内容取值动作应拒绝: err=%v", err)
 	}
-	// 元数据规则不得携带聚合声明（内容绑定随聚合面存在，旧有校验兜底）。
+	// 元数据规则不得携带聚合声明（旧有校验兜底）。
 	metaWithAgg := contentAggregateEntryJSON([]ContentBinding{{Row: 2, Dimension: DimDescription}})
 	metaWithAgg.Category = RuleCategoryMetadata
 	if _, err := ruleFromJSON(metaWithAgg); err == nil {
-		t.Fatal("元数据规则携带聚合声明（含内容绑定）应拒绝")
+		t.Fatal("元数据规则携带聚合声明应拒绝")
 	}
 }
 
@@ -138,8 +152,10 @@ func TestContentSourceHitSetSupply(t *testing.T) {
 		},
 		Identity: []IdentityPart{{Row: 1, Capture: "work"}},
 		Aggregate: &AggregateProduction{
-			WorkType:        sdkdto.ResourceTypeArticle,
-			Tracks:          []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}, {Row: 2, Role: contract.StoreTypeDocument}},
+			WorkType: sdkdto.ResourceTypeArticle,
+			Tracks:   []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}, {Row: 2, Role: contract.StoreTypeDocument}},
+		},
+		MetadataFile: &MetadataFileProduction{
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
 	}, {
@@ -158,7 +174,7 @@ func TestContentSourceHitSetSupply(t *testing.T) {
 	}
 	// 无绑定规则（禁用/元数据/空绑定）零供给。
 	noBindings := append([]RuleEntry{}, rules...)
-	noBindings[0].Aggregate.ContentBindings = nil
+	noBindings[0].MetadataFile = nil
 	if hits := companionContentHitSet(noBindings, conclusions); len(hits) != 0 {
 		t.Fatalf("无内容绑定时应零供给: %+v", hits)
 	}
@@ -184,8 +200,10 @@ func TestContentSourceDeclarationProduction(t *testing.T) {
 			},
 			Identity: []IdentityPart{{Row: 1, Capture: "work"}},
 			Aggregate: &AggregateProduction{
-				WorkType:        sdkdto.ResourceTypeArticle,
-				Tracks:          []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}, {Row: 2, Role: contract.StoreTypeDocument}},
+				WorkType: sdkdto.ResourceTypeArticle,
+				Tracks:   []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}, {Row: 2, Role: contract.StoreTypeDocument}},
+			},
+			MetadataFile: &MetadataFileProduction{
 				ContentBindings: []ContentBinding{binding},
 			},
 		}

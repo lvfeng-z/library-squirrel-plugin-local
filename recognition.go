@@ -145,18 +145,27 @@ type FileConclusion struct {
 	Final []MetadataDeclaration
 	// Pending 为合成待裁决项（赋值指定维度的冲突随覆盖消解）。
 	Pending []PendingItem
-	// AggWorkKey 为聚合段落定的聚合作品键（"f:"+主导文件相对路径；空=无聚合，
-	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）；AggWorkType 为
-	// 选中规则声明的作品类型（聚合定义的作品类型，创建链子行 ResourceType 的
-	// 声明值来源）。三字段由汇流后的聚合段写入（识别轮在结论汇流后统一落轨），
-	// 逐文件求值循环不产出、聚合段不改写群归属与元数据结论。
+	// AggWorkKey 为配对归属的作品键（"f:"+主导文件相对路径；空=无归属，独立
+	// 作品）——聚合在场时=聚合段落定的聚合作品键（与现状同值），映射单用时=
+	// 配对段落定的主导文件作品键（说明成员归并目标）；AggTrackRole 为本文件
+	// 的轨道角色（空=无聚合）；AggWorkType 为选中规则声明的作品类型（聚合
+	// 定义的作品类型，创建链子行 ResourceType 的声明值来源；配对归并不落
+	// 作品类型——作品形态随主导文件自身结论）。三字段由汇流后的聚合段/配对
+	// 段写入（两段同位挂汇流后），逐文件求值循环不产出、不改写群归属与元
+	// 数据结论。
 	AggWorkKey   string
 	AggTrackRole string
 	AggWorkType  string
-	// AggCompanion 为伴随说明成员标记（聚合段落定）：该文件以「仅被指派为
-	// 元数据文件、未分配轨道」的身份归属聚合作品——归进作品、无轨、不导入、
-	// 不独立成作品，内容只作元数据来源；轨道成员（含轨行兼绑定的双重身份
-	// 成员）与无聚合文件不带标记。
+	// PairingGuardLeads 目录配对守卫拒绝注记（配对段落定）：本文件作为说明
+	// 成员候选参与目录配对、组内主导候选多于一个被守卫拒绝时的候选数
+	//（行详情可见原因的数据位——「目录内有 N 个主导候选，目录配对未成立，
+	// 说明文件维持独立作品」）；与归属字段互斥（守卫拒绝=零归属），配对
+	// 成立/零主导组/标识配对拒绝/非候选均零值。
+	PairingGuardLeads int
+	// AggCompanion 为配对说明成员标记（聚合段/配对段落定）：该文件以「仅被
+	// 指派为元数据文件、未分配轨道」的身份归属作品（聚合作品或配对主导文件
+	// 的作品）——归进作品、无轨、不导入、不独立成作品，内容只作元数据来源；
+	// 轨道成员（含轨行兼绑定的双重身份成员）与无归属文件不带标记。
 	AggCompanion bool
 	// rawDecls 为提取段原始声明（合成前中间产物）：预览基座规则相关件的铸造
 	// 原料，快照与呈现不消费（本类型为进程内求值产物，不经序列化）。
@@ -1068,19 +1077,29 @@ type SnapFile struct {
 	StructClues []SnapStructClue `json:"structClues,omitempty"`
 	// Assigned 本文件存在会话赋值（元素7 标记；赋值明细为会话活数据不入快照）。
 	Assigned bool `json:"assigned,omitempty"`
-	// AggWorkKey 聚合归属的作品键（"f:"+主导文件相对路径；空=无聚合，独立
-	// 作品）；AggTrackRole 本文件的轨道角色（空=无聚合）；AggWorkType 选中
-	// 规则声明的作品类型（聚合定义的作品类型，创建链子行 ResourceType 的声明
-	// 值）。聚合段标识等值并组的落轨结论，消费面=选择域聚合分支与执行面多轨。
+	// AggWorkKey 配对归属的作品键（"f:"+主导文件相对路径；空=无归属，独立
+	// 作品）——聚合在场时=聚合段落定的聚合作品键（与现状同值），映射单用时
+	// =配对段落定的主导文件作品键（说明成员归并目标）；AggTrackRole 本文件
+	// 的轨道角色（空=无聚合）；AggWorkType 选中规则声明的作品类型（聚合定义
+	// 的作品类型，创建链子行 ResourceType 的声明值；配对归并不落作品类型）。
+	// 聚合段标识等值并组与配对段说明成员归并的落轨结论，消费面=选择域聚合
+	// 分支与执行面多轨。
 	AggWorkKey   string `json:"aggWorkKey,omitempty"`
 	AggTrackRole string `json:"aggTrackRole,omitempty"`
 	AggWorkType  string `json:"aggWorkType,omitempty"`
-	// AggCompanion 伴随说明成员标记：该文件仅被指派为元数据文件（未分配轨道）
-	// 而归进聚合作品——无轨、不导入、不独立成作品，内容只作元数据来源；独立
-	// 于空 aggTrackRole 的「无聚合」含义（说明成员=归属键在场+轨道角色空+本
-	// 标记真，三字段语义不变）。零值=非说明成员（旧快照载入即现状语义，
-	// 无迁移）。
+	// AggCompanion 配对说明成员标记：该文件仅被指派为元数据文件（未分配
+	// 轨道）而归进作品（聚合作品或配对主导文件的作品）——无轨、不导入、
+	// 不独立成作品，内容只作元数据来源；独立于空 aggTrackRole 的「无聚合」
+	// 含义（说明成员=归属键在场+轨道角色空+本标记真，三字段语义不变）。
+	// 零值=非说明成员（旧快照载入即现状语义，无迁移）。
 	AggCompanion bool `json:"aggCompanion,omitempty"`
+	// PairingGuardLeads 目录配对守卫拒绝注记（配对段落定）：本文件作为说明
+	// 成员候选参与目录配对、组内主导候选多于一个被守卫拒绝时的候选数——
+	// 说明成员候选行的行详情可见原因数据位（「目录内有 N 个主导候选，目录
+	// 配对未成立，说明文件维持独立作品」）。与归属字段互斥（守卫拒绝=零
+	// 归属）；配对成立/零主导组/标识配对拒绝/非候选均零值；重识别随新快照
+	// 重建自然清零（目录主导归一后注记消失、配对随之成立）。
+	PairingGuardLeads int `json:"pairingGuardLeads,omitempty"`
 	// ContentSize / ContentModTime 内容游标（尺寸+修改时间 UnixNano）：该文件
 	// 上轮被采集过内容片段时在场，增量轮目录被 mtime 跳过时逐文件 stat
 	// 比对，失配即整目录拉回求值面（内容原地修改不改父目录 mtime，目录级
@@ -1512,6 +1531,9 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIn
 		MatchedRuleIDs: c.MatchedRuleIDs,
 		AggWorkKey:     c.AggWorkKey, AggTrackRole: c.AggTrackRole, AggWorkType: c.AggWorkType,
 		AggCompanion: c.AggCompanion,
+		// 配对守卫拒绝注记随快照落档（行详情可见原因跨轮携带——目录主导
+		// 归一后重识别随新快照自然清零）
+		PairingGuardLeads: c.PairingGuardLeads,
 	}
 	if resolved := assignIdx.resolveFile(c.RelPath); len(resolved.coveredDimensions()) > 0 {
 		file.Assigned = true
@@ -2556,18 +2578,34 @@ func workPayloadContentDeclsByWork(snap *RecognitionSnapshot) map[string][]SnapD
 }
 
 // contentDeclsByWork 内容声明归集的唯一实现：includeLead 控制是否收录主导
-// 文件自身的内容声明（投影并入=只补其他成员；创建载荷=全成员收齐）。
+// 文件自身的内容声明（投影并入=只补其他成员；创建载荷=全成员收齐）。作品
+// 键按配对归属取值：有归属成员（聚合轨/说明成员与配对说明成员）=AggWorkKey；
+// 配对组的主导文件无归属（配对不并作品），其作品键=自身相对路径键（即说明
+// 成员的归并目标键）——键落在配对指向集（成员归属键全集）内的主导按对位键
+// 参与归集；聚合场景下主导文件的归属键即对位键，取值与口径均不变。
 func contentDeclsByWork(snap *RecognitionSnapshot, includeLead bool) map[string][]SnapDecl {
 	if snap == nil {
 		return nil
 	}
+	pairedKeys := make(map[string]bool, len(snap.Files))
+	for i := range snap.Files {
+		if key := snap.Files[i].AggWorkKey; key != "" {
+			pairedKeys[key] = true
+		}
+	}
 	var out map[string][]SnapDecl
 	for i := range snap.Files {
 		f := &snap.Files[i]
-		if f.AggWorkKey == "" {
-			continue
-		}
-		if !includeLead && f.AggWorkKey == workKeyPrefixFile+f.RelPath {
+		key := f.AggWorkKey
+		if key == "" {
+			// 无归属文件按自身路径键寻址：配对组主导（键在指向集内）仅在
+			// 创建载荷口径（includeLead）收其自身声明；普通单文件不在指向
+			// 集内零收录——投影与载荷两口径均同现状。
+			key = workKeyPrefixFile + f.RelPath
+			if !pairedKeys[key] || !includeLead {
+				continue
+			}
+		} else if !includeLead && key == workKeyPrefixFile+f.RelPath {
 			continue
 		}
 		for _, decl := range f.Final {
@@ -2579,14 +2617,15 @@ func contentDeclsByWork(snap *RecognitionSnapshot, includeLead bool) map[string]
 			}
 			d := decl
 			d.OriginName = f.FileName
-			out[f.AggWorkKey] = append(out[f.AggWorkKey], d)
+			out[key] = append(out[key], d)
 		}
 	}
 	return out
 }
 
-// mergeWorkDeclarations 聚合作品级声明并入（纯函数、输入序确定）：主导文件
-// 终选声明 ∪ 成员伴随说明内容声明 → 作品级声明序列与同维冲突清单。
+// mergeWorkDeclarations 作品级声明并入（纯函数、输入序确定；聚合作品与配对
+// 归属作品同构消费——聚合在场时主导=聚合主导、映射单用时主导=配对主导）：
+// 主导文件终选声明 ∪ 成员伴随说明内容声明 → 作品级声明序列与同维冲突清单。
 //   - 值等价去重：同维同值的成员声明并入主导侧同名声明（保主导侧声明本体，
 //     截断标注与角色等附属位随之）；主导侧缺席该维时成员声明按成员序补位；
 //   - 同维多值冲突：主导侧与成员侧（或成员之间）同维度存在多个互异值 → 该维
@@ -2701,19 +2740,23 @@ func leadDimAssigned(leadFinal []SnapDecl, leadIdx []int) bool {
 }
 
 // projectWorkMergedFile 单文件投影的作品级并入改写（投影层专用，不动持久
-// 快照）：聚合作品主导文件（作品键对位成员）把其他成员的伴随说明内容声明
-// 并入终选视图——无冲突维度补位合成；冲突维度移出终选呈现（既有待裁决呈现
-// 口径：维度进待裁决即不双呈值）并落待裁决维度标记，冲突明细由 overview 分节
-// 的待裁决清单携带。伴随说明成员行另附内容采集状态位（行详情可见原因）。
-// 非主导文件仅补状态位，其余原样返回。
+// 快照）：作品主导文件把其他成员的伴随说明内容声明并入终选视图——主导判定
+// 按配对归属：聚合主导=归属键对位自身路径；配对组主导无归属（配对不并作品），
+// 以配对组指向键（"f:"+自身相对路径，即说明成员的归并目标）在场为准。无冲突
+// 维度补位合成；冲突维度移出终选呈现（既有待裁决呈现口径：维度进待裁决即不
+// 双呈值）并落待裁决维度标记，冲突明细由 overview 分节的待裁决清单携带。伴随
+// 说明成员行另附内容采集状态位（行详情可见原因）。非主导文件仅补状态位，其余
+// 原样返回（普通单文件无指向声明零并入）。
 func projectWorkMergedFile(f SnapFile, contentDecls map[string][]SnapDecl) SnapFile {
 	if f.AggCompanion {
 		f.ContentState = companionContentStateOf(f)
 	}
-	if f.AggWorkKey == "" || f.AggWorkKey != workKeyPrefixFile+f.RelPath {
+	leadKey := workKeyPrefixFile + f.RelPath
+	isLead := f.AggWorkKey == leadKey || (f.AggWorkKey == "" && len(contentDecls[leadKey]) > 0)
+	if !isLead {
 		return f
 	}
-	memberDecls := contentDecls[f.AggWorkKey]
+	memberDecls := contentDecls[leadKey]
 	if len(memberDecls) == 0 {
 		return f
 	}
@@ -2758,9 +2801,10 @@ func companionContentStateOf(f SnapFile) string {
 	return snapCompanionContentUncollected
 }
 
-// workMergePendingOf 全部聚合作品的并入冲突明细（主导文件快照序）：overview
+// workMergePendingOf 全部配对作品的并入冲突明细（主导文件快照序）：overview
 // 分节待裁决清单的投影层追加段——挂主导文件、候选两值两来源，与识别期待裁决
-// 同构（前端按既有待裁决机制呈现与裁决）。
+// 同构（前端按既有待裁决机制呈现与裁决）。主导判定与 projectWorkMergedFile
+// 同一配对归属口径（聚合主导=归属键对位；配对主导=指向键在场）。
 func workMergePendingOf(snap *RecognitionSnapshot, contentDecls map[string][]SnapDecl) []SnapPending {
 	if len(contentDecls) == 0 {
 		return nil
@@ -2768,10 +2812,11 @@ func workMergePendingOf(snap *RecognitionSnapshot, contentDecls map[string][]Sna
 	var out []SnapPending
 	for i := range snap.Files {
 		f := &snap.Files[i]
-		if f.AggWorkKey == "" || f.AggWorkKey != workKeyPrefixFile+f.RelPath {
+		leadKey := workKeyPrefixFile + f.RelPath
+		if f.AggWorkKey != leadKey && (f.AggWorkKey != "" || len(contentDecls[leadKey]) == 0) {
 			continue
 		}
-		if _, conflicts := mergeWorkDeclarations(f.RelPath, f.FileName, f.Final, contentDecls[f.AggWorkKey]); len(conflicts) > 0 {
+		if _, conflicts := mergeWorkDeclarations(f.RelPath, f.FileName, f.Final, contentDecls[leadKey]); len(conflicts) > 0 {
 			out = append(out, conflicts...)
 		}
 	}
@@ -3360,8 +3405,9 @@ func targetSetOf(targets []string) map[string]bool {
 
 // —— 伴随说明文件内容采集的识别轮接线 ——
 
-// companionContentHitSet 内容采集的命中集供给点：聚合规则内容绑定行（行 →
-// 维度配置即采集意图）命中的文件相对路径。绑定行按与第二相取值同一基座
+// companionContentHitSet 内容采集的命中集供给点：「元数据文件」产出内容
+// 绑定行（行 → 维度配置即采集意图；聚合并用与映射单用同源供给——绑定住
+// 规则级落档位）命中的文件相对路径。绑定行按与第二相取值同一基座
 //（contentBindingInputs——结论同批派生的求值输入）独立求值，命中面与整段
 // 取值产声明恒一致；无内容绑定时供给为空集——零采集零效果。库内谓词与
 // 全量树面不在本供给面（保守不命中）。
@@ -3726,9 +3772,11 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 	return nil
 }
 
-// runAggregationOnConclusions 识别轮汇流点的聚合段入口（与 pipeline.go 的
-// runAggregationStage 同一算法，作用对象为合并求值结论）：conclusions 与
-// files 按下标对齐（调用方保证同一求值清单），聚合归属直接写入结论字段。
+// runAggregationOnConclusions 识别轮汇流点的聚合段与配对段入口（与
+// pipeline.go 的 runAggregationStage 同一算法，作用对象为合并求值结论）：
+// conclusions 与 files 按下标对齐（调用方保证同一求值清单），聚合归属与
+// 配对归属（映射单用规则的说明成员归并——配对段居聚合段之后、聚合归属
+// 优先）直接写入结论字段。
 func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) {
 	assigns := aggregateGrouping(newAggEvalSurface(files, treeFiles), rules, lib, types)
 	for i := range conclusions {
@@ -3739,6 +3787,7 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 		conclusions[i].AggTrackRole = assigns[i].TrackRole
 		conclusions[i].AggWorkType = assigns[i].WorkType
 		conclusions[i].AggCompanion = assigns[i].Companion
+		conclusions[i].PairingGuardLeads = assigns[i].GuardLeads
 	}
 }
 

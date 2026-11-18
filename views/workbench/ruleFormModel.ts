@@ -1795,24 +1795,54 @@ export interface TrackAssignForm {
 
 // 内容绑定（ContentBinding 表单形态；落 JSON 字段 row/dimension 与内核同形）：
 // 把本规则一条条件行命中文件的伴随说明内容整段声明到某含义维度——一期零参数
-//（整段→单维度），同一行不得重复绑定（一行内容只去一个维度）。绑定行可为轨行
-//（照常导入，内容叠加产出）或说明行（不导入——处置归聚合段）；「元数据文件」
-// 弹窗（MetadataFileDialog）是唯一指派面。
+//（整段→维度），一行内容可整段同时映射多个维度（多目标=同行多条目），同一行
+// 同一维度唯一（重复勾选无效果）。绑定行可为轨行（并用时照常导入，内容叠加
+// 产出）或说明行（不导入——处置归配对/聚合段）；「元数据文件」弹窗
+//（MetadataFileDialog）是唯一指派面。
 export interface ContentBindingForm {
   row: number
   dimension: string
+}
+
+// 配对方式取值（与内核 PairingMode 同集）：identity=标识配对（配对键部分=行号+
+// 捕获名按声明序拼成复合标识，捕获值相等即一组——说明文件与资源文件各自从
+// 自己的命中行取同名捕获）；directory=目录配对（同目录主导候选唯一时任意的
+// 说明文件归并给该主导，不携带标识部分）。
+export type PairingModeForm = 'identity' | 'directory'
+
+// 配对方式选项（「配对方式：」选择器条目，剧本A 帧2 逐字词）。
+export const PAIRING_MODE_OPTIONS: { value: PairingModeForm; label: string }[] = [
+  { value: 'identity', label: '标识配对' },
+  { value: 'directory', label: '目录配对' }
+]
+
+// 配对键声明（PairingKey 表单形态；落 JSON 字段 mode/identity 与内核同形）：
+// 「元数据文件」产出自己的字段——与聚合规则的作品标识各自独立、并用互不牵连
+//（规则级 identity 维持聚合专属）。映射单用（本规则无聚合产出）时必填，否则
+// 说明成员无从归属；并用时可省略（省略=分组随聚合并组）。
+export interface PairingKeyForm {
+  mode: PairingModeForm
+  identity?: IdentityPartForm[]
+}
+
+// 「元数据文件」产出表单形态（规则级独立落档位，与「聚合成作品」平级、各自可
+// 单独添加或同规则并用）：内容绑定列表+配对键声明。元数据规则与聚合规则均可
+// 携带；null=未加该产出（保存载荷不落键）。
+export interface MetadataFileProductionForm {
+  pairing?: PairingKeyForm
+  contentBindings?: ContentBindingForm[]
 }
 
 // 分轨入口表单形态。companionUse 为规则级历史字段——内核口径=规则级仅 track
 // 可写（空串载入归一 track；metadata 载入即拒并指路行级指派——处置语义由分轨
 // 入口（轨道行=导入）+内容绑定勾选（内容产出元数据）合成表达，见插件 Go 侧
 // validateAggregateEntry 的拒载文案）；前端表单不出现 metadata 选项，保存载荷
-// 恒归一 track 落档。contentBindings 为内容绑定（「元数据文件」指派的落档形态）。
+// 恒归一 track 落档。内容绑定已迁至规则级「元数据文件」产出
+//（MetadataFileProductionForm），聚合产出不再携带。
 export interface AggregateProductionForm {
   workType: string
   tracks: TrackAssignForm[]
   companionUse: string
-  contentBindings?: ContentBindingForm[]
 }
 
 // 类型投影条目（ListResourceTypes 应答条目的前端投影：结构角色与基数）。投影缺席
@@ -1884,13 +1914,14 @@ export function aggRoleShortLabel(role: string): string {
   return AGG_ROLE_SHORT_LABELS[role] || role
 }
 
-// 内容去向维度枚举（与内核 knownBindingDimensions 同集=五维度全值；一期=整段→
-// 单维度、零参数，决策2）。描述为本批主用形态列首；顺序即下拉呈现序。
+// 内容去向维度枚举（与内核 knownBindingDimensions 同集=五维度全值；一行内容
+// 整段可同时映射多个维度，各维独立走既有合成与冲突判定）。描述为本批主用形态
+// 列首；顺序即弹窗勾选组呈现序（剧本A 帧2「☑描述 ☐标签 ☐标题 ☐作者 ☐作品集」）。
 export const CONTENT_BINDING_DIMENSIONS: { value: string; label: string }[] = [
   { value: 'description', label: '描述' },
-  { value: 'author', label: '作者' },
   { value: 'tag', label: '标签' },
   { value: 'title', label: '标题' },
+  { value: 'author', label: '作者' },
   { value: 'collection', label: '作品集' }
 ]
 
@@ -1899,14 +1930,28 @@ export function contentBindingDimensionLabel(dim: string): string {
   return hit ? hit.label : dim
 }
 
-// 产出区「元数据文件」入口摘要（剧本1 帧1「元数据文件（0）」/帧2 系统回应
-//「元数据文件（1）：第 3 行 → 描述」/剧本3 帧1 完成态；绑定按行号升序、
-// 多绑定以「、」连排）。SubpageRules 规则列表摘要同词复用。
+// 产出区「元数据文件」入口摘要（剧本A 帧1「元数据文件（0）」/帧2 系统回应
+//「元数据文件（1）：第 2 行 → 描述」，多目标摘要连写「描述+标签」）：绑定按
+// 行号升序、行内维度按枚举序以「+」连写、行间以「、」连排；计数=被指派行数
+//（同行多维度合并为一段）。SubpageRules 规则列表摘要同词复用。
 export function aggMetadataFileSummary(bindings: ContentBindingForm[] | null | undefined): string {
   const list = (bindings || []).filter(Boolean).slice().sort((a, b) => a.row - b.row)
-  if (!list.length) return '元数据文件（0）'
-  const segs = list.map((b) => `第 ${b.row} 行 → ${contentBindingDimensionLabel(b.dimension)}`)
-  return `元数据文件（${list.length}）：${segs.join('、')}`
+  const byRow = new Map<number, string[]>()
+  for (const b of list) {
+    const dims = byRow.get(b.row) || []
+    dims.push(b.dimension)
+    byRow.set(b.row, dims)
+  }
+  if (!byRow.size) return '元数据文件（0）'
+  const segs: string[] = []
+  for (const [row, dims] of byRow) {
+    const sorted = dims
+      .slice()
+      .sort((x, y) => CONTENT_BINDING_DIMENSIONS.findIndex((d) => d.value === x) - CONTENT_BINDING_DIMENSIONS.findIndex((d) => d.value === y))
+      .map((v) => contentBindingDimensionLabel(v))
+    segs.push(`第 ${row} 行 → ${sorted.join('+')}`)
+  }
+  return `元数据文件（${byRow.size}）：${segs.join('、')}`
 }
 
 // 类型清单（分轨入口第一步的按钮清单）：滤除无结构角色的类型（unknown），返回
@@ -2045,16 +2090,35 @@ function condxTplTailKnownExt(tpl: string, known: Set<string>): string {
   return known.has(ext) ? ext : ''
 }
 
+// 元数据类别行式底盘的模板尾内联扩展名守卫（决策8 甲案·与内核 ruleFromJSON
+// 同口径同文案方向）：文件名行模板对去扩展名的文件名求值，尾字面白名单扩展
+// 名恒不命中——此前元数据类别无守卫（静默死行），保存闸门补齐拦截+指路
+// 「扩展名是」附加条件；dir/seq 目标行不受影响（名不去扩展名）。白名单基底=
+// 常见扩展名集（内核 knownFileExtsForTplTail 同源清单；聚合面按类型投影并集、
+// 元数据行无轨类型语境，取基底集）。聚合类别行不经本函数（聚合面闸门
+// aggFormErrors「文件轨行」措辞先行，聚合路径零变化）。
+export function condxFileRowInlineExtError(rows: CondxRowForm[]): string {
+  const known = new Set(COMMON_FILE_EXTS)
+  for (const f of condxFlatRows(rows)) {
+    const c = f.condx
+    if (!c || c.target !== 'file' || c.format.mode === 'contains') continue
+    const ext = condxTplTailKnownExt(c.format.tpl || '', known)
+    if (ext) {
+      return `第 ${f.row} 行模板尾部误写扩展名 ${ext}：文件名行模板只匹配去扩展名的文件名，该形态恒不命中，请删除模板尾部的 ${ext}，改用「扩展名是」附加条件承载扩展名`
+    }
+  }
+  return ''
+}
+
 // 聚合表单保存闸门（纯函数）：轨行结构限制（平行选择器——括号子组/行级非/跨行
 // 相等均拒绝，与内核 validateAggregateEntry 同口径）+ 文件轨行模板尾部误写
 // 扩展名拒绝（模板只匹配去扩展名的文件名，该形态恒不命中——与内核同口径）+
 // 标识声明（行号界内、捕获在轨行声明、群键只选自序列行）+ 分轨入口（类型
-// 在册、角色∈类型规约、行号界内、必含角色被至少一轨行覆盖）+ 内容绑定（行号
-// 界内、维度合法枚举、同行不重复——与内核 validateContentBindings 同口径；勾选
-// 未选去向的行级拦截在元数据文件弹窗内）。companionUse 处置维度不进本闸门：
-// 内核口径=规则级仅 track 可写（metadata 载入即拒并指路行级指派——分轨入口+
-// 内容绑定勾选合成表达），前端表单不出 metadata 选项、载荷恒归一 track。返回
-// 错误清单（空=通过）；文案为编辑面锚文案。
+// 在册、角色∈类型规约、行号界内、必含角色被至少一轨行覆盖）。内容绑定已迁至
+// 规则级「元数据文件」产出（metadataFileFormErrors）。companionUse 处置维度不
+// 进本闸门：内核口径=规则级仅 track 可写（metadata 载入即拒并指路行级指派——
+// 分轨入口+内容绑定勾选合成表达），前端表单不出 metadata 选项、载荷恒归一
+// track。返回错误清单（空=通过）；文案为编辑面锚文案。
 export function aggFormErrors(
   rows: CondxRowForm[],
   identity: IdentityPartForm[],
@@ -2172,26 +2236,98 @@ export function aggFormErrors(
         }
       }
     }
-    // 内容绑定校验（「元数据文件」指派；与内核 validateContentBindings 同口径）：
-    // 行号界内、维度合法枚举、同行不重复（一期一行内容只去一个维度）。勾选未选
-    // 去向的行级拦截在元数据文件弹窗内（帧7 ⚠ 行），此处兜保存面。
-    const dims = new Set(CONTENT_BINDING_DIMENSIONS.map((d) => d.value))
-    const seenBindingRows = new Set<number>()
-    for (let i = 0; i < (prod.contentBindings || []).length; i++) {
-      const b = prod.contentBindings[i]
-      if (!b) continue
-      if (b.row < 1 || b.row > total) {
-        errs.push(`内容绑定第 ${i + 1} 项行号 ${b.row} 越界（共 ${total} 行）`)
-        continue
+  }
+  return errs
+}
+
+// 「元数据文件」产出保存闸门（纯函数，与内核 validateMetadataFileProduction/
+// validatePairingKey 同口径）：内容绑定（行号界内、维度合法枚举、同一行同一
+// 维度唯一——一行内容整段可同时映射多个维度；勾选未选去向的行级拦截在元数据
+// 文件弹窗内〔剧本A 帧3 ⚠ 行〕，此处兜保存面）+ 配对键（形态枚举合法；标识
+// 配对=配对键部分的行号界内、捕获名引用存在、群键只选自序列目标行；目录配对
+// 不携带标识部分）。映射单用（hasAggregate=false，本规则无聚合产出）时配对键
+// 必填——否则说明成员无从归属；并用时可省略。mf 为 null（未加产出）恒通过。
+export function metadataFileFormErrors(
+  rows: CondxRowForm[],
+  mf: MetadataFileProductionForm | null,
+  hasAggregate: boolean
+): string[] {
+  const errs: string[] = []
+  if (!mf) return errs
+  const total = condxFlatRows(rows).length
+  const bindings = mf.contentBindings || []
+  if (!bindings.length) {
+    errs.push('元数据文件产出缺少内容绑定（打开「元数据文件」弹窗勾选条件行并选内容去向）')
+  }
+  const dims = new Set(CONTENT_BINDING_DIMENSIONS.map((d) => d.value))
+  const seenRowDims = new Set<string>()
+  for (let i = 0; i < bindings.length; i++) {
+    const b = bindings[i]
+    if (!b) continue
+    if (b.row < 1 || b.row > total) {
+      errs.push(`内容绑定第 ${i + 1} 项行号 ${b.row} 越界（共 ${total} 行）`)
+      continue
+    }
+    const key = `${b.row}/${b.dimension}`
+    if (seenRowDims.has(key)) {
+      errs.push(`内容绑定第 ${i + 1} 项与在先项重复指派第 ${b.row} 行的同一维度（同一行同一维度唯一）`)
+      continue
+    }
+    seenRowDims.add(key)
+    if (!b.dimension || !dims.has(b.dimension)) {
+      errs.push(`内容绑定第 ${i + 1} 项维度非法: "${b.dimension}"（内容去向只出 描述/标签/标题/作者/作品集 枚举）`)
+    }
+  }
+  // 配对键校验（与内核 validatePairingKey 同口径）
+  const pairing = mf.pairing
+  if (!pairing || !pairing.mode) {
+    if (!hasAggregate) {
+      errs.push('元数据文件产出缺少配对键声明（无聚合产出时须声明配对方式：标识配对或目录配对）')
+    }
+    return errs
+  }
+  if (pairing.mode === 'directory') {
+    if ((pairing.identity || []).length) {
+      errs.push('配对键为目录配对，不得携带标识配对部分（所在目录即配对键）')
+    }
+    return errs
+  }
+  if (pairing.mode !== 'identity') {
+    errs.push(`配对方式非法: "${pairing.mode}"（identity=标识配对 / directory=目录配对）`)
+    return errs
+  }
+  const parts = pairing.identity || []
+  if (!parts.length) {
+    errs.push('配对键为标识配对但缺少配对键部分（行·捕获名）')
+    return errs
+  }
+  const candidates = new Set(aggIdentityCandidates(rows).map((c) => `${c.row}/${c.group}`))
+  const anyRowCaptures = new Set(aggIdentityCandidates(rows).map((c) => c.group))
+  const rowByNo = new Map(condxFlatRows(rows).map((f) => [f.row, f.condx] as const))
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]
+    if (!part) continue
+    if (part.row < 1 || part.row > total) {
+      errs.push(`配对键第 ${i + 1} 部分行号 ${part.row} 越界（共 ${total} 行）`)
+      continue
+    }
+    if (!part.capture) {
+      errs.push(`配对键第 ${i + 1} 部分缺少捕获名`)
+      continue
+    }
+    if (part.capture === AGG_GROUP_KEY_CAPTURE) {
+      const target = rowByNo.get(part.row)
+      if (!target || target.target !== 'seq') {
+        errs.push(`配对键第 ${i + 1} 部分：序列群键只能选自序列目标行`)
       }
-      if (seenBindingRows.has(b.row)) {
-        errs.push(`内容绑定第 ${i + 1} 项与在先项重复指派第 ${b.row} 行（一行内容只去一个维度）`)
-        continue
-      }
-      seenBindingRows.add(b.row)
-      if (!b.dimension || !dims.has(b.dimension)) {
-        errs.push(`内容绑定第 ${i + 1} 项维度非法: "${b.dimension}"（内容去向只出 描述/作者/标签/标题/作品集 枚举）`)
-      }
+      continue
+    }
+    if (!candidates.has(`${part.row}/${part.capture}`)) {
+      errs.push(
+        anyRowCaptures.has(part.capture)
+          ? `配对键第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选条件行汇集候选中的同词位）`
+          : `配对键第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何条件行声明`
+      )
     }
   }
   return errs

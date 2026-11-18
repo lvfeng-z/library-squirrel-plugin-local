@@ -48,10 +48,16 @@ type FileDecision struct {
 	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）；AggWorkType 为
 	// 选中规则声明的作品类型（聚合定义的作品类型，创建链子行 ResourceType 的
 	// 声明值来源）。三字段由汇流后的聚合段写入（见 runAggregationStage）——
-	// 逐文件求值循环不产出。
+	// 逐文件求值循环不产出。PairingGuardLeads 为配对守卫拒绝注记（目录配对
+	// 多主导时的主导候选数，配对段落定）：行详情可见原因数据位，与归属字段
+	// 互斥（守卫拒绝=零归属）。
 	AggWorkKey   string
 	AggTrackRole string
 	AggWorkType  string
+	// PairingGuardLeads 目录配对守卫拒绝注记：本文件作为说明成员候选参与目录
+	// 配对、组内主导候选多于一个被守卫拒绝时的候选数；0=无注记（配对成立/
+	// 零主导组/标识配对拒绝/非候选均零值）。
+	PairingGuardLeads int
 }
 
 // ScanNote 为一条贪婪识别歧义记录。
@@ -157,6 +163,7 @@ func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rule
 		decisions[i].AggWorkKey = assigns[i].WorkKey
 		decisions[i].AggTrackRole = assigns[i].TrackRole
 		decisions[i].AggWorkType = assigns[i].WorkType
+		decisions[i].PairingGuardLeads = assigns[i].GuardLeads
 	}
 }
 
@@ -953,7 +960,8 @@ type contentBindingPlan struct {
 	rows []Pattern
 }
 
-// contentBindingPlans 过滤携带内容绑定的启用聚合规则并编译绑定行。行结构
+// contentBindingPlans 过滤携带内容绑定（「元数据文件」产出，住规则级落档位）
+// 的启用规则并编译绑定行——聚合规则（并用）与映射单用规则同源供给。行结构
 // 非法（越界/行级非/括号子组）或编译失败按宁缺勿错整条跳过——与聚合段
 // buildAggregationPlans 同款防御（载入校验已拦的形态在此双保险）。无绑定时
 // 返回空（现状行为零变化）。
@@ -961,12 +969,12 @@ func contentBindingPlans(rules []RuleEntry) []*contentBindingPlan {
 	var plans []*contentBindingPlan
 	for i := range rules {
 		rule := &rules[i]
-		if !rule.Enabled || rule.Category != RuleCategoryAggregate ||
-			rule.Aggregate == nil || len(rule.Aggregate.ContentBindings) == 0 ||
+		if !rule.Enabled || rule.MetadataFile == nil ||
+			len(rule.MetadataFile.ContentBindings) == 0 ||
 			len(rule.Conditions) == 0 {
 			continue
 		}
-		bindings := rule.Aggregate.ContentBindings
+		bindings := rule.MetadataFile.ContentBindings
 		rows := make([]Pattern, len(bindings))
 		valid := true
 		for j := range bindings {

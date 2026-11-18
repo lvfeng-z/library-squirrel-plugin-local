@@ -3948,29 +3948,34 @@ func TestAggregationTypeDanglingAnchor(t *testing.T) {
 		{ResourceType: sdkdto.ResourceTypeVideo},
 	})
 	warns := AnchorAggregateRules(profile, videoOnly)
-	if len(warns) != 2 {
-		t.Fatalf("悬空的 image/article 两条聚合规则应各产生一条告警: %v", warns)
+	if len(warns) != 1 {
+		t.Fatalf("悬空的 article 聚合种子应产生一条告警（单图说明种子已改纯映射、无类型引用）: %v", warns)
 	}
-	if !strings.Contains(warns[0].Error(), "image") || !strings.Contains(warns[1].Error(), "article") {
+	if !strings.Contains(warns[0].Error(), "article") {
 		t.Fatalf("悬空告警应点名对应作品类型: %v", warns)
 	}
-	if profile.Rules[0].Enabled != true || profile.Rules[1].Enabled != false || profile.Rules[2].Enabled != false {
-		t.Fatalf("悬空条目应停用、在册条目不受影响: video=%v image=%v article=%v",
+	if profile.Rules[0].Enabled != true || profile.Rules[1].Enabled != true || profile.Rules[2].Enabled != false {
+		t.Fatalf("悬空条目应停用、在册条目与纯映射种子不受影响: video=%v map=%v article=%v",
 			profile.Rules[0].Enabled, profile.Rules[1].Enabled, profile.Rules[2].Enabled)
 	}
 
 	noIndex := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: PresetAggregateRules()}
-	if warns := AnchorAggregateRules(noIndex, nil); len(warns) != 3 {
-		t.Fatalf("索引缺席时全部聚合规则应按悬空停用: %d 条告警", len(warns))
+	if warns := AnchorAggregateRules(noIndex, nil); len(warns) != 2 {
+		t.Fatalf("索引缺席时全部聚合种子应按悬空停用（纯映射种子无类型引用不计入）: %d 条告警", len(warns))
 	}
 
-	// 求值跳过：悬空停用后 EffectiveRules 出局——article 形态文件零聚合归属。
+	// 求值跳过：悬空停用后 EffectiveRules 出局——article 形态文件零聚合轨道
+	// 归属（启用中的纯映射种子对 a.txt 的目录配对归并正当在场——说明成员
+	// 无轨无类型，与聚合归属零冲突）。
 	files := aggScanFiles("w/a.txt", "w/a.jpg")
 	decisions := RunPipelineWithTypes(files, EffectiveRules(profile), nil, videoOnly)
 	for _, rel := range []string{"w/a.txt", "w/a.jpg"} {
-		if got := aggDecisionOf(t, decisions, rel); got.AggWorkKey != "" {
-			t.Fatalf("悬空停用的聚合规则不应参与求值: %s → %q", rel, got.AggWorkKey)
+		if got := aggDecisionOf(t, decisions, rel); got.AggTrackRole != "" || got.AggWorkType != "" {
+			t.Fatalf("悬空停用的聚合规则不应产出聚合轨道归属: %s → role=%q type=%q", rel, got.AggTrackRole, got.AggWorkType)
 		}
+	}
+	if got := aggDecisionOf(t, decisions, "w/a.jpg"); got.AggWorkKey != "" {
+		t.Fatalf("悬空停用后主导文件应零聚合归属: %q", got.AggWorkKey)
 	}
 }
 
@@ -3988,8 +3993,17 @@ func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
 		t.Fatalf("初始化后档案应含三条预置种子: errs=%v rules=%d", errs, len(profile.Rules))
 	}
 	for _, rule := range profile.Rules {
-		if rule.Source != RuleSourcePreset || rule.Category != RuleCategoryAggregate || !rule.Enabled {
+		if rule.Source != RuleSourcePreset || !rule.Enabled {
 			t.Fatalf("预置种子应以预置来源入档并与用户条目同权: %+v", rule)
+		}
+		// 种子三改纯映射形态（决策4 甲）：类别=metadata（无聚合产出、目录
+		// 配对）；其余两条聚合种子类别不变。
+		wantCategory := RuleCategoryAggregate
+		if rule.ID == presetAggImageCompanionTextID {
+			wantCategory = RuleCategoryMetadata
+		}
+		if rule.Category != wantCategory {
+			t.Fatalf("预置种子类别不符（纯映射种子=metadata、聚合种子=aggregate）: %+v", rule)
 		}
 	}
 
@@ -4190,6 +4204,8 @@ func TestAggregationCompanionRowGrouping(t *testing.T) {
 				{Row: 1, Role: sdkdto.StoreRoleVideoMain},
 				{Row: 2, Role: contract.StoreTypeSubtitle},
 			},
+		},
+		MetadataFile: &MetadataFileProduction{
 			ContentBindings: []ContentBinding{{Row: 3, Dimension: DimDescription}},
 		},
 	}
@@ -4246,6 +4262,8 @@ func TestAggregationTrackRowBindingDualIdentity(t *testing.T) {
 				{Row: 1, Role: sdkdto.StoreRoleDocument},
 				{Row: 2, Role: sdkdto.StoreRoleImage},
 			},
+		},
+		MetadataFile: &MetadataFileProduction{
 			ContentBindings: []ContentBinding{{Row: 1, Dimension: DimDescription}},
 		},
 	}
@@ -4309,32 +4327,53 @@ func TestAggregationCompanionSnapshotMark(t *testing.T) {
 	}
 }
 
-// TestAggregationPresetImageCompanionSeed 预置种子「单图+说明文本」锚：默认
-// 种子序（视频→单图说明→一图一文本）下，同名的 jpg+txt 对按图片作品+伴随
-// 说明吸收——图片为主导文件（image 轨），txt 归进图片作品（无轨、说明成员
-// 标记、不独立成作品）；异名 txt 不被本种子吸收（无必含轨命中、组不成立），
-// 由图文种子按正文轨照旧处置。
+// TestAggregationPresetImageCompanionSeed 预置种子「单图+说明文本」收编边界锚
+//（决策4 甲·纯映射形态）：聚合归属优先——同名图片+文本对与孤立 txt 均由
+// 图文种子聚合收编（图文种子正文行 {作品} 模板吞任意主干名，孤立 txt 单必含
+// 轨成组为单正文 article 作品，目录配对对其不可达；同名对=正文轨主导+内嵌图
+// 轨，与「一图一文本」种子现状行为一致——聚合段在先、映射不夺已归属成员）；
+// 聚合竞争缺席（仅纯映射种子在场）时异名说明文件才经目录配对归并（正例）。
 func TestAggregationPresetImageCompanionSeed(t *testing.T) {
 	files := aggScanFiles("img/cover.jpg", "img/cover.txt", "img/notes.txt")
 	rules := PresetAggregateRules()
 	conclusions := MergedRecognition(files, rules, nil, nil)
 	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
 
-	cover := aggConclusionOf(t, conclusions, "img/cover.jpg")
-	if cover.AggWorkKey != "f:img/cover.jpg" || cover.AggTrackRole != contract.StoreTypeImage ||
-		cover.AggWorkType != sdkdto.ResourceTypeImage || cover.AggCompanion {
-		t.Fatalf("图片主导文件的聚合归属不符: key=%q role=%q type=%q companion=%v",
-			cover.AggWorkKey, cover.AggTrackRole, cover.AggWorkType, cover.AggCompanion)
+	// 同名对：图文种子聚合收编（正文轨主导+内嵌图轨，纯映射种子不夺）。
+	coverTxt := aggConclusionOf(t, conclusions, "img/cover.txt")
+	if coverTxt.AggWorkKey != "f:img/cover.txt" || coverTxt.AggTrackRole != sdkdto.StoreRoleDocument ||
+		coverTxt.AggWorkType != sdkdto.ResourceTypeArticle || coverTxt.AggCompanion {
+		t.Fatalf("同名对的 txt 应由图文种子聚合收编为正文轨主导: key=%q role=%q type=%q companion=%v",
+			coverTxt.AggWorkKey, coverTxt.AggTrackRole, coverTxt.AggWorkType, coverTxt.AggCompanion)
 	}
-	txt := aggConclusionOf(t, conclusions, "img/cover.txt")
-	if txt.AggWorkKey != "f:img/cover.jpg" || txt.AggTrackRole != "" || !txt.AggCompanion {
-		t.Fatalf("同名说明文本应归进图片作品（无轨+说明成员标记）: key=%q role=%q companion=%v",
-			txt.AggWorkKey, txt.AggTrackRole, txt.AggCompanion)
+	coverJpg := aggConclusionOf(t, conclusions, "img/cover.jpg")
+	if coverJpg.AggWorkKey != "f:img/cover.txt" || coverJpg.AggTrackRole != contract.StoreTypeImage || coverJpg.AggCompanion {
+		t.Fatalf("同名对的 jpg 应为图文种子内嵌图轨: key=%q role=%q companion=%v",
+			coverJpg.AggWorkKey, coverJpg.AggTrackRole, coverJpg.AggCompanion)
 	}
+	// 孤立 txt：图文种子单正文成组收编（聚合在前，目录配对不可达——现状
+	// 行为锚定，收编边界实测结论）。
 	lone := aggConclusionOf(t, conclusions, "img/notes.txt")
-	if lone.AggWorkKey != "f:img/notes.txt" || lone.AggTrackRole != contract.StoreTypeDocument || lone.AggCompanion {
-		t.Fatalf("异名说明文本应按图文种子正文轨处置（不带入本种子的说明语义）: key=%q role=%q companion=%v",
+	if lone.AggWorkKey != "f:img/notes.txt" || lone.AggTrackRole != sdkdto.StoreRoleDocument || lone.AggCompanion {
+		t.Fatalf("孤立 txt 应由图文种子聚合收编为单正文作品: key=%q role=%q companion=%v",
 			lone.AggWorkKey, lone.AggTrackRole, lone.AggCompanion)
+	}
+
+	// 正例（聚合竞争缺席）：仅纯映射种子在场时，异名说明文件经目录配对归并
+	// 到同目录唯一主导的图片作品（说明成员标记、无轨、不独立成作品）。
+	solo := aggScanFiles("solo/cover.jpg", "solo/说明.txt")
+	soloRules := []RuleEntry{rules[1]}
+	soloConclusions := MergedRecognition(solo, soloRules, nil, nil)
+	runAggregationOnConclusions(soloConclusions, solo, solo, soloRules, nil, testAggTypeIndex())
+	lead := aggConclusionOf(t, soloConclusions, "solo/cover.jpg")
+	if lead.AggWorkKey != "" || lead.AggCompanion {
+		t.Fatalf("目录配对的主导候选应维持独立作品（配对不并作品）: key=%q companion=%v",
+			lead.AggWorkKey, lead.AggCompanion)
+	}
+	member := aggConclusionOf(t, soloConclusions, "solo/说明.txt")
+	if member.AggWorkKey != "f:solo/cover.jpg" || member.AggTrackRole != "" || !member.AggCompanion {
+		t.Fatalf("唯一主导目录的异名说明文件应经目录配对归并（无轨+说明成员标记）: key=%q role=%q companion=%v",
+			member.AggWorkKey, member.AggTrackRole, member.AggCompanion)
 	}
 }
 
@@ -4519,8 +4558,10 @@ func workMergeConflictRules(t *testing.T) []RuleEntry {
 			Category: RuleCategoryAggregate, Conditions: rows, Pattern: aggPat,
 			Identity: []IdentityPart{{Row: 1, Capture: "work"}},
 			Aggregate: &AggregateProduction{
-				WorkType:        sdkdto.ResourceTypeImage,
-				Tracks:          []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}},
+				WorkType: sdkdto.ResourceTypeImage,
+				Tracks:   []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}},
+			},
+			MetadataFile: &MetadataFileProduction{
 				ContentBindings: []ContentBinding{{Row: 2, Dimension: DimAuthor}},
 			},
 		},

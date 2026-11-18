@@ -1,10 +1,11 @@
-// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品；聚合
-// 规则落轨的成员按聚合作品键并成一件多成员作品、其余每文件一件单文件作品；
-// 集=序列群、默认聚合单元），承载选择集的持久化校验、创建编排动作（异步化：
-// 创建前目录级 mtime 对账〔逐文件存在性核对已并入 verify 哈希循环，见
-// hashWorkFilesAllOrNothing〕→ 一次 CreateTask 走 Create 过滤产出分支 → 选择集
-// 清理，均移独立 goroutine；进度与终态经 createProgress/createDone 事件推送）与
-// 会话模式任务产出的目录含义链构造（取快照回放结论，不触发目录问答）。
+// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品；配对
+// 归属非空的成员按配对作品键并成一件多成员作品〔聚合在场时=聚合归属、映射
+// 单用时=配对归并〕，其余每文件一件单文件作品；集=序列群、默认聚合单元），
+// 承载选择集的持久化校验、创建编排动作（异步化：创建前目录级 mtime 对账〔逐
+// 文件存在性核对已并入 verify 哈希循环，见 hashWorkFilesAllOrNothing〕→ 一次
+// CreateTask 走 Create 过滤产出分支 → 选择集清理，均移独立 goroutine；进度与
+// 终态经 createProgress/createDone 事件推送）与会话模式任务产出的目录含义链
+// 构造（取快照回放结论，不触发目录问答）。
 package main
 
 import (
@@ -47,22 +48,24 @@ func splitWorkSetKey(setKey string) (dirRelKey, groupKey string) {
 	return dirRelKey, groupKey
 }
 
-// SelectableWork 可选作品：选择的最小粒度。单文件作品恒一文件；聚合作品=同
-// 聚合作品键的成员并成一件（Files 多成员、首位=主导文件——作品级结论〔集归属/
-// 呈现态/创建链元数据〕按主导文件结论取值）。Files 保留轨道集形态承载两类
-// 作品。
+// SelectableWork 可选作品：选择的最小粒度。单文件作品恒一文件；组作品=同
+// 配对作品键的成员并成一件（聚合在场时=聚合归属〔轨道集形态〕，映射单用时=
+// 配对归并〔主导+说明成员〕——Files 多成员、首位=主导文件，作品级结论〔集
+// 归属/呈现态/创建链元数据〕按主导文件结论取值）。Files 保留轨道集形态承载
+// 两类组作品。
 type SelectableWork struct {
-	// WorkID 作品键（workKeyPrefixFile + 文件相对路径；聚合作品=主导文件相对路径）。
+	// WorkID 作品键（workKeyPrefixFile + 文件相对路径；组作品=主导文件相对
+	// 路径——聚合归属键与配对组键同形）。
 	WorkID string `json:"workId"`
-	// DirRelKey 所属目录键（'/' 路径，库根直下为空串；聚合作品=主导文件目录键）。
+	// DirRelKey 所属目录键（'/' 路径，库根直下为空串；组作品=主导文件目录键）。
 	DirRelKey string `json:"dirRelKey"`
-	// Files 作品全部轨道的相对路径（单文件作品恒一条；聚合作品=成员清单，首位
+	// Files 作品全部成员的相对路径（单文件作品恒一条；组作品=成员清单，首位
 	//=主导文件，余按快照序；伴随说明成员随作品联动，亦在清单内）。
 	Files []string `json:"files"`
-	// CompanionCount 伴随说明成员数（聚合作品专属；清单内含说明成员的选择域
-	// 计数附注数据位——「含说明 N」「另有说明文件 N」类文案由前端按本位与
-	// Files 数派生，说明成员不进创建链）。单文件作品与无说明成员的聚合作品
-	// 零值省略。
+	// CompanionCount 伴随说明成员数（组作品专属——聚合作品与配对归并作品
+	// 同构；清单内含说明成员的选择域计数附注数据位——「含说明 N」「另有说明
+	// 文件 N」类文案由前端按本位与 Files 数派生，说明成员不进创建链）。
+	// 单文件作品与无说明成员的组作品零值省略。
 	CompanionCount int `json:"companionCount,omitempty"`
 	// SetKey 所属集键（仅序列群成员非空；落单文件不属任何集）。
 	SetKey string `json:"setKey,omitempty"`
@@ -182,9 +185,10 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 	for i := range snap.Files {
 		fileByPath[snap.Files[i].RelPath] = &snap.Files[i]
 	}
-	// 单过扫描：聚合成员并入其聚合作品（作品位=首成员快照序），无聚合归属的
-	// 文件走原逐文件分支各自成件——两类作品在 Works 中保持快照序（确定序），
-	// 单文件作品路径零变化。
+	// 单过扫描：有归属成员（聚合轨/说明成员与配对说明成员）并入其配对作品
+	//（作品位=首成员快照序），无归属文件按自身路径键寻址——配对组主导后到
+	// 并入同键组作品（对位挪前）、普通单文件建独立作品，两类作品在 Works 中
+	// 保持快照序（确定序），单文件作品路径零变化。
 	setMembers := make(map[string][]*SelectableWork)
 	aggByWork := make(map[string]*SelectableWork)
 	for i := range snap.Files {
@@ -209,7 +213,7 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 			if f.AggCompanion {
 				work.CompanionCount++
 			}
-			if f.RelPath == strings.TrimPrefix(f.AggWorkKey, workKeyPrefixFile) {
+			if f.AggWorkKey == workKeyPrefixFile+f.RelPath {
 				// 主导文件=作品键对位成员：先见伴随成员时，主导文件挪至 Files
 				// 首位并以其目录键为作品目录键（后续集归属/呈现态按 Files 首位
 				// 取值）。
@@ -221,11 +225,26 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 			}
 			continue
 		}
+		key := workKeyPrefixFile + f.RelPath
+		if work := aggByWork[key]; work != nil {
+			// 配对组主导后到（说明成员先建组）：先入清单再对位挪至 Files 首
+			// 位并以其目录键为作品目录键——与聚合主导后到同款对位逻辑。
+			work.Files = append(work.Files, f.RelPath)
+			work.DirRelKey = f.DirRelKey
+			for j := len(work.Files) - 1; j > 0; j-- {
+				work.Files[j] = work.Files[j-1]
+			}
+			work.Files[0] = f.RelPath
+			continue
+		}
 		work := &SelectableWork{
-			WorkID:    workKeyPrefixFile + f.RelPath,
+			WorkID:    key,
 			DirRelKey: f.DirRelKey,
 			Files:     []string{f.RelPath},
 		}
+		// 登记组作品索引：后到的配对说明成员按同键（归并目标=主导路径键）
+		// 追加进本作品（配对组主导先到形态）。
+		aggByWork[key] = work
 		domain.Works = append(domain.Works, work)
 		domain.byWork[work.WorkID] = work
 		if f.GroupKey != "" {
@@ -234,17 +253,16 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 		}
 	}
 	for _, work := range domain.Works {
-		if _, aggregated := aggByWork[work.WorkID]; aggregated {
-			// 聚合作品：作品级结论=主导文件（Files 首位）——集归属按主导文件
-			// 群键整体入集，可选性/呈现态只看主导文件。
-			work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files[:1])
+		// 作品级结论=主导文件（Files 首位）——单文件作品 Files 恒一条，两口径
+		// 同值；集归属按主导文件群键整体入集，可选性/呈现态只看主导文件。主导
+		// 先到的单文件/配对作品已在主循环归集（SetKey 非空防重）。
+		work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files[:1])
+		if work.SetKey == "" {
 			if lead := fileByPath[work.Files[0]]; lead != nil && lead.GroupKey != "" {
 				work.SetKey = workSetKey(lead.DirRelKey, lead.GroupKey)
 				setMembers[work.SetKey] = append(setMembers[work.SetKey], work)
 			}
-			continue
 		}
-		work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files)
 	}
 	for _, setKey := range sortedKeys(setMembers) {
 		members := setMembers[setKey]

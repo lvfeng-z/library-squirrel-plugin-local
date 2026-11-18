@@ -76,12 +76,12 @@ type FilePluginData struct {
 	// 文件数与角色构成（确认呈现「N 个文件」「视频 + 字幕×N」类文案的数据面）
 	// 由本清单直接可得。
 	Tracks []TrackEntry `json:"tracks,omitempty"`
-	// ContentDecls 作品成员的内容来源声明快照（聚合作品子行专属，零契约插件
-	// 自有字段）：创建时点该作品全部成员（含主导文件）终选中来源=内容的声明
-	// 按快照序固化——任务自包含（执行期单文件重算不重读内容，作品级并入素材
-	// 全靠本快照），执行期与重算结论按作品级并入规则合成。说明成员本身不在
-	// Tracks（不导入、不哈希），其内容声明只经本字段进入作品元数据。空=无
-	// 内容绑定（既有载荷零值兼容）。
+	// ContentDecls 作品成员的内容来源声明快照（配对归属作品子行均携带——
+	// 聚合作品与映射单用作品同构，零契约插件自有字段）：创建时点该作品全部
+	// 成员（含主导文件）终选中来源=内容的声明按快照序固化——任务自包含
+	//（执行期单文件重算不重读内容，作品级并入素材全靠本快照），执行期与重算
+	// 结论按作品级并入规则合成。说明成员本身不导入不哈希，其内容声明只经本
+	// 字段进入作品元数据。空=无内容绑定（既有载荷零值兼容）。
 	ContentDecls []SnapDecl `json:"contentDecls,omitempty"`
 }
 
@@ -322,9 +322,12 @@ func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string, repor
 
 // batchFileItem 批次应答的子行素材：带归属裁决的文件与其所属目录的含义链。
 // 批次父行纯容器（目录含义链不呈现于父行），含义链随子行各自的目录走。
+// contentDecls 为该子行承载的作品内容来源声明快照（配对归属作品的说明成员
+// 内容产出——映射单用作品经主导子行固化；聚合作品子行走显式参数不经本位）。
 type batchFileItem struct {
-	af       attributedFile
-	metadata []PathMeaning
+	af           attributedFile
+	metadata     []PathMeaning
+	contentDecls []SnapDecl
 }
 
 // —— 大批次子行分帧（契约 21 B1+，大载荷分页方案·设计 B）——
@@ -741,7 +744,9 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 	//（集成员按上方集内序）——与串行基准同一序，单元只携计划素材（哈希在
 	// worker 池内做，归属裁决与子行构造在放行侧做，保序不变量锚定放行序）。
 	// aggKey 非空=聚合作品（成员文件携带聚合归属，Files 首位=主导文件）——产出
-	// 形态分叉：单子行（不再逐文件扁平），成员对账失败降为整件放弃。
+	// 形态分叉：单子行（不再逐文件扁平），成员对账失败降为整件放弃。哈希面
+	// 剔除说明成员对配对归属作品通用（聚合与映射单用同款，见 workHashFaceOf——
+	// 成员清单与计数数据面仍是全量 Files，域推导不动，仅创建链消费过滤视图）。
 	type emitUnit struct {
 		work              *SelectableWork
 		metadata          []PathMeaning
@@ -757,12 +762,10 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
 		appendUnit := func(work *SelectableWork) {
 			aggKey := aggKeyOf(snapFileByPath, work)
-			if aggKey != "" {
-				// 哈希/核对/子行面剔除说明成员（成员清单与计数数据面仍是全量
-				// Files——域推导不动，仅创建链消费过滤视图）
-				work = workHashFaceOf(snapFileByPath, work)
-			}
-			units = append(units, emitUnit{work: work, metadata: metadata, classifiedSiteKey: classifiedSiteKey, aggKey: aggKey})
+			units = append(units, emitUnit{
+				work: workHashFaceOf(snapFileByPath, work),
+				metadata: metadata, classifiedSiteKey: classifiedSiteKey, aggKey: aggKey,
+			})
 		}
 		for _, work := range plan.loneWorks {
 			appendUnit(work)
@@ -772,12 +775,13 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		}
 	}
 
-	// 聚合作品的成员内容声明（载荷固化面）：任一聚合单元在场时一次收齐按作品
-	// 键取用——说明成员与被绑定轨行的内容产出经此并入作品元数据（任务自包含，
-	// 执行期重算不重读内容）；纯单文件批次零工作零开销。
+	// 组作品的内容声明（载荷固化面）：聚合单元或含说明成员的配对作品在场时
+	// 一次收齐按作品键取用——说明成员与被绑定轨行/主导的内容产出经此并入
+	// 作品元数据（任务自包含，执行期重算不重读内容）；纯单文件批次零工作零
+	// 开销。
 	var payloadContentDecls map[string][]SnapDecl
 	for _, u := range units {
-		if u.aggKey != "" {
+		if u.aggKey != "" || u.work.CompanionCount > 0 {
 			payloadContentDecls = workPayloadContentDeclsByWork(sess.Snapshot)
 			break
 		}
@@ -996,11 +1000,17 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			}
 		} else {
 			// 逐文件裁决归属后按原序扁平进批次（目录序内先落单作品后集成
-			// 员——同目录文件不按归属重排）
+			// 员——同目录文件不按归属重排）。配对归属作品（映射单用）哈希面
+			// 后恒主导单条：内容声明随主导子行固化进载荷（执行期作品级并入，
+			// 与聚合子行的显式参数形态同构）。
 			unitItems := make([]batchFileItem, 0, len(out.files))
-			for _, f := range out.files {
+			for i, f := range out.files {
 				attr := resolveWorkAttribution(filepath.Base(f.FullPath), unit.classifiedSiteKey)
-				unitItems = append(unitItems, batchFileItem{af: attributedFile{entry: f, attr: attr}, metadata: unit.metadata})
+				item := batchFileItem{af: attributedFile{entry: f, attr: attr}, metadata: unit.metadata}
+				if i == 0 {
+					item.contentDecls = payloadContentDecls[unit.work.WorkID]
+				}
+				unitItems = append(unitItems, item)
 			}
 			allItems = append(allItems, unitItems...)
 			children := buildChildResponses(unitItems, sess.Assignments)
@@ -1279,6 +1289,9 @@ func buildChildResponses(items []batchFileItem, assigns map[string]SessionAssign
 			snapshot := assign
 			fp.Assignment = &snapshot
 		}
+		// 配对归属作品的内容声明随子行固化（映射单用：说明成员内容经主导子行
+		// 进入任务载荷，执行期与重算结论按作品级并入规则合成）
+		fp.ContentDecls = item.contentDecls
 		fpJSON, _ := json.Marshal(fp)
 
 		children = append(children, &sdkdto.TaskCreateChildResponse{
@@ -1328,17 +1341,26 @@ func aggKeyOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
 	return ""
 }
 
-// workHashFaceOf 创建链的作品哈希面：聚合作品剔除伴随说明成员——说明成员只作
-// 元数据来源，文件本体不哈希、不核对、不导子行（不进轨道清单与集序素材），
-// 轨道成员（含被内容绑定的双重身份成员）照常保留（绑定只叠加内容产出，不改
-// 写导入身份）。无说明成员时原作品直接返回（零拷贝，既有路径零变化）；主导
-// 文件恒为轨道成员，过滤不触及 Files 首位。
+// workHashFaceOf 创建链的作品哈希面：按配对归属剔除伴随说明成员——说明成员
+// 只作元数据来源，文件本体不哈希、不核对、不导子行（不进轨道清单与集序素材），
+// 聚合在场时=聚合归属同值（聚合作品主导携带归属键），映射单用时=配对组作品
+//（主导无归属而作品含说明成员）；轨道成员（含被内容绑定的双重身份成员）照常
+// 保留（绑定只叠加内容产出，不改写导入身份）。无说明成员的作品原样返回（零
+// 拷贝，含全部单文件作品——既有路径零变化）；主导文件恒为轨道成员/配对主导，
+// 过滤不触及 Files 首位。
 func workHashFaceOf(fileByPath map[string]*SnapFile, work *SelectableWork) *SelectableWork {
 	if len(work.Files) == 0 {
 		return work
 	}
-	if lead := fileByPath[work.Files[0]]; lead == nil || lead.AggWorkKey == "" {
-		return work // 单文件作品/无聚合归属：结构性无说明成员
+	hasCompanion := false
+	for _, rel := range work.Files {
+		if rec := fileByPath[rel]; rec != nil && rec.AggCompanion {
+			hasCompanion = true
+			break
+		}
+	}
+	if !hasCompanion {
+		return work // 无说明成员：结构性零过滤（含单文件作品与纯轨聚合作品）
 	}
 	kept := make([]string, 0, len(work.Files))
 	for _, rel := range work.Files {
@@ -1572,12 +1594,12 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	}
 	final := conclusion.Final
 	if len(fp.ContentDecls) > 0 {
-		// 聚合作品级并入：重算结论（主导文件）∪ 载荷固化的成员内容声明——
-		// 同维多值冲突按主导值落库（冲突呈现归解析工作台的待裁决面，裁决经
-		// 会话赋值重识别生效后载荷随创建时点更新）；描述落库取并入后首个
-		// 声明（值原样入——落库字段无长度约束，采集上限 64KB 即自然上界，
-		// 呈现截断归前端）。重算不重读内容，主导文件自身的内容声明同样由
-		// 载荷复原。
+		// 作品级并入（配对归属通用）：重算结论（主导文件）∪ 载荷固化的成员
+		// 内容声明——同维多值冲突按主导值落库（冲突呈现归解析工作台的待裁决
+		// 面，裁决经会话赋值重识别生效后载荷随创建时点更新）；描述落库取并入
+		// 后首个声明（值原样入——落库字段无长度约束，采集上限 64KB 即自然上
+		// 界，呈现截断归前端）。重算不重读内容，主导文件自身的内容声明同样
+		// 由载荷复原。
 		leadDecls := make([]SnapDecl, 0, len(final))
 		for _, decl := range final {
 			leadDecls = append(leadDecls, snapDeclOf(decl))

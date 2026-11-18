@@ -235,8 +235,9 @@ interface DimPolicyView {
 
 // 档案规则条目（ruleEntryJSON 形态：conditions / extractions 即 JSON 片段源——
 // v4/v5 档案条件只落 conditions，模式树为编译缓存不落档；category/identity/
-// aggregate 为聚合规则的类别与两件声明——元数据规则三者缺省；aggregate.
-// contentBindings=内容绑定〔「元数据文件」指派，omitempty 缺省=无内容产出〕）
+// aggregate 为聚合规则的类别与两件声明——元数据规则三者缺省；metadataFile=
+// 规则级「元数据文件」产出〔与聚合产出平级，元数据规则与聚合规则均可携带——
+// 内容绑定+配对键声明，内容绑定已从 aggregate 迁出〕）
 interface RuleEntryView {
   id: string
   description: string
@@ -248,6 +249,9 @@ interface RuleEntryView {
     workType: string
     tracks: { row: number; role: string }[]
     companionUse?: string
+  } | null
+  metadataFile?: {
+    pairing?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
   conditions?: unknown
@@ -583,8 +587,8 @@ async function doMoveRule(index: number, delta: -1 | 1): Promise<void> {
 
 // 弹窗初始载荷（RuleEditDialog rule 模式入参的结构投影；conditions/extractions
 // 即档案条目的 JSON 片段原文，由弹窗内结构化/JSON 双模编辑；category/identity/
-// aggregate 为聚合规则三件声明——复制条目时内容随载、id 置空 source 归 manual
-//（复制件=用户手写条目））
+// aggregate 为聚合规则三件声明、metadataFile 为规则级「元数据文件」产出——复制
+// 条目时内容随载、id 置空 source 归 manual（复制件=用户手写条目））
 interface RuleDialogInput {
   id: string
   description: string
@@ -597,6 +601,9 @@ interface RuleDialogInput {
     workType: string
     tracks: { row: number; role: string }[]
     companionUse?: string
+  } | null
+  metadataFile?: {
+    pairing?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
   conditions?: unknown
@@ -681,14 +688,15 @@ function hitCountOf(rule: RuleEntryView): number | null {
 
 // —— 列表行范围小字（B2）：与编辑弹窗同函数生成 ——
 // 普通行=「目标类别 · N 形态」（类别=条件行目标并集去重、多类别以 + 并列；
-// 条件行缺失的坏档行不显示）；聚合规则带内容绑定（「元数据文件」指派）时
-// 附「元数据文件（N）」（与编辑弹窗产出区摘要同词——伴随说明文件内容解析）
+// 条件行缺失的坏档行不显示）；规则带「元数据文件」产出（元数据规则与聚合
+// 规则均可——映射单用/并用）时附「元数据文件（N）」（与编辑弹窗产出区摘要
+// 同词——元数据文件映射与聚合解耦）
 function shapeSummaryOf(rule: RuleEntryView): string {
   const shape = condxShapeSummary(rule.conditions)
   const parts: string[] = []
   if (shape.count > 0) parts.push(`${shape.label} · ${shape.count} 形态`)
-  const bindings = rule.aggregate && rule.aggregate.contentBindings
-  if (isAggregateRule(rule) && Array.isArray(bindings) && bindings.length > 0) {
+  const bindings = rule.metadataFile && rule.metadataFile.contentBindings
+  if (Array.isArray(bindings) && bindings.length > 0) {
     parts.push(aggMetadataFileSummary(bindings))
   }
   return parts.join(' · ')
@@ -706,6 +714,7 @@ function openNew(): void {
     category: '',
     identity: null,
     aggregate: null,
+    metadataFile: null,
     conditions: null,
     extractions: null,
     synthesis: { dimPolicies: [], roles: [] }
@@ -728,6 +737,7 @@ function ruleToDialogInput(rule: RuleEntryView, asCopy: boolean): RuleDialogInpu
     category: rule.category || '',
     identity: rule.identity ?? null,
     aggregate: rule.aggregate ?? null,
+    metadataFile: rule.metadataFile ?? null,
     conditions: rule.conditions ?? null,
     extractions: rule.extractions ?? [],
     synthesis: {

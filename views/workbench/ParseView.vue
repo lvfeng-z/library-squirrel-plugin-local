@@ -114,11 +114,13 @@
             <h3 class="li-ws-card-title">
               资源清单
               <!-- 已选计数按作品（聚合作品=一件）：未选=可选/共（帧1 形态；含说明
-                   成员的作品件数附注「K 件含说明」——剧本2 帧1），已选>0=已选作品
+                   成员的作品件数附注「K 件含说明」恒显——0 件也显示，剧本C 帧1
+                   「0 件含说明」锚；剧本2 帧1 同形），已选>0=已选作品
                    文件总数（帧3「已选 1 件作品（3 个文件，含说明 1）」形态，M 个文件=
                    选择集各作品 files 数求和〔含说明成员——清单行全量在场〕，
-                   说明成员数另附「含说明 N」——剧本1 帧3/剧本3 帧2） -->
-              <template v-if="snapshot"><span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">{{ selectedWorks.size > 0 ? `（${selectedFileCount} 个文件${selectedCompanionCount > 0 ? `，含说明 ${selectedCompanionCount}` : ''}）` : `（可选 ${selectableWorks.length} / 共 ${allWorks.length}${worksCompanionCount > 0 ? `，${worksCompanionCount} 件含说明` : ''}）` }}</span></span></template>
+                   说明成员数另附「含说明 N」——剧本1 帧3/剧本3 帧2；0 省略为 BO 帧2
+                   「（2 个文件）」既有锚口径） -->
+              <template v-if="snapshot"><span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">{{ selectedWorks.size > 0 ? `（${selectedFileCount} 个文件${selectedCompanionCount > 0 ? `，含说明 ${selectedCompanionCount}` : ''}）` : `（可选 ${selectableWorks.length} / 共 ${allWorks.length}，${worksCompanionCount} 件含说明）` }}</span></span></template>
               <span v-if="snapshot" class="li-ws-card-stats">文件 {{ snapshot.stats.totalFiles }} · 已识别 {{ snapshot.stats.identified }} · 有线索 {{ snapshot.stats.clueful }} · 无线索 {{ snapshot.stats.plain }} · 序列群 {{ snapshot.stats.groupCount }} · 待裁决 {{ snapshot.stats.pendingFiles }}<template v-if="snapshot.stats.skippedDirs > 0"> · 增量跳过目录 {{ snapshot.stats.skippedDirs }}</template></span>
             </h3>
             <!-- 识别中：流式进度（阶段跃迁 + 计数）；赋值变更后的自动增量重识别共用此状态条 -->
@@ -253,6 +255,10 @@
                     <!-- 行详情·内容采集状态（剧本1 帧8）：被指派行命中非文本文件
                          等场景的可见原因 -->
                     <span v-if="row.contentState" class="li-ws-row-contentstate">详情：{{ companionContentStateText(row.contentState) }}</span>
+                    <!-- 行详情·目录配对守卫拒绝（剧本B 帧4）：说明成员候选行参与
+                         目录配对、组内主导候选多于一个被守卫拒绝——可见原因携带
+                         主导候选数 -->
+                    <span v-if="row.pairingGuardLeads" class="li-ws-row-contentstate">详情：目录内有 {{ row.pairingGuardLeads }} 个主导候选，目录配对未成立，说明文件维持独立作品</span>
                     <span v-if="row.assigned" class="li-ws-row-assigned">已赋值</span>
                   </span>
                 </div>
@@ -322,6 +328,8 @@
                       <span v-if="row.file.pendingDims && row.file.pendingDims.length" class="li-ws-row-pending">待裁决:{{ row.file.pendingDims.join('/') }}</span>
                       <!-- 行详情·内容采集状态（剧本1 帧8）：与平铺行同款 -->
                       <span v-if="row.file.contentState" class="li-ws-row-contentstate">详情：{{ companionContentStateText(row.file.contentState) }}</span>
+                      <!-- 行详情·目录配对守卫拒绝（剧本B 帧4）：与平铺行同款 -->
+                      <span v-if="row.file.pairingGuardLeads" class="li-ws-row-contentstate">详情：目录内有 {{ row.file.pairingGuardLeads }} 个主导候选，目录配对未成立，说明文件维持独立作品</span>
                       <span v-if="row.file.assigned" class="li-ws-row-assigned">已赋值</span>
                     </span>
                   </div>
@@ -952,6 +960,11 @@ interface SnapFile {
   // uncollected=未采集（无内容游标的异常态）；已产内容来源声明的行不带（声明
   // 本体即产出事实）、非说明成员不带。
   contentState?: string
+  // 目录配对守卫拒绝注记（配对段数据位）：说明成员候选行参与目录配对、组内
+  // 主导候选多于一个被守卫拒绝时的候选数——行详情可见原因
+  //（「目录内有 N 个主导候选，目录配对未成立，说明文件维持独立作品」）；
+  // 0=无注记（配对成立/零主导组/标识配对拒绝/非候选）。
+  pairingGuardLeads?: number
   assigned?: boolean
 }
 
