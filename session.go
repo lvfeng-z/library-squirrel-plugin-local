@@ -2034,8 +2034,9 @@ func decodePanoramaCursor(cursor string, generation int64) (int, error) {
 func snapFileWireBytes(f SnapFile) int {
 	n := 144 // 骨架：键名/标点/state/数值与布尔字段
 	n += len(f.RelPath) + len(f.FileName) + len(f.DirRelKey) + len(f.State) + len(f.GroupKey)
+	n += 14 + len(f.ContentState)
 	for _, d := range f.Final {
-		n += 72 + len(d.Dimension) + len(d.Value) + len(d.Source) + len(d.RoleName) + len(d.RuleID)
+		n += 72 + len(d.Dimension) + len(d.Value) + len(d.Source) + len(d.RoleName) + len(d.RuleID) + len(d.OriginName)
 		n += alsoRuleIDsWireBytes(d.AlsoRuleIDs)
 	}
 	for _, dim := range f.PendingDims {
@@ -2058,6 +2059,9 @@ func snapFileWireBytes(f SnapFile) int {
 func selectableWorkWireBytes(w *SelectableWork) int {
 	n := 104
 	n += len(w.WorkID) + len(w.DirRelKey) + len(w.SetKey) + len(w.State)
+	if w.CompanionCount > 0 {
+		n += 18
+	}
 	for _, rel := range previewWireMembers(w.Files) {
 		n += 14 + len(rel)
 	}
@@ -2419,10 +2423,14 @@ func (m *SessionManager) panoramaPageOf(sess *WorkbenchSession, req workbenchFro
 		if offset > len(snap.Files) {
 			return nil, errPanoramaCursorInvalid
 		}
+		// 聚合作品级并入索引一次建齐（页内逐条投影与全量投影 panoramaViewOf
+		// 同一实现与同一索引，逐条全等）
+		contentDecls := workContentDeclsByWork(snap)
 		projected := make([]SnapFile, 0, 64)
 		projectAt := func(i int) SnapFile {
 			f := snap.Files[i]
 			f.StructClues = StructCluesOf(snap.RootPath, f.RelPath, f.FileName)
+			f = projectWorkMergedFile(f, contentDecls)
 			return f
 		}
 		end := panoramaPackEnd(func(i int) int {

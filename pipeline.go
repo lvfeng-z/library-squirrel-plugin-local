@@ -18,6 +18,12 @@ type ScanFile struct {
 	DirNames []string
 	// RelPath 为以 '/' 分隔的相对路径（相对扫描根）。
 	RelPath string
+	// CompanionText 为伴随说明文件的内容片段（识别轮按规则命中集采集注入，
+	// 空串=未采集或不可作为文本呈现——二进制嗅探拒读/读盘失败/不在命中集）；
+	// CompanionTruncated 标记片段超采集上限被截断。求值只消费注入的数据
+	// 字段，不发起读盘。
+	CompanionText      string
+	CompanionTruncated bool
 }
 
 // FileDecision 为单文件经过分组与提取两段后的流水线结论。
@@ -125,6 +131,8 @@ func RunPipelineWithTypes(files []ScanFile, rules []RuleEntry, lib *LibraryIndex
 			Siblings:               siblingsByDir[dirGroupKey(file.DirNames)],
 			AncestorFiles:          ancestorFilesLevels(file.DirNames, siblingsByDir),
 			AncestorChildDirCounts: ancestorChildDirCounts(file.DirNames, childDirsByParent),
+			CompanionText:          file.CompanionText,
+			CompanionTruncated:     file.CompanionTruncated,
 		}
 		decision := FileDecision{RelPath: file.RelPath, FileName: file.FileName}
 		decision.Group, _ = runGroupStage(rules, in, lib, ctx)
@@ -786,6 +794,10 @@ var sourceTrust = map[SourceKind]int{
 	SourceConstant:     1,
 	SourceAssignment:   6,
 	SourceAdjudication: 6,
+	// 内容为伴随说明文件里人工书写的说明文本，与目录策展同级（高于文件名
+	// 解析与谓词确证，低于赋值/裁决）；同层不同值经 highTrust 维度进待裁决
+	// ——冲突可见不静默丢失。
+	SourceContent: 5,
 }
 
 // defaultDimStrategies 为含义维度未配置策略时的缺省策略：标题多候选并存会
@@ -926,4 +938,174 @@ func pickHighTrust(final []MetadataDeclaration, pending []PendingItem, dim Metad
 	}
 	reason := fmt.Sprintf("维度 %s 同层冲突：最高可信来源 %s 存在 %d 个不同取值，无法自动择一", dim, top[0].Source, len(distinct))
 	return final, append(pending, PendingItem{Dimension: dim, Candidates: top, Reason: reason})
+}
+
+// —— 伴随说明内容的两相提取（内容绑定 → 命中集登记 → 汇流后整段取值产声明）——
+
+// contentBindingPlan 单条聚合规则内容绑定的求值预案：各绑定行编译为独立求值
+// 的行包装模式（与聚合段轨行同一编译口径，行号即行序前缀）。
+type contentBindingPlan struct {
+	// rule 为源规则（引用传入规则序列的条目）。
+	rule *RuleEntry
+	// bindings 为绑定的先序副本（rows 与之同长对位）。
+	bindings []ContentBinding
+	// rows 为各绑定行的编译产物（下标与 bindings 对位）。
+	rows []Pattern
+}
+
+// contentBindingPlans 过滤携带内容绑定的启用聚合规则并编译绑定行。行结构
+// 非法（越界/行级非/括号子组）或编译失败按宁缺勿错整条跳过——与聚合段
+// buildAggregationPlans 同款防御（载入校验已拦的形态在此双保险）。无绑定时
+// 返回空（现状行为零变化）。
+func contentBindingPlans(rules []RuleEntry) []*contentBindingPlan {
+	var plans []*contentBindingPlan
+	for i := range rules {
+		rule := &rules[i]
+		if !rule.Enabled || rule.Category != RuleCategoryAggregate ||
+			rule.Aggregate == nil || len(rule.Aggregate.ContentBindings) == 0 ||
+			len(rule.Conditions) == 0 {
+			continue
+		}
+		bindings := rule.Aggregate.ContentBindings
+		rows := make([]Pattern, len(bindings))
+		valid := true
+		for j := range bindings {
+			rowNo := bindings[j].Row
+			if rowNo < 1 || rowNo > len(rule.Conditions) {
+				valid = false
+				break
+			}
+			cond := rule.Conditions[rowNo-1]
+			if cond.Negated || cond.Condition == nil {
+				valid = false
+				break
+			}
+			p, err := compileCondx(cond.Condition, rowNo)
+			if err != nil {
+				valid = false
+				break
+			}
+			rows[j] = p
+		}
+		if !valid {
+			continue
+		}
+		plans = append(plans, &contentBindingPlan{rule: rule, bindings: bindings, rows: rows})
+	}
+	return plans
+}
+
+// contentBindingInputs 从同批结论构造内容绑定行的求值输入（两相共用同一基座
+// ——第一相命中集登记与第二相整段取值由此取同一批输入，命中面恒一致）。同
+// 目录兄弟表按结论同目录聚合、各层祖先直接子文件面按本批结论派生：增量批为
+// 求值面子集，目录终结谓词对此保守不命中（与 MatchInput 祖先面缺席的契约
+// 同款）。库内谓词索引不注入（nil）：绑定行携带库内谓词时保守不命中。
+func contentBindingInputs(conclusions []FileConclusion) []*MatchInput {
+	siblingsByDir := make(map[string][]string, len(conclusions))
+	for i := range conclusions {
+		key := conclusions[i].DirRelKey
+		siblingsByDir[key] = append(siblingsByDir[key], conclusions[i].FileName)
+	}
+	inputs := make([]*MatchInput, len(conclusions))
+	for i := range conclusions {
+		c := &conclusions[i]
+		dirNames := ExtractDirLevels(c.RelPath)
+		ancestorFiles := make([][]string, len(dirNames))
+		for d := range dirNames {
+			ancestorFiles[d] = siblingsByDir[strings.Join(dirNames[:d+1], "/")]
+		}
+		inputs[i] = &MatchInput{
+			FileName:      c.FileName,
+			DirNames:      dirNames,
+			RelPath:       c.RelPath,
+			Siblings:      siblingsByDir[c.DirRelKey],
+			AncestorFiles: ancestorFiles,
+		}
+	}
+	return inputs
+}
+
+// anyRowHit 报告输入是否命中该预案的任一绑定行（每行独立作用域求值，与聚合
+// 段轨行同款纪律；命中只判事实，捕获不外溢）。
+func (p *contentBindingPlan) anyRowHit(in *MatchInput) bool {
+	for j := range p.rows {
+		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+		if p.rows[j].Evaluate(in, nil, ctx) {
+			return true
+		}
+	}
+	return false
+}
+
+// contentDeclarationsOf 按该预案的内容绑定对单文件产声明（第二相整段取值）：
+// 绑定行命中即把注入的内容片段整段声明到绑定维度，来源=内容、截断事实随声明
+// 标注、归属产出规则 ID。内容为空（未采集/拒读）时调用方已先行跳过，此处不
+// 再判空；行未命中零产出。
+func (p *contentBindingPlan) contentDeclarationsOf(in *MatchInput) []MetadataDeclaration {
+	var out []MetadataDeclaration
+	for j := range p.rows {
+		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}
+		if !p.rows[j].Evaluate(in, nil, ctx) {
+			continue
+		}
+		out = append(out, MetadataDeclaration{
+			Dimension: p.bindings[j].Dimension,
+			Value:     in.CompanionText,
+			Source:    SourceContent,
+			Truncated: in.CompanionTruncated,
+			RuleID:    p.rule.ID,
+		})
+	}
+	return out
+}
+
+// applyCompanionContentDeclarations 两相提取的第二相（采集注入完成后、识别
+// 装配消费前）：对携带内容片段的文件按内容绑定整段取值产声明，与提取段原始
+// 声明合并重合成终选与待裁决，会话赋值按维度覆盖重放（特异性知识压过内容
+// 声明，与逐文件求值期的合并语义一致）。空内容/全空白=零声明（取不到值
+// 语义，取值面判空白、声明值保留原文整段）；无绑定规则时零工作直接返回。
+// conclusions 与 files 按下标对齐（调用方保证同一求值清单）。
+func applyCompanionContentDeclarations(conclusions []FileConclusion, files []ScanFile, rules []RuleEntry, assigns map[string]SessionAssignment) {
+	plans := contentBindingPlans(rules)
+	if len(plans) == 0 {
+		return
+	}
+	hasContent := false
+	for i := range files {
+		if files[i].CompanionText != "" {
+			hasContent = true
+			break
+		}
+	}
+	if !hasContent {
+		return
+	}
+	inputs := contentBindingInputs(conclusions)
+	for i := range files {
+		if i >= len(inputs) {
+			break
+		}
+		inputs[i].CompanionText = files[i].CompanionText
+		inputs[i].CompanionTruncated = files[i].CompanionTruncated
+	}
+	policy := AggregateSynthesis(rules)
+	for i := range conclusions {
+		if i >= len(files) || strings.TrimSpace(files[i].CompanionText) == "" {
+			continue
+		}
+		var contentDecls []MetadataDeclaration
+		for _, plan := range plans {
+			contentDecls = append(contentDecls, plan.contentDeclarationsOf(inputs[i])...)
+		}
+		if len(contentDecls) == 0 {
+			continue
+		}
+		merged := append([]MetadataDeclaration{}, conclusions[i].rawDecls...)
+		merged = append(merged, contentDecls...)
+		final, pending := Synthesize(merged, policy)
+		if assign := resolveFileAssignment(assigns, conclusions[i].RelPath); len(assign.coveredDimensions()) > 0 {
+			final, pending = applyAssignmentToConclusion(final, pending, &assign)
+		}
+		conclusions[i].Final, conclusions[i].Pending = final, pending
+	}
 }

@@ -304,6 +304,53 @@ func TestDeriveWorkDomainAggregatedWorksMerge(t *testing.T) {
 	}
 }
 
+// TestDeriveWorkDomainCompanionMembersAndCount 说明成员的选择域资格与计数
+// 数据位：说明成员随作品联动（Files 含说明成员、不再各自成件——勾选即选
+// 整件），作品计数附注的数据位 CompanionCount=说明成员数；说明成员的呈现态
+// 不参与作品可选性（作品级结论=主导文件，纯说明文件恒 plain 不拉低作品——
+// 否则带说明的作品结构性不可选）；轨道成员与单文件作品计数零值省略。
+func TestDeriveWorkDomainCompanionMembersAndCount(t *testing.T) {
+	aggKey := "f:inner/ep01.mp4"
+	snap := &RecognitionSnapshot{
+		Files: []SnapFile{
+			{RelPath: "inner/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "inner", State: snapStateIdentified,
+				AggWorkKey: aggKey, AggTrackRole: sdkdto.StoreRoleVideoMain},
+			{RelPath: "inner/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "inner", State: snapStatePlain,
+				AggWorkKey: aggKey, AggTrackRole: contract.StoreTypeSubtitle},
+			{RelPath: "inner/ep01.nfo", FileName: "ep01.nfo", DirRelKey: "inner", State: snapStatePlain,
+				AggWorkKey: aggKey, AggCompanion: true},
+			{RelPath: "inner/ep01.txt", FileName: "ep01.txt", DirRelKey: "inner", State: snapStatePlain,
+				AggWorkKey: aggKey, AggCompanion: true},
+			{RelPath: "落单/readme.txt", FileName: "readme.txt", DirRelKey: "落单", State: snapStatePlain},
+		},
+	}
+	domain := DeriveWorkDomain(snap, nil)
+
+	if len(domain.Works) != 2 {
+		t.Fatalf("四聚合成员并一件+落单一件应共 2 件作品（说明成员不各自成件），实际 %d: %+v", len(domain.Works), domain.Works)
+	}
+	agg := domain.Work(aggKey)
+	if agg == nil {
+		t.Fatalf("缺少聚合作品 %s（works: %+v）", aggKey, domain.Works)
+	}
+	// 说明成员随作品联动：Files 含说明成员（首位=主导文件）
+	want := []string{"inner/ep01.mp4", "inner/ep01.zh.srt", "inner/ep01.nfo", "inner/ep01.txt"}
+	if !reflect.DeepEqual(agg.Files, want) {
+		t.Fatalf("聚合作品 Files 应含说明成员（首位=主导文件），期望 %v 实际 %v", want, agg.Files)
+	}
+	if agg.CompanionCount != 2 {
+		t.Fatalf("说明成员计数数据位应为 2（清单计数附注「含说明 2」的数据面），实际 %d", agg.CompanionCount)
+	}
+	// 说明成员的 plain 呈现态不拉低作品：可选性按主导文件
+	if !agg.Selectable || agg.State != workStateIdentified {
+		t.Fatalf("带说明成员的作品应按主导文件可选（identified），实际 selectable=%v state=%s", agg.Selectable, agg.State)
+	}
+	// 轨道成员与单文件作品计数零值省略（旧前端载荷兼容）
+	if lone := domain.Work("f:落单/readme.txt"); lone == nil || lone.CompanionCount != 0 {
+		t.Fatalf("单文件作品说明成员计数应零值，实际 %+v", lone)
+	}
+}
+
 // TestCreateReconcileAggregatedMemberDirs 创建前目录级对账的聚合分支：多成员
 // 作品的目录键集=各成员文件所属目录（成员可跨目录，逐成员核对）；任一成员目录
 // mtime 漂移即阻断。单文件作品恒=作品自身目录键（既有路径等价，由既有用例锚定）。

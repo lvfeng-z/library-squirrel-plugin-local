@@ -3898,16 +3898,18 @@ func TestAggregationStagePhaseAnchor(t *testing.T) {
 	}
 }
 
-// TestAggregationCompanionUseMetadataRejected 处置维度留位锚：CompanionUse 两值
-// 结构在场（track|metadata）；metadata（纯元数据承载）为留位值——档案载入
-// 即拒；空串与 track 载入归一为 track。
-func TestAggregationCompanionUseMetadataRejected(t *testing.T) {
+// TestAggregationCompanionUseRowLevelDisposition 处置维度行级口径锚：
+// CompanionUse 两值结构在场（track|metadata）；处置语义由行级指派合成表达
+// （分轨入口指派角色=轨道行导入、内容绑定勾选=内容产出元数据）——规则级
+// metadata 为被行级指派取代的拼写，档案载入即拒并指路行级指派；空串与
+// track 载入归一为 track（旧档兼容）。
+func TestAggregationCompanionUseRowLevelDisposition(t *testing.T) {
 	if CompanionUseTrack != "track" || CompanionUseMetadata != "metadata" {
 		t.Fatalf("处置维度两值应为 track|metadata: %q|%q", CompanionUseTrack, CompanionUseMetadata)
 	}
 	seed := PresetAggregateRules()[0]
 	bad := seed
-	bad.ID = "agg-metadata-rejected"
+	bad.ID = "agg-metadata-row-level"
 	bad.Aggregate = &AggregateProduction{
 		WorkType:     seed.Aggregate.WorkType,
 		Tracks:       seed.Aggregate.Tracks,
@@ -3919,10 +3921,10 @@ func TestAggregationCompanionUseMetadataRejected(t *testing.T) {
 	}
 	profile, errs := ParseProfile(data)
 	if profile == nil || len(profile.Rules) != 0 {
-		t.Fatalf("metadata 处置维度的条目应被载入拒绝: %d 条", len(profile.Rules))
+		t.Fatalf("规则级 metadata 处置维度的条目应被载入拒绝: %d 条", len(profile.Rules))
 	}
-	if len(errs) == 0 || !strings.Contains(errs[0].Error(), "留位") {
-		t.Fatalf("metadata 处置维度应产生留位告警: %v", errs)
+	if len(errs) == 0 || !strings.Contains(errs[0].Error(), "行级指派") {
+		t.Fatalf("规则级 metadata 处置维度应指路行级指派口径: %v", errs)
 	}
 
 	ok := seed
@@ -3946,15 +3948,19 @@ func TestAggregationTypeDanglingAnchor(t *testing.T) {
 		{ResourceType: sdkdto.ResourceTypeVideo},
 	})
 	warns := AnchorAggregateRules(profile, videoOnly)
-	if len(warns) != 1 || !strings.Contains(warns[0].Error(), "article") {
-		t.Fatalf("悬空的 article 聚合规则应产生一条告警: %v", warns)
+	if len(warns) != 2 {
+		t.Fatalf("悬空的 image/article 两条聚合规则应各产生一条告警: %v", warns)
 	}
-	if profile.Rules[0].Enabled != true || profile.Rules[1].Enabled != false {
-		t.Fatalf("悬空条目应停用、在册条目不受影响: video=%v article=%v", profile.Rules[0].Enabled, profile.Rules[1].Enabled)
+	if !strings.Contains(warns[0].Error(), "image") || !strings.Contains(warns[1].Error(), "article") {
+		t.Fatalf("悬空告警应点名对应作品类型: %v", warns)
+	}
+	if profile.Rules[0].Enabled != true || profile.Rules[1].Enabled != false || profile.Rules[2].Enabled != false {
+		t.Fatalf("悬空条目应停用、在册条目不受影响: video=%v image=%v article=%v",
+			profile.Rules[0].Enabled, profile.Rules[1].Enabled, profile.Rules[2].Enabled)
 	}
 
 	noIndex := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: PresetAggregateRules()}
-	if warns := AnchorAggregateRules(noIndex, nil); len(warns) != 2 {
+	if warns := AnchorAggregateRules(noIndex, nil); len(warns) != 3 {
 		t.Fatalf("索引缺席时全部聚合规则应按悬空停用: %d 条告警", len(warns))
 	}
 
@@ -3978,8 +3984,8 @@ func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
 		t.Fatalf("空档案首次初始化应写入预置种子: seeded=%v err=%v", seeded, err)
 	}
 	profile, errs := LoadProfile(store)
-	if len(errs) != 0 || len(profile.Rules) != 2 {
-		t.Fatalf("初始化后档案应含两条预置种子: errs=%v rules=%d", errs, len(profile.Rules))
+	if len(errs) != 0 || len(profile.Rules) != 3 {
+		t.Fatalf("初始化后档案应含三条预置种子: errs=%v rules=%d", errs, len(profile.Rules))
 	}
 	for _, rule := range profile.Rules {
 		if rule.Source != RuleSourcePreset || rule.Category != RuleCategoryAggregate || !rule.Enabled {
@@ -4005,8 +4011,8 @@ func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
 		}
 	}
 
-	// 恢复预置：删除视频种子后按 ID 补回（article 在场不动）。
-	trimmed := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{disabled.Rules[1]}}
+	// 恢复预置：删除视频种子后按 ID 补回（单图说明与图文种子在场不动）。
+	trimmed := &RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{disabled.Rules[1], disabled.Rules[2]}}
 	if err := SaveProfile(store, trimmed); err != nil {
 		t.Fatalf("保存删减档案失败: %v", err)
 	}
@@ -4015,8 +4021,8 @@ func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
 		t.Fatalf("恢复预置应补回 1 条缺席种子: added=%d err=%v", added, err)
 	}
 	restored, _ := LoadProfile(store)
-	if len(restored.Rules) != 2 {
-		t.Fatalf("恢复后档案应回到两条种子: %d", len(restored.Rules))
+	if len(restored.Rules) != 3 {
+		t.Fatalf("恢复后档案应回到三条种子: %d", len(restored.Rules))
 	}
 
 	// 已有档案不再重复初始化。
@@ -4153,5 +4159,442 @@ func TestSnapshotGroupMembersNaturalOrder(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("群卡成员自然序不符: 得到 %v 期望 %v", got, want)
+	}
+}
+
+// TestAggregationCompanionRowGrouping 混合规则（轨行+说明行）并组锚：被指派为
+// 元数据文件的行（内容绑定勾选、未分配轨道）命中的文件按标识等值归进作品
+// ——有归属、无轨、带说明成员标记；未指派未分轨的行命中不构成成员（两处
+// 皆无=不参与成员判定）；说明成员不计必含轨单位——无必含命中的组不成立，
+// 说明文件维持独立作品。
+func TestAggregationCompanionRowGrouping(t *testing.T) {
+	files := aggScanFiles("d/ep01.mp4", "d/ep01.zh.srt", "d/ep01.nfo", "d/ep01.log", "s/only.nfo")
+	rule := RuleEntry{
+		ID:       "agg-mixed",
+		Enabled:  true,
+		Category: RuleCategoryAggregate,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".mp4"}}}},
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}.{任意}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".srt"}}}},
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".nfo"}}}},
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".log"}}}},
+		},
+		Identity: []IdentityPart{{Row: 1, Capture: "work"}},
+		Aggregate: &AggregateProduction{
+			WorkType: sdkdto.ResourceTypeVideo,
+			Tracks: []TrackAssign{
+				{Row: 1, Role: sdkdto.StoreRoleVideoMain},
+				{Row: 2, Role: contract.StoreTypeSubtitle},
+			},
+			ContentBindings: []ContentBinding{{Row: 3, Dimension: DimDescription}},
+		},
+	}
+	rules := []RuleEntry{rule}
+	conclusions := MergedRecognition(files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+
+	video := aggConclusionOf(t, conclusions, "d/ep01.mp4")
+	if video.AggWorkKey != "f:d/ep01.mp4" || video.AggTrackRole != sdkdto.StoreRoleVideoMain || video.AggCompanion {
+		t.Fatalf("视频轨成员的归属不符: key=%q role=%q companion=%v",
+			video.AggWorkKey, video.AggTrackRole, video.AggCompanion)
+	}
+	sub := aggConclusionOf(t, conclusions, "d/ep01.zh.srt")
+	if sub.AggWorkKey != "f:d/ep01.mp4" || sub.AggTrackRole != contract.StoreTypeSubtitle || sub.AggCompanion {
+		t.Fatalf("字幕轨成员的归属不符: key=%q role=%q companion=%v",
+			sub.AggWorkKey, sub.AggTrackRole, sub.AggCompanion)
+	}
+	nfo := aggConclusionOf(t, conclusions, "d/ep01.nfo")
+	if nfo.AggWorkKey != "f:d/ep01.mp4" || nfo.AggTrackRole != "" || !nfo.AggCompanion {
+		t.Fatalf("说明行成员应归进作品（无轨+说明成员标记）: key=%q role=%q companion=%v",
+			nfo.AggWorkKey, nfo.AggTrackRole, nfo.AggCompanion)
+	}
+	logFile := aggConclusionOf(t, conclusions, "d/ep01.log")
+	if logFile.AggWorkKey != "" || logFile.AggCompanion {
+		t.Fatalf("未指派未分轨的行命中不应入组: key=%q companion=%v",
+			logFile.AggWorkKey, logFile.AggCompanion)
+	}
+	lone := aggConclusionOf(t, conclusions, "s/only.nfo")
+	if lone.AggWorkKey != "" || lone.AggCompanion {
+		t.Fatalf("无必含轨命中的说明文件不应独立成聚合作品: key=%q companion=%v",
+			lone.AggWorkKey, lone.AggCompanion)
+	}
+}
+
+// TestAggregationTrackRowBindingDualIdentity 轨行绑定不动导入身份锚：被内容
+// 绑定勾选的轨行=双重身份——轨道角色照常落（随作品导入为资源）、不带说明
+// 成员标记（绑定只叠加内容产出，不改写导入处置）。
+func TestAggregationTrackRowBindingDualIdentity(t *testing.T) {
+	files := aggScanFiles("n/a.txt", "n/a.jpg")
+	rule := RuleEntry{
+		ID:       "agg-dual",
+		Enabled:  true,
+		Category: RuleCategoryAggregate,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".txt"}}}},
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}"),
+				Attach: []CondxAttach{{Kind: CondxAttachFileExt, Value: ".jpg"}}}},
+		},
+		Identity: []IdentityPart{{Row: 1, Capture: "work"}},
+		Aggregate: &AggregateProduction{
+			WorkType: sdkdto.ResourceTypeArticle,
+			Tracks: []TrackAssign{
+				{Row: 1, Role: sdkdto.StoreRoleDocument},
+				{Row: 2, Role: sdkdto.StoreRoleImage},
+			},
+			ContentBindings: []ContentBinding{{Row: 1, Dimension: DimDescription}},
+		},
+	}
+	rules := []RuleEntry{rule}
+	conclusions := MergedRecognition(files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+
+	txt := aggConclusionOf(t, conclusions, "n/a.txt")
+	if txt.AggWorkKey != "f:n/a.txt" || txt.AggTrackRole != sdkdto.StoreRoleDocument || txt.AggCompanion {
+		t.Fatalf("被绑定的轨行应照常落轨导入（双重身份，导入处置不受绑定影响）: key=%q role=%q companion=%v",
+			txt.AggWorkKey, txt.AggTrackRole, txt.AggCompanion)
+	}
+	img := aggConclusionOf(t, conclusions, "n/a.jpg")
+	if img.AggWorkKey != "f:n/a.txt" || img.AggTrackRole != sdkdto.StoreRoleImage || img.AggCompanion {
+		t.Fatalf("图片轨成员的归属不符: key=%q role=%q companion=%v",
+			img.AggWorkKey, img.AggTrackRole, img.AggCompanion)
+	}
+}
+
+// TestAggregationCompanionSnapshotMark 说明成员快照标记锚：伴随说明成员的
+// 归属在快照上=归属键在场+轨道角色空+说明成员标记真（标记独立于空
+// aggTrackRole 的「无聚合」含义），随快照 JSON 往返保真；轨道成员不带标记；
+// 旧快照（无该字段）载入零值=非说明成员。
+func TestAggregationCompanionSnapshotMark(t *testing.T) {
+	assignIdx := newAssignmentDirIndex(nil, nil)
+	companion := snapFileOf(&FileConclusion{
+		RelPath: "d/ep01.nfo", FileName: "ep01.nfo", DirRelKey: "d",
+		AggWorkKey: "f:d/ep01.mp4", AggWorkType: sdkdto.ResourceTypeVideo, AggCompanion: true,
+	}, nil, assignIdx)
+	if companion.AggWorkKey != "f:d/ep01.mp4" || companion.AggTrackRole != "" || !companion.AggCompanion {
+		t.Fatalf("说明成员的快照标记不符: key=%q role=%q companion=%v",
+			companion.AggWorkKey, companion.AggTrackRole, companion.AggCompanion)
+	}
+	track := snapFileOf(&FileConclusion{
+		RelPath: "d/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "d",
+		AggWorkKey: "f:d/ep01.mp4", AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo,
+	}, nil, assignIdx)
+	if track.AggCompanion {
+		t.Fatalf("轨道成员不应带说明成员标记: %+v", track)
+	}
+	data, err := json.Marshal(&RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion, Files: []SnapFile{companion},
+	})
+	if err != nil {
+		t.Fatalf("序列化快照失败: %v", err)
+	}
+	var back RecognitionSnapshot
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("反序列化快照失败: %v", err)
+	}
+	if len(back.Files) != 1 || !back.Files[0].AggCompanion || back.Files[0].AggTrackRole != "" {
+		t.Fatalf("说明成员标记应随快照往返保真: %+v", back.Files)
+	}
+	legacy := []byte(`{"schemaVersion":3,"files":[{"relPath":"a.nfo","fileName":"a.nfo","state":"plain"}]}`)
+	var old RecognitionSnapshot
+	if err := json.Unmarshal(legacy, &old); err != nil {
+		t.Fatalf("旧快照读入失败: %v", err)
+	}
+	if old.Files[0].AggCompanion {
+		t.Fatalf("旧快照说明成员标记应零值降级: %+v", old.Files[0])
+	}
+}
+
+// TestAggregationPresetImageCompanionSeed 预置种子「单图+说明文本」锚：默认
+// 种子序（视频→单图说明→一图一文本）下，同名的 jpg+txt 对按图片作品+伴随
+// 说明吸收——图片为主导文件（image 轨），txt 归进图片作品（无轨、说明成员
+// 标记、不独立成作品）；异名 txt 不被本种子吸收（无必含轨命中、组不成立），
+// 由图文种子按正文轨照旧处置。
+func TestAggregationPresetImageCompanionSeed(t *testing.T) {
+	files := aggScanFiles("img/cover.jpg", "img/cover.txt", "img/notes.txt")
+	rules := PresetAggregateRules()
+	conclusions := MergedRecognition(files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+
+	cover := aggConclusionOf(t, conclusions, "img/cover.jpg")
+	if cover.AggWorkKey != "f:img/cover.jpg" || cover.AggTrackRole != contract.StoreTypeImage ||
+		cover.AggWorkType != sdkdto.ResourceTypeImage || cover.AggCompanion {
+		t.Fatalf("图片主导文件的聚合归属不符: key=%q role=%q type=%q companion=%v",
+			cover.AggWorkKey, cover.AggTrackRole, cover.AggWorkType, cover.AggCompanion)
+	}
+	txt := aggConclusionOf(t, conclusions, "img/cover.txt")
+	if txt.AggWorkKey != "f:img/cover.jpg" || txt.AggTrackRole != "" || !txt.AggCompanion {
+		t.Fatalf("同名说明文本应归进图片作品（无轨+说明成员标记）: key=%q role=%q companion=%v",
+			txt.AggWorkKey, txt.AggTrackRole, txt.AggCompanion)
+	}
+	lone := aggConclusionOf(t, conclusions, "img/notes.txt")
+	if lone.AggWorkKey != "f:img/notes.txt" || lone.AggTrackRole != contract.StoreTypeDocument || lone.AggCompanion {
+		t.Fatalf("异名说明文本应按图文种子正文轨处置（不带入本种子的说明语义）: key=%q role=%q companion=%v",
+			lone.AggWorkKey, lone.AggTrackRole, lone.AggCompanion)
+	}
+}
+
+// —— 伴随说明内容解析·消费面：作品级声明并入与全景投影 —— //
+
+// TestMergeWorkDeclarations 作品级声明并入核心（主导文件终选 ∪ 成员内容声明）
+// 的正反例：无冲突补位合成、同维同值去重保主导本体、同维异值挂主导待裁决
+// （候选两值两来源、成员间互异同样进待裁决）、主导侧 union 多值遇内容异值
+// 整维进待裁决、无成员声明零工作原样返回。
+func TestMergeWorkDeclarations(t *testing.T) {
+	lead := func(decls ...SnapDecl) SnapFile {
+		return SnapFile{RelPath: "d/ep01.mp4", FileName: "ep01.mp4", Final: decls}
+	}
+	content := func(dim MetadataDimension, val, origin string) SnapDecl {
+		return SnapDecl{Dimension: string(dim), Value: val, Source: string(SourceContent), OriginName: origin}
+	}
+
+	t.Run("无成员声明原样返回", func(t *testing.T) {
+		l := lead(SnapDecl{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)})
+		merged, conflicts := mergeWorkDeclarations(l.RelPath, l.FileName, l.Final, nil)
+		if len(conflicts) != 0 || len(merged) != 1 || merged[0].Value != "Isel" {
+			t.Fatalf("无成员声明应零工作原样返回: merged=%+v conflicts=%+v", merged, conflicts)
+		}
+	})
+
+	t.Run("无冲突补位合成保来源标注", func(t *testing.T) {
+		l := lead(SnapDecl{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)})
+		member := content(DimDescription, "本字幕由个人制作", "ep01.nfo")
+		member.Truncated = true
+		merged, conflicts := mergeWorkDeclarations(l.RelPath, l.FileName, l.Final, []SnapDecl{member})
+		if len(conflicts) != 0 || len(merged) != 2 {
+			t.Fatalf("无冲突应合成两维零待裁决: merged=%+v conflicts=%+v", merged, conflicts)
+		}
+		desc := merged[1]
+		if desc.Value != "本字幕由个人制作" || desc.Source != string(SourceContent) ||
+			desc.OriginName != "ep01.nfo" || !desc.Truncated {
+			t.Fatalf("补位声明应整条保真（值/来源/来源文件名/截断标注）: %+v", desc)
+		}
+	})
+
+	t.Run("同维同值去重保主导本体", func(t *testing.T) {
+		l := lead(SnapDecl{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)})
+		member := content(DimAuthor, "Isel", "ep01.nfo")
+		merged, conflicts := mergeWorkDeclarations(l.RelPath, l.FileName, l.Final, []SnapDecl{member})
+		if len(conflicts) != 0 || len(merged) != 1 || merged[0].Source != string(SourceFilename) {
+			t.Fatalf("同维同值应去重保主导声明本体: merged=%+v conflicts=%+v", merged, conflicts)
+		}
+	})
+
+	t.Run("同维异值挂主导待裁决两值两来源", func(t *testing.T) {
+		l := lead(SnapDecl{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)})
+		member := content(DimAuthor, "いせる", "说明.txt")
+		merged, conflicts := mergeWorkDeclarations(l.RelPath, l.FileName, l.Final, []SnapDecl{member})
+		if len(merged) != 1 || merged[0].Value != "Isel" {
+			t.Fatalf("冲突维并入结果应只留主导侧声明（创建按主导值落库）: %+v", merged)
+		}
+		if len(conflicts) != 1 || conflicts[0].RelPath != "d/ep01.mp4" || conflicts[0].Dimension != string(DimAuthor) {
+			t.Fatalf("冲突应挂主导文件待裁决: %+v", conflicts)
+		}
+		cands := conflicts[0].Candidates
+		if len(cands) != 2 || cands[0].Source != string(SourceFilename) || cands[0].Value != "Isel" ||
+			cands[1].Source != string(SourceContent) || cands[1].Value != "いせる" || cands[1].OriginName != "说明.txt" {
+			t.Fatalf("候选应为主导侧在前、成员侧携来源文件名的两值两来源: %+v", cands)
+		}
+		if !strings.Contains(conflicts[0].Reason, string(DimAuthor)) {
+			t.Fatalf("冲突原因应点名维度: %q", conflicts[0].Reason)
+		}
+	})
+
+	t.Run("成员间互异主导缺席同样进待裁决", func(t *testing.T) {
+		members := []SnapDecl{
+			content(DimDescription, "甲说明", "a.txt"),
+			content(DimDescription, "乙说明", "b.txt"),
+		}
+		merged, conflicts := mergeWorkDeclarations("d/x.jpg", "x.jpg", nil, members)
+		if len(merged) != 0 || len(conflicts) != 1 {
+			t.Fatalf("主导缺席的成员互异应整维进待裁决（并入结果不含该维）: merged=%+v conflicts=%+v", merged, conflicts)
+		}
+		if len(conflicts[0].Candidates) != 2 || conflicts[0].Candidates[0].OriginName != "a.txt" || conflicts[0].Candidates[1].OriginName != "b.txt" {
+			t.Fatalf("候选应按成员序去重保首: %+v", conflicts[0].Candidates)
+		}
+	})
+
+	t.Run("主导侧多值遇内容异值整维进待裁决", func(t *testing.T) {
+		l := lead(
+			SnapDecl{Dimension: string(DimTag), Value: "画集", Source: string(SourceFilename)},
+			SnapDecl{Dimension: string(DimTag), Value: "短篇", Source: string(SourceDir)},
+		)
+		merged, conflicts := mergeWorkDeclarations(l.RelPath, l.FileName, l.Final,
+			[]SnapDecl{content(DimTag, "水彩", "无题.txt")})
+		if len(conflicts) != 1 || conflicts[0].Dimension != string(DimTag) || len(conflicts[0].Candidates) != 3 {
+			t.Fatalf("union 维度的跨文件互异应整维进待裁决（候选=主导侧+成员侧）: %+v", conflicts)
+		}
+		if len(merged) != 2 {
+			t.Fatalf("并入结果保留主导侧该维声明本体: %+v", merged)
+		}
+	})
+}
+
+// companionProjectionSnap 全景投影测试快照：聚合作品「主导+轨道成员+说明成员」
+// （说明成员携内容声明，作者与主导文件名推导互异）+ 拒读/未采集两形态说明成员
+// + 独立落单文件。
+func companionProjectionSnap() *RecognitionSnapshot {
+	videoKey := "f:inner/ep01.mp4"
+	content := func(dim MetadataDimension, val string) SnapDecl {
+		return SnapDecl{Dimension: string(dim), Value: val, Source: string(SourceContent)}
+	}
+	return &RecognitionSnapshot{
+		SchemaVersion: recognitionSnapshotSchemaVersion,
+		Files: []SnapFile{
+			{RelPath: "inner/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "inner", State: snapStateIdentified,
+				Final: []SnapDecl{
+					{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)},
+					{Dimension: string(DimTitle), Value: "inner world", Source: string(SourceFilename)},
+				},
+				AggWorkKey: videoKey, AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
+			{RelPath: "inner/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "inner", State: snapStatePlain,
+				AggWorkKey: videoKey, AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+			{RelPath: "inner/ep01.nfo", FileName: "ep01.nfo", DirRelKey: "inner", State: snapStateIdentified,
+				Final: []SnapDecl{
+					content(DimDescription, "本字幕由个人制作，仅供学习交流"),
+					content(DimAuthor, "いせる"),
+				},
+				AggWorkKey: videoKey, AggWorkType: sdkdto.ResourceTypeVideo, AggCompanion: true},
+			{RelPath: "inner/ep01.bin", FileName: "ep01.bin", DirRelKey: "inner", State: snapStatePlain,
+				AggWorkKey: videoKey, AggWorkType: sdkdto.ResourceTypeVideo, AggCompanion: true,
+				ContentSize: 99, ContentModTime: 1700000000000000000},
+			{RelPath: "inner/ep02.nfo", FileName: "ep02.nfo", DirRelKey: "inner", State: snapStatePlain,
+				AggWorkKey: "f:inner/ep02.mp4", AggCompanion: true},
+			{RelPath: "落单/readme.txt", FileName: "readme.txt", DirRelKey: "落单", State: snapStatePlain},
+		},
+	}
+}
+
+// TestPanoramaWorkMergeProjection 全景投影的作品级并入与说明成员数据位：
+// 主导文件投影并入成员内容声明（无冲突补位、冲突维移出终选并落待裁决维度
+// 标记）、来源标注（来源=内容+来源成员文件名）与截断标注随声明透传；说明
+// 成员行附内容采集状态位（拒读/未采集可区分、已产声明不带）；overview 待裁决
+// 清单追加并入冲突明细（挂主导文件、两值两来源）；files 分节逐页拼接与全量
+// 投影逐条全等；持久快照记录不被投影改写。
+func TestPanoramaWorkMergeProjection(t *testing.T) {
+	snap := companionProjectionSnap()
+	view := panoramaViewOf(snap)
+
+	filesByRel := make(map[string]SnapFile, len(view.Files))
+	for _, f := range view.Files {
+		filesByRel[f.RelPath] = f
+	}
+	lead := filesByRel["inner/ep01.mp4"]
+	if lead.Final == nil {
+		t.Fatalf("主导文件投影应含并入声明: %+v", lead)
+	}
+	// 无冲突维度：描述补位合成（来源标注=内容+来源成员文件名）；冲突维度：
+	// 作者移出终选呈现、落待裁决维度标记；无冲突既有维度照旧
+	var desc, title, author *SnapDecl
+	for i := range lead.Final {
+		switch lead.Final[i].Dimension {
+		case string(DimDescription):
+			desc = &lead.Final[i]
+		case string(DimTitle):
+			title = &lead.Final[i]
+		case string(DimAuthor):
+			author = &lead.Final[i]
+		}
+	}
+	if desc == nil || desc.Source != string(SourceContent) || desc.OriginName != "ep01.nfo" ||
+		desc.Value != "本字幕由个人制作，仅供学习交流" {
+		t.Fatalf("描述应补位合成并携带来源标注: %+v", desc)
+	}
+	if title == nil || title.Value != "inner world" {
+		t.Fatalf("无冲突既有维度应照旧在场: %+v", title)
+	}
+	if author != nil {
+		t.Fatalf("冲突维度应移出终选呈现（既有待裁决口径不双呈值）: %+v", author)
+	}
+	if len(lead.PendingDims) != 1 || lead.PendingDims[0] != string(DimAuthor) {
+		t.Fatalf("冲突维度应落主导文件待裁决维度标记: %+v", lead.PendingDims)
+	}
+	// 说明成员行状态位：已产声明不带、拒读 rejected、未采集 uncollected
+	if s := filesByRel["inner/ep01.nfo"].ContentState; s != "" {
+		t.Fatalf("已产内容声明的说明成员不应带采集状态位: %q", s)
+	}
+	if s := filesByRel["inner/ep01.bin"].ContentState; s != snapCompanionContentRejected {
+		t.Fatalf("有游标无声明应标拒读态: %q", s)
+	}
+	if s := filesByRel["inner/ep02.nfo"].ContentState; s != snapCompanionContentUncollected {
+		t.Fatalf("无游标应标未采集态: %q", s)
+	}
+	// 非说明成员不带状态位
+	if s := filesByRel["inner/ep01.zh.srt"].ContentState; s != "" {
+		t.Fatalf("轨道成员不应带采集状态位: %q", s)
+	}
+	// 持久快照不被投影改写（并入只发生在投影层）
+	if raw := snap.Files[0]; len(raw.PendingDims) != 0 ||
+		len(raw.Final) != 2 || raw.Final[1].Dimension != string(DimTitle) {
+		t.Fatalf("持久快照的主导文件记录不应被投影改写: %+v", raw)
+	}
+
+	// overview 待裁决清单追加并入冲突明细（挂主导文件、两值两来源）
+	overview := panoramaOverviewViewOf(snap)
+	found := false
+	for _, p := range overview.Pending {
+		if p.RelPath == "inner/ep01.mp4" && p.Dimension == string(DimAuthor) {
+			found = true
+			if len(p.Candidates) != 2 || p.Candidates[0].Value != "Isel" || p.Candidates[1].Value != "いせる" ||
+				p.Candidates[1].OriginName != "ep01.nfo" {
+				t.Fatalf("并入冲突候选应为主导在前两值两来源: %+v", p.Candidates)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("overview 待裁决清单应含并入冲突明细: %+v", overview.Pending)
+	}
+
+	// files 分节逐页拼接与全量投影逐条全等（并入与状态位在两路径同一实现）
+	root := t.TempDir()
+	m, ctx := newRecognitionFixture(t, root, nil)
+	injectSessionSnapshot(t, m, root, snap)
+	var paged []SnapFile
+	cursor := ""
+	for page := 0; ; page++ {
+		m.HandleFrontendRequest(mustJSON(t, workbenchFrontendRequest{
+			Seq: int64(300 + page), Action: workbenchActionGetPanorama, Root: root,
+			Section: panoramaSectionFiles, Cursor: cursor, PageSizeHint: 2,
+		}))
+		resp := ctx.lastResponse(t)
+		if !resp.OK || resp.Panorama == nil || resp.Page == nil {
+			t.Fatalf("files 分页拉取失败（第 %d 页）: %+v", page+1, resp)
+		}
+		paged = append(paged, resp.Panorama.Files...)
+		if resp.Page.Done {
+			break
+		}
+		cursor = resp.Page.NextCursor
+	}
+	if !reflect.DeepEqual(paged, view.Files) {
+		t.Fatal("files 分节逐页拼接与全量投影逐条不全等")
+	}
+}
+
+// TestCompanionDeclTruncatedRoundTrip 截断标注随声明的快照投影往返：声明级
+// Truncated 经 snapDeclOf/declOfSnap 保真（投影与创建载荷共用的紧凑形态）。
+func TestCompanionDeclTruncatedRoundTrip(t *testing.T) {
+	decl := MetadataDeclaration{
+		Dimension: DimDescription, Value: "超长说明…", Source: SourceContent, Truncated: true,
+	}
+	snap := snapDeclOf(decl)
+	if !snap.Truncated {
+		t.Fatalf("紧凑形态应携带截断标注: %+v", snap)
+	}
+	back := declOfSnap(snap)
+	if back.Dimension != decl.Dimension || back.Value != decl.Value ||
+		back.Source != decl.Source || !back.Truncated {
+		t.Fatalf("声明往返应保真: %+v", back)
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if !strings.Contains(string(data), `"truncated":true`) {
+		t.Fatalf("截断标注应随 JSON 序列化在场: %s", data)
 	}
 }

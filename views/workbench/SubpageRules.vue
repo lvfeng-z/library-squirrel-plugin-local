@@ -206,7 +206,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated } from 'vue'
 import { Events } from '@wailsio/runtime'
 import RuleEditDialog from './RuleEditDialog.vue'
-import { condxShapeSummary } from './ruleFormModel'
+import { condxShapeSummary, aggMetadataFileSummary } from './ruleFormModel'
 import { requestTimeoutMs } from './requestTimeout'
 
 // 工作台事件协议通道（与插件 Go 侧 session.go 约定一致）
@@ -235,7 +235,8 @@ interface DimPolicyView {
 
 // 档案规则条目（ruleEntryJSON 形态：conditions / extractions 即 JSON 片段源——
 // v4/v5 档案条件只落 conditions，模式树为编译缓存不落档；category/identity/
-// aggregate 为聚合规则的类别与两件声明——元数据规则三者缺省）
+// aggregate 为聚合规则的类别与两件声明——元数据规则三者缺省；aggregate.
+// contentBindings=内容绑定〔「元数据文件」指派，omitempty 缺省=无内容产出〕）
 interface RuleEntryView {
   id: string
   description: string
@@ -243,7 +244,12 @@ interface RuleEntryView {
   enabled: boolean
   category?: string
   identity?: { row: number; capture: string }[] | null
-  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
+  aggregate?: {
+    workType: string
+    tracks: { row: number; role: string }[]
+    companionUse?: string
+    contentBindings?: { row: number; dimension: string }[]
+  } | null
   conditions?: unknown
   extractions?: unknown
   synthesis?: { dimPolicies?: DimPolicyView[] | null; roles?: RoleBindingView[] | null }
@@ -587,7 +593,12 @@ interface RuleDialogInput {
   isNew: boolean
   category?: string
   identity?: { row: number; capture: string }[] | null
-  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
+  aggregate?: {
+    workType: string
+    tracks: { row: number; role: string }[]
+    companionUse?: string
+    contentBindings?: { row: number; dimension: string }[]
+  } | null
   conditions?: unknown
   extractions: unknown
   synthesis: { dimPolicies: DimPolicyView[]; roles: RoleBindingView[] }
@@ -670,10 +681,17 @@ function hitCountOf(rule: RuleEntryView): number | null {
 
 // —— 列表行范围小字（B2）：与编辑弹窗同函数生成 ——
 // 普通行=「目标类别 · N 形态」（类别=条件行目标并集去重、多类别以 + 并列；
-// 条件行缺失的坏档行不显示）
+// 条件行缺失的坏档行不显示）；聚合规则带内容绑定（「元数据文件」指派）时
+// 附「元数据文件（N）」（与编辑弹窗产出区摘要同词——伴随说明文件内容解析）
 function shapeSummaryOf(rule: RuleEntryView): string {
   const shape = condxShapeSummary(rule.conditions)
-  return shape.count > 0 ? `${shape.label} · ${shape.count} 形态` : ''
+  const parts: string[] = []
+  if (shape.count > 0) parts.push(`${shape.label} · ${shape.count} 形态`)
+  const bindings = rule.aggregate && rule.aggregate.contentBindings
+  if (isAggregateRule(rule) && Array.isArray(bindings) && bindings.length > 0) {
+    parts.push(aggMetadataFileSummary(bindings))
+  }
+  return parts.join(' · ')
 }
 
 // 新建：空载荷入弹窗（v4 缺省样例〔【{作者}】{标题} 行 + 作者/标题提取行〕

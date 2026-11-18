@@ -76,6 +76,13 @@ type FilePluginData struct {
 	// 文件数与角色构成（确认呈现「N 个文件」「视频 + 字幕×N」类文案的数据面）
 	// 由本清单直接可得。
 	Tracks []TrackEntry `json:"tracks,omitempty"`
+	// ContentDecls 作品成员的内容来源声明快照（聚合作品子行专属，零契约插件
+	// 自有字段）：创建时点该作品全部成员（含主导文件）终选中来源=内容的声明
+	// 按快照序固化——任务自包含（执行期单文件重算不重读内容，作品级并入素材
+	// 全靠本快照），执行期与重算结论按作品级并入规则合成。说明成员本身不在
+	// Tracks（不导入、不哈希），其内容声明只经本字段进入作品元数据。空=无
+	// 内容绑定（既有载荷零值兼容）。
+	ContentDecls []SnapDecl `json:"contentDecls,omitempty"`
 }
 
 // hasRealAttribution PluginData 是否携带真实域归属（裁决出真实站点与页级作品 ID）
@@ -748,11 +755,31 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		// 站点分类含义 → 子树归属站点键（快照回放含义不含 site 型——site 仅经
 		// 目录问答产生，会话模式问答不可达，此处恒走文件名形态归属裁决）
 		classifiedSiteKey := resolveClassifiedSiteKey(metadata, h.resolveSiteKeyByID)
+		appendUnit := func(work *SelectableWork) {
+			aggKey := aggKeyOf(snapFileByPath, work)
+			if aggKey != "" {
+				// 哈希/核对/子行面剔除说明成员（成员清单与计数数据面仍是全量
+				// Files——域推导不动，仅创建链消费过滤视图）
+				work = workHashFaceOf(snapFileByPath, work)
+			}
+			units = append(units, emitUnit{work: work, metadata: metadata, classifiedSiteKey: classifiedSiteKey, aggKey: aggKey})
+		}
 		for _, work := range plan.loneWorks {
-			units = append(units, emitUnit{work: work, metadata: metadata, classifiedSiteKey: classifiedSiteKey, aggKey: aggKeyOf(snapFileByPath, work)})
+			appendUnit(work)
 		}
 		for _, member := range plan.setMembers {
-			units = append(units, emitUnit{work: member, metadata: metadata, classifiedSiteKey: classifiedSiteKey, aggKey: aggKeyOf(snapFileByPath, member)})
+			appendUnit(member)
+		}
+	}
+
+	// 聚合作品的成员内容声明（载荷固化面）：任一聚合单元在场时一次收齐按作品
+	// 键取用——说明成员与被绑定轨行的内容产出经此并入作品元数据（任务自包含，
+	// 执行期重算不重读内容）；纯单文件批次零工作零开销。
+	var payloadContentDecls map[string][]SnapDecl
+	for _, u := range units {
+		if u.aggKey != "" {
+			payloadContentDecls = workPayloadContentDeclsByWork(sess.Snapshot)
+			break
 		}
 	}
 
@@ -917,8 +944,9 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			plannedTotal -= rowsOfUnit
 			dropSamples = append(dropSamples, hashDropSample{workID: unit.work.WorkID, err: out.dropErr})
 		} else if unit.aggKey != "" {
-			// 聚合作品=单子行：成员按轨道清单（哈希序=Files 序，首位=主导文件）
-			// 构造 v4 载荷——作品身份/归属/赋值快照/目录含义链均按主导文件结论，
+			// 聚合作品=单子行：成员按轨道清单（哈希序=Files 序，首位=主导文件；
+			// 伴随说明成员已在哈希面剔除——清单只含轨道成员）构造 v4 载荷——
+			// 作品身份/归属/赋值快照/目录含义链均按主导文件结论，
 			// ResourceType=快照声明的作品类型（识别期聚合段落轨的规则声明值，
 			// 不做推断）。类型悬空（注册表已拉到而声明类型不在册）=整件放弃
 			//（宁可不导不错型）；注册表拉取失败（索引缺席）信任声明值直发，
@@ -944,7 +972,7 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 					members = append(members, aggTrackMember{entry: f, role: role})
 				}
 				attr := resolveWorkAttribution(filepath.Base(out.files[0].FullPath), unit.classifiedSiteKey)
-				child := buildAggregatedChildResponse(members, attr, unit.metadata, sess.Assignments, workType)
+				child := buildAggregatedChildResponse(members, attr, unit.metadata, sess.Assignments, workType, payloadContentDecls[unit.aggKey])
 				if child == nil {
 					// 构造期成员 Stat 失败（哈希刚完成的窄窗竞态）——同整件放弃半径
 					plannedTotal -= rowsOfUnit
@@ -1300,6 +1328,33 @@ func aggKeyOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
 	return ""
 }
 
+// workHashFaceOf 创建链的作品哈希面：聚合作品剔除伴随说明成员——说明成员只作
+// 元数据来源，文件本体不哈希、不核对、不导子行（不进轨道清单与集序素材），
+// 轨道成员（含被内容绑定的双重身份成员）照常保留（绑定只叠加内容产出，不改
+// 写导入身份）。无说明成员时原作品直接返回（零拷贝，既有路径零变化）；主导
+// 文件恒为轨道成员，过滤不触及 Files 首位。
+func workHashFaceOf(fileByPath map[string]*SnapFile, work *SelectableWork) *SelectableWork {
+	if len(work.Files) == 0 {
+		return work
+	}
+	if lead := fileByPath[work.Files[0]]; lead == nil || lead.AggWorkKey == "" {
+		return work // 单文件作品/无聚合归属：结构性无说明成员
+	}
+	kept := make([]string, 0, len(work.Files))
+	for _, rel := range work.Files {
+		if rec := fileByPath[rel]; rec != nil && rec.AggCompanion {
+			continue
+		}
+		kept = append(kept, rel)
+	}
+	if len(kept) == len(work.Files) {
+		return work
+	}
+	filtered := *work
+	filtered.Files = kept
+	return &filtered
+}
+
 // aggTrackMember 聚合作品的成员轨道：哈希完成的文件条目+该成员的结构角色
 // （快照文件行的聚合轨道角色）。
 type aggTrackMember struct {
@@ -1324,10 +1379,11 @@ func aggTypeOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
 // （不再逐文件扁平）——ResourceType=workType（识别期聚合段落轨的规则声明
 // 作品类型，调用方自快照成员行取值并完成悬空校验）；PluginData=v4 轨道清单
 // 形态（顶层字段=主导文件结论：路径/哈希/赋值快照/目录含义链，Tracks=全部
-// 成员的角色清单）；作品身份/归属键与单文件子行同构（真实域=页级作品 ID、
-// local 回退=主导文件内容哈希）。成员 Stat 失败（构造期窄窗竞态）返回 nil，
-// 调用方按整件放弃处理。
-func buildAggregatedChildResponse(members []aggTrackMember, attr workAttribution, metadata []PathMeaning, assigns map[string]SessionAssignment, workType string) *sdkdto.TaskCreateChildResponse {
+// 成员的角色清单——伴随说明成员不在清单，其内容产出经 contentDecls 固化进
+// 载荷供执行期作品级并入）；作品身份/归属键与单文件子行同构（真实域=页级
+// 作品 ID、local 回退=主导文件内容哈希）。成员 Stat 失败（构造期窄窗竞态）
+// 返回 nil，调用方按整件放弃处理。
+func buildAggregatedChildResponse(members []aggTrackMember, attr workAttribution, metadata []PathMeaning, assigns map[string]SessionAssignment, workType string, contentDecls []SnapDecl) *sdkdto.TaskCreateChildResponse {
 	if len(members) == 0 {
 		return nil
 	}
@@ -1354,6 +1410,7 @@ func buildAggregatedChildResponse(members []aggTrackMember, attr workAttribution
 		Size:          tracks[0].Size,
 		Metadata:      metadata,
 		Tracks:        tracks,
+		ContentDecls:  contentDecls,
 	}
 	// 作品身份：真实域=解析出的页级作品 ID，local 回退=主导文件内容哈希
 	workID := lead.entry.Hash
@@ -1514,6 +1571,23 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 		h.ctx.Infof("CreateWorkInfo 观测: file=%s matched=%v final=%d", fp.RelPath, conclusion.MatchedRuleIDs, len(conclusion.Final))
 	}
 	final := conclusion.Final
+	if len(fp.ContentDecls) > 0 {
+		// 聚合作品级并入：重算结论（主导文件）∪ 载荷固化的成员内容声明——
+		// 同维多值冲突按主导值落库（冲突呈现归解析工作台的待裁决面，裁决经
+		// 会话赋值重识别生效后载荷随创建时点更新）；描述落库取并入后首个
+		// 声明（值原样入——落库字段无长度约束，采集上限 64KB 即自然上界，
+		// 呈现截断归前端）。重算不重读内容，主导文件自身的内容声明同样由
+		// 载荷复原。
+		leadDecls := make([]SnapDecl, 0, len(final))
+		for _, decl := range final {
+			leadDecls = append(leadDecls, snapDeclOf(decl))
+		}
+		merged, _ := mergeWorkDeclarations(fp.RelPath, filepath.Base(fp.FullPath), leadDecls, fp.ContentDecls)
+		final = make([]MetadataDeclaration, 0, len(merged))
+		for _, d := range merged {
+			final = append(final, declOfSnap(d))
+		}
+	}
 
 	resp := &sdkdto.WorkResponse{Work: &sdkdto.WorkDTO{}}
 	workName := stripExt(filepath.Base(fp.FullPath))

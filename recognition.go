@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -151,6 +153,11 @@ type FileConclusion struct {
 	AggWorkKey   string
 	AggTrackRole string
 	AggWorkType  string
+	// AggCompanion 为伴随说明成员标记（聚合段落定）：该文件以「仅被指派为
+	// 元数据文件、未分配轨道」的身份归属聚合作品——归进作品、无轨、不导入、
+	// 不独立成作品，内容只作元数据来源；轨道成员（含轨行兼绑定的双重身份
+	// 成员）与无聚合文件不带标记。
+	AggCompanion bool
 	// rawDecls 为提取段原始声明（合成前中间产物）：预览基座规则相关件的铸造
 	// 原料，快照与呈现不消费（本类型为进程内求值产物，不经序列化）。
 	rawDecls []MetadataDeclaration
@@ -283,6 +290,8 @@ func mergedRecognition(files, treeFiles []ScanFile, rules []RuleEntry, lib *Libr
 			Siblings:               siblingsByDir[dirGroupKey(file.DirNames)],
 			AncestorFiles:          ancestorFilesLevels(file.DirNames, treeSiblings),
 			AncestorChildDirCounts: ancestorChildDirCounts(file.DirNames, childDirsByParent),
+			CompanionText:          file.CompanionText,
+			CompanionTruncated:     file.CompanionTruncated,
 		}
 		var assign *SessionAssignment
 		if assignIdx != nil {
@@ -1066,6 +1075,26 @@ type SnapFile struct {
 	AggWorkKey   string `json:"aggWorkKey,omitempty"`
 	AggTrackRole string `json:"aggTrackRole,omitempty"`
 	AggWorkType  string `json:"aggWorkType,omitempty"`
+	// AggCompanion 伴随说明成员标记：该文件仅被指派为元数据文件（未分配轨道）
+	// 而归进聚合作品——无轨、不导入、不独立成作品，内容只作元数据来源；独立
+	// 于空 aggTrackRole 的「无聚合」含义（说明成员=归属键在场+轨道角色空+本
+	// 标记真，三字段语义不变）。零值=非说明成员（旧快照载入即现状语义，
+	// 无迁移）。
+	AggCompanion bool `json:"aggCompanion,omitempty"`
+	// ContentSize / ContentModTime 内容游标（尺寸+修改时间 UnixNano）：该文件
+	// 上轮被采集过内容片段时在场，增量轮目录被 mtime 跳过时逐文件 stat
+	// 比对，失配即整目录拉回求值面（内容原地修改不改父目录 mtime，目录级
+	// 游标检不到）。零值=未采集。内容本体不入持久快照，游标只是新鲜度凭据
+	//（旧快照零值载入即未采集语义，无迁移）。
+	ContentSize    int64 `json:"contentSize,omitempty"`
+	ContentModTime int64 `json:"contentModTime,omitempty"`
+	// ContentState 内容采集状态（投影层展开的呈现态数据，不入持久快照）：
+	// 伴随说明成员行的行详情可见原因数据位——rejected=采集过但未按文本产出
+	// 声明（二进制嗅探拒读或内容全空白，「内容未按文本读取，描述未生成」
+	// 的数据面）、uncollected=未采集（无内容游标：命中集缺席或 stat 失败的
+	// 异常形态）；已产内容来源声明的行不带（声明本体即产出事实）。非说明
+	// 成员不带。仅 getPanorama 投影携带。
+	ContentState string `json:"contentState,omitempty"`
 }
 
 // SnapDecl 声明的紧凑形态（终选与待裁决候选共用）。
@@ -1076,6 +1105,15 @@ type SnapDecl struct {
 	RoleName    string   `json:"roleName,omitempty"`
 	RuleID      string   `json:"ruleId,omitempty"`
 	AlsoRuleIDs []string `json:"alsoRuleIds,omitempty"`
+	// Truncated 声明值取自超采集上限被截断的伴随说明内容片段（内容来源声明
+	// 专属）：内容不完整的事实随声明携带，供来源呈现标注（投影与创建载荷
+	// 均随声明透传）。
+	Truncated bool `json:"truncated,omitempty"`
+	// OriginName 作品级并入声明的来源成员文件名：主导文件投影上并入的伴随
+	// 说明内容声明携带——详情来源标注（「说明文件 X.txt / 正文轨 X.txt」类
+	// 呈现）的数据位，来源成员的导入身份（说明成员或被绑定的轨道成员）由
+	// 文件行的聚合字段另行携带；文件自身产出的声明不带（值出自该文件本身）。
+	OriginName string `json:"originName,omitempty"`
 }
 
 // SnapClue 疑似线索：类别 + 摘要（如命中的库内名字、pixiv ID、群组前缀）。
@@ -1182,6 +1220,10 @@ type aggregateInput struct {
 	ignoredTargets   map[string]bool
 	confirmedTargets map[string]bool
 	confirmedSetIDs  map[string]int64
+	// contentCursors 本轮被采集文件的内容游标（相对路径 → 尺寸+修改时间）：
+	// 铸入重求值文件的记录供增量轮比对；跳过复用目录的记录自带旧游标
+	//（整记录复用），不经本表。
+	contentCursors map[string]companionContentCursor
 }
 
 // aggregatePanorama 把合并求值结论聚合为识别全景快照（七类元素）：
@@ -1272,6 +1314,9 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 
 	appendConclusion := func(c *FileConclusion) {
 		file := snapFileOf(c, in.lib, assignIdx)
+		if cur, ok := in.contentCursors[c.RelPath]; ok {
+			file.ContentSize, file.ContentModTime = cur.Size, cur.ModTime
+		}
 		snap.Files = append(snap.Files, file)
 		if len(c.Pending) > 0 {
 			for _, item := range c.Pending {
@@ -1466,6 +1511,7 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIn
 		RelPath: c.RelPath, FileName: c.FileName, DirRelKey: c.DirRelKey,
 		MatchedRuleIDs: c.MatchedRuleIDs,
 		AggWorkKey:     c.AggWorkKey, AggTrackRole: c.AggTrackRole, AggWorkType: c.AggWorkType,
+		AggCompanion: c.AggCompanion,
 	}
 	if resolved := assignIdx.resolveFile(c.RelPath); len(resolved.coveredDimensions()) > 0 {
 		file.Assigned = true
@@ -1500,6 +1546,16 @@ func snapDeclOf(decl MetadataDeclaration) SnapDecl {
 	return SnapDecl{
 		Dimension: string(decl.Dimension), Value: decl.Value, Source: string(decl.Source),
 		RoleName: decl.RoleName, RuleID: decl.RuleID, AlsoRuleIDs: decl.AlsoRuleIDs,
+		Truncated: decl.Truncated,
+	}
+}
+
+// declOfSnap 紧凑形态 → 声明（创建链把载荷携带的作品级并入声明并回执行期
+// 重算结论时的反向转换，字段一一对应）。
+func declOfSnap(d SnapDecl) MetadataDeclaration {
+	return MetadataDeclaration{
+		Dimension: MetadataDimension(d.Dimension), Value: d.Value, Source: SourceKind(d.Source),
+		RoleName: d.RoleName, RuleID: d.RuleID, AlsoRuleIDs: d.AlsoRuleIDs, Truncated: d.Truncated,
 	}
 }
 
@@ -2468,6 +2524,240 @@ func previewSnapCandidates(cands []SnapCandidate) []SnapCandidate {
 	return cands
 }
 
+// —— 聚合作品级声明并入（主导文件结论 ∪ 成员伴随说明内容声明）——
+//
+// 并入发生在消费面（全景投影与创建链），不进逐文件求值循环：识别快照保持
+// 逐文件结论原样（说明成员与被绑定的轨道成员各自携带内容声明），作品级视图
+// 在投影/创建时点按聚合作品键现算。
+
+// snapCompanionContentRejected / snapCompanionContentUncollected 伴随说明成员
+// 行内容采集状态的投影词汇（contentState 数据位，文案本体是前端呈现事）。
+const (
+	snapCompanionContentRejected    = "rejected"
+	snapCompanionContentUncollected = "uncollected"
+)
+
+// workContentDeclsByWork 按聚合作品键归集成员的伴随说明内容声明（投影层一次
+// 遍历的共用基座）：取各成员终选中来源=内容的声明、附来源成员文件名（详情
+// 来源标注的数据位），成员按快照文件序；主导文件自身的内容声明已在其终选中，
+// 不经此通道（并入侧只补其他成员）。无内容声明时返回 nil（投影层零改写——
+// 无内容绑定的聚合作品与单文件作品零变化）。
+func workContentDeclsByWork(snap *RecognitionSnapshot) map[string][]SnapDecl {
+	return contentDeclsByWork(snap, false)
+}
+
+// workPayloadContentDeclsByWork 按聚合作品键归集创建载荷的内容声明（任务自
+// 包含固化用）：各作品全部成员（含主导文件——执行期单文件重算不重读内容，
+// 主导自身的内容声明须经载荷复原）终选中来源=内容的声明，按快照文件序收齐、
+// 附来源成员文件名。无内容声明时返回 nil（单文件作品与无绑定聚合零载荷，
+// 旧载荷零值兼容）。创建链一次建齐按作品键取用。
+func workPayloadContentDeclsByWork(snap *RecognitionSnapshot) map[string][]SnapDecl {
+	return contentDeclsByWork(snap, true)
+}
+
+// contentDeclsByWork 内容声明归集的唯一实现：includeLead 控制是否收录主导
+// 文件自身的内容声明（投影并入=只补其他成员；创建载荷=全成员收齐）。
+func contentDeclsByWork(snap *RecognitionSnapshot, includeLead bool) map[string][]SnapDecl {
+	if snap == nil {
+		return nil
+	}
+	var out map[string][]SnapDecl
+	for i := range snap.Files {
+		f := &snap.Files[i]
+		if f.AggWorkKey == "" {
+			continue
+		}
+		if !includeLead && f.AggWorkKey == workKeyPrefixFile+f.RelPath {
+			continue
+		}
+		for _, decl := range f.Final {
+			if decl.Source != string(SourceContent) {
+				continue
+			}
+			if out == nil {
+				out = make(map[string][]SnapDecl)
+			}
+			d := decl
+			d.OriginName = f.FileName
+			out[f.AggWorkKey] = append(out[f.AggWorkKey], d)
+		}
+	}
+	return out
+}
+
+// mergeWorkDeclarations 聚合作品级声明并入（纯函数、输入序确定）：主导文件
+// 终选声明 ∪ 成员伴随说明内容声明 → 作品级声明序列与同维冲突清单。
+//   - 值等价去重：同维同值的成员声明并入主导侧同名声明（保主导侧声明本体，
+//     截断标注与角色等附属位随之）；主导侧缺席该维时成员声明按成员序补位；
+//   - 同维多值冲突：主导侧与成员侧（或成员之间）同维度存在多个互异值 → 该维
+//     挂主导文件待裁决（候选=主导侧声明在前、成员侧声明按成员序在后，按值
+//     去重保首——两值两来源的裁决数据面），并入结果只保留主导侧该维声明
+//     （主导侧亦缺席则该维整体缺席）——创建链据此按主导值落库，裁决经会话
+//     赋值走既有覆盖通路；
+//   - 无成员声明零工作：主导终选原样返回（不复制，调用方只读）。
+//
+// 冲突不区分维度策略（union 维度的跨文件互异值同样进待裁决——说明文件人工
+// 书写的值与主导结论互异时宁缺勿错、可见不静默丢失）。leadRelPath/leadFileName
+// 为待裁决明细的挂靠主导文件寻址（投影与创建载荷同构消费）。
+func mergeWorkDeclarations(leadRelPath, leadFileName string, leadFinal []SnapDecl, memberDecls []SnapDecl) (merged []SnapDecl, conflicts []SnapPending) {
+	if len(memberDecls) == 0 {
+		return leadFinal, nil
+	}
+	type dimBucket struct {
+		leadIdx   []int
+		memberIdx []int
+	}
+	var order []string
+	buckets := make(map[string]*dimBucket)
+	for i := range leadFinal {
+		dim := leadFinal[i].Dimension
+		b := buckets[dim]
+		if b == nil {
+			b = &dimBucket{}
+			buckets[dim] = b
+			order = append(order, dim)
+		}
+		b.leadIdx = append(b.leadIdx, i)
+	}
+	for i := range memberDecls {
+		dim := memberDecls[i].Dimension
+		b := buckets[dim]
+		if b == nil {
+			b = &dimBucket{}
+			buckets[dim] = b
+			order = append(order, dim)
+		}
+		b.memberIdx = append(b.memberIdx, i)
+	}
+	merged = make([]SnapDecl, 0, len(leadFinal)+len(memberDecls))
+	for _, dim := range order {
+		b := buckets[dim]
+		if len(b.memberIdx) == 0 {
+			for _, i := range b.leadIdx {
+				merged = append(merged, leadFinal[i])
+			}
+			continue
+		}
+		distinct := make(map[string]bool, len(b.leadIdx)+len(b.memberIdx))
+		candidates := make([]SnapDecl, 0, len(b.leadIdx)+len(b.memberIdx))
+		for _, i := range b.leadIdx {
+			d := leadFinal[i]
+			if distinct[d.Value] {
+				continue
+			}
+			distinct[d.Value] = true
+			candidates = append(candidates, d)
+		}
+		for _, i := range b.memberIdx {
+			d := memberDecls[i]
+			if distinct[d.Value] {
+				continue
+			}
+			distinct[d.Value] = true
+			candidates = append(candidates, d)
+		}
+		if len(distinct) == 1 {
+			if len(b.leadIdx) > 0 {
+				for _, i := range b.leadIdx {
+					merged = append(merged, leadFinal[i])
+				}
+			} else {
+				merged = append(merged, candidates[0])
+			}
+			continue
+		}
+		conflicts = append(conflicts, SnapPending{
+			RelPath:    leadRelPath,
+			FileName:   leadFileName,
+			Dimension:  dim,
+			Reason:     fmt.Sprintf("维度 %s 跨文件冲突：主导文件结论与伴随说明成员声明存在 %d 个不同取值，需裁决后合成", dim, len(distinct)),
+			Candidates: candidates,
+		})
+		for _, i := range b.leadIdx {
+			merged = append(merged, leadFinal[i])
+		}
+	}
+	return merged, conflicts
+}
+
+// projectWorkMergedFile 单文件投影的作品级并入改写（投影层专用，不动持久
+// 快照）：聚合作品主导文件（作品键对位成员）把其他成员的伴随说明内容声明
+// 并入终选视图——无冲突维度补位合成；冲突维度移出终选呈现（既有待裁决呈现
+// 口径：维度进待裁决即不双呈值）并落待裁决维度标记，冲突明细由 overview 分节
+// 的待裁决清单携带。伴随说明成员行另附内容采集状态位（行详情可见原因）。
+// 非主导文件仅补状态位，其余原样返回。
+func projectWorkMergedFile(f SnapFile, contentDecls map[string][]SnapDecl) SnapFile {
+	if f.AggCompanion {
+		f.ContentState = companionContentStateOf(f)
+	}
+	if f.AggWorkKey == "" || f.AggWorkKey != workKeyPrefixFile+f.RelPath {
+		return f
+	}
+	memberDecls := contentDecls[f.AggWorkKey]
+	if len(memberDecls) == 0 {
+		return f
+	}
+	merged, conflicts := mergeWorkDeclarations(f.RelPath, f.FileName, f.Final, memberDecls)
+	if len(conflicts) == 0 {
+		f.Final = merged
+		return f
+	}
+	conflictDims := make(map[string]bool, len(conflicts))
+	for _, c := range conflicts {
+		conflictDims[c.Dimension] = true
+	}
+	final := make([]SnapDecl, 0, len(merged))
+	for _, decl := range merged {
+		if conflictDims[decl.Dimension] {
+			continue
+		}
+		final = append(final, decl)
+	}
+	f.Final = final
+	dims := make([]string, 0, len(f.PendingDims)+len(conflicts))
+	dims = append(dims, f.PendingDims...)
+	for _, c := range conflicts {
+		dims = append(dims, c.Dimension)
+	}
+	f.PendingDims = dims
+	return f
+}
+
+// companionContentStateOf 伴随说明成员行的内容采集状态：终选含内容来源声明=
+// 内容已产（状态位空缺）；有内容游标而无内容声明=采集过但未按文本产出
+//（二进制嗅探拒读或内容全空白）；无游标=未采集。
+func companionContentStateOf(f SnapFile) string {
+	for _, decl := range f.Final {
+		if decl.Source == string(SourceContent) {
+			return ""
+		}
+	}
+	if f.ContentSize != 0 || f.ContentModTime != 0 {
+		return snapCompanionContentRejected
+	}
+	return snapCompanionContentUncollected
+}
+
+// workMergePendingOf 全部聚合作品的并入冲突明细（主导文件快照序）：overview
+// 分节待裁决清单的投影层追加段——挂主导文件、候选两值两来源，与识别期待裁决
+// 同构（前端按既有待裁决机制呈现与裁决）。
+func workMergePendingOf(snap *RecognitionSnapshot, contentDecls map[string][]SnapDecl) []SnapPending {
+	if len(contentDecls) == 0 {
+		return nil
+	}
+	var out []SnapPending
+	for i := range snap.Files {
+		f := &snap.Files[i]
+		if f.AggWorkKey == "" || f.AggWorkKey != workKeyPrefixFile+f.RelPath {
+			continue
+		}
+		if _, conflicts := mergeWorkDeclarations(f.RelPath, f.FileName, f.Final, contentDecls[f.AggWorkKey]); len(conflicts) > 0 {
+			out = append(out, conflicts...)
+		}
+	}
+	return out
+}
+
 // panoramaOverviewViewOf 快照的 overview 分节投影：文件明细不随答（files 分节
 // 逐页拉取），仅展开目录级结构线索集；候选三仓/序列群/待裁决明细等重载荷
 // 清单由分节切页逐段携带，小字段（统计/规则档案态等）每页随答。重载荷条目的
@@ -2480,6 +2770,12 @@ func panoramaOverviewViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 	view.Candidates = previewSnapCandidates(view.Candidates)
 	view.IgnoredCandidates = previewSnapCandidates(view.IgnoredCandidates)
 	view.ConfirmedCandidates = previewSnapCandidates(view.ConfirmedCandidates)
+	// 待裁决清单追加聚合作品级并入冲突段（主导文件序；无内容绑定时零追加）：
+	// 与识别期待裁决同构的明细条目，候选携带两值两来源与来源成员文件名。
+	contentDecls := workContentDeclsByWork(snap)
+	if extra := workMergePendingOf(snap, contentDecls); len(extra) > 0 {
+		view.Pending = append(append([]SnapPending(nil), view.Pending...), extra...)
+	}
 	if len(snap.Dirs) > 0 {
 		dirs := make([]SnapDir, len(snap.Dirs))
 		for i, d := range snap.Dirs {
@@ -2493,13 +2789,17 @@ func panoramaOverviewViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 
 // panoramaViewOf 快照的前端投影：游标表为后端增量态，不出前端载荷；文件级与
 // 目录级记录分别附加结构分段线索集（纯路径推导的呈现态数据，不入持久快照）。
+// 文件级另附聚合作品级并入视图：主导文件并入成员伴随说明内容声明（files 分节
+// 逐页投影 projectWorkMergedFile 与本全量投影同一实现，逐条全等）。
 func panoramaViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 	view := *snap
 	view.DirMtimes = nil
+	contentDecls := workContentDeclsByWork(snap)
 	if len(snap.Files) > 0 {
 		files := make([]SnapFile, len(snap.Files))
 		for i, f := range snap.Files {
 			f.StructClues = StructCluesOf(snap.RootPath, f.RelPath, f.FileName)
+			f = projectWorkMergedFile(f, contentDecls)
 			files[i] = f
 		}
 		view.Files = files
@@ -2971,6 +3271,9 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 		ignoredTargets:   targetSetOf(sess.IgnoredCandidates),
 		confirmedTargets: targetSetOf(sess.ConfirmedCandidates),
 		confirmedSetIDs:  sess.ConfirmedSetIDs,
+		// 规则未变（档案指纹闸门）则内容命中集未变，上轮游标继续有效，随
+		// 重铸快照携带——合成重放零读盘，不做内容再采集。
+		contentCursors: prevCompanionContentCursors(prev),
 	})
 	diff := ComputeSnapshotDiff(prev, snapshot)
 	if _, err := m.CompleteRecognitionWithDiff(root, snapshot, diff); err != nil {
@@ -3022,6 +3325,91 @@ func targetSetOf(targets []string) map[string]bool {
 		set[t] = true
 	}
 	return set
+}
+
+// —— 伴随说明文件内容采集的识别轮接线 ——
+
+// companionContentHitSet 内容采集的命中集供给点：聚合规则内容绑定行（行 →
+// 维度配置即采集意图）命中的文件相对路径。绑定行按与第二相取值同一基座
+//（contentBindingInputs——结论同批派生的求值输入）独立求值，命中面与整段
+// 取值产声明恒一致；无内容绑定时供给为空集——零采集零效果。库内谓词与
+// 全量树面不在本供给面（保守不命中）。
+func companionContentHitSet(rules []RuleEntry, conclusions []FileConclusion) []string {
+	plans := contentBindingPlans(rules)
+	if len(plans) == 0 || len(conclusions) == 0 {
+		return nil
+	}
+	inputs := contentBindingInputs(conclusions)
+	var hits []string
+	for i := range conclusions {
+		for _, plan := range plans {
+			if plan.anyRowHit(inputs[i]) {
+				hits = append(hits, conclusions[i].RelPath)
+				break
+			}
+		}
+	}
+	return hits
+}
+
+// contentCursorMismatchDirs 内容游标失配的跳过目录集：跳过目录里上轮被采集
+// 的文件（游标在场）逐个 stat 比对尺寸与修改时间，失配目录入集——内容原地
+// 修改不改父目录 mtime，目录级跳过检不到内容变化，文件级游标补位。stat
+// 失败按失配处理（保守拉回求值面）。prev 为 nil 时返回空集。
+func contentCursorMismatchDirs(root string, prev *RecognitionSnapshot, prevSkipped map[string]bool) map[string]bool {
+	if prev == nil {
+		return nil
+	}
+	mismatched := make(map[string]bool)
+	for _, f := range prev.Files {
+		if f.ContentSize == 0 && f.ContentModTime == 0 {
+			continue // 零值游标=上轮未采集，不在新鲜度监视面
+		}
+		if !prevSkipped[f.DirRelKey] {
+			continue // 目录本就重求值，无需文件级比对
+		}
+		fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(f.RelPath)))
+		if err != nil || fi.Size() != f.ContentSize || fi.ModTime().UnixNano() != f.ContentModTime {
+			mismatched[f.DirRelKey] = true
+		}
+	}
+	return mismatched
+}
+
+// prevCompanionContentCursors 上轮快照的被采集文件游标（相对路径 → 游标）：
+// 规则未变的重铸轮携带——命中集未变则游标仍有效。
+func prevCompanionContentCursors(prev *RecognitionSnapshot) map[string]companionContentCursor {
+	if prev == nil {
+		return nil
+	}
+	var out map[string]companionContentCursor
+	for _, f := range prev.Files {
+		if f.ContentSize == 0 && f.ContentModTime == 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]companionContentCursor)
+		}
+		out[f.RelPath] = companionContentCursor{Size: f.ContentSize, ModTime: f.ContentModTime}
+	}
+	return out
+}
+
+// skipCorrectionEvalFace 跳过集修正的求值面装配：forced 命中的跳过目录整目录
+// 拉回求值面（直接文件全部追加进求值清单），并从跳过复用集摘除——该目录
+// 结论不再从旧快照复用。赋值影响面与内容游标失配面共用本手法。
+func skipCorrectionEvalFace(base []FileEntry, all []FileEntry, prevSkipped map[string]bool, forced map[string]bool) []FileEntry {
+	for _, f := range all {
+		if dirKey := dirRelKeyOf(f.RelPath); prevSkipped[dirKey] && forced[dirKey] {
+			base = append(base, f)
+		}
+	}
+	for dirKey := range prevSkipped {
+		if forced[dirKey] {
+			delete(prevSkipped, dirKey)
+		}
+	}
+	return base
 }
 
 // recognitionDoneMessage 识别完成消息（整库全量轮与赋值增量重算轮共用同一
@@ -3123,11 +3511,12 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 		Done: len(enumRes.Files), Total: len(enumRes.AllFiles),
 	})
 
-	// 跳过集修正：赋值影响面的跳过目录整目录强制重算（赋值覆盖维度需重求
-	// 值）。等值口径（旧形态目录赋值展开为每文件条目=子树每目录都命中）：
-	// 目录 D 复活⟺D 自身或祖先链存在目录条目，或 D 直属文件存在文件例外
-	// ——前者覆盖子树全部目录（与旧展开等值），后者锚定单目录（旧形态下
-	// 该目录的每文件条目至少含此例外）。
+	// 跳过集修正：两类影响面命中的跳过目录整目录强制重算。其一为赋值影响面
+	//（赋值覆盖维度需重求值）。等值口径（旧形态目录赋值展开为每文件条目=
+	// 子树每目录都命中）：目录 D 复活⟺D 自身或祖先链存在目录条目，或 D
+	// 直属文件存在文件例外——前者覆盖子树全部目录（与旧展开等值），后者
+	// 锚定单目录（旧形态下该目录的每文件条目至少含此例外）。其二为内容游标
+	// 失配面（被采集文件的原地内容修改，见 contentCursorMismatchDirs）。
 	assignDirs := make(map[string]bool, len(sess.Assignments))
 	for key := range sess.Assignments {
 		if isDirAssignmentKey(key) {
@@ -3149,18 +3538,19 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 	for _, dirKey := range enumRes.SkippedDirKeys {
 		prevSkipped[dirKey] = true
 	}
-	evalFiles := enumRes.Files
-	for _, f := range enumRes.AllFiles {
-		dirKey := dirRelKeyOf(f.RelPath)
-		if prevSkipped[dirKey] && (assignDirs[dirKey] || dirAssignmentActive(dirKey)) {
-			evalFiles = append(evalFiles, f)
-		}
+	forcedDirs := make(map[string]bool, len(assignDirs))
+	for dirKey := range assignDirs {
+		forcedDirs[dirKey] = true
 	}
 	for dirKey := range prevSkipped {
-		if assignDirs[dirKey] || dirAssignmentActive(dirKey) {
-			delete(prevSkipped, dirKey)
+		if dirAssignmentActive(dirKey) {
+			forcedDirs[dirKey] = true
 		}
 	}
+	for dirKey := range contentCursorMismatchDirs(root, prev, prevSkipped) {
+		forcedDirs[dirKey] = true
+	}
+	evalFiles := skipCorrectionEvalFace(enumRes.Files, enumRes.AllFiles, prevSkipped, forcedDirs)
 
 	// 库内谓词索引（识别干跑注入求值：谓词规则与名字命中线索都吃它）
 	var lib *LibraryIndex
@@ -3193,6 +3583,19 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 	// 聚合段（汇流后的独立通道）：群归属与元数据结论已定，聚合只消费既有
 	// 结论不改写——标识等值并组后把聚合归属落回各文件结论。
 	runAggregationOnConclusions(conclusions, evalScan, treeScan, enabledRules, lib, aggTypes)
+
+	// 伴随说明文件内容采集（条件命中登记之后、声明产出之前）：按命中集一次
+	// 采齐内容片段并注入求值输入面——纯求值只消费注入的数据字段，读盘集中
+	// 在此步（任务流扫描不经本通路）。采集同步铸文件级游标入快照，供下轮
+	// 增量比对。
+	companionSamples, contentCursors := collectCompanionContentSet(
+		companionContentHitSet(enabledRules, conclusions), enumRes.AllFiles)
+	applyCompanionContent(evalScan, companionSamples)
+	applyCompanionContent(treeScan, companionSamples)
+	// 第二相（整段取值产声明）：内容注入完成后对绑定行命中的文件按内容绑定
+	// 产声明并入结论（合成重放，赋值覆盖重放）——纯求值只消费注入的数据
+	// 字段，与第一相命中集共用同一求值基座。
+	applyCompanionContentDeclarations(conclusions, evalScan, enabledRules, sess.Assignments)
 	m.publishRecognitionEvent(&workbenchFrontendEvent{
 		Kind: workbenchEventRecognitionProgress, Root: root, Phase: recogPhaseEvaluate,
 		Done: len(conclusions), Total: len(evalFiles),
@@ -3216,6 +3619,7 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 		evaluatorBuildID: evalBuildID,
 		ignoredTargets:   ignoredTargets, confirmedTargets: confirmedTargets,
 		confirmedSetIDs: sess.ConfirmedSetIDs,
+		contentCursors:  contentCursors,
 	})
 
 	// 差异集：与上一份快照的文件级结论对比（prev 为 nil 时为全量新增形态）——
@@ -3264,6 +3668,7 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 		conclusions[i].AggWorkKey = assigns[i].WorkKey
 		conclusions[i].AggTrackRole = assigns[i].TrackRole
 		conclusions[i].AggWorkType = assigns[i].WorkType
+		conclusions[i].AggCompanion = assigns[i].Companion
 	}
 }
 

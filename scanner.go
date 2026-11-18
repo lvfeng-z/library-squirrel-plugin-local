@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 // FileEntry 扫描到的文件条目
@@ -212,4 +218,160 @@ func (s *Scanner) Enumerate(prevDirMtimes map[string]int64) (*EnumerateResult, e
 		return nil, err
 	}
 	return result, nil
+}
+
+// —— 伴随说明文件的内容片段采集（识别轮按规则命中集的一次性读盘）——
+
+// companionContentMaxBytes 单文件内容片段的采集上限：命中集文件读盘量的
+// 安全界，超出截断。
+const companionContentMaxBytes = 64 << 10
+
+// CompanionContent 单个伴随说明文件的内容片段采集产物。
+type CompanionContent struct {
+	// Text 为解码后的内容片段：编码回退链的终态文本，不可解码字节以替换
+	// 字符在场（替换字符可见即回退事实的呈现）。
+	Text string
+	// Truncated 标记内容超出采集上限被截断（内容声明来源标注截断事实的
+	// 数据位）。
+	Truncated bool
+}
+
+// companionContentCursor 文件级内容游标：尺寸+修改时间（UnixNano）。内容
+// 原地修改不改父目录 mtime，目录级增量跳过检不到内容变化，被采集文件以此
+// 逐文件比对新鲜度（失配即拉回求值面，接线见识别轮）。
+type companionContentCursor struct {
+	Size    int64
+	ModTime int64
+}
+
+// companionContentCursorOf 从文件信息取内容游标。
+func companionContentCursorOf(fi os.FileInfo) companionContentCursor {
+	return companionContentCursor{Size: fi.Size(), ModTime: fi.ModTime().UnixNano()}
+}
+
+// collectCompanionContent 采集单文件的内容片段：上限读入（多读一字节判定
+// 截断）→ 二进制嗅探（首段含 NUL 字节即拒读：零内容零声明，按来源缺失
+// 呈现）→ 编码回退链解码。ok=false 为拒读（二进制嗅探命中或读盘失败）；
+// stat 成功时游标仍然返回——拒读不是永久态，文件再编辑后游标失配照常拉回
+// 求值面。
+func collectCompanionContent(fullPath string) (sample CompanionContent, cursor companionContentCursor, ok bool) {
+	f, err := os.Open(fullPath)
+	if err != nil {
+		return CompanionContent{}, companionContentCursor{}, false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return CompanionContent{}, companionContentCursor{}, false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, companionContentMaxBytes+1))
+	if err != nil {
+		return CompanionContent{}, companionContentCursorOf(fi), false
+	}
+	if len(data) > companionContentMaxBytes {
+		data = data[:companionContentMaxBytes]
+		sample.Truncated = true
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return CompanionContent{}, companionContentCursorOf(fi), false
+	}
+	sample.Text = decodeCompanionText(data)
+	return sample, companionContentCursorOf(fi), true
+}
+
+// collectCompanionContentSet 按命中集一次采齐（不逐目录流式）：hitRels 为
+// 内容绑定行命中的文件相对路径，allFiles 为枚举全量清单（相对路径 → 完整
+// 路径解析）。返回内容片段表（拒读者缺席）与游标表（stat 成功的命中文件，
+// 含拒读者）。清单外路径静默跳过——文件增删由下轮枚举对账。
+func collectCompanionContentSet(hitRels []string, allFiles []FileEntry) (samples map[string]CompanionContent, cursors map[string]companionContentCursor) {
+	if len(hitRels) == 0 {
+		return nil, nil
+	}
+	fullByRel := make(map[string]string, len(allFiles))
+	for _, f := range allFiles {
+		fullByRel[f.RelPath] = f.FullPath
+	}
+	samples = make(map[string]CompanionContent, len(hitRels))
+	cursors = make(map[string]companionContentCursor, len(hitRels))
+	seen := make(map[string]bool, len(hitRels))
+	for _, rel := range hitRels {
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		full, listed := fullByRel[rel]
+		if !listed {
+			continue
+		}
+		sample, cursor, ok := collectCompanionContent(full)
+		if cursor.ModTime != 0 || cursor.Size != 0 {
+			cursors[rel] = cursor
+		}
+		if ok {
+			samples[rel] = sample
+		}
+	}
+	return samples, cursors
+}
+
+// applyCompanionContent 把采集产物注入求值输入面：命中集文件的内容片段与
+// 截断标记写入对应条目（缺席者保持零值——纯求值只消费注入的数据字段，
+// 读盘不进求值函数）。
+func applyCompanionContent(files []ScanFile, samples map[string]CompanionContent) {
+	if len(samples) == 0 {
+		return
+	}
+	for i := range files {
+		if s, ok := samples[files[i].RelPath]; ok {
+			files[i].CompanionText = s.Text
+			files[i].CompanionTruncated = s.Truncated
+		}
+	}
+}
+
+// decodeCompanionText 内容片段的编码回退链：BOM 判定 → UTF-8 合法性校验 →
+// GBK 解码 → 不可解码字节按替换字符读入（GBK 解码器对失配序列自置替换
+// 字符，链尾天然以替换字符收尾）。
+func decodeCompanionText(data []byte) string {
+	switch {
+	case bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}):
+		return decodeUTF8WithReplacement(data[3:])
+	case bytes.HasPrefix(data, []byte{0xFF, 0xFE}):
+		return decodeUTF16WithReplacement(data[2:], false)
+	case bytes.HasPrefix(data, []byte{0xFE, 0xFF}):
+		return decodeUTF16WithReplacement(data[2:], true)
+	}
+	if utf8.Valid(data) {
+		return string(data)
+	}
+	out, err := simplifiedchinese.GBK.NewDecoder().Bytes(data)
+	if err != nil {
+		return strings.ToValidUTF8(string(data), string(utf8.RuneError))
+	}
+	return string(out)
+}
+
+// decodeUTF8WithReplacement UTF-8 解码（BOM 已剥）：失配字节按替换字符读入。
+func decodeUTF8WithReplacement(data []byte) string {
+	if utf8.Valid(data) {
+		return string(data)
+	}
+	return strings.ToValidUTF8(string(data), string(utf8.RuneError))
+}
+
+// decodeUTF16WithReplacement UTF-16 解码（BOM 已剥）：奇数尾字节丢弃，落单
+// 代位由标准库按替换字符置换。
+func decodeUTF16WithReplacement(data []byte, bigEndian bool) string {
+	if len(data)%2 != 0 {
+		data = data[:len(data)-1]
+	}
+	units := make([]uint16, len(data)/2)
+	for i := range units {
+		lo, hi := data[2*i], data[2*i+1]
+		if bigEndian {
+			lo, hi = hi, lo
+		}
+		units[i] = uint16(lo) | uint16(hi)<<8
+	}
+	return string(utf16.Decode(units))
 }

@@ -51,6 +51,11 @@ const (
 	//（经裁决生成的规则以常量动作产出，信任级高于全部规则推导来源，见
 	// pipeline.go 的 sourceTrust）。
 	SourceAdjudication SourceKind = "adjudication"
+	// SourceContent 表示伴随说明内容：值来自识别轮按内容绑定命中集采集注入
+	// 的说明文件内容片段整段。内容来源只经聚合规则的内容绑定面成立（元数据
+	// 规则的提取动作携带内容取值时载入即拒）；声明在场判定（when 谓词）不
+	// 消费该来源——条件引用按未知来源拒绝（knownSourceKinds 不收录）。
+	SourceContent SourceKind = "content"
 )
 
 // ExtractionFrom 为提取动作的取值来源。
@@ -80,6 +85,11 @@ const (
 	// 供给方由本规则目录行的 refScope 附件声明、动作以 RefRule 指明——取值经
 	// 限定键「供给方ID.rN.组名」注入，供给方捕获私有作用域不变。
 	FromRefCapture ExtractionFrom = "refCapture"
+	// FromContent 表示取伴随说明文件的内容片段整段（识别轮按聚合规则内容绑定
+	// 的命中集采集注入的数据字段）。内容取值只经聚合规则的内容绑定面成立：
+	// 元数据规则的提取动作携带该来源时载入即拒（内容绑定是聚合规则的窄产出），
+	// 绑定行的整段取值不走提取动作分支（见 pipeline.go 的内容声明产出）。
+	FromContent ExtractionFrom = "content"
 )
 
 // SynthStrategy 为同一含义维度多来源候选值的合成策略。
@@ -141,6 +151,9 @@ type MetadataDeclaration struct {
 	// AlsoRuleIDs 为与本声明同值并入的其他规则 ID（按并入先后保序；
 	// 并入只补记出处，本声明的维度、值、来源与角色不受影响）。
 	AlsoRuleIDs []string `json:"alsoRuleIds,omitempty"`
+	// Truncated 标记声明值取自超采集上限被截断的伴随说明内容片段（来源=内容
+	// 的声明专属）：内容不完整的事实随声明携带，供来源呈现标注。
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // DeclPredicate 声明谓词：某来源载体在某含义维度上的声明是否在场
@@ -478,15 +491,32 @@ type TrackAssign struct {
 	Role string `json:"role"`
 }
 
-// 处置维度取值：伴随轨行在分轨入口中的处置两值。
+// 处置维度取值：伴随轨行处置的规则级历史两值。处置语义由行级指派合成表达
+// ——分轨入口指派角色=轨道行（导入为资源）；内容绑定勾选=内容产出元数据；
+// 两者兼有=双重身份（轨道行照常导入+内容来源，导入身份不受绑定影响）；仅
+// 绑定未分轨=伴随说明文件处置（归进作品、无轨、不导入、不独立成作品）；两
+// 者皆无=不参与成员判定。规则级字段仅为旧档兼容归一保留（空串归一 track）。
 const (
-	// CompanionUseTrack 表示轨道承载：随作品导入成为资源的轨（本批唯一可写值）。
+	// CompanionUseTrack 表示轨道承载：随作品导入成为资源的轨（规则级唯一可写
+	// 值，空串载入归一为此值）。
 	CompanionUseTrack = "track"
-	// CompanionUseMetadata 表示纯元数据承载：文件归属作品但无轨、不导入、不
-	// 独立成作品（其内容→元数据的消费随内容解析批次启用）。本批留位不实现：
-	// 档案载入校验拒绝该值（不做半截语义），编辑面不出该选项。
+	// CompanionUseMetadata 表示纯元数据承载：该处置由行级指派合成表达（仅被
+	// 内容绑定勾选且未分配轨道的行）；规则级此值不再使用——档案载入校验拒绝
+	// 并指路行级指派。
 	CompanionUseMetadata = "metadata"
 )
+
+// ContentBinding 为聚合产出的内容绑定（「元数据文件」指派的落档形态）：把
+// 本规则一条条件行命中文件的伴随说明内容整段声明到某含义维度。绑定行可为
+// 轨行（照常导入，内容叠加产出）或说明行（不导入——处置归聚合段）；一期
+// 零参数（整段→单维度），「单文件解析逻辑→单/多维度」为该结构的参数化
+// 扩展位、本批不设计；同一行不得重复绑定（一行内容只去一个维度）。
+type ContentBinding struct {
+	// Row 为被指派的条件行号（1 起顶层序号，须在本规则条件行范围内）。
+	Row int `json:"row"`
+	// Dimension 为内容整段声明到的含义维度。
+	Dimension MetadataDimension `json:"dimension"`
+}
 
 // AggregateProduction 为聚合规则的分轨入口（聚合成作品产出）：类型先行——
 // 作品类型选自运行时资源类型注册表投影（内置 6 类+插件自定义类型），轨行→
@@ -498,7 +528,13 @@ type AggregateProduction struct {
 	// Tracks 为各轨行的角色分配。
 	Tracks []TrackAssign `json:"tracks"`
 	// CompanionUse 为伴随轨行的处置维度（track|metadata；空串按 track 载入）。
+	// 处置语义由行级指派合成表达（分轨入口+内容绑定），本字段仅为旧档兼容
+	// 归一（metadata 载入即拒并指路行级指派）。
 	CompanionUse string `json:"companionUse,omitempty"`
+	// ContentBindings 为内容绑定列表（行→维度）：绑定行命中文件的伴随说明内容
+	// 产声明——聚合规则的窄产出，提取动作互斥不变量的唯一除外条款（仅整段→
+	// 单维度、零参数）。空=无内容产出（现状行为，旧档零值兼容）。
+	ContentBindings []ContentBinding `json:"contentBindings,omitempty"`
 }
 
 // RuleEntry 为一条完整规则：模式 + 提取动作 + 合成策略。
@@ -947,6 +983,9 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 		if err := validateAggregateEntry(rj); err != nil {
 			return nil, err
 		}
+		if err := validateContentBindings(rj); err != nil {
+			return nil, err
+		}
 	}
 	// 组合规则（refs 非空）的空条件表落档形态已随 refs 退役消亡：空条件表
 	// 一律拒绝（无条件行的普通规则=恒命中，违背 v4 语义）。
@@ -1045,13 +1084,14 @@ func condxTplTailKnownExt(tpl string) (string, bool) {
 }
 
 // validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（轨行+作品标识
-// 声明+分轨入口）、与其他机制互斥（提取动作/模式树旧形态）、轨行
-// 只收普通条件行（平行选择器——括号子组、行级非、跨行相等值校验均拒绝：
-// 轨行独立求值，相等门引用他行绑定恒不可得）、标识与分轨的行号及捕获名引用
-// 存在、处置维度 metadata 留位值载入即拒（沿未知词条「载入即拒绝」先例——
-// 不实现半截语义）、文件轨行模板尾字面误写扩展名拒收（模板对去扩展名的文件
-// 名求值，该形态恒不命中——见 knownFileExtsForTplTail）。空串处置维度归一为
-// track。
+// 声明+分轨入口）、与其他机制互斥（提取动作/模式树旧形态；内容绑定为聚合
+// 规则自带的窄产出，不占提取动作——互斥不变量的除外条款见
+// validateContentBindings）、轨行只收普通条件行（平行选择器——括号子组、
+// 行级非、跨行相等值校验均拒绝：轨行独立求值，相等门引用他行绑定恒不可
+// 得）、标识与分轨的行号及捕获名引用存在、处置维度按行级指派口径归一
+//（空串/track 归一 track；metadata 为被行级指派取代的拼写，载入即拒并指
+// 路）、文件轨行模板尾字面误写扩展名拒收（模板对去扩展名的文件名求值，
+// 该形态恒不命中——见 knownFileExtsForTplTail）。
 func validateAggregateEntry(rj *ruleEntryJSON) error {
 	if rj.Aggregate == nil {
 		return fmt.Errorf("聚合规则 %q 缺少分轨入口（aggregate）", rj.ID)
@@ -1066,7 +1106,7 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 	case "", CompanionUseTrack:
 		rj.Aggregate.CompanionUse = CompanionUseTrack
 	case CompanionUseMetadata:
-		return fmt.Errorf("聚合规则 %q 的处置维度 metadata（纯元数据承载）为留位值，暂不支持", rj.ID)
+		return fmt.Errorf("聚合规则 %q 的处置维度 metadata（纯元数据承载）由行级指派合成表达（分轨入口+内容绑定勾选），规则级该值不再使用", rj.ID)
 	default:
 		return fmt.Errorf("聚合规则 %q 的处置维度非法: %q（可用值 track）", rj.ID, rj.Aggregate.CompanionUse)
 	}
@@ -1162,6 +1202,40 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 	return nil
 }
 
+// knownBindingDimensions 为内容绑定可声明的含义维度合法取值集（五个维度
+// 枚举全值——内容整段可声明到任一维度；与 when 谓词的维度口径互不相干）。
+var knownBindingDimensions = map[MetadataDimension]bool{
+	DimAuthor: true, DimTag: true, DimTitle: true, DimCollection: true,
+	DimDescription: true,
+}
+
+// validateContentBindings 聚合规则内容绑定的载入校验：绑定行号在本规则条件行
+// 范围内、维度为合法维度枚举、同一行不得重复绑定（一期一行内容只去一个维度
+// ——「单文件→多维度」为扩展位不在本批）。内容绑定是「聚合规则不带提取动作」
+// 不变量的除外条款（窄产出仅整段→单维度、零参数），提取动作面的互斥校验维持
+// 不变；调用前须已过 validateAggregateEntry（行结构合法性与条件行数以此为准）。
+func validateContentBindings(rj *ruleEntryJSON) error {
+	if rj.Aggregate == nil || len(rj.Aggregate.ContentBindings) == 0 {
+		return nil
+	}
+	total := len(rj.Conditions)
+	seenRows := make(map[int]bool, len(rj.Aggregate.ContentBindings))
+	for i := range rj.Aggregate.ContentBindings {
+		b := &rj.Aggregate.ContentBindings[i]
+		if b.Row < 1 || b.Row > total {
+			return fmt.Errorf("聚合规则 %q 的内容绑定第 %d 项行号 %d 越界（共 %d 行）", rj.ID, i+1, b.Row, total)
+		}
+		if seenRows[b.Row] {
+			return fmt.Errorf("聚合规则 %q 的内容绑定第 %d 项与在先项重复指派第 %d 行（一行内容只去一个维度）", rj.ID, i+1, b.Row)
+		}
+		seenRows[b.Row] = true
+		if !knownBindingDimensions[b.Dimension] {
+			return fmt.Errorf("聚合规则 %q 的内容绑定第 %d 项维度非法: %q（作者/标签/标题/作品集/描述）", rj.ID, i+1, b.Dimension)
+		}
+	}
+	return nil
+}
+
 // knownSourceKinds / knownDimensions 为提取动作构造期校验用的合法取值集。
 var knownSourceKinds = map[SourceKind]bool{
 	SourceDir: true, SourceFilename: true, SourceConstant: true, SourceGroup: true,
@@ -1205,6 +1279,12 @@ func validateExtractionsCore(ruleID string, providers []string, pattern Pattern,
 
 	for i := range actions {
 		action := &actions[i]
+		if action.From == FromContent {
+			// 内容来源只经聚合规则的内容绑定面成立：元数据规则的提取动作携带
+			// 内容取值即拒绝（不留静默零产出形态）。
+			return fmt.Errorf("规则 %q 的第 %d 条提取动作为内容取值：元数据规则不得声明内容来源（内容来源只经聚合规则的内容绑定面成立）",
+				ruleID, i+1)
+		}
 		if action.From == FromRefCapture {
 			// 供给方捕获（作用域附件消费规则专用）：refRule 必填且须属本条
 			// 供给方集；captureName 必填（对齐 FromCapture 的必填口径）。
@@ -2080,17 +2160,24 @@ func presetAggFileRow(tpl, ext string) CondxRow {
 
 // 预置种子规则的稳定 ID（恢复预置按 ID 判缺席）。
 const (
-	presetAggVideoSubtitleID    = "preset-agg-video-subtitle"
-	presetAggArticleImageTextID = "preset-agg-article-image-text"
-	presetAggVideoDesc          = "视频+字幕聚合为 video 作品（预置）"
-	presetAggArticleDesc        = "一图一文本聚合为 article 作品（预置）"
+	presetAggVideoSubtitleID        = "preset-agg-video-subtitle"
+	presetAggImageCompanionTextID   = "preset-agg-image-companion-text"
+	presetAggArticleImageTextID     = "preset-agg-article-image-text"
+	presetAggVideoDesc              = "视频+字幕聚合为 video 作品（预置）"
+	presetAggImageCompanionTextDesc = "单图+说明文本聚合为 image 作品（预置）"
+	presetAggArticleDesc            = "一图一文本聚合为 article 作品（预置）"
 )
 
-// PresetAggregateRules 预置聚合种子规则（两条，无特权机制——就是普通聚合规则）：
+// PresetAggregateRules 预置聚合种子规则（三条，无特权机制——就是普通聚合规则）：
 //
 //   - 种子一「视频+字幕→video」：各视频扩展与各字幕扩展各一行（视频轨行的
 //     作业名模板不含扩展名——扩展名由谓词承载；字幕轨行用「{作品}.{任意}」
 //     带锚形态吞掉语言段，如 ep01.zh.srt 的标识取 ep01）；
+//   - 种子三「单图+说明文本→image」：jpg/png/webp 图片行分配 image 轨（必含，
+//     承载主导文件），txt 说明行不分配轨道、自带内容绑定→描述——同名 txt 归
+//     进图片作品（伴随说明成员：无轨、不导入、不独立成作品，内容整段作作品
+//     描述）。条目排在图文种子之前：同名的图片+文本对按「图片作品+伴随说明」
+//     吸收，异名对与禁用本种子时图文种子的正文轨照旧；
 //   - 种子二「一图一文本→article」：txt 正文行 + jpg/png/webp 内嵌图行。
 //
 // 首次档案初始化写入（来源=预置），此后与用户条目同权——规则管理面可见、可
@@ -2121,6 +2208,16 @@ func PresetAggregateRules() []RuleEntry {
 		articleRows = append(articleRows, presetAggFileRow("{作品}", e.ext))
 		articleTracks = append(articleTracks, TrackAssign{Row: len(articleRows), Role: e.role})
 	}
+	// 单图+说明文本：图片行各扩展一行分配 image 轨，txt 说明行不分配轨道——
+	// 指派为元数据文件（内容绑定→描述），归进图片作品作伴随说明成员。
+	imageCompanionExts := []string{".jpg", ".png", ".webp"}
+	imageCompanionRows := make([]CondxRow, 0, len(imageCompanionExts)+1)
+	imageCompanionTracks := make([]TrackAssign, 0, len(imageCompanionExts))
+	for _, ext := range imageCompanionExts {
+		imageCompanionRows = append(imageCompanionRows, presetAggFileRow("{作品}", ext))
+		imageCompanionTracks = append(imageCompanionTracks, TrackAssign{Row: len(imageCompanionRows), Role: contract.StoreTypeImage})
+	}
+	imageCompanionRows = append(imageCompanionRows, presetAggFileRow("{作品}", ".txt"))
 	return []RuleEntry{
 		{
 			ID:          presetAggVideoSubtitleID,
@@ -2134,6 +2231,23 @@ func PresetAggregateRules() []RuleEntry {
 				WorkType:     sdkdto.ResourceTypeVideo,
 				Tracks:       videoTracks,
 				CompanionUse: CompanionUseTrack,
+			},
+		},
+		{
+			ID:          presetAggImageCompanionTextID,
+			Description: presetAggImageCompanionTextDesc,
+			Source:      RuleSourcePreset,
+			Enabled:     true,
+			Category:    RuleCategoryAggregate,
+			Conditions:  imageCompanionRows,
+			Identity:    []IdentityPart{{Row: 1, Capture: "work"}},
+			Aggregate: &AggregateProduction{
+				WorkType:     sdkdto.ResourceTypeImage,
+				Tracks:       imageCompanionTracks,
+				CompanionUse: CompanionUseTrack,
+				// 说明行（末行 txt）自带内容绑定→描述：勾选即「元数据文件」
+				// 指派，未分配轨道=伴随说明处置。
+				ContentBindings: []ContentBinding{{Row: len(imageCompanionRows), Dimension: DimDescription}},
 			},
 		},
 		{

@@ -57,8 +57,13 @@ type SelectableWork struct {
 	// DirRelKey 所属目录键（'/' 路径，库根直下为空串；聚合作品=主导文件目录键）。
 	DirRelKey string `json:"dirRelKey"`
 	// Files 作品全部轨道的相对路径（单文件作品恒一条；聚合作品=成员清单，首位
-	//=主导文件，余按快照序）。
+	//=主导文件，余按快照序；伴随说明成员随作品联动，亦在清单内）。
 	Files []string `json:"files"`
+	// CompanionCount 伴随说明成员数（聚合作品专属；清单内含说明成员的选择域
+	// 计数附注数据位——「含说明 N」「另有说明文件 N」类文案由前端按本位与
+	// Files 数派生，说明成员不进创建链）。单文件作品与无说明成员的聚合作品
+	// 零值省略。
+	CompanionCount int `json:"companionCount,omitempty"`
 	// SetKey 所属集键（仅序列群成员非空；落单文件不属任何集）。
 	SetKey string `json:"setKey,omitempty"`
 	// Selectable 可选=文件已识别且无待裁决（未识别与待裁决均不可选——
@@ -192,12 +197,18 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 					DirRelKey: f.DirRelKey,
 					Files:     []string{f.RelPath},
 				}
+				if f.AggCompanion {
+					work.CompanionCount++
+				}
 				aggByWork[f.AggWorkKey] = work
 				domain.Works = append(domain.Works, work)
 				domain.byWork[work.WorkID] = work
 				continue
 			}
 			work.Files = append(work.Files, f.RelPath)
+			if f.AggCompanion {
+				work.CompanionCount++
+			}
 			if f.RelPath == strings.TrimPrefix(f.AggWorkKey, workKeyPrefixFile) {
 				// 主导文件=作品键对位成员：先见伴随成员时，主导文件挪至 Files
 				// 首位并以其目录键为作品目录键（后续集归属/呈现态按 Files 首位

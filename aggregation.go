@@ -162,6 +162,9 @@ type aggRulePlan struct {
 	identity []IdentityPart
 	// tracks 为分轨入口（轨行→角色分配）。
 	tracks []TrackAssign
+	// metaRows 为被指派为元数据文件的行号集合（内容绑定行——「元数据文件」
+	// 指派的行；轨行兼有绑定=双重身份，照常导入）。无绑定时为空集。
+	metaRows map[int]bool
 	// requiredRow 为必含轨行号集合（所分配角色在类型规约中 Min≥1）。
 	requiredRow map[int]bool
 }
@@ -220,10 +223,28 @@ func buildAggregationPlans(rules []RuleEntry, types *resourceTypeIndex) []*aggRu
 			rowIsSeq:    rowIsSeq,
 			identity:    rule.Identity,
 			tracks:      rule.Aggregate.Tracks,
+			metaRows:    metadataAssignedRows(rule.Aggregate),
 			requiredRow: required,
 		})
 	}
 	return plans
+}
+
+// metadataAssignedRows 聚合产出上被指派为元数据文件的行号集合：内容绑定行
+//（行→维度配置即「元数据文件」指派——勾选即指派；轨行兼有绑定=双重身份，
+// 照常导入）。无内容绑定时为空集——成员判定维持只认分轨行的口径（无指派=
+// 现状行为，旧档零值兼容）。
+func metadataAssignedRows(agg *AggregateProduction) map[int]bool {
+	if agg == nil || len(agg.ContentBindings) == 0 {
+		return nil
+	}
+	rows := make(map[int]bool, len(agg.ContentBindings))
+	for _, b := range agg.ContentBindings {
+		if b.Row >= 1 {
+			rows[b.Row] = true
+		}
+	}
+	return rows
 }
 
 // —— 单文件的轨行命中面与标识解析 ——
@@ -298,16 +319,30 @@ func (h aggFileRowHits) hitsRequiredRow(required map[int]bool) bool {
 	return false
 }
 
+// hitsAnyRow 报告该文件是否命中行号集合中的任一行（集合为空或行号越界时
+// 恒假）——被指派为元数据文件的行的命中面。
+func (h aggFileRowHits) hitsAnyRow(rows map[int]bool) bool {
+	for row := range rows {
+		if row >= 1 && row <= len(h) && h[row-1] != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // —— 并组主算法 ——
 
 // aggAssignment 单文件的聚合归属结论：WorkKey 为聚合作品键（"f:"+主导文件
 // 相对路径，与选择域的作品键同形——键前缀维持单一）；TrackRole 为本文件的
 // 轨道角色；WorkType 为选中规则声明的作品类型（聚合定义的作品类型，消费面=
-// 创建链子行 ResourceType）；WorkKey 空=无聚合（独立作品，其余字段同空）。
+// 创建链子行 ResourceType）；Companion 为伴随说明成员标记（仅被指派为元数据
+// 文件、未分配轨道的成员——归进作品、无轨；轨道成员含轨行兼绑定的双重身份
+// 成员，照常导入不带标记）。WorkKey 空=无聚合（独立作品，其余字段同空）。
 type aggAssignment struct {
 	WorkKey   string
 	TrackRole string
 	WorkType  string
+	Companion bool
 }
 
 // aggregateGrouping 标识等值并组（纯函数、输入序确定）：
@@ -315,6 +350,10 @@ type aggAssignment struct {
 //   - 轨行按既有行求值机制逐文件求命中（捕获绑定、目录命中、序列群组分析全部
 //     走同一 Pattern.Evaluate——目录捕获的目录间共享与序列群键的组内共享由此
 //     自然成立：同目录文件解析出同名目录捕获值、同群组成员解析出同群键）；
+//   - 成员判定=两处指派合成的命中面：命中分轨行（轨道行，导入为资源；兼有
+//     内容绑定的轨行=双重身份，照常导入+内容来源，导入身份不受绑定影响）或
+//     命中被指派为元数据文件的行（仅绑定未分轨=伴随说明成员：归进作品、无
+//     轨、不计必含轨单位）；两处皆未命中=不参与成员判定；
 //   - 标识值相等者并成一件作品（文件名同名/序列成组/目录成组三种形态同一语法）；
 //   - 必含轨行每组恰一命中才成立：文件/目录行按命中文件数计，序列行按相异群键
 //     数计（集合轨=整序列组 N 存储位计 1 单位）；≠1 即歧义（含零命中），该组
@@ -347,8 +386,8 @@ func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryI
 			}
 			hits[i] = rowHits
 		}
-		// 成员收集：标识可得、命中至少一条分轨行、且尚未被在先规则归属；
-		// 组序=标识值首成员出现序，组内成员按扫描序（确定性）。
+		// 成员收集：标识可得、命中分轨行或被指派为元数据文件的行、且尚未被
+		// 在先规则归属；组序=标识值首成员出现序，组内成员按扫描序（确定性）。
 		type aggMemberGroup struct {
 			members []int
 		}
@@ -358,7 +397,8 @@ func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryI
 			if out[i].WorkKey != "" {
 				continue
 			}
-			if hits[i].trackRoleOf(plan.tracks) == "" {
+			role := hits[i].trackRoleOf(plan.tracks)
+			if role == "" && !hits[i].hitsAnyRow(plan.metaRows) {
 				continue
 			}
 			v, ok := hits[i].identityValue(plan.identity)
@@ -410,7 +450,11 @@ func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryI
 			workKey := "f:" + surface.files[lead].RelPath
 			workType := plan.rule.Aggregate.WorkType
 			for _, i := range g.members {
-				out[i] = aggAssignment{WorkKey: workKey, TrackRole: hits[i].trackRoleOf(plan.tracks), WorkType: workType}
+				// 未命中任何分轨行的成员（仅绑定行命中）=伴随说明成员：有归属、
+				// 无轨、带说明标记；轨道成员（含轨行兼绑定的双重身份成员）照常
+				// 落轨不带标记。
+				role := hits[i].trackRoleOf(plan.tracks)
+				out[i] = aggAssignment{WorkKey: workKey, TrackRole: role, WorkType: workType, Companion: role == ""}
 			}
 		}
 	}

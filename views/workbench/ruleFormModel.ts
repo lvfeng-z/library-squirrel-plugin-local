@@ -1793,11 +1793,26 @@ export interface TrackAssignForm {
   role: string
 }
 
-// 分轨入口表单形态（companionUse 处置维度本批唯一可写值 track，随载荷落档）。
+// 内容绑定（ContentBinding 表单形态；落 JSON 字段 row/dimension 与内核同形）：
+// 把本规则一条条件行命中文件的伴随说明内容整段声明到某含义维度——一期零参数
+//（整段→单维度），同一行不得重复绑定（一行内容只去一个维度）。绑定行可为轨行
+//（照常导入，内容叠加产出）或说明行（不导入——处置归聚合段）；「元数据文件」
+// 弹窗（MetadataFileDialog）是唯一指派面。
+export interface ContentBindingForm {
+  row: number
+  dimension: string
+}
+
+// 分轨入口表单形态。companionUse 为规则级历史字段——内核口径=规则级仅 track
+// 可写（空串载入归一 track；metadata 载入即拒并指路行级指派——处置语义由分轨
+// 入口（轨道行=导入）+内容绑定勾选（内容产出元数据）合成表达，见插件 Go 侧
+// validateAggregateEntry 的拒载文案）；前端表单不出现 metadata 选项，保存载荷
+// 恒归一 track 落档。contentBindings 为内容绑定（「元数据文件」指派的落档形态）。
 export interface AggregateProductionForm {
   workType: string
   tracks: TrackAssignForm[]
   companionUse: string
+  contentBindings?: ContentBindingForm[]
 }
 
 // 类型投影条目（ListResourceTypes 应答条目的前端投影：结构角色与基数）。投影缺席
@@ -1848,6 +1863,50 @@ export function aggTypeLabel(type: string): string {
 
 export function aggRoleLabel(role: string): string {
   return AGG_ROLE_LABELS[role] || role
+}
+
+// 角色短词（行标去「轨」形态，与 ParseView 确认框轨别摘要短名同口径）：元数据
+// 文件弹窗的轨道随行标注用——剧本1 帧2「（轨道：视频）」「（轨道：字幕）」、
+// 剧本2 帧2「（轨道：图片）」「（轨道：正文）」；未分配轨道行不取词（弹窗侧标
+// 注「（未分配轨道）」）。未知角色值照原样呈现。
+export const AGG_ROLE_SHORT_LABELS: Record<string, string> = {
+  videoMain: '视频',
+  subtitle: '字幕',
+  image: '图片',
+  document: '正文',
+  thumbnail: '缩略图',
+  videoTrack: '视频原料',
+  audioTrack: '音频原料',
+  audioMain: '音频主体'
+}
+
+export function aggRoleShortLabel(role: string): string {
+  return AGG_ROLE_SHORT_LABELS[role] || role
+}
+
+// 内容去向维度枚举（与内核 knownBindingDimensions 同集=五维度全值；一期=整段→
+// 单维度、零参数，决策2）。描述为本批主用形态列首；顺序即下拉呈现序。
+export const CONTENT_BINDING_DIMENSIONS: { value: string; label: string }[] = [
+  { value: 'description', label: '描述' },
+  { value: 'author', label: '作者' },
+  { value: 'tag', label: '标签' },
+  { value: 'title', label: '标题' },
+  { value: 'collection', label: '作品集' }
+]
+
+export function contentBindingDimensionLabel(dim: string): string {
+  const hit = CONTENT_BINDING_DIMENSIONS.find((d) => d.value === dim)
+  return hit ? hit.label : dim
+}
+
+// 产出区「元数据文件」入口摘要（剧本1 帧1「元数据文件（0）」/帧2 系统回应
+//「元数据文件（1）：第 3 行 → 描述」/剧本3 帧1 完成态；绑定按行号升序、
+// 多绑定以「、」连排）。SubpageRules 规则列表摘要同词复用。
+export function aggMetadataFileSummary(bindings: ContentBindingForm[] | null | undefined): string {
+  const list = (bindings || []).filter(Boolean).slice().sort((a, b) => a.row - b.row)
+  if (!list.length) return '元数据文件（0）'
+  const segs = list.map((b) => `第 ${b.row} 行 → ${contentBindingDimensionLabel(b.dimension)}`)
+  return `元数据文件（${list.length}）：${segs.join('、')}`
 }
 
 // 类型清单（分轨入口第一步的按钮清单）：滤除无结构角色的类型（unknown），返回
@@ -1990,8 +2049,12 @@ function condxTplTailKnownExt(tpl: string, known: Set<string>): string {
 // 相等均拒绝，与内核 validateAggregateEntry 同口径）+ 文件轨行模板尾部误写
 // 扩展名拒绝（模板只匹配去扩展名的文件名，该形态恒不命中——与内核同口径）+
 // 标识声明（行号界内、捕获在轨行声明、群键只选自序列行）+ 分轨入口（类型
-// 在册、角色∈类型规约、行号界内、必含角色被至少一轨行覆盖）。返回错误清单
-// （空=通过）；文案为编辑面锚文案。
+// 在册、角色∈类型规约、行号界内、必含角色被至少一轨行覆盖）+ 内容绑定（行号
+// 界内、维度合法枚举、同行不重复——与内核 validateContentBindings 同口径；勾选
+// 未选去向的行级拦截在元数据文件弹窗内）。companionUse 处置维度不进本闸门：
+// 内核口径=规则级仅 track 可写（metadata 载入即拒并指路行级指派——分轨入口+
+// 内容绑定勾选合成表达），前端表单不出 metadata 选项、载荷恒归一 track。返回
+// 错误清单（空=通过）；文案为编辑面锚文案。
 export function aggFormErrors(
   rows: CondxRowForm[],
   identity: IdentityPartForm[],
@@ -2107,6 +2170,27 @@ export function aggFormErrors(
         if (!covered) {
           errs.push('分轨入口未覆盖必含角色（类型规约 Min≥1 的角色）——主导文件无从判定，请把某轨行分到必含轨')
         }
+      }
+    }
+    // 内容绑定校验（「元数据文件」指派；与内核 validateContentBindings 同口径）：
+    // 行号界内、维度合法枚举、同行不重复（一期一行内容只去一个维度）。勾选未选
+    // 去向的行级拦截在元数据文件弹窗内（帧7 ⚠ 行），此处兜保存面。
+    const dims = new Set(CONTENT_BINDING_DIMENSIONS.map((d) => d.value))
+    const seenBindingRows = new Set<number>()
+    for (let i = 0; i < (prod.contentBindings || []).length; i++) {
+      const b = prod.contentBindings[i]
+      if (!b) continue
+      if (b.row < 1 || b.row > total) {
+        errs.push(`内容绑定第 ${i + 1} 项行号 ${b.row} 越界（共 ${total} 行）`)
+        continue
+      }
+      if (seenBindingRows.has(b.row)) {
+        errs.push(`内容绑定第 ${i + 1} 项与在先项重复指派第 ${b.row} 行（一行内容只去一个维度）`)
+        continue
+      }
+      seenBindingRows.add(b.row)
+      if (!b.dimension || !dims.has(b.dimension)) {
+        errs.push(`内容绑定第 ${i + 1} 项维度非法: "${b.dimension}"（内容去向只出 描述/作者/标签/标题/作品集 枚举）`)
       }
     }
   }

@@ -506,6 +506,103 @@ func TestCreateWorkInfoDescriptionDeclaration(t *testing.T) {
 	})
 }
 
+// TestCreateWorkInfoCompanionContentMerge 聚合作品执行期的作品级并入：载荷固化
+// 的成员内容声明与主导文件重算结论按并入规则合成——无冲突维度补位落库（描述
+// 取并入后首个声明、值原样入）、同维多值冲突按主导值落库（不并集成员值）、
+// 任务级赋值快照（裁决）压过内容冲突。无载荷声明的既有子行零变化。
+func TestCreateWorkInfoCompanionContentMerge(t *testing.T) {
+	newFetcher := func(rules ...RuleEntry) *LocalImportWorkFetcher {
+		data, err := json.Marshal(RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: rules})
+		if err != nil {
+			t.Fatalf("构造测试档案失败: %v", err)
+		}
+		return &LocalImportWorkFetcher{ctx: descWireCtx{
+			stubPluginCtx: stubPluginCtx{kv: map[string]string{RuleProfileKVKey: string(data)}},
+		}}
+	}
+	create := func(t *testing.T, h *LocalImportWorkFetcher, fileName string, decls []SnapDecl, assign *SessionAssignment) *sdkdto.WorkResponse {
+		t.Helper()
+		fp := FilePluginData{
+			SchemaVersion: 4, FullPath: "C:/lib/" + fileName, RelPath: fileName,
+			Hash: "abc123", Size: 10, ContentDecls: decls, Assignment: assign,
+		}
+		data, err := json.Marshal(fp)
+		if err != nil {
+			t.Fatalf("构造 PluginData 失败: %v", err)
+		}
+		pd := string(data)
+		resp, err := h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
+		if err != nil {
+			t.Fatalf("CreateWorkInfo 不应报错: %v", err)
+		}
+		return resp
+	}
+	authorsOf := func(resp *sdkdto.WorkResponse) []string {
+		var out []string
+		for _, a := range resp.LocalAuthors {
+			if a.AuthorName != nil {
+				out = append(out, *a.AuthorName)
+			}
+		}
+		return out
+	}
+	content := func(dim MetadataDimension, val, origin string) SnapDecl {
+		return SnapDecl{Dimension: string(dim), Value: val, Source: string(SourceContent), OriginName: origin}
+	}
+
+	// 重算基线：文件名模板产出作者声明（主导结论）
+	baseline := descWireFileRule(t, "author-rule", "{作者}",
+		ExtractionAction{Dimension: DimAuthor, From: FromCapture, CaptureName: condxVocab["作者"], Row: 1})
+
+	t.Run("描述补位落库且值原样入", func(t *testing.T) {
+		h := newFetcher(baseline)
+		long := "本字幕由个人制作，仅供学习交流。\n第二行说明保留换行原样落库。"
+		resp := create(t, h, "Isel.jpg", []SnapDecl{content(DimDescription, long, "Isel.nfo")}, nil)
+		if resp.Work.SiteWorkDescription == nil || *resp.Work.SiteWorkDescription != long {
+			t.Fatalf("成员内容描述应补位落库（含换行原样入），实得 %+v", resp.Work.SiteWorkDescription)
+		}
+		if got := authorsOf(resp); len(got) != 1 || got[0] != "Isel" {
+			t.Fatalf("主导文件名作者应照常落库，实得 %v", got)
+		}
+	})
+
+	t.Run("同维冲突按主导值落库", func(t *testing.T) {
+		h := newFetcher(baseline)
+		resp := create(t, h, "Isel.jpg", []SnapDecl{
+			content(DimAuthor, "いせる", "Isel.nfo"),
+			content(DimDescription, "说明正文", "Isel.nfo"),
+		}, nil)
+		got := authorsOf(resp)
+		if len(got) != 1 || got[0] != "Isel" {
+			t.Fatalf("冲突维应按主导值落库（不并集成员值），实得 %v", got)
+		}
+		if resp.Work.SiteWorkDescription == nil || *resp.Work.SiteWorkDescription != "说明正文" {
+			t.Fatalf("无冲突维度的成员声明应照常补位，实得 %+v", resp.Work.SiteWorkDescription)
+		}
+	})
+
+	t.Run("赋值裁决压过内容冲突", func(t *testing.T) {
+		h := newFetcher(baseline)
+		assign := &SessionAssignment{Author: "いせる"}
+		resp := create(t, h, "Isel.jpg", []SnapDecl{content(DimAuthor, "第三人", "Isel.nfo")}, assign)
+		got := authorsOf(resp)
+		if len(got) != 1 || got[0] != "いせる" {
+			t.Fatalf("任务级赋值快照（裁决）应压过内容冲突，实得 %v", got)
+		}
+	})
+
+	t.Run("无载荷声明零变化", func(t *testing.T) {
+		h := newFetcher(baseline)
+		resp := create(t, h, "Isel.jpg", nil, nil)
+		if resp.Work.SiteWorkDescription != nil {
+			t.Fatalf("无载荷声明时描述字段应缺席，实得 %q", *resp.Work.SiteWorkDescription)
+		}
+		if got := authorsOf(resp); len(got) != 1 || got[0] != "Isel" {
+			t.Fatalf("既有子行行为应零变化，实得 %v", got)
+		}
+	})
+}
+
 // TestBuildChildResponsesSiteKeyAndSingleParent 混归属子行构造与单父行形态：
 // 子行归属键与 FilePluginData 归属字段同构——真实域子行携 siteKey 与页级作品
 // ID 身份、local 回退子行键留空（继承父应答站点键）与哈希身份；父行为纯容器
@@ -892,6 +989,117 @@ func TestCreateAggregatedWorksSingleChildAndTracks(t *testing.T) {
 	// 批次摘要：2 件聚合作品=2 子行
 	if summary := m.takeCreateBatchSummary(root); summary.total != 2 {
 		t.Fatalf("批次摘要 total 应为 2（聚合作品单子行），实际 %+v", summary)
+	}
+}
+
+// TestEmitSelectedWorksCompanionMemberExcluded 说明成员的创建链处置：不哈希、
+// 不核对、不导子行（轨道清单与集序素材均不含），其内容声明经载荷固化进子行
+// （任务自包含）；被内容绑定的轨道成员=双重身份照常导入（轨道清单照常含它，
+// 绑定不改写导入身份——「创建确认仍 N 个文件」的数据面=轨道清单）；说明成员
+// 磁盘缺席不阻断创建（零 Stat 零哈希的强断言——文件本体不进创建产物）。
+func TestEmitSelectedWorksCompanionMemberExcluded(t *testing.T) {
+	videoKey := "f:剧集/ep01.mp4"
+	articleKey := "f:图文/手记.txt"
+	content := func(dim MetadataDimension, val string) SnapDecl {
+		return SnapDecl{Dimension: string(dim), Value: val, Source: string(SourceContent)}
+	}
+	root, h, m, sess, works := aggEmitFixture(t, []SnapFile{
+		{RelPath: "剧集/ep01.mp4", FileName: "ep01.mp4", DirRelKey: "剧集", State: snapStateIdentified,
+			Final:        []SnapDecl{{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)}},
+			AggWorkKey:   videoKey,
+			AggTrackRole: sdkdto.StoreRoleVideoMain, AggWorkType: sdkdto.ResourceTypeVideo},
+		// 双重身份（非主导轨行）：被内容绑定的字幕轨——照常导入（轨道清单
+		// 照常含它），内容叠加产出
+		{RelPath: "剧集/ep01.zh.srt", FileName: "ep01.zh.srt", DirRelKey: "剧集", State: snapStateIdentified,
+			Final:        []SnapDecl{content(DimDescription, "字幕组备注整段")},
+			AggWorkKey:   videoKey,
+			AggTrackRole: contract.StoreTypeSubtitle, AggWorkType: sdkdto.ResourceTypeVideo},
+		{RelPath: "剧集/ep01.nfo", FileName: "ep01.nfo", DirRelKey: "剧集", State: snapStateIdentified,
+			Final: []SnapDecl{
+				content(DimDescription, "本字幕由个人制作"),
+				content(DimAuthor, "いせる"),
+			},
+			AggWorkKey: videoKey, AggWorkType: sdkdto.ResourceTypeVideo, AggCompanion: true},
+		// 双重身份（主导轨行）：被内容绑定的图文正文轨——照常导入，主导自身
+		// 的内容声明经载荷复原（执行期重算不重读内容）
+		{RelPath: "图文/手记.txt", FileName: "手记.txt", DirRelKey: "图文", State: snapStateIdentified,
+			Final:        []SnapDecl{content(DimDescription, "手记正文整段")},
+			AggWorkKey:   articleKey,
+			AggTrackRole: sdkdto.StoreRoleDocument, AggWorkType: sdkdto.ResourceTypeArticle},
+		{RelPath: "图文/配图.jpg", FileName: "配图.jpg", DirRelKey: "图文", State: snapStatePlain,
+			AggWorkKey: articleKey, AggTrackRole: sdkdto.StoreRoleImage, AggWorkType: sdkdto.ResourceTypeArticle},
+	})
+	// 说明成员磁盘缺席：创建仍须成功（说明文件不 Stat 不哈希——若进哈希面
+	// 即「磁盘对账未通过」中止）
+	if err := os.Remove(root + "/剧集/ep01.nfo"); err != nil {
+		t.Fatalf("移除说明成员测试文件失败: %v", err)
+	}
+
+	// 选择域：说明成员随作品联动（Files 含它），计数数据位=1
+	var agg, article *SelectableWork
+	for _, w := range works {
+		switch w.WorkID {
+		case videoKey:
+			agg = w
+		case articleKey:
+			article = w
+		}
+	}
+	if agg == nil || len(agg.Files) != 3 || agg.CompanionCount != 1 {
+		t.Fatalf("视频作品应含说明成员三文件、计数 1，实际 %+v", agg)
+	}
+	if article == nil || len(article.Files) != 2 || article.CompanionCount != 0 {
+		t.Fatalf("图文作品应为双轨道零说明计数，实际 %+v", article)
+	}
+
+	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "说明批次"))
+	if len(resps) != 1 {
+		t.Fatalf("纯 local 批次应为单应答单父，实得 %d 个", len(resps))
+	}
+	children := resps[0].Children
+	if len(children) != 2 {
+		t.Fatalf("2 件聚合作品应各产 1 个子行，实得 %d: %v", len(children), responseChildNames(resps[0]))
+	}
+
+	// 视频作品：轨道清单不含说明成员（2 轨，被绑定的字幕轨照常在场——绑定
+	// 不改写导入身份）；成员内容声明固化进载荷（说明成员两条+被绑定字幕轨
+	// 一条，各携来源成员文件名——落库侧按作品级并入规则合成）
+	video := children[0]
+	var vfp FilePluginData
+	if err := json.Unmarshal([]byte(video.PluginData), &vfp); err != nil {
+		t.Fatalf("解析聚合子行 PluginData 失败: %v", err)
+	}
+	if len(vfp.Tracks) != 2 || vfp.Tracks[0].RelPath != "剧集/ep01.mp4" || vfp.Tracks[1].RelPath != "剧集/ep01.zh.srt" ||
+		vfp.Tracks[1].Role != contract.StoreTypeSubtitle {
+		t.Fatalf("轨道清单应只含轨道成员（被绑定字幕轨照常在场），实际 %+v", vfp.Tracks)
+	}
+	if len(vfp.ContentDecls) != 3 {
+		t.Fatalf("成员内容声明应固化进载荷（说明成员两条+被绑定轨行一条），实际 %+v", vfp.ContentDecls)
+	}
+	origins := map[string]bool{}
+	for _, d := range vfp.ContentDecls {
+		origins[d.OriginName] = true
+	}
+	if !origins["ep01.nfo"] || !origins["ep01.zh.srt"] {
+		t.Fatalf("载荷声明应携带来源成员文件名（说明成员与被绑定轨行各自在场），实际 %+v", vfp.ContentDecls)
+	}
+
+	// 图文作品：被绑定的正文轨照常在轨道清单（双重身份——绑定不改写导入
+	// 身份），主导自身的内容声明同样经载荷复原（执行期重算不重读内容）
+	art := children[1]
+	var afp FilePluginData
+	if err := json.Unmarshal([]byte(art.PluginData), &afp); err != nil {
+		t.Fatalf("解析聚合子行 PluginData 失败: %v", err)
+	}
+	if len(afp.Tracks) != 2 || afp.Tracks[0].RelPath != "图文/手记.txt" || afp.Tracks[0].Role != sdkdto.StoreRoleDocument {
+		t.Fatalf("被绑定的轨行应照常落轨导入（轨道清单照常含它），实际 %+v", afp.Tracks)
+	}
+	if len(afp.ContentDecls) != 1 || afp.ContentDecls[0].Value != "手记正文整段" || afp.ContentDecls[0].OriginName != "手记.txt" {
+		t.Fatalf("主导轨行的内容声明应经载荷固化，实际 %+v", afp.ContentDecls)
+	}
+
+	if summary := m.takeCreateBatchSummary(root); summary.total != 2 {
+		t.Fatalf("批次摘要 total 应为 2，实际 %+v", summary)
 	}
 }
 

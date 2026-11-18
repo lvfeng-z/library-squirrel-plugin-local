@@ -331,6 +331,16 @@
             </div>
           </div>
           <el-button v-else size="small" text @click="openTrackDialog">+ 聚合成作品</el-button>
+          <!-- 元数据文件入口（伴随说明文件内容解析·剧本1 帧1/剧本3 帧1）：产出区
+               第二行——◇ 元数据文件（N）：第 X 行 → 描述；[打开]进独立弹窗（唯一
+               指派面，帧2）。无分轨入口时不出（内容绑定挂分轨入口落档） -->
+          <div v-if="aggProduction" class="li-out-card li-red-metadata-card">
+            <div class="li-condx-card-line">
+              <span class="li-out-mark">◇</span>
+              <span class="li-condx-card-tpl" :title="metadataFileSummary">{{ metadataFileSummary }}</span>
+              <el-button size="small" text @click="openMetadataDialog">[打开]</el-button>
+            </div>
+          </div>
           <p class="li-red-hint">
             类型先行：作品类型选自运行时注册表投影（内置+插件自定义类型）→可用轨亮出→轨行→角色分配，角色按类型规约过滤
           </p>
@@ -460,6 +470,18 @@
             </div>
           </template>
         </AutoHeightDialog>
+
+        <!-- 元数据文件弹窗（伴随说明文件内容解析·剧本1 帧2/帧7、剧本2 帧2）：
+             内容绑定唯一指派面——勾选本规则条件行+内容去向（一期=整段→单维度）；
+             确定回写产出区摘要（勾选未选去向=帧7 拦截态：⚠ 行+[知道了]、勾选保留）；
+             常驻挂载、开关纯由 state 控制 -->
+        <MetadataFileDialog
+          v-model:state="metadataDialogState"
+          :rule-title="descInput"
+          :rows="metadataDialogRows"
+          :bindings="aggProduction && aggProduction.contentBindings ? aggProduction.contentBindings : []"
+          @confirm="onMetadataConfirm"
+        />
       </template>
 
       <!-- ================= 入口②：集规则调整（SetRulePanel「调整规则」，剧本E 语义随迁） ================= -->
@@ -594,6 +616,7 @@
 import { ref, computed, watch } from 'vue'
 import CondxRowEditDialog from './CondxRowEditDialog.vue'
 import CondxRowsEditor from './CondxRowsEditor.vue'
+import MetadataFileDialog from './MetadataFileDialog.vue'
 import {
   DIMENSION_OPTIONS,
   FROM_OPTIONS,
@@ -629,7 +652,9 @@ import {
   aggAvailableTracksText,
   aggRoleDisplay,
   aggRoleRequired,
+  aggRoleShortLabel,
   aggProductionSummary,
+  aggMetadataFileSummary,
   aggIdentityCandidates,
   aggIdentityWordOf,
   aggFormErrors,
@@ -640,6 +665,7 @@ import {
   type ExtractionActionJSON,
   type IdentityPartForm,
   type AggregateProductionForm,
+  type ContentBindingForm,
   type AggTypeSpec,
   type AggIdentityCandidate
 } from './ruleFormModel'
@@ -668,7 +694,12 @@ interface RuleInput {
   isNew: boolean
   category?: string
   identity?: { row: number; capture: string }[] | null
-  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
+  aggregate?: {
+    workType: string
+    tracks: { row: number; role: string }[]
+    companionUse?: string
+    contentBindings?: { row: number; dimension: string }[]
+  } | null
   conditions?: unknown
   extractions: unknown
   synthesis?: { dimPolicies?: { dimension: string; strategy: string }[] | null; roles?: { source: string; roleName: string }[] | null }
@@ -729,7 +760,8 @@ const props = defineProps<{
 // rule 模式保存载荷（完整规则条目 JSON——父组件原样进 saveRule；conditions
 // 为 v4 条件行（目录行可多段/挂作用域附件），pattern 不再发送；category/
 // identity/aggregate 为聚合规则的类别与两件声明（元数据规则三者缺省——
-// omitempty 落档零残留））。
+// omitempty 落档零残留）。aggregate.contentBindings=内容绑定（「元数据文件」
+// 指派；空=无内容产出，undefined 键不落档=omitempty 镜像）。
 interface RuleSavePayload {
   id: string
   description: string
@@ -737,7 +769,12 @@ interface RuleSavePayload {
   enabled: boolean
   category?: string
   identity?: { row: number; capture: string }[]
-  aggregate?: { workType: string; tracks: { row: number; role: string }[]; companionUse?: string } | null
+  aggregate?: {
+    workType: string
+    tracks: { row: number; role: string }[]
+    companionUse?: string
+    contentBindings?: { row: number; dimension: string }[]
+  } | null
   conditions: unknown
   extractions: unknown
   synthesis: { dimPolicies: { dimension: string; strategy: string }[]; roles: { source: string; roleName: string }[] }
@@ -858,6 +895,7 @@ function switchCategory(cat: 'metadata' | 'aggregate'): void {
   aggProduction.value = null
   trackDialogState.value = false
   trackDraft.value = null
+  metadataDialogState.value = false
   if (cat === 'aggregate') {
     // 新建未改动的缺省样例行不带入聚合形态（轨行区从「+ 加轨」起步）
     if (props.rule && props.rule.isNew && condxRows.value.length === 1) {
@@ -1014,6 +1052,41 @@ function confirmTrackDialog(): void {
   if (!trackDraft.value) return
   aggProduction.value = cloneJSON(trackDraft.value)
   trackDialogState.value = false
+}
+
+// —— 元数据文件弹窗（伴随说明文件内容解析·剧本1 帧1/帧2）：内容绑定唯一指派面 ——
+
+const metadataDialogState = ref(false)
+
+// 弹窗行清单（与轨行区同源）：行号+模板形态（分轨弹窗同款构造）+轨道短词
+//（按当前分轨入口的角色分配；空=未分配轨道）
+const metadataDialogRows = computed<{ no: number; text: string; track: string }[]>(() => {
+  const roleByRow = new Map<number, string>()
+  if (aggProduction.value && aggProduction.value.tracks) {
+    for (const t of aggProduction.value.tracks) {
+      if (t) roleByRow.set(t.row, t.role)
+    }
+  }
+  return trackAssignRows.value.map((t) => ({
+    no: t.no,
+    text: t.text,
+    track: roleByRow.has(t.no) ? aggRoleShortLabel(roleByRow.get(t.no) || '') : ''
+  }))
+})
+
+// 产出区入口摘要（帧1「元数据文件（0）」/帧2 系统回应「元数据文件（1）：第 3 行 → 描述」）
+const metadataFileSummary = computed((): string =>
+  aggMetadataFileSummary(aggProduction.value ? aggProduction.value.contentBindings : null)
+)
+
+function openMetadataDialog(): void {
+  metadataDialogState.value = true
+}
+
+// 弹窗〔确定〕：绑定清单回写分轨入口（空清单=清除指派——该规则行为回到现状）
+function onMetadataConfirm(bindings: ContentBindingForm[]): void {
+  if (!aggProduction.value) return
+  aggProduction.value.contentBindings = bindings.length ? cloneJSON(bindings) : undefined
 }
 
 // 条件卡〔编辑〕/〔+ 加条件〕开窗（顶层卡与组框内成员卡同一链路——成员卡经组框
@@ -1695,11 +1768,20 @@ function initFromProps(): void {
           tracks: (Array.isArray(initAgg.tracks) ? initAgg.tracks : [])
             .filter((t): t is { row: number; role: string } => !!t && typeof t.row === 'number' && typeof t.role === 'string')
             .map((t) => ({ row: t.row, role: t.role })),
-          companionUse: initAgg.companionUse || 'track'
+          companionUse: initAgg.companionUse || 'track',
+          contentBindings: Array.isArray(initAgg.contentBindings)
+            ? initAgg.contentBindings
+                .filter(
+                  (b): b is { row: number; dimension: string } =>
+                    !!b && typeof b.row === 'number' && typeof b.dimension === 'string'
+                )
+                .map((b) => ({ row: b.row, dimension: b.dimension }))
+            : undefined
         }
       : null
     trackDialogState.value = false
     trackDraft.value = null
+    metadataDialogState.value = false
     const defaultRows = (): CondxRowForm[] => [
       {
         connector: '',
@@ -1814,7 +1896,13 @@ function buildRulePayload(): RuleSavePayload | null {
         ? {
             workType: aggProduction.value.workType,
             tracks: aggProduction.value.tracks.map((t) => ({ row: t.row, role: t.role })),
-            companionUse: 'track'
+            // 规则级处置维度恒归一 track（metadata 由行级指派合成表达——内核载入
+            // 对规则级 metadata 拒载；前端表单不出该值）
+            companionUse: 'track',
+            // 内容绑定（「元数据文件」指派）：空=无内容产出，键不落档（omitempty 镜像）
+            contentBindings: (aggProduction.value.contentBindings || []).length
+              ? aggProduction.value.contentBindings.map((b) => ({ row: b.row, dimension: b.dimension }))
+              : undefined
           }
         : null,
       conditions: condxNormalizeRows(condxJsonMode.value ? condxParsed.value ?? [] : condxRows.value),

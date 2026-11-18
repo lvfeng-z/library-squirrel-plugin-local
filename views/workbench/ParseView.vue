@@ -113,10 +113,12 @@
                  创建任务/开始全量识别已移页头 -->
             <h3 class="li-ws-card-title">
               资源清单
-              <!-- 已选计数按作品（聚合作品=一件）：未选=可选/共（帧1 形态），已选>0=
-                   已选作品文件总数（帧3「已选 1 件作品（3 个文件）」形态，M 个文件=
-                   选择集各作品 files 数求和） -->
-              <template v-if="snapshot"><span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">{{ selectedWorks.size > 0 ? `（${selectedFileCount} 个文件）` : `（可选 ${selectableWorks.length} / 共 ${allWorks.length}）` }}</span></span></template>
+              <!-- 已选计数按作品（聚合作品=一件）：未选=可选/共（帧1 形态；含说明
+                   成员的作品件数附注「K 件含说明」——剧本2 帧1），已选>0=已选作品
+                   文件总数（帧3「已选 1 件作品（3 个文件，含说明 1）」形态，M 个文件=
+                   选择集各作品 files 数求和〔含说明成员——清单行全量在场〕，
+                   说明成员数另附「含说明 N」——剧本1 帧3/剧本3 帧2） -->
+              <template v-if="snapshot"><span class="li-ws-create-count">已选 {{ selectedWorks.size }} 件作品<span class="li-ws-create-sub">{{ selectedWorks.size > 0 ? `（${selectedFileCount} 个文件${selectedCompanionCount > 0 ? `，含说明 ${selectedCompanionCount}` : ''}）` : `（可选 ${selectableWorks.length} / 共 ${allWorks.length}${worksCompanionCount > 0 ? `，${worksCompanionCount} 件含说明` : ''}）` }}</span></span></template>
               <span v-if="snapshot" class="li-ws-card-stats">文件 {{ snapshot.stats.totalFiles }} · 已识别 {{ snapshot.stats.identified }} · 有线索 {{ snapshot.stats.clueful }} · 无线索 {{ snapshot.stats.plain }} · 序列群 {{ snapshot.stats.groupCount }} · 待裁决 {{ snapshot.stats.pendingFiles }}<template v-if="snapshot.stats.skippedDirs > 0"> · 增量跳过目录 {{ snapshot.stats.skippedDirs }}</template></span>
             </h3>
             <!-- 识别中：流式进度（阶段跃迁 + 计数）；赋值变更后的自动增量重识别共用此状态条 -->
@@ -236,6 +238,9 @@
                   <span class="li-ws-row-state" :class="`is-${row.state}`" :title="stateLabel(row.state)">{{ stateDot(row.state) }}</span>
                   <span class="li-ws-row-path" :title="row.relPath">{{ row.relPath }}</span>
                   <span v-if="aggTrackLabel(row.aggTrackRole)" class="li-ws-row-track">{{ aggTrackLabel(row.aggTrackRole) }}</span>
+                  <!-- 说明徽章（伴随说明成员行·剧本1 帧3）：aggCompanion 身份位
+                       （与 contentState 无关）——归进作品、无轨、不导入 -->
+                  <span v-if="row.aggCompanion" class="li-ws-row-track is-companion">说明</span>
                   <span v-if="diffMark(row.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.relPath)}`">{{ diffMark(row.relPath) === 'changed' ? 'Δ变更' : diffMark(row.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
                   <span class="li-ws-row-meta">
                     <template v-if="row.final && row.final.length">
@@ -245,6 +250,9 @@
                       <span v-for="(c, i) in row.clues" :key="i" class="li-ws-row-clue">{{ clueLabel(c) }}</span>
                     </template>
                     <span v-if="row.pendingDims && row.pendingDims.length" class="li-ws-row-pending">待裁决:{{ row.pendingDims.join('/') }}</span>
+                    <!-- 行详情·内容采集状态（剧本1 帧8）：被指派行命中非文本文件
+                         等场景的可见原因 -->
+                    <span v-if="row.contentState" class="li-ws-row-contentstate">详情：{{ companionContentStateText(row.contentState) }}</span>
                     <span v-if="row.assigned" class="li-ws-row-assigned">已赋值</span>
                   </span>
                 </div>
@@ -301,6 +309,8 @@
                     <span class="li-ws-row-state" :class="`is-${row.file.state}`" :title="stateLabel(row.file.state)">{{ stateDot(row.file.state) }}</span>
                     <span class="li-ws-tree-fname" :title="row.file.relPath">{{ row.file.fileName }}</span>
                     <span v-if="aggTrackLabel(row.file.aggTrackRole)" class="li-ws-row-track">{{ aggTrackLabel(row.file.aggTrackRole) }}</span>
+                    <!-- 说明徽章（伴随说明成员行·剧本1 帧3）：与平铺行同款 -->
+                    <span v-if="row.file.aggCompanion" class="li-ws-row-track is-companion">说明</span>
                     <span v-if="diffMark(row.file.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.file.relPath)}`">{{ diffMark(row.file.relPath) === 'changed' ? 'Δ变更' : diffMark(row.file.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
                     <span class="li-ws-row-meta">
                       <template v-if="row.file.final && row.file.final.length">
@@ -310,6 +320,8 @@
                         <span v-for="(c, ci) in row.file.clues" :key="ci" class="li-ws-row-clue">{{ clueLabel(c) }}</span>
                       </template>
                       <span v-if="row.file.pendingDims && row.file.pendingDims.length" class="li-ws-row-pending">待裁决:{{ row.file.pendingDims.join('/') }}</span>
+                      <!-- 行详情·内容采集状态（剧本1 帧8）：与平铺行同款 -->
+                      <span v-if="row.file.contentState" class="li-ws-row-contentstate">详情：{{ companionContentStateText(row.file.contentState) }}</span>
                       <span v-if="row.file.assigned" class="li-ws-row-assigned">已赋值</span>
                     </span>
                   </div>
@@ -658,10 +670,33 @@
                 </div>
                 <div class="li-ws-sec">
                   <h4 class="li-ws-sec-title">识别结果</h4>
+                  <!-- 跨文件并入冲突·待裁决（剧本2 帧3/帧4）：主导文件结论 × 伴随说明
+                       成员声明同维不同值——「待裁决（A：vA ｜ B：vB）」两来源各带一枚
+                       快裁键（点=接既有裁决/会话赋值通路：按文件+维度写会话赋值、增量
+                       重识别后终选更新，帧4「（裁决：采用说明文件）」附注随之呈现）；
+                       识别期同维冲突仍由下方解析面板的既有待裁决区承载 -->
+                  <div v-for="p in contentPendingItems" :key="`cp-${p.dimension}`" class="li-ws-decl is-content-pending">
+                    <span class="li-ws-decl-main">{{ dimLabel(p.dimension) }}　待裁决（{{ pendingCandidatesText(p) }}）</span>
+                    <div class="li-ws-pending-actions">
+                      <button
+                        v-for="(c, j) in p.candidates || []"
+                        :key="`cpk-${j}`"
+                        type="button"
+                        class="li-ws-pending-pick"
+                        :disabled="adjudicatingQuick"
+                        @click="adjudicateCandidate(p, j)"
+                      >用{{ pendingCandidateWord(p, j) }}</button>
+                    </div>
+                  </div>
                   <template v-if="selectedFile.final && selectedFile.final.length">
                     <div v-for="(d, i) in selectedFile.final" :key="i" class="li-ws-decl">
-                      <span class="li-ws-decl-main">{{ declLabel(d) }}</span>
-                      <span class="li-ws-decl-src">
+                      <span class="li-ws-decl-main">{{ declLabel(d) }}{{ adjudicationSuffix(d) }}</span>
+                      <!-- 内容来源声明（剧本1 帧5/剧本2 帧2/剧本3 帧3）：来源标注
+                           「（来源：说明文件 X / 正文轨 X）」——词按来源成员是否轨道成员
+                           定（轨道成员=其轨道名，如正文轨；非轨道=说明文件）；
+                           truncated=采集超限截断标注 -->
+                      <span v-if="d.source === 'content'" class="li-ws-decl-origin">（来源：{{ contentOriginText(d) }}）</span>
+                      <span v-else class="li-ws-decl-src">
                         <span class="li-ws-decl-src-text">{{ sourceLabel(d.source) }}<template v-if="d.ruleId"> · <a class="li-ws-rule-link" :href="ruleEditRoute(d.ruleId)" :title="`跳规则管理子页并打开「${ruleNameOf(d.ruleId)}」编辑`">{{ ruleNameOf(d.ruleId) }}</a></template></span>
                         <button
                           v-if="(d.alsoRuleIds || []).length"
@@ -747,8 +782,11 @@
       />
       <p class="li-ws-create-dialog-note">
         <!-- 选择集含聚合作品（帧5 形态，聚合作品=一个子任务）：帧式首行 + 逐件明细；
-             纯单文件选择集保持原说明文案（单文件作品行为零变化） -->
-        <template v-if="aggregatedSelectedWorks.length > 0">将创建 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）为 {{ selectedWorks.size }} 个子任务：</template>
+             纯单文件选择集保持原说明文案（单文件作品行为零变化）。说明成员不导入
+             ——首行文件数剔除说明成员、另附「另有说明文件 N」（剧本1 帧6/剧本2 帧5/
+             剧本3 帧4）；无说明成员维持「N 个文件」现状形态（剧本2 帧2「2 个文件」
+             无附注承诺） -->
+        <template v-if="aggregatedSelectedWorks.length > 0">将创建 {{ selectedWorks.size }} 件作品（{{ createDialogFileText }}）为 {{ selectedWorks.size }} 个子任务：</template>
         <template v-else>一次创建为一个父任务，包含全部 {{ selectedWorks.size }} 件作品（{{ selectedFileCount }} 个文件）；识别出站点归属的文件按站点分组为额外父行（罕见）。创建前经磁盘对账核验；创建后任务为 Created 状态，由任务管理手动开始</template>
       </p>
       <ul v-if="aggregatedSelectedWorks.length > 0" class="li-ws-create-dialog-tracks">
@@ -867,6 +905,12 @@ interface SnapDecl {
   // 同值伴生来源：与本声明产出相同值的其他规则（终选合成同值去重的伴生记录，
   // 保序；缺省=无同值伴随）
   alsoRuleIds?: string[]
+  // 伴随说明内容声明专属（阶段4 投影位）：truncated=声明值取自超采集上限被截断
+  // 的内容片段（来源呈现标注「已截断」）；originName=作品级并入声明的来源成员
+  // 文件名（「（来源：说明文件 X / 正文轨 X）」标注的数据位——文件自身产出的
+  // 声明不带，值出自该文件本身）
+  truncated?: boolean
+  originName?: string
 }
 
 interface SnapFile {
@@ -890,6 +934,15 @@ interface SnapFile {
   aggWorkKey?: string
   aggTrackRole?: string
   aggWorkType?: string
+  // 伴随说明成员标记（伴随说明文件内容解析·阶段3）：该文件仅被指派为元数据
+  // 文件（未分配轨道）而归进聚合作品——无轨、不导入、不独立成作品；清单行挂
+  // 「说明」徽章（与 contentState 无关的身份位）、同作品悬停/复选联动照常。
+  aggCompanion?: boolean
+  // 内容采集状态（阶段4 投影位，呈现态数据）：伴随说明成员行的行详情可见原因
+  //——rejected=采集过但未按文本产出声明（二进制嗅探拒读或内容全空白）、
+  // uncollected=未采集（无内容游标的异常态）；已产内容来源声明的行不带（声明
+  // 本体即产出事实）、非说明成员不带。
+  contentState?: string
   assigned?: boolean
 }
 
@@ -1003,6 +1056,10 @@ interface SelectableWorkView {
   workId: string
   dirRelKey: string
   files: string[]
+  // 伴随说明成员数（伴随说明文件内容解析·阶段4 数据位）：清单内含说明成员的
+  // 计数附注（「含说明 N」「另有说明文件 N」）与确认框轨别摘要尾缀（「说明×N」）
+  // 由本位派生；说明成员不进创建链。零值省略。
+  companionCount?: number
   setKey?: string
   selectable: boolean
   state: string
@@ -1500,6 +1557,100 @@ const selectedIgnored = computed(() => {
 const selectedPending = computed(() =>
   ((snapshot.value && snapshot.value.pending) || []).filter((p) => p.relPath === selectedRelPath.value)
 )
+
+// —— 跨文件并入冲突·就地快裁与来源标注（伴随说明文件内容解析·剧本2 帧2/帧3/帧4） ——
+
+// 选中文件的跨文件并入冲突（阶段4 投影：overview Pending 追加段——主导文件
+// 待裁决+候选两值两来源）。仅含内容来源候选的条目在识别结果区呈现（识别期
+// 同维冲突维持解析面板既有待裁决区，双轨并存、同一 adjudicate 通路）。
+const contentPendingItems = computed<SnapPending[]>(() =>
+  selectedPending.value.filter((p) => (p.candidates || []).some((c) => c && c.source === 'content'))
+)
+
+// 内容声明来源成员的查找（originName→文件记录）：同聚合作品内按文件名对位
+//（跨目录同名兜底首个；文件自身产出=originName 空→选中文件自身）
+function contentOriginFile(originName?: string): SnapFile | null {
+  const name = originName || (selectedFile.value ? selectedFile.value.fileName : '')
+  if (!name) return null
+  const workKey = selectedFile.value ? selectedFile.value.aggWorkKey || '' : ''
+  const files = (snapshot.value && snapshot.value.files) || []
+  let fallback: SnapFile | null = null
+  for (const f of files) {
+    if (!f || f.fileName !== name) continue
+    if (workKey && f.aggWorkKey === workKey) return f
+    if (!fallback) fallback = f
+  }
+  return fallback
+}
+
+// 内容来源词（帧2 剧本2「（来源：正文轨 002.txt）」/帧5 剧本1「（来源：说明文件
+// ep01.txt）」）：来源成员为轨道成员→其轨道名（正文轨/视频轨…）；否则=说明文件
+function contentOriginWord(originName?: string): string {
+  const member = contentOriginFile(originName)
+  if (member && member.aggTrackRole) {
+    const label = AGG_TRACK_LABELS[member.aggTrackRole]
+    if (label) return label
+  }
+  return '说明文件'
+}
+
+// 内容来源声明的来源标注文本：「说明文件 ep01.txt」/「正文轨 002.txt」
+//（truncated=采集超限截断，尾缀标注——内容不完整的事实随声明携带）
+function contentOriginText(d: SnapDecl): string {
+  const name = d.originName || (selectedFile.value ? selectedFile.value.fileName : '')
+  return `${contentOriginWord(d.originName)} ${name}${d.truncated ? ' · 已截断' : ''}`
+}
+
+// 待裁决候选来源词（帧3 剧本2）：内容候选=说明文件（或按来源成员轨道取轨名）；
+// 主导侧推导候选=文件名推导（帧文案词——推导侧统称，不按实际来源细分）
+function pendingCandidateWord(p: SnapPending, idx: number): string {
+  const c = (p.candidates || [])[idx]
+  if (c && c.source === 'content') return contentOriginWord(c.originName)
+  return '文件名推导'
+}
+
+// 待裁决行文本：「文件名推导：Isel ｜ 说明文件：いせる」（帧3 剧本2 逐字骨架）
+function pendingCandidatesText(p: SnapPending): string {
+  return (p.candidates || [])
+    .map((c, j) => `${pendingCandidateWord(p, j)}：${c ? c.value : ''}`)
+    .join(' ｜ ')
+}
+
+// 快裁后的采用侧记忆（帧4「（裁决：采用说明文件）」附注的数据面——赋值声明本体
+// 不区分赋值来路，取值+维度+侧词在前端随裁决动作记录；值失配=记忆失效不呈现）
+const adjudicationMemo = new Map<string, { word: string; value: string }>()
+const adjudicatingQuick = ref(false)
+
+// 快裁键（帧3 你做=点「用说明文件」单次点）：接既有 adjudicate 通路——按文件+
+// 维度写会话赋值（pickIndex=候选序），点了立即生效、可再改；增量重识别经既有
+// recognitionDone 事件链刷新全景
+async function adjudicateCandidate(p: SnapPending, idx: number): Promise<void> {
+  if (!session.value || adjudicatingQuick.value) return
+  const c = (p.candidates || [])[idx]
+  if (!c) return
+  adjudicatingQuick.value = true
+  const resp = await request('adjudicate', {
+    root: session.value.rootPath,
+    relPath: p.relPath,
+    dimension: p.dimension,
+    adjudicateMode: 'pick',
+    pickIndex: idx
+  })
+  adjudicatingQuick.value = false
+  if (!resp.ok) return
+  adjudicationMemo.set(`${p.relPath}|${p.dimension}`, {
+    word: pendingCandidateWord(p, idx),
+    value: c.value
+  })
+}
+
+// 赋值声明的裁决附注（帧4「いせる（裁决：采用说明文件）」）：赋值来源+取值与
+// 记忆对位才呈现；手工赋值/再改值后失配自动消隐
+const adjudicationSuffix = (d: SnapDecl): string => {
+  if (!selectedFile.value || d.source !== 'assignment') return ''
+  const memo = adjudicationMemo.get(`${selectedFile.value.relPath}|${d.dimension}`)
+  return memo && memo.value === d.value ? `（裁决：采用${memo.word}）` : ''
+}
 
 // 面板 refresh 事件（忽略动作应答后仅重取全景+决策态，不触发识别）
 function onPanelRefresh(): void {
@@ -2413,6 +2564,14 @@ const AGG_TRACK_SHORTS: Record<string, string> = {
 // 行级轨道标：未配对行（角色空）返回空串、模板不渲染标记（非空串占位）
 const aggTrackLabel = (role?: string): string => (role ? AGG_TRACK_LABELS[role] || role : '')
 
+// 伴随说明成员行的内容采集状态呈现（剧本1 帧8 行详情）：rejected=采集过但未按
+// 文本产出（二进制嗅探拒读非文本或内容全空白）；uncollected=未采集（无内容
+// 游标的异常态——命中集缺席或 stat 失败；文案为最简同构词，剧本未单列帧）
+const companionContentStateText = (state: string): string => {
+  if (state === 'rejected') return '内容未按文本读取（非文本文件），描述未生成'
+  return '内容未采集，描述未生成'
+}
+
 // 悬停联动（剧本1 帧2/帧4）：指针悬停聚合成员行时记录其聚合作品键，同键成员行
 // 整行高亮（含指针行，共同表达「这几行是同一件作品」）；未配对行键为空、无联动；
 // 移开即恢复。平铺/目录树两种模式共用同一键（=识别快照 aggWorkKey）
@@ -2441,7 +2600,9 @@ const aggregatedWorkLabel = (w: SelectableWorkView): string => {
 
 // 确认框轨别摘要（按 role 归并，清单序）：article 形态=「图文」（帧文案逐字）；
 // 其余形态=主导角色短名 + 伴随角色×N 通用式（video 形态据此自然产出
-// 「视频 + 字幕×2」，无伴随=仅主导短名如「视频」）
+// 「视频 + 字幕×2」，无伴随=仅主导短名如「视频」）；伴随说明成员不占轨，
+// 尾缀「说明×N」（剧本1 帧6「视频 + 字幕×1 + 说明×1」/剧本2 帧5「图片 +
+// 说明×1」——companionCount 数据位）
 const aggregatedTrackSummary = (w: SelectableWorkView): string => {
   const files = w.files || []
   const roleOf = (rel: string): string => {
@@ -2449,7 +2610,9 @@ const aggregatedTrackSummary = (w: SelectableWorkView): string => {
     return f && f.aggTrackRole ? f.aggTrackRole : ''
   }
   const leadFile = files.length > 0 ? fileByRel.value.get(files[0]) : null
-  if (leadFile && leadFile.aggWorkType === 'article') return '图文'
+  if (leadFile && leadFile.aggWorkType === 'article') {
+    return (w.companionCount || 0) > 0 ? `图文 + 说明×${w.companionCount}` : '图文'
+  }
   const shortOf = (role: string): string => AGG_TRACK_SHORTS[role] || role
   const parts: string[] = []
   const order: string[] = []
@@ -2469,7 +2632,9 @@ const aggregatedTrackSummary = (w: SelectableWorkView): string => {
     parts.push(n > 1 ? `${name}×${n}` : name)
   }
   const lead = files.length > 0 ? shortOf(roleOf(files[0])) : ''
-  return parts.length > 0 ? `${lead} + ${parts.join(' + ')}` : lead
+  if (lead) parts.unshift(lead)
+  if ((w.companionCount || 0) > 0) parts.push(`说明×${w.companionCount}`)
+  return parts.join(' + ')
 }
 
 const isWorkSelected = (id: string): boolean => selectedWorks.value.has(id)
@@ -2895,6 +3060,33 @@ const selectedFileCount = computed<number>(() => {
   return count
 })
 
+// —— 伴随说明计数附注（伴随说明文件内容解析·剧本1 帧3/剧本2 帧1/剧本3 帧2） ——
+
+// 选择集说明成员合计（已选>0 形态：「（M 个文件，含说明 N）」——文件计数含说明
+// 成员〔清单行全量在场〕，说明成员数另附）
+const selectedCompanionCount = computed<number>(() => {
+  let count = 0
+  for (const id of selectedWorks.value) {
+    const work = workIndex.value.get(id)
+    if (work) count += work.companionCount || 0
+  }
+  return count
+})
+
+// 含说明成员的作品件数（未选形态：「（可选 X / 共 Y，K 件含说明）」）
+const worksCompanionCount = computed<number>(() =>
+  allWorks.value.filter((w) => (w.companionCount || 0) > 0).length
+)
+
+// 创建确认首行文件计数（剧本1 帧6/剧本2 帧5/剧本3 帧4）：说明成员不导入——
+// 文件数剔除说明成员、另附「另有说明文件 N」；无说明成员维持「N 个文件」
+// 现状形态（剧本2 帧2「2 个文件」无附注承诺）
+const createDialogFileText = computed<string>(() => {
+  const companions = selectedCompanionCount.value
+  if (companions > 0) return `${selectedFileCount.value - companions} 个文件，另有说明文件 ${companions}`
+  return `${selectedFileCount.value} 个文件`
+})
+
 // 剧本K1：点「创建任务」→ 弹名称确认对话框（预填默认名，可编辑，空=用默认）；
 // 空选择守卫与原直驱路径一致（按钮 disabled 之外的二道防线）
 function openCreateDialog(): void {
@@ -3036,6 +3228,7 @@ const sourceLabel = (source: string): string => {
     case 'predicate': return '库内命中'
     case 'assignment': return '手工赋值'
     case 'adjudication': return '裁决'
+    case 'content': return '伴随说明'
     case 'qna': return '泛化'
     case 'builtin': return '内置'
     case 'manual': return '手写'
@@ -3704,6 +3897,23 @@ onUnmounted(() => {
   border-radius: var(--app-radius-sm);
   background: var(--app-tag-neutral-bg);
   color: var(--app-text-regular);
+}
+
+/* 说明徽章（伴随说明成员行·剧本1 帧3/剧本3 帧2）：aggCompanion 身份位——归进
+   作品、无轨、不导入、不独立成作品；警示色与轨道标分野 */
+.li-ws-row-track.is-companion {
+  background: var(--app-tag-warning-bg);
+  color: var(--app-tag-warning-text);
+}
+
+/* 行详情·内容采集状态（剧本1 帧8：被指派行命中非文本文件等场景的可见原因，
+   行内以摘要胶囊呈现——平铺清单行高固定 30px 虚拟化切片的既有约束） */
+.li-ws-row-contentstate {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--app-radius-sm);
+  background: var(--app-tag-danger-bg);
+  color: var(--app-tag-danger-text);
 }
 
 /* 重识别差异高亮：变更/新增行底色标记（消失行不在当前清单，经差异条计数呈现） */
@@ -4589,6 +4799,43 @@ onUnmounted(() => {
 
 .li-ws-decl-src-text {
   word-break: break-all;
+}
+
+/* 内容来源声明的来源标注（剧本1 帧5/剧本2 帧2：「（来源：说明文件 ep01.txt）」
+   「（来源：正文轨 002.txt）」——值行下的独立一行，截断声明尾缀同位） */
+.li-ws-decl-origin {
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  word-break: break-all;
+}
+
+/* 跨文件并入冲突待裁决行（剧本2 帧3「作者　待裁决（文件名推导：Isel ｜ 说明文件：いせる）」）：
+   与终选声明行同容器形态、警示色分野 */
+.li-ws-decl.is-content-pending .li-ws-decl-main {
+  color: var(--app-color-warning, var(--app-text-primary));
+}
+
+/* 快裁键（帧3「[用文件名推导] [用说明文件]」两键：接既有裁决/会话赋值通路） */
+.li-ws-pending-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.li-ws-pending-pick {
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 0 8px;
+  border: 1px solid var(--app-border-color-lighter, var(--app-border-color-light));
+  border-radius: var(--app-radius-sm);
+  background: var(--app-tag-neutral-bg);
+  color: var(--app-color-primary);
+  cursor: pointer;
+}
+
+.li-ws-pending-pick:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 /* 同值折叠标签：终选声明来源行尾 [同值 +N]（展开态 [同值 +N ▴]），点击展开/收起 */

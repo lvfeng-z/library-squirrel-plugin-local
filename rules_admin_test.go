@@ -544,7 +544,7 @@ func TestAggregateRulesAdminAnchoringAndPreset(t *testing.T) {
 		t.Fatalf("预置来源条目编辑保存应被接受（与用户条目同权）: %v", err)
 	}
 
-	// 恢复预置：删除种子后补回（档案此前无种子——两条预置均缺席，一次补 2 条；
+	// 恢复预置：删除种子后补回（档案此前无种子——三条预置均缺席，一次补 3 条；
 	// 在场条目不覆写）
 	if _, err := mgr.ApplyDeleteRule(presetAggVideoSubtitleID); err != nil {
 		t.Fatalf("删除预置种子失败: %v", err)
@@ -553,10 +553,10 @@ func TestAggregateRulesAdminAnchoringAndPreset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("恢复预置失败: %v", err)
 	}
-	if added != 2 {
-		t.Fatalf("应补回 2 条预置种子，实际 %d", added)
+	if added != 3 {
+		t.Fatalf("应补回 3 条预置种子，实际 %d", added)
 	}
-	for _, want := range []string{presetAggVideoSubtitleID, presetAggArticleImageTextID} {
+	for _, want := range []string{presetAggVideoSubtitleID, presetAggImageCompanionTextID, presetAggArticleImageTextID} {
 		found := false
 		for _, r := range view.Rules {
 			if r.ID == want {

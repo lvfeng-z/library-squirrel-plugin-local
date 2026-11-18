@@ -24,6 +24,11 @@ type MatchInput struct {
 	// AncestorChildDirCounts 为各层祖先目录的直接子目录数（仅目录计数，不含
 	// 文件），索引与 DirNames 对齐；未提供时子目录数谓词保守不命中。
 	AncestorChildDirCounts []int
+	// CompanionText 为伴随说明文件的内容片段（识别轮按规则命中集采集注入的
+	// 普通数据字段，求值只消费不发起读盘）；CompanionTruncated 标记片段超
+	// 采集上限被截断。空串=未采集或不可作为文本呈现。
+	CompanionText      string
+	CompanionTruncated bool
 }
 
 // ancestorFilesAt 返回深度 d 祖先目录的直接子文件名（true=数据可用且非空）。
