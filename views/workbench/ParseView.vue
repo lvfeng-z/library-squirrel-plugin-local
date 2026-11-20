@@ -213,26 +213,26 @@
                 ref="listViewport"
                 class="li-ws-list"
                 @scroll="onListScroll"
-                @mouseleave="hoverAggKey = ''"
+                @mouseleave="hoverRel = ''"
               >
                 <div class="li-ws-list-spacer" :style="{ height: `${visibleRange.start * ROW_H}px` }"></div>
                 <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 自身轨道标（聚合成员，无聚合归属
-                     行无标）+ 声明/线索摘要 + 差异标 + 已赋值标；悬停聚合成员行→同作品
-                     其他成员行整行高亮（aggWorkKey 联动，无聚合归属行无联动）；行点击 =
+                     行无标）+ 声明/线索摘要 + 差异标 + 已赋值标；悬停行→共作品行整行高亮（互链判定见 aggHoverClass）
+                     （聚合成员按 aggWorkKey 等值、扇出说明文件按共作品；独立行无联动）；行点击 =
                      选中联动右栏（选中键 = 文件相对路径），与复选不互斥 -->
                 <div
                   v-for="row in visibleFiles"
                   :key="row.relPath"
                   class="li-ws-row"
-                  :class="[row.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.relPath) ? `is-diff-${diffMark(row.relPath)}` : ''), aggHoverClass(row.aggWorkKey)]"
+                  :class="[row.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.relPath) ? `is-diff-${diffMark(row.relPath)}` : ''), aggHoverClass(row.aggWorkKey, row.relPath)]"
                   @click="selectFile(row.relPath)"
-                  @mouseenter="hoverAggKey = row.aggWorkKey || ''"
-                  @mouseleave="hoverAggKey = ''"
+                  @mouseenter="hoverRel = row.relPath"
+                  @mouseleave="hoverRel = ''"
                 >
                   <el-checkbox
                     class="li-ws-cb"
-                    :model-value="isWorkSelected(workIdOf(row.relPath))"
-                    :disabled="!isWorkSelectable(row.relPath)"
+                    :model-value="isRelSelected(row.relPath)"
+                    :disabled="!isRelSelectable(row.relPath)"
                     :title="workHintOf(row.relPath)"
                     @click.stop
                     @change="() => toggleWorkAt(row.relPath)"
@@ -266,7 +266,7 @@
                    目录行 = 展开箭头 + 复选框（子树递选，按作品聚合进现有选择集）+ 目录名（点 = 右栏目录解析面板）
                    + 文件数 + 含义覆盖标记；
                    文件行 = 行首作品级复选（勾选/禁用语义同平铺，目录行全选/半选态由选择集派生）+ 平铺同款元数据，点行 = 现有联动 -->
-              <el-scrollbar v-if="listMode === 'tree'" ref="treeViewport" class="li-ws-tree" @mouseleave="hoverAggKey = ''">
+              <el-scrollbar v-if="listMode === 'tree'" ref="treeViewport" class="li-ws-tree" @mouseleave="hoverRel = ''">
                 <template v-for="row in treeRows" :key="row.key">
                   <div v-if="row.kind === 'dir' && row.dir" class="li-ws-tree-dir" :style="{ paddingLeft: `${row.depth * 16 + 4}px` }">
                     <button
@@ -293,17 +293,17 @@
                   <div
                     v-else-if="row.kind === 'file' && row.file"
                     class="li-ws-tree-file"
-                    :class="[row.file.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.file.relPath) ? `is-diff-${diffMark(row.file.relPath)}` : ''), aggHoverClass(row.file.aggWorkKey)]"
+                    :class="[row.file.relPath === selectedRelPath ? 'is-selected' : (diffMark(row.file.relPath) ? `is-diff-${diffMark(row.file.relPath)}` : ''), aggHoverClass(row.file.aggWorkKey, row.file.relPath)]"
                     :style="{ paddingLeft: `${row.depth * 16 + 30}px` }"
                     @click="selectFile(row.file.relPath)"
-                    @mouseenter="hoverAggKey = row.file.aggWorkKey || ''"
-                    @mouseleave="hoverAggKey = ''"
+                    @mouseenter="hoverRel = row.file.relPath"
+                    @mouseleave="hoverRel = ''"
                   >
                     <!-- H6：行首复选走作品级选择集通路（与平铺行同款），阻止冒泡以免触发行选中联动 -->
                     <el-checkbox
                       class="li-ws-cb"
-                      :model-value="isWorkSelected(workIdOf(row.file.relPath))"
-                      :disabled="!isWorkSelectable(row.file.relPath)"
+                      :model-value="isRelSelected(row.file.relPath)"
+                      :disabled="!isRelSelectable(row.file.relPath)"
                       :title="workHintOf(row.file.relPath)"
                       @click.stop
                       @change="() => toggleWorkAt(row.file.relPath)"
@@ -2545,27 +2545,41 @@ const workIndex = computed<Map<string, SelectableWorkView>>(() => {
   return index
 })
 
-// 文件相对路径 → 所属作品（域内每文件恰属一件单文件作品，键=前缀+相对路径）
-const workByRel = computed<Map<string, SelectableWorkView>>(() => {
-  const index = new Map<string, SelectableWorkView>()
+// 文件相对路径 → 所属作品列表（多数文件恰属一件作品——单文件作品键=前缀+
+// 相对路径、聚合成员属其聚合作品；扇出到多作品的元数据源文件属多件——内容
+// 各带一份、清单行随每件目标作品联动，按域序保序）
+const worksByRel = computed<Map<string, SelectableWorkView[]>>(() => {
+  const index = new Map<string, SelectableWorkView[]>()
   for (const w of allWorks.value) {
-    for (const rel of w.files) index.set(rel, w)
+    for (const rel of w.files) {
+      const list = index.get(rel)
+      if (list) list.push(w)
+      else index.set(rel, [w])
+    }
   }
   return index
 })
 
-const workIdOf = (rel: string): string => {
-  const w = workByRel.value.get(rel)
-  return w ? w.workId : ''
+// 行复选显示态：任一所属作品在选即亮——扇出说明文件勾选任一目标作品即随该
+// 作品任务并入（每件各计说明×1）；单属作品退化为所属作品在选与否，与单值
+// 寻址同值。
+const isRelSelected = (rel: string): boolean => {
+  for (const w of worksByRel.value.get(rel) || []) {
+    if (selectedWorks.value.has(w.workId)) return true
+  }
+  return false
 }
-const isWorkSelectable = (rel: string): boolean => {
-  const w = workByRel.value.get(rel)
-  return !!w && w.selectable
+// 行复选可点态：单属作品沿用作品可选性；多属（扇出说明文件）不可点——无独立
+// 成件资格，勾选经其目标作品行进行。
+const isRelSelectable = (rel: string): boolean => {
+  const list = worksByRel.value.get(rel)
+  return !!list && list.length === 1 && list[0].selectable
 }
 const workHintOf = (rel: string): string => {
-  const w = workByRel.value.get(rel)
-  if (!w) return '不在可选作品域'
-  return w.selectable ? '' : `${workStateLabel(w.state)}（整体不可选）`
+  const list = worksByRel.value.get(rel)
+  if (!list || list.length === 0) return '不在可选作品域'
+  if (list.length > 1) return `说明文件·扇出到 ${list.length} 件作品（勾选任一目标作品即随任务并入）`
+  return list[0].selectable ? '' : `${workStateLabel(list[0].state)}（整体不可选）`
 }
 
 const workStateLabel = (state: string): string => {
@@ -2625,11 +2639,41 @@ const companionContentStateText = (state: string): string => {
   return '内容未采集，描述未生成'
 }
 
-// 悬停联动（剧本1 帧2/帧4）：指针悬停聚合成员行时记录其聚合作品键，同键成员行
-// 整行高亮（含指针行，共同表达「这几行是同一件作品」）；无聚合归属行键为空、无联动；
-// 移开即恢复。平铺/目录树两种模式共用同一键（=识别快照 aggWorkKey）
-const hoverAggKey = ref('')
-const aggHoverClass = (key?: string): string => (key && key === hoverAggKey.value ? 'is-agg-hover' : '')
+// 悬停联动（剧本1 帧2/帧4·剧本B 帧1/帧5）：指针悬停行时记录其相对路径，与它
+// 「同属至少一件作品」的行整行高亮（含指针行，共同表达「这几行同进一件作品」）
+// ——聚合成员行按 aggWorkKey 等值互链（快照键直达，大作品不依赖域投影成员表），
+// 扇出说明文件与它的每件目标作品行按共作品互链（一 txt 多作品的随组联动：悬停
+// txt 亮起全部目标作品行、悬停作品行亮起随它的说明行）；无互链对象的独立行
+// 保持原生悬停底色。平铺/目录树两种模式共用。移开即恢复。
+const hoverRel = ref('')
+const hoverFile = computed(() => (hoverRel.value ? fileByRel.value.get(hoverRel.value) || null : null))
+const hoverWorks = computed<SelectableWorkView[]>(() => {
+  if (!hoverRel.value) return []
+  return worksByRel.value.get(hoverRel.value) || []
+})
+// 指针行自身是否着色：仅当确有互链对象（同键成员或共作品行）
+const hoverHasLink = computed(() => {
+  if (hoverFile.value && hoverFile.value.aggWorkKey) return true
+  for (const w of hoverWorks.value) {
+    if (w.files && w.files.length > 1) return true
+  }
+  return false
+})
+const aggHoverClass = (key: string | undefined, rel: string): string => {
+  const x = hoverRel.value
+  if (!x) return ''
+  if (rel === x) return hoverHasLink.value ? 'is-agg-hover' : ''
+  const f = hoverFile.value
+  if (!f) return ''
+  if (key && key === f.aggWorkKey) return 'is-agg-hover'
+  const ws = worksByRel.value.get(rel)
+  if (ws) {
+    for (const w of hoverWorks.value) {
+      if (ws.indexOf(w) >= 0) return 'is-agg-hover'
+    }
+  }
+  return ''
+}
 
 // 选择集中的聚合作品（files 多成员；帧5 确认框逐件列明细——聚合作品=一个子任务）
 const aggregatedSelectedWorks = computed<SelectableWorkView[]>(() => {
@@ -2690,8 +2734,7 @@ const aggregatedTrackSummary = (w: SelectableWorkView): string => {
   return parts.join(' + ')
 }
 
-const isWorkSelected = (id: string): boolean => selectedWorks.value.has(id)
-
+// 作品级选中判定（行级显示态走 isRelSelected——多属行任一目标作品在选即亮）
 function toggleWork(id: string): void {
   const work = workIndex.value.get(id)
   if (!work || !work.selectable) return
@@ -2702,8 +2745,9 @@ function toggleWork(id: string): void {
 }
 
 function toggleWorkAt(rel: string): void {
-  const id = workIdOf(rel)
-  if (id) toggleWork(id)
+  // 多属行（扇出说明文件）不可点（isRelSelectable=false），此处 no-op 兜底
+  const list = worksByRel.value.get(rel)
+  if (list && list.length === 1) toggleWork(list[0].workId)
 }
 
 function addWorks(works: SelectableWorkView[], on: boolean): void {
@@ -2716,15 +2760,17 @@ function addWorks(works: SelectableWorkView[], on: boolean): void {
   selectedWorks.value = next
 }
 
-// 当前过滤条件命中的作品集（清单行复选的可见域，去重保序）
+// 当前过滤条件命中的作品集（清单行复选的可见域，去重保序——多属行的各目标
+// 作品经同一行可达，均入可见域）
 const filteredWorks = computed<SelectableWorkView[]>(() => {
   const seen = new Set<string>()
   const out: SelectableWorkView[] = []
   for (const f of filteredFiles.value) {
-    const w = workByRel.value.get(f.relPath)
-    if (w && !seen.has(w.workId)) {
-      seen.add(w.workId)
-      out.push(w)
+    for (const w of worksByRel.value.get(f.relPath) || []) {
+      if (!seen.has(w.workId)) {
+        seen.add(w.workId)
+        out.push(w)
+      }
     }
   }
   return out
@@ -3102,28 +3148,34 @@ const defaultTaskName = computed<string>(
   () => `本地导入 · ${libraryRootName.value} · ${selectedWorks.value.size} 件作品`
 )
 
-// 框下小字的 M：选择集作品文件总数（按选择集聚合各作品 files 数求和；
-// 悬空选择键不在 workIndex 内、无文件数可计按 0——悬空本身另有创建栏提示拦阻）
+// 框下小字的 M：选择集作品文件数（按作品成员并集去重——扇出说明文件物理
+// 一份、并入 N 件目标作品时按一份计；悬空选择键不在 workIndex 内、无文件数
+// 可计按 0——悬空本身另有创建栏提示拦阻）
 const selectedFileCount = computed<number>(() => {
-  let count = 0
+  const rels = new Set<string>()
   for (const id of selectedWorks.value) {
     const work = workIndex.value.get(id)
-    if (work) count += (work.files && work.files.length) || 0
+    if (work) for (const rel of work.files || []) rels.add(rel)
   }
-  return count
+  return rels.size
 })
 
 // —— 伴随说明计数附注（伴随说明文件内容解析·剧本1 帧3/剧本2 帧1/剧本3 帧2） ——
 
-// 选择集说明成员合计（已选>0 形态：「（M 个文件，含说明 N）」——文件计数含说明
-// 成员〔清单行全量在场〕，说明成员数另附）
+// 选择集说明成员合计（已选>0 形态：「（M 个文件，含说明 N）」——按物理说明
+// 文件去重：扇出说明文件并入 N 件目标作品计一份，与创建确认「另有说明文件
+// N」同口径；各作品的「说明×N」明细行仍按作品各自的 companionCount 计）
 const selectedCompanionCount = computed<number>(() => {
-  let count = 0
+  const companions = new Set<string>()
   for (const id of selectedWorks.value) {
     const work = workIndex.value.get(id)
-    if (work) count += work.companionCount || 0
+    if (!work) continue
+    for (const rel of work.files || []) {
+      const f = fileByRel.value.get(rel)
+      if (f && f.aggCompanion) companions.add(rel)
+    }
   }
-  return count
+  return companions.size
 })
 
 // 含说明成员的作品件数（未选形态：「（可选 X / 共 Y，K 件含说明）」）
@@ -4143,8 +4195,9 @@ onUnmounted(() => {
   background: rgba(128, 128, 128, 0.08);
 }
 
-/* 悬停联动（剧本1 帧2/帧4）：指针悬停聚合成员行→同 aggWorkKey 成员行整行高亮
-   （含指针行，主色淡底；置于原生 :hover 之后同特异性覆盖灰底）；无聚合归属行无联动 */
+/* 悬停联动（剧本1 帧2/帧4·剧本B 帧1/帧5）：指针悬停行→共作品行整行高亮
+   （聚合成员按 aggWorkKey 等值、扇出说明文件与各目标作品行互链；含指针行，
+   主色淡底；置于原生 :hover 之后同特异性覆盖灰底）；独立行无联动 */
 .li-ws-row.is-agg-hover,
 .li-ws-tree-file.is-agg-hover {
   background: color-mix(in srgb, var(--app-color-primary) 12%, transparent);
