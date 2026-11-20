@@ -1,11 +1,12 @@
 // 决策10（终审重梳轮）的内核释放锚：解除提取×聚合互斥（聚合规则携提取动作
 // 照常逐文件求值、声明挂各命中文件、经主导文件结论并入聚合作品元数据）+
-// 配对/聚合段放开行结构限制（括号子组/行级非——成员判定消费规则完整求值的
-// 命中集，行级命中照常按行）+ 平行行等值回归（存量聚合/配对规则的现状形态
+// 聚合/扇出段放开行结构限制（括号子组/行级非——成员判定消费规则完整求值的
+// 命中集，行级命中照常按行）+ 平行行等值回归（存量聚合/映射规则的现状形态
 // 行命中池 OR 汇聚逐字节等值，连接词不参与成员判定）。
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
-// booleanReleaseRun 对文件面执行合并求值+聚合/配对段（与 pairingRun 同款装配）。
+// booleanReleaseRun 对文件面执行合并求值+聚合/扇出段（与 fanoutRun 同款装配）。
 func booleanReleaseRun(t *testing.T, files []ScanFile, rules []RuleEntry) []FileConclusion {
 	t.Helper()
 	conclusions := MergedRecognition(files, rules, nil, nil)
@@ -154,15 +155,15 @@ func TestAggregationBooleanShapeGate(t *testing.T) {
 	}
 }
 
-// TestPairingBooleanShapeGate 布尔组合（括号子组+行级非）配对规则锚：绑定行/
-// 主导行照常按行（括号内层行占号）；整条布尔求值为门——门不过的说明文件
-// 不入配对命中集、维持独立作品。
-func TestPairingBooleanShapeGate(t *testing.T) {
-	// 结构：〔{作品}.png 或 {任意}〕 且 非 {任意}.md——行1 主导（组内展平）、
+// TestFanoutBooleanShapeGate 布尔组合（括号子组+行级非）映射规则锚：绑定行/
+// 目标行照常按行（括号内层行占号）；整条布尔求值为门——门不过的说明文件
+// 不入分组命中集、按独立作品导入（孤文件回退）。
+func TestFanoutBooleanShapeGate(t *testing.T) {
+	// 结构：〔{作品}.png 或 {任意}〕 且 非 {任意}.md——行1 目标（组内展平）、
 	// 行2 绑定、行3 行级非（.md 说明文件被门排除）。
 	rule := RuleEntry{
 		ID:          "map-boolean-gate",
-		Description: "测试：布尔组合配对",
+		Description: "测试：布尔组合扇出",
 		Source:      RuleSourceManual,
 		Enabled:     true,
 		Conditions: []CondxRow{
@@ -173,7 +174,7 @@ func TestPairingBooleanShapeGate(t *testing.T) {
 			{Connector: "and", Negated: true, Condition: booleanReleaseFileCond("{任意}", ".md")},
 		},
 		MetadataFile: &MetadataFileProduction{
-			Pairing:         &PairingKey{Mode: PairingModeDirectory},
+			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
 	}
@@ -182,26 +183,27 @@ func TestPairingBooleanShapeGate(t *testing.T) {
 
 	cover := aggConclusionOf(t, conclusions, "单图/cover.png")
 	if cover.AggWorkKey != "" || cover.AggCompanion {
-		t.Fatalf("主导候选应维持独立作品: key=%q companion=%v", cover.AggWorkKey, cover.AggCompanion)
+		t.Fatalf("目标文件应维持独立作品: key=%q companion=%v", cover.AggWorkKey, cover.AggCompanion)
 	}
 	paired := aggConclusionOf(t, conclusions, "单图/说明.txt")
-	if paired.AggWorkKey != "f:单图/cover.png" || paired.AggTrackRole != "" || !paired.AggCompanion {
-		t.Fatalf("门内说明文件应归并到唯一主导: key=%q role=%q companion=%v",
-			paired.AggWorkKey, paired.AggTrackRole, paired.AggCompanion)
+	if paired.AggWorkKey != "" || paired.AggTrackRole != "" || !paired.AggCompanion ||
+		!reflect.DeepEqual(paired.FanoutWorkKeys, []string{"f:单图/cover.png"}) {
+		t.Fatalf("门内说明文件应为元数据源（零归属键+扇出到组内唯一作品）: key=%q role=%q companion=%v fanout=%v",
+			paired.AggWorkKey, paired.AggTrackRole, paired.AggCompanion, paired.FanoutWorkKeys)
 	}
 	// 门排除锚：备注.md 命中行级非内层（.md）→ 整条求值不过——纯平行语义下
-	// 它是行2 命中的说明成员候选（会被归并），布尔门令其维持独立。
+	// 它是行2 命中的说明成员候选（会被扇出收编），布尔门令其按独立作品导入。
 	note := aggConclusionOf(t, conclusions, "单图/备注.md")
-	if note.AggWorkKey != "" || note.AggCompanion {
-		t.Fatalf("布尔门不过的说明文件应维持独立作品: key=%q companion=%v",
-			note.AggWorkKey, note.AggCompanion)
+	if note.AggWorkKey != "" || note.AggCompanion || len(note.FanoutWorkKeys) != 0 {
+		t.Fatalf("布尔门不过的说明文件应按独立作品导入: key=%q companion=%v fanout=%v",
+			note.AggWorkKey, note.AggCompanion, note.FanoutWorkKeys)
 	}
 }
 
 // TestGroupParallelRowsEquivalenceAnchor 平行行为等值回归锚（关键回归约束）：
-// 纯平行行（无括号无行级非——存量聚合/配对规则的现状形态）的成员判定=行
+// 纯平行行（无括号无行级非——存量聚合/映射规则的现状形态）的成员判定=行
 // 命中池 OR 汇聚，行前连接词（空串/and/or）不参与成员判定——三种连接词
-// 书写的同构规则产出逐字节等值的聚合/配对结论（求值器接线不改变平行语义）。
+// 书写的同构规则产出逐字节等值的聚合/扇出结论（求值器接线不改变平行语义）。
 func TestGroupParallelRowsEquivalenceAnchor(t *testing.T) {
 	files := aggScanFiles("x/a.mp4", "x/a.zh.srt", "x/b.mp4")
 	build := func(id, secondConnector string) RuleEntry {

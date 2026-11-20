@@ -48,16 +48,18 @@ type FileDecision struct {
 	// 独立作品）；AggTrackRole 为本文件的轨道角色（空=无聚合）；AggWorkType 为
 	// 选中规则声明的作品类型（聚合定义的作品类型，创建链子行 ResourceType 的
 	// 声明值来源）。三字段由汇流后的聚合段写入（见 runAggregationStage）——
-	// 逐文件求值循环不产出。PairingGuardLeads 为配对守卫拒绝注记（目录配对
-	// 多主导时的主导候选数，配对段落定）：行详情可见原因数据位，与归属字段
-	// 互斥（守卫拒绝=零归属）。
+	// 逐文件求值循环不产出。AggCompanion 为说明成员标记（聚合段产的绑定行
+	// 成员或扇出归属段产的元数据源文件——归进作品/挂靠作品、无轨、不导入、
+	// 不独立成件）；AggFanoutWorkKeys 为内容扇出键集（本文件的内容声明按
+	// 分组扇出到达的全部作品键——内容声明只按此键集流动；空=无扇出）。
 	AggWorkKey   string
 	AggTrackRole string
 	AggWorkType  string
-	// PairingGuardLeads 目录配对守卫拒绝注记：本文件作为说明成员候选参与目录
-	// 配对、组内主导候选多于一个被守卫拒绝时的候选数；0=无注记（配对成立/
-	// 零主导组/标识配对拒绝/非候选均零值）。
-	PairingGuardLeads int
+	AggCompanion bool
+	// AggFanoutWorkKeys 内容扇出键集：扇出归属段落定（与聚合归属同相挂汇流
+	// 后），组内目标文件推出的全部作品键（已被聚合收编=其聚合作品键、未
+	// 收编=自身路径键）；组内无落点（孤文件回退）与未参与扇出的文件零值。
+	AggFanoutWorkKeys []string
 }
 
 // ScanNote 为一条贪婪识别歧义记录。
@@ -164,7 +166,8 @@ func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rule
 		decisions[i].AggWorkKey = assigns[i].WorkKey
 		decisions[i].AggTrackRole = assigns[i].TrackRole
 		decisions[i].AggWorkType = assigns[i].WorkType
-		decisions[i].PairingGuardLeads = assigns[i].GuardLeads
+		decisions[i].AggCompanion = assigns[i].Companion
+		decisions[i].AggFanoutWorkKeys = assigns[i].FanoutWorkKeys
 	}
 }
 
@@ -310,13 +313,13 @@ func runGroupStage(rules []RuleEntry, in *MatchInput, lib *LibraryIndex, ctx *Pa
 //
 // 供给方门段先行（作用域附件）：主循环前对会被求值的规则条件行内
 // refScope 附件引用的全部供给方先求值（runRefGateStage——needed 收集为
-//「全部启用规则条件行递归扫描 refScope 附件」）；
+// 「全部启用规则条件行递归扫描 refScope 附件」）；
 // 供给方命中层集（dirHitDepths）透传进共享上下文（ParseContext.RefScopeDepths，
 // ruleScopedContext 继承——风险6 核对点），消费规则目录行逐层槽位的 refScope
 // 谓词按层距阶梯判据核对（裁决⑥：候选层 c 合格 ⟺ 供给方命中且 ∃D∈供给方
 // 命中层集 s.t. 层距=0 时 c>D、层距=N 时 c−D=N——「之下不含其身」与
 // above-form 在该判据下天然不可成立）。供给方未命中
-//（停用/悬空/被跳过——链式供给合法，环为唯一禁形、保存与载入两期同拒，
+// （停用/悬空/被跳过——链式供给合法，环为唯一禁形、保存与载入两期同拒，
 // 成环条目不在求值场）→ 附件谓词恒不满足→行不中（严格语义，不降级）。
 // 供给方捕获快照以限定键挂入消费规则私有作用域的注入区（ParseContext.
 // RefCaptures，按本规则的供给方集注入——injectRefSnapshots；refCapture 提取
@@ -343,7 +346,7 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 		}
 		// 聚合规则照常逐文件求值（决策10 解除互斥）：携带提取动作时声明挂
 		// 各命中文件、经主导文件结论并入聚合作品元数据；并组判定仍在汇流后
-		// 的聚合段（runAggregationStage——两段各司其职，配对/并入不进本循环）。
+		// 的聚合段（runAggregationStage——两段各司其职，扇出/并入不进本循环）。
 		ruleCtx := ctx.ruleScopedContext()
 		// 作用域附件消费规则：供给方捕获快照按本规则供给方集注入其私有作用域
 		//（限定键通道，refCapture 提取与 when 限定名可读；供给方未命中时快照

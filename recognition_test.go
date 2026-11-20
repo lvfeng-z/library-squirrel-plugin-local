@@ -3965,7 +3965,7 @@ func TestAggregationTypeDanglingAnchor(t *testing.T) {
 	}
 
 	// 求值跳过：悬空停用后 EffectiveRules 出局——article 形态文件零聚合轨道
-	// 归属（启用中的纯映射种子对 a.txt 的目录配对归并正当在场——说明成员
+	// 归属（启用中的纯映射种子对 a.txt 的所在目录分组扇出正当在场——元数据源
 	// 无轨无类型，与聚合归属零冲突）。
 	files := aggScanFiles("w/a.txt", "w/a.jpg")
 	decisions := RunPipelineWithTypes(files, EffectiveRules(profile), nil, videoOnly)
@@ -3996,8 +3996,8 @@ func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
 		if rule.Source != RuleSourcePreset || !rule.Enabled {
 			t.Fatalf("预置种子应以预置来源入档并与用户条目同权: %+v", rule)
 		}
-		// 种子三改纯映射形态（决策4 甲）：类别=metadata（无聚合产出、目录
-		// 配对）；其余两条聚合种子类别不变。
+		// 种子三改纯映射形态（决策4 甲）：类别=metadata（无聚合产出、所在
+		// 目录分组）；其余两条聚合种子类别不变。
 		wantCategory := RuleCategoryAggregate
 		if rule.ID == presetAggImageCompanionTextID {
 			wantCategory = RuleCategoryMetadata
@@ -4177,12 +4177,11 @@ func TestSnapshotGroupMembersNaturalOrder(t *testing.T) {
 }
 
 // TestAggregationCompanionRowGrouping 混合规则（轨行+说明行）并组锚：被指派为
-// 元数据文件的行（内容绑定勾选、未分配轨道）命中的文件经配对键归并进作品
-// （决策12③ 翻新：绑定行不再经聚合标识入组——聚合成员=轨行命中；说明成员
-// 由配对段产出，配对键缺省的并用规则按归一形态=聚合标识取键）——有归属、
-// 无轨、带说明成员标记、随作品类型；未指派未分轨的行命中不构成聚合成员，
-// 但其文件作为未收编主导参与配对（聚合未覆盖的行命中按单用语义承载）——
-// 与已收编主导同组时配对目标跨件，守卫拒绝、说明文件维持独立作品（I3）。
+// 元数据文件的行（内容绑定勾选、未分配轨道）命中的文件经聚合标识入组为
+// 聚合成作品的说明成员（归进作品、无轨、不计必含轨单位、带说明成员标记、
+// 随作品类型）；未指派未分轨的行命中不构成聚合成员，但其文件在扇出面承载
+// 目标（组内非绑定行命中）——说明文件的内容扇出键集含聚合作品与该独立
+// 作品两键（一 txt 多作品扇出，聚合结论不受扇出影响）。
 func TestAggregationCompanionRowGrouping(t *testing.T) {
 	files := aggScanFiles("d/ep01.mp4", "d/ep01.zh.srt", "d/ep01.nfo", "s/only.nfo")
 	rule := RuleEntry{
@@ -4208,8 +4207,8 @@ func TestAggregationCompanionRowGrouping(t *testing.T) {
 			},
 		},
 		MetadataFile: &MetadataFileProduction{
-			// 配对键缺省=归一形态（identity:=聚合标识 {row1,work}——运行时
-			// 镜像与载入归一同式）。
+			// 分组绑定缺省=聚合成作品所绑分组（求值期便利缺省，档案不物化
+			//——运行时镜像 identity:=聚合标识 {row1,work}）。
 			ContentBindings: []ContentBinding{{Row: 3, Dimension: DimDescription}},
 		},
 	}
@@ -4229,7 +4228,7 @@ func TestAggregationCompanionRowGrouping(t *testing.T) {
 	}
 	nfo := aggConclusionOf(t, conclusions, "d/ep01.nfo")
 	if nfo.AggWorkKey != "f:d/ep01.mp4" || nfo.AggTrackRole != "" || !nfo.AggCompanion {
-		t.Fatalf("说明行成员应经配对键归并进作品（无轨+说明成员标记）: key=%q role=%q companion=%v",
+		t.Fatalf("说明行成员应经聚合标识入组归并进作品（无轨+说明成员标记）: key=%q role=%q companion=%v",
 			nfo.AggWorkKey, nfo.AggTrackRole, nfo.AggCompanion)
 	}
 	lone := aggConclusionOf(t, conclusions, "s/only.nfo")
@@ -4239,9 +4238,8 @@ func TestAggregationCompanionRowGrouping(t *testing.T) {
 	}
 
 	// 未指派未分轨的行（.log）命中文件不构成聚合成员（轨道/绑定两处指派皆
-	// 无）；配对面它承载未收编主导候选——与已收编主导（mp4/srt 同属 W）同配
-	// 对键时目标集跨件（W ∪ 主导文件自身作品），守卫拒绝、说明文件维持独立
-	// 作品（I3 跨件拒绝的正例锚；主导候选维持独立不受扰）。
+	// 无）；扇出面它承载目标文件（组内非绑定行命中）——说明文件的内容扇出
+	// 键集含聚合作品与该独立作品两键（一 txt 多作品扇出，主导结论不受扰）。
 	mixed := aggScanFiles("d/ep01.mp4", "d/ep01.zh.srt", "d/ep01.nfo", "d/ep01.log")
 	mixedConclusions := MergedRecognition(mixed, rules, nil, nil)
 	runAggregationOnConclusions(mixedConclusions, mixed, mixed, rules, nil, testAggTypeIndex())
@@ -4250,14 +4248,15 @@ func TestAggregationCompanionRowGrouping(t *testing.T) {
 		t.Fatalf("未指派未分轨的行命中不应入组: key=%q companion=%v",
 			logFile.AggWorkKey, logFile.AggCompanion)
 	}
-	guarded := aggConclusionOf(t, mixedConclusions, "d/ep01.nfo")
-	if guarded.AggWorkKey != "" || guarded.AggCompanion {
-		t.Fatalf("主导跨件（收编主导+未收编主导同键）的说明文件应守卫拒绝、维持独立作品: key=%q companion=%v",
-			guarded.AggWorkKey, guarded.AggCompanion)
+	merged := aggConclusionOf(t, mixedConclusions, "d/ep01.nfo")
+	if merged.AggWorkKey != "f:d/ep01.mp4" || merged.AggTrackRole != "" || !merged.AggCompanion ||
+		!reflect.DeepEqual(merged.FanoutWorkKeys, []string{"f:d/ep01.mp4", "f:d/ep01.log"}) {
+		t.Fatalf("说明文件应归并进作品且内容扇出到组内两件作品（聚合作品+独立 log 作品）: key=%q role=%q companion=%v fanout=%v",
+			merged.AggWorkKey, merged.AggTrackRole, merged.AggCompanion, merged.FanoutWorkKeys)
 	}
 	mixedVideo := aggConclusionOf(t, mixedConclusions, "d/ep01.mp4")
 	if mixedVideo.AggWorkKey != "f:d/ep01.mp4" || mixedVideo.AggTrackRole != sdkdto.StoreRoleVideoMain {
-		t.Fatalf("守卫拒绝不应扰动主导的聚合结论: key=%q role=%q",
+		t.Fatalf("扇出不应扰动主导的聚合结论: key=%q role=%q",
 			mixedVideo.AggWorkKey, mixedVideo.AggTrackRole)
 	}
 }
@@ -4352,9 +4351,9 @@ func TestAggregationCompanionSnapshotMark(t *testing.T) {
 // TestAggregationPresetImageCompanionSeed 预置种子「单图+说明文本」收编边界锚
 // （决策4 甲·纯映射形态）：聚合归属优先——同名图片+文本对与孤立 txt 均由
 // 图文种子聚合收编（图文种子正文行 {作品} 模板吞任意主干名，孤立 txt 单必含
-// 轨成组为单正文 article 作品，目录配对对其不可达；同名对=正文轨主导+内嵌图
-// 轨，与「一图一文本」种子现状行为一致——聚合段在先、映射不夺已归属成员）；
-// 聚合竞争缺席（仅纯映射种子在场）时异名说明文件才经目录配对归并（正例）。
+// 轨成组为单正文 article 作品，目录分组对其不可达；同名对=正文轨主导+内嵌图
+// 轨，与「一图一文本」种子现状行为一致——聚合段在先、扇出不夺已归属成员）；
+// 聚合竞争缺席（仅纯映射种子在场）时异名说明文件才经所在目录分组扇出（正例）。
 func TestAggregationPresetImageCompanionSeed(t *testing.T) {
 	files := aggScanFiles("img/cover.jpg", "img/cover.txt", "img/notes.txt")
 	rules := PresetAggregateRules()
@@ -4373,7 +4372,7 @@ func TestAggregationPresetImageCompanionSeed(t *testing.T) {
 		t.Fatalf("同名对的 jpg 应为图文种子内嵌图轨: key=%q role=%q companion=%v",
 			coverJpg.AggWorkKey, coverJpg.AggTrackRole, coverJpg.AggCompanion)
 	}
-	// 孤立 txt：图文种子单正文成组收编（聚合在前，目录配对不可达——现状
+	// 孤立 txt：图文种子单正文成组收编（聚合在前，目录分组不可达——现状
 	// 行为锚定，收编边界实测结论）。
 	lone := aggConclusionOf(t, conclusions, "img/notes.txt")
 	if lone.AggWorkKey != "f:img/notes.txt" || lone.AggTrackRole != sdkdto.StoreRoleDocument || lone.AggCompanion {
@@ -4381,21 +4380,23 @@ func TestAggregationPresetImageCompanionSeed(t *testing.T) {
 			lone.AggWorkKey, lone.AggTrackRole, lone.AggCompanion)
 	}
 
-	// 正例（聚合竞争缺席）：仅纯映射种子在场时，异名说明文件经目录配对归并
-	// 到同目录唯一主导的图片作品（说明成员标记、无轨、不独立成作品）。
+	// 正例（聚合竞争缺席）：仅纯映射种子在场时，异名说明文件经所在目录分组
+	// 扇出到同目录图片作品（元数据源=零归属键+说明成员标记+扇出键集，无轨、
+	// 不独立成件）。
 	solo := aggScanFiles("solo/cover.jpg", "solo/说明.txt")
 	soloRules := []RuleEntry{rules[1]}
 	soloConclusions := MergedRecognition(solo, soloRules, nil, nil)
 	runAggregationOnConclusions(soloConclusions, solo, solo, soloRules, nil, testAggTypeIndex())
 	lead := aggConclusionOf(t, soloConclusions, "solo/cover.jpg")
 	if lead.AggWorkKey != "" || lead.AggCompanion {
-		t.Fatalf("目录配对的主导候选应维持独立作品（配对不并作品）: key=%q companion=%v",
+		t.Fatalf("目录分组的目标文件应维持独立作品（扇出不并作品）: key=%q companion=%v",
 			lead.AggWorkKey, lead.AggCompanion)
 	}
 	member := aggConclusionOf(t, soloConclusions, "solo/说明.txt")
-	if member.AggWorkKey != "f:solo/cover.jpg" || member.AggTrackRole != "" || !member.AggCompanion {
-		t.Fatalf("唯一主导目录的异名说明文件应经目录配对归并（无轨+说明成员标记）: key=%q role=%q companion=%v",
-			member.AggWorkKey, member.AggTrackRole, member.AggCompanion)
+	if member.AggWorkKey != "" || member.AggTrackRole != "" || !member.AggCompanion ||
+		!reflect.DeepEqual(member.FanoutWorkKeys, []string{"f:solo/cover.jpg"}) {
+		t.Fatalf("唯一目标目录的异名说明文件应经目录分组扇出（零归属键+说明成员标记）: key=%q role=%q companion=%v fanout=%v",
+			member.AggWorkKey, member.AggTrackRole, member.AggCompanion, member.FanoutWorkKeys)
 	}
 }
 

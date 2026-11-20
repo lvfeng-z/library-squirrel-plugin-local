@@ -510,10 +510,11 @@ const (
 
 // ContentBinding 为「元数据文件」产出的一条内容绑定（行→维度指派）：把本
 // 规则一条条件行命中文件的伴随说明内容整段声明到某含义维度。绑定行可为轨
-// 行（照常导入，内容叠加产出）或说明行（不导入——处置归配对段：决策12③
-// 绑定行经配对键入组，单用/并用同通道）；一期零参数（整段→单维度），
-// 「单文件解析逻辑→多维度」为该结构的参数化扩展位、本批不设计；一行内容
-// 可整段同时映射多个维度（多目标=同行多条绑定），同一行同一维度唯一。
+// 行（照常导入，内容叠加产出——双重身份）或说明行（仅绑定行命中=元数据源
+// 文件，不导入——内容按分组绑定扇出给组内全部作品）；一期零参数（整段→
+// 单维度），「单文件解析逻辑→多维度」为该结构的参数化扩展位、本批不设计；
+// 一行内容可整段同时映射多个维度（多目标=同行多条绑定），同一行同一维度
+// 唯一。
 type ContentBinding struct {
 	// Row 为被指派的条件行号（1 起先序展平，须在本规则条件行范围内——括号
 	// 子组内层行照常占号）。
@@ -522,48 +523,74 @@ type ContentBinding struct {
 	Dimension MetadataDimension `json:"dimension"`
 }
 
-// PairingMode 为映射产出配对键的取值形态。
-type PairingMode string
+// GroupingMode 为「元数据文件」产出分组绑定的键形态。
+type GroupingMode string
 
 const (
-	// PairingModeIdentity 表示标识配对：配对键=若干「行·捕获名」部分按声明序
-	// 拼成的复合标识，捕获值相等（共享捕获跨行汇流）的文件归为一组——说明
-	// 文件与资源文件各自从自己的命中行取同名捕获（如 无题_01.txt↔无题_01.png）。
-	PairingModeIdentity PairingMode = "identity"
-	// PairingModeDirectory 表示目录配对：配对键=文件所在目录——同目录主导
-	// 候选唯一时任意的说明文件归并给该主导（异名形态 cover.jpg+说明.txt 零
-	// 配置吸收），多主导目录守卫拒绝、说明文件维持独立作品。
-	PairingModeDirectory PairingMode = "directory"
+	// GroupingModeIdentity 表示标识分组：分组键=若干「行·捕获名」部分按声明
+	// 序拼成的复合标识（序列群键保留名可用），捕获值相等（共享捕获跨行汇流）
+	// 的文件归为一组——说明文件与资源文件各自从自己的命中行取同名捕获
+	// （如 无题_01.txt↔无题_01.png 经同名 {作品标识} 同键入组）。
+	GroupingModeIdentity GroupingMode = "identity"
+	// GroupingModeDirectory 表示所在目录分组：分组键=文件所在目录——同目录
+	// 的文件归为一组，说明内容扇出给组内全部作品（组内无其他文件时说明
+	// 文件按独立作品导入——孤文件回退）。
+	GroupingModeDirectory GroupingMode = "directory"
 )
 
-// PairingKey 为映射产出的配对键声明（「元数据文件」产出自己的字段，与聚合
-// 规则的标识声明各自独立声明——决策12③：并用形态下配对键仍是绑定行成员
-// 判定的唯一驱动，缺省=载入归一为聚合标识的等值形态；规则级 Identity 维持
-// 聚合专属）。
-type PairingKey struct {
-	// Mode 为配对形态（identity | directory）。
-	Mode PairingMode `json:"mode"`
-	// Identity 为标识配对的复合标识部分（形态同聚合的标识声明：行号+捕获
-	// 名，序列群键保留名可用）；目录配对不携带（在场即载入拒绝）。
+// GroupingBinding 为「元数据文件」产出的分组绑定声明（内容扇出的分组依据）：
+// 产出声明自己消费哪个分组。与聚合成作品的分组（规则级标识声明）各自独立
+// 声明、并用互不牵连；分组键求值与聚合标识共用同一实现（统一分组求值器，
+// 见 aggFileRowHits 的 identityValue/groupingKeyOf）。
+type GroupingBinding struct {
+	// Mode 为分组键形态（identity=标识分组 | directory=所在目录分组）。
+	Mode GroupingMode `json:"mode"`
+	// Identity 为标识分组的键部分（形态同聚合的标识声明：行号+捕获名，序列
+	// 群键保留名可用）；所在目录分组不携带（在场即载入拒绝）。
 	Identity []IdentityPart `json:"identity,omitempty"`
 }
 
 // MetadataFileProduction 为「元数据文件」产出的独立落档位（规则级产出、与
 // 聚合成作品产出平级，可各自单独使用或同规则并用）：内容绑定列表（哪些条
-// 件行的文件内容→哪个元数据维度）+ 配对键声明（说明文件靠什么找到它所属
-// 的作品）。单用（无聚合产出）按配对键分组做说明成员归并（不并作品——组
-// 成员文件各自保持原作品形态）；并用（有聚合产出）绑定行同样经配对键入组
-// （决策12③ 统一入组通道——聚合段成员判定回归轨行），配对目标=组内主导们
-// 所在的作品（桥接，同件无歧义/跨件拒绝）。
+// 件行的文件内容→哪个元数据维度）+ 分组绑定声明（说明内容按哪个分组内的
+// 作品集扇出）。绑定行命中文件的内容声明扇出给分组内全部作品（各自成件=
+// 各带一份、被聚合成一件=那件带一份；轨行兼绑定的双重身份文件内容同样
+// 扇出）；仅绑定行命中的未收编文件=元数据源文件（组内有落点时成立：不导入、
+// 不独立成件），组内无落点（全为绑定行命中或分组键不可得）按独立作品导入
+// （孤文件回退）。并用（有聚合产出）而分组绑定缺省时，求值期缺省绑聚合成
+// 作品所绑分组（便利缺省，显式可换——本结构不落档物化）。
 type MetadataFileProduction struct {
-	// Pairing 为配对键声明：映射单用（本规则无聚合产出）时必填，否则说明
-	// 成员无从归属；并用（有聚合产出）时缺省=载入归一为标识配对
-	// （identity:=聚合标识，见 normalizeCombinedPairingKey——行为等值
-	// 转换，零迁移零拒绝）。
-	Pairing *PairingKey `json:"pairing,omitempty"`
+	// Grouping 为分组绑定声明：映射单用（本规则无聚合产出）时必填——说明
+	// 内容无分组可依即无落点；并用（有聚合产出）时可缺省（缺省=聚合成作品
+	// 所绑分组，求值期取用、载入不物化）。
+	Grouping *GroupingBinding `json:"grouping,omitempty"`
 	// ContentBindings 为内容绑定列表（行→维度，一行可多条目=多目标）：绑定
 	// 行命中文件的伴随说明内容产声明。空=无内容产出（该形态载入拒绝）。
 	ContentBindings []ContentBinding `json:"contentBindings,omitempty"`
+	// legacyPairing 为旧档配对键（metadataFile.pairing）的载入暂存位：分组
+	// 绑定改以 metadataFile.grouping 落档，旧档读入即归一（键位迁移，见
+	// normalizeLegacyPairingKey），不参与序列化（非导出字段）。
+	legacyPairing *GroupingBinding
+}
+
+// UnmarshalJSON 从 JSON 载入「元数据文件」产出：字段直读之外，另把旧档的
+// 配对键（pairing）读入载入暂存位，供条目构造路径归一到分组绑定落档位
+// （载入即归一、不拒收——两形态 JSON 同构，归一只是键位迁移）；序列化方向
+// 按结构体标签展开，暂存位非导出、不再随档落旧键。
+func (m *MetadataFileProduction) UnmarshalJSON(data []byte) error {
+	type metadataFileJSON struct {
+		Grouping        *GroupingBinding `json:"grouping,omitempty"`
+		Pairing         *GroupingBinding `json:"pairing,omitempty"`
+		ContentBindings []ContentBinding `json:"contentBindings,omitempty"`
+	}
+	var in metadataFileJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return fmt.Errorf("元数据文件产出反序列化失败: %w", err)
+	}
+	m.Grouping = in.Grouping
+	m.legacyPairing = in.Pairing
+	m.ContentBindings = in.ContentBindings
+	return nil
 }
 
 // AggregateProduction 为聚合规则的分轨入口（聚合成作品产出）：类型先行——
@@ -628,10 +655,10 @@ type RuleEntry struct {
 	// 元数据规则不得携带（载入拒绝）。
 	Aggregate *AggregateProduction `json:"aggregate,omitempty"`
 	// MetadataFile 为「元数据文件」产出（规则级独立落档位，与聚合产出平级、
-	// 各自可单独使用或并用）：内容绑定+配对键声明。元数据规则与聚合规则均可
-	// 携带（映射单用=无聚合产出时按配对键分组归并说明成员、不并作品；并用=
-	// 绑定行经配对键入组、配对目标=组内主导所在作品〔桥接〕，配对键缺省载入
-	// 归一为聚合标识——决策12③）。
+	// 各自可单独使用或并用）：内容绑定+分组绑定声明。元数据规则与聚合规则均可
+	// 携带（映射单用=无聚合产出时内容按分组绑定扇出给组内全部作品、扇出
+	// 不并作品；并用=分组绑定可独立于聚合标识声明，缺省=聚合成作品所绑分组
+	//〔求值期取用，档案不物化〕）。
 	MetadataFile *MetadataFileProduction `json:"metadataFile,omitempty"`
 	// Conditions 为 v4 条件行列表（目标三分+格式+附加+小标）：v4 档案的
 	// 持久化语法。机器规则生产方（问答/泛化）与档案装载同一来源；
@@ -1068,10 +1095,12 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 			return nil, err
 		}
 	}
-	// 并用归一（决策12③ 统一入组通道·I1）：聚合产出与「元数据文件」产出并在
-	// 而配对键缺省的条目，载入归一 pairing={mode:identity, identity:=聚合标识}
-	// ——行为等值转换、零迁移零拒绝（见 normalizeCombinedPairingKey）。
-	normalizeCombinedPairingKey(rj)
+	// 旧档归一：元数据文件产出的旧配对键（metadataFile.pairing）上缴到分组
+	// 绑定落档位（metadataFile.grouping）——载入即归一、零拒绝零迁移；并用
+	// 缺省绑定不在此物化（求值期按聚合成作品所绑分组取用）。
+	if err := normalizeLegacyPairingKey(rj); err != nil {
+		return nil, err
+	}
 	if err := validateMetadataFileProduction(rj); err != nil {
 		return nil, err
 	}
@@ -1333,37 +1362,36 @@ func normalizeLegacyAggregateBindings(rj *ruleEntryJSON) error {
 	return nil
 }
 
-// normalizeCombinedPairingKey 并用归一（决策12③ 统一入组通道·I1 修复）：
-// 聚合产出与「元数据文件」产出并在（内容绑定在场）而配对键缺省的条目，
-// 载入归一 pairing={mode:identity, identity:=聚合标识}——行为等值转换、
-// 零迁移零拒绝：旧 BO 并用档的绑定行原经聚合标识入组，归一后经配对段按
-// 同值配对键入组、归并目标=组内主导所在作品（桥接），行为与升级前等值
-// （绑定行原随聚合标识入组=配对键=聚合标识的效果）。归一只在绑定在场时
-// 成立（无绑定的聚合条目无「元数据文件」产出语义，不触配对面）；保存按
-// 归一形态落档（配对键显式化——与旧档绑定归一同款「载入即归一、保存出
-// 新形态」口径）。求值侧 buildPairingPlans 对未经本通路的内存形态按同式
-// 兜底（运行时镜像）。
-func normalizeCombinedPairingKey(rj *ruleEntryJSON) {
-	if rj.Aggregate == nil || rj.MetadataFile == nil ||
-		rj.MetadataFile.Pairing != nil || len(rj.MetadataFile.ContentBindings) == 0 ||
-		len(rj.Identity) == 0 {
-		return
+// normalizeLegacyPairingKey 旧档归一：元数据文件产出携带旧档配对键
+// （metadataFile.pairing，由 UnmarshalJSON 读入暂存位）上缴到分组绑定落档位
+// （metadataFile.grouping）——载入即归一、零迁移零拒绝（两形态 JSON 同构：
+// mode=identity|directory、identity=键部分，归一只是键位迁移，归一后分组
+// 求值照常）。新旧两个落档位同时携带（双写形态——无法判定唯一意图）载入
+// 拒绝；保存只写新键位（归一形态随档）。并用缺省（分组绑定缺省而聚合产出
+// 在场）不在此物化——求值期按聚合成作品所绑分组取用（便利缺省不落档）。
+func normalizeLegacyPairingKey(rj *ruleEntryJSON) error {
+	if rj.MetadataFile == nil || rj.MetadataFile.legacyPairing == nil {
+		return nil
 	}
-	rj.MetadataFile.Pairing = &PairingKey{Mode: PairingModeIdentity, Identity: rj.Identity}
+	legacy := rj.MetadataFile.legacyPairing
+	rj.MetadataFile.legacyPairing = nil
+	if rj.MetadataFile.Grouping != nil {
+		return fmt.Errorf("规则 %q 同时携带 metadataFile.pairing 与 metadataFile.grouping（双写形态）：分组绑定只落 metadataFile.grouping", rj.ID)
+	}
+	rj.MetadataFile.Grouping = legacy
+	return nil
 }
 
 // validateMetadataFileProduction 「元数据文件」产出（规则级落档位）的载入
 // 校验：绑定行号在本规则条件行范围内、维度为合法维度枚举、同一行同一维度
 // 唯一（一行内容整段可同时映射多个维度=同行多条目，同一维度重复勾选无效果
-// 即拒绝）。配对键按形态校验：标识配对=配对键部分（行·捕获名）的行号与
-// 捕获名引用存在（序列群键保留名只选自序列目标行，与聚合标识声明同口径）；
-// 目录配对=不携带标识部分（目录即配对键）；映射单用（本规则无聚合产出）
-// 时配对键必填——否则说明成员无从归属，并用（有聚合产出）时缺省=载入归一
-// 为标识配对（配对键:=聚合标识，见 normalizeCombinedPairingKey——归一后
-// 配对键是绑定行成员判定的唯一驱动，聚合标识不再替代）。提取动作面：聚合
-// 并存已放开（决策10 解除互斥——提取声明挂各命中文件，行引用校验照常走
-// validateExtractions）；内容来源取值拒绝照旧（决策3：内容通路唯一面=「元数据
-// 文件」产出的内容绑定）。
+// 即拒绝）。分组绑定按形态校验：标识分组=键部分（行·捕获名）的行号与捕获
+// 名引用存在（序列群键保留名只选自序列目标行，与聚合标识声明同口径）；
+// 所在目录分组=不携带键部分（目录即分组键）；映射单用（本规则无聚合产出）
+// 时分组绑定必填——否则说明内容无分组可依即无落点；并用（有聚合产出）时
+// 可缺省（求值期缺省绑聚合成作品所绑分组，档案不物化）。提取动作面：聚合
+// 并存已放开（提取声明挂各命中文件，行引用校验照常走 validateExtractions）；
+// 内容来源取值拒绝照旧（内容通路唯一面=「元数据文件」产出的内容绑定）。
 func validateMetadataFileProduction(rj *ruleEntryJSON) error {
 	mf := rj.MetadataFile
 	if mf == nil {
@@ -1387,35 +1415,34 @@ func validateMetadataFileProduction(rj *ruleEntryJSON) error {
 			return fmt.Errorf("规则 %q 的内容绑定第 %d 项维度非法: %q（作者/标签/标题/作品集/描述）", rj.ID, i+1, b.Dimension)
 		}
 	}
-	return validatePairingKey(rj)
+	return validateGroupingBinding(rj)
 }
 
-// validatePairingKey 配对键声明的形态与引用校验（validateMetadataFileProduction
-// 的配对面子程序）：形态枚举合法、标识配对的配对键部分行号与捕获名引用存在
+// validateGroupingBinding 分组绑定声明的形态与引用校验（validateMetadataFileProduction
+// 的分组绑定面子程序）：形态枚举合法、标识分组的键部分行号与捕获名引用存在
 // （捕获名按本规则全部条件行的声明面汇流查证——共享捕获跨行同名，与聚合并
-// 组的取值口径一致）；映射单用（无聚合产出）时配对键必填。并用（有聚合
-// 产出）的缺省配对键已由 normalizeCombinedPairingKey 先行归一（identity:=
-// 聚合标识），到达此处时在场并按同口径校验——下方并用缺省分支为归一缺席
-// 形态的双保险兜底（等值放行，不构成可落档通道）。
-func validatePairingKey(rj *ruleEntryJSON) error {
+// 组的取值口径一致）；映射单用（无聚合产出）时分组绑定必填。并用（有聚合
+// 产出）的缺省绑定不落档（求值期取聚合成作品所绑分组），此处对缺省形态
+// 直接放行。
+func validateGroupingBinding(rj *ruleEntryJSON) error {
 	mf := rj.MetadataFile
-	if mf.Pairing == nil {
+	if mf.Grouping == nil {
 		if rj.Aggregate == nil {
-			return fmt.Errorf("规则 %q 的元数据文件产出缺少配对键声明（无聚合产出时须声明配对方式：标识配对或目录配对）", rj.ID)
+			return fmt.Errorf("规则 %q 的元数据文件产出未绑定分组（无聚合产出时分组绑定必填：说明内容按分组扇出，无分组即无落点）", rj.ID)
 		}
 		return nil
 	}
-	switch mf.Pairing.Mode {
-	case PairingModeIdentity:
-		if len(mf.Pairing.Identity) == 0 {
-			return fmt.Errorf("规则 %q 的配对键为标识配对但缺少配对键部分（行·捕获名）", rj.ID)
+	switch mf.Grouping.Mode {
+	case GroupingModeIdentity:
+		if len(mf.Grouping.Identity) == 0 {
+			return fmt.Errorf("规则 %q 的分组绑定为标识分组但缺少键部分（行·捕获名）", rj.ID)
 		}
-	case PairingModeDirectory:
-		if len(mf.Pairing.Identity) > 0 {
-			return fmt.Errorf("规则 %q 的配对键为目录配对，不得携带标识配对部分（所在目录即配对键）", rj.ID)
+	case GroupingModeDirectory:
+		if len(mf.Grouping.Identity) > 0 {
+			return fmt.Errorf("规则 %q 的分组绑定为所在目录分组，不得携带键部分（所在目录即分组键）", rj.ID)
 		}
 	default:
-		return fmt.Errorf("规则 %q 的配对方式非法: %q（identity=标识配对 / directory=目录配对）", rj.ID, string(mf.Pairing.Mode))
+		return fmt.Errorf("规则 %q 的分组绑定形态非法: %q（identity=标识分组 / directory=所在目录）", rj.ID, string(mf.Grouping.Mode))
 	}
 	leaves := condxLeafRowsOf(rj.Conditions)
 	total := len(leaves)
@@ -1431,17 +1458,17 @@ func validatePairingKey(rj *ruleEntryJSON) error {
 		}
 		rowCaptures[i] = set
 	}
-	for i := range mf.Pairing.Identity {
-		part := &mf.Pairing.Identity[i]
+	for i := range mf.Grouping.Identity {
+		part := &mf.Grouping.Identity[i]
 		if part.Row < 1 || part.Row > total {
-			return fmt.Errorf("规则 %q 的配对键第 %d 部分行号 %d 越界（共 %d 行）", rj.ID, i+1, part.Row, total)
+			return fmt.Errorf("规则 %q 的分组绑定第 %d 部分行号 %d 越界（共 %d 行）", rj.ID, i+1, part.Row, total)
 		}
 		if part.Capture == "" {
-			return fmt.Errorf("规则 %q 的配对键第 %d 部分缺少捕获名", rj.ID, i+1)
+			return fmt.Errorf("规则 %q 的分组绑定第 %d 部分缺少捕获名", rj.ID, i+1)
 		}
 		if part.Capture == identityGroupKeyCapture {
 			if leaves[part.Row-1].row.Condition.Target != CondxTargetSeq {
-				return fmt.Errorf("规则 %q 的配对键第 %d 部分：序列群键（%s）只能选自序列目标行", rj.ID, i+1, identityGroupKeyCapture)
+				return fmt.Errorf("规则 %q 的分组绑定第 %d 部分：序列群键（%s）只能选自序列目标行", rj.ID, i+1, identityGroupKeyCapture)
 			}
 			continue
 		}
@@ -1453,7 +1480,7 @@ func validatePairingKey(rj *ruleEntryJSON) error {
 			}
 		}
 		if !declared {
-			return fmt.Errorf("规则 %q 的配对键第 %d 部分引用的捕获名 %q 未在任何条件行声明", rj.ID, i+1, part.Capture)
+			return fmt.Errorf("规则 %q 的分组绑定第 %d 部分引用的捕获名 %q 未在任何条件行声明", rj.ID, i+1, part.Capture)
 		}
 	}
 	return nil
@@ -2397,12 +2424,13 @@ const (
 //     作业名模板不含扩展名——扩展名由谓词承载；字幕轨行用「{作品}.{任意}」
 //     带锚形态吞掉语言段，如 ep01.zh.srt 的标识取 ep01）；
 //   - 种子三「单图+说明文本→图片作品元数据」：纯映射形态（决策4 甲）——
-//     jpg/png/webp 图片行不聚合（各自成作品），txt 说明行目录配对归并→描述
-//     （同目录主导候选唯一时任意的说明文件归并、多主导守卫拒绝）。与图文
-//     种子的收编边界：聚合归属优先（聚合段在先、映射不夺已归属成员）——
+//     jpg/png/webp 图片行不聚合（各自成作品），txt 说明行所在目录分组扇出→
+//     描述（同目录图片作品各带一份、说明文件不导入；目录内无图片时说明文件
+//     按独立作品导入——孤文件回退）。与图文
+//     种子的收编边界：聚合归属优先（聚合段在先、扇出不夺已归属成员）——
 //     同名图片+文本对（002.jpg+002.txt）归图文种子聚合收编；孤立 txt（无
 //     同名图片对）在图文种子正文行命中下同样先行聚合收编为单正文作品，
-//     目录配对对这两类形态不可达（收编边界以正反例测试锚定）；
+//     目录分组对这两类形态不可达（收编边界以正反例测试锚定）；
 //   - 种子二「一图一文本→article」：txt 正文行 + jpg/png/webp 内嵌图行。
 //
 // 首次档案初始化写入（来源=预置），此后与用户条目同权——规则管理面可见、可
@@ -2433,9 +2461,10 @@ func PresetAggregateRules() []RuleEntry {
 		articleRows = append(articleRows, presetAggFileRow("{作品}", e.ext))
 		articleTracks = append(articleTracks, TrackAssign{Row: len(articleRows), Role: e.role})
 	}
-	// 单图+说明文本（纯映射）：图片行各扩展一行（主导候选承载方），txt 说明
-	// 行指派为元数据文件（内容绑定→描述）——目录配对归并到同目录唯一主导的
-	// 图片作品，无聚合产出（图片各自成作品、说明成员不导入不独立成件）。
+	// 单图+说明文本（纯映射）：图片行各扩展一行（作品承载方），txt 说明
+	// 行指派为元数据文件（内容绑定→描述）——所在目录分组把说明内容扇出给
+	// 同目录图片各自成的作品，无聚合产出（图片各自成作品、说明文件不导入
+	// 不独立成件；目录内无图片时说明文件按独立作品导入——孤文件回退）。
 	// 行前连接词显式落 and：聚合规则的空连接词归一是聚合校验的特权（轨行
 	// 平行选择器），元数据类别行式底盘要求非首行显式携带。
 	imageCompanionExts := []string{".jpg", ".png", ".webp"}
@@ -2473,10 +2502,10 @@ func PresetAggregateRules() []RuleEntry {
 			Category:    RuleCategoryMetadata,
 			Conditions:  imageCompanionRows,
 			// 纯映射形态：无聚合产出、无标识声明（聚合专属），「元数据文件」
-			// 产出自携目录配对键——说明行（末行 txt）内容绑定→描述，归并到
-			// 同目录唯一主导的图片作品（决策4 甲）。
+			// 产出自携所在目录分组绑定——说明行（末行 txt）内容绑定→描述，
+			// 扇出给同目录图片各自成的作品（决策4 甲）。
 			MetadataFile: &MetadataFileProduction{
-				Pairing:         &PairingKey{Mode: PairingModeDirectory},
+				Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
 				ContentBindings: []ContentBinding{{Row: len(imageCompanionRows), Dimension: DimDescription}},
 			},
 		},

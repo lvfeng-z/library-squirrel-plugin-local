@@ -2,10 +2,10 @@
 // 标识等值并组——条件行复用既有条件行求值机制（文件名/目录名/序列/引用四种源
 // 的行包装求值与捕获绑定），并组判定为纯函数（输入=扫描事实+规则档案+资源
 // 类型注册表投影，无 IO、输入序确定）。求值挂点见 pipeline.go 的聚合段。
-// 决策12③（统一入组通道）：聚合段成员判定=命中分轨行——绑定行归配对段
-// （配对预案覆盖一切含「元数据文件」产出与绑定的启用规则，含并用形态）。
-// 决策12③（统一入组通道）：聚合段成员判定=命中分轨行（绑定行归配对段——
-// 配对预案覆盖一切含「元数据文件」产出与绑定的启用规则，含并用形态）。
+// 聚合段成员判定=命中分轨行或绑定行（仅绑定行命中=说明成员——归进作品、
+// 无轨、不计必含轨单位）；其后接扇出归属段（fanoutAttribution，覆盖一切含
+// 「元数据文件」产出与绑定的启用规则——内容按分组扇出、元数据源标记，
+// 含并用形态）。
 package main
 
 import (
@@ -173,13 +173,21 @@ type aggRulePlan struct {
 	tracks []TrackAssign
 	// requiredRow 为必含轨行号集合（所分配角色在类型规约中 Min≥1）。
 	requiredRow map[int]bool
+	// bindingRows 为被内容绑定勾选的行号集合（聚合成员判定的绑定行面：仅
+	// 绑定行命中的文件=说明成员——归进作品、无轨、不计必含轨单位；轨行兼
+	// 绑定的双重身份成员照常落轨）。
+	bindingRows map[int]bool
+	// seq 为规则在规则表中的下标（归属竞争的先到先得凭据：扇出归属段须
+	// 辨认「归属是否本规则聚合段所赋」——本规则收编的绑定行成员照常补
+	// 扇出键集，他规则收编的不再改判）。
+	seq int
 }
 
 // aggregateBooleanGate 布尔组合形态的整条求值门（决策10：成员判定消费规则
 // 完整求值的命中集）：条件行含括号子组或行级非时，把整行编译为完整布尔树
 // （且连接紧于或连接——与提取段同一行式底盘语义；平行余留的空连接词按
 // 「或」归一，平行=行命中池 OR）；纯平行行（无括号无行级非——存量聚合/
-// 配对规则的现状形态）返回 nil 不设门——行命中池 OR 汇聚即命中面，既有
+// 映射规则的现状形态）返回 nil 不设门——行命中池 OR 汇聚即命中面，既有
 // 行为逐字节等值（连接词不参与成员判定）。编译失败返回错误（调用方按宁缺
 // 勿错整条跳过——与载入侧校验互补的双保险）。
 func aggregateBooleanGate(rule *RuleEntry) (Pattern, error) {
@@ -256,6 +264,8 @@ func buildAggregationPlans(rules []RuleEntry, types *resourceTypeIndex) []*aggRu
 			identity:    rule.Identity,
 			tracks:      rule.Aggregate.Tracks,
 			requiredRow: required,
+			bindingRows: metadataAssignedRows(rule),
+			seq:         i,
 		})
 	}
 	return plans
@@ -264,8 +274,9 @@ func buildAggregationPlans(rules []RuleEntry, types *resourceTypeIndex) []*aggRu
 // metadataAssignedRows 规则上被指派为元数据文件的行号集合：内容绑定行
 // （行→维度配置即「元数据文件」指派——勾选即指派；轨行兼有绑定=双重身份，
 // 照常导入）。绑定住规则级「元数据文件」产出落档位；无该产出或无绑定为空
-// 集。消费面=配对段的绑定行集（决策12③：聚合段成员判定回归轨行，绑定行
-// 经配对键入组）与内容采集/第二相的行命中面。
+// 集。消费面=聚合段的绑定行成员面（仅绑定行命中的文件=说明成员——归进
+// 作品、无轨、不计必含轨单位）、扇出归属段的内容源候选面与内容采集/第二相
+// 的行命中面。
 func metadataAssignedRows(rule *RuleEntry) map[int]bool {
 	if rule == nil || rule.MetadataFile == nil || len(rule.MetadataFile.ContentBindings) == 0 {
 		return nil
@@ -279,7 +290,13 @@ func metadataAssignedRows(rule *RuleEntry) map[int]bool {
 	return rows
 }
 
-// —— 单文件的条件行命中面与标识解析 ——
+// —— 单文件的条件行命中面与分组键解析（统一分组求值器）——
+//
+// 分组键求值的单一实现：聚合标识（规则级 Identity）与元数据文件分组绑定
+// （MetadataFileProduction.Grouping）共用同一取值面——普通捕获名按行序跨行
+// 汇流（首个能供值的命中行）、序列群键专用名只对写入了群组产物的序列行
+// 取值、所在目录形态=目录聚合键。聚合侧与扇出侧的等值要求（三向回放全等
+// 锚）：两消费面调同一实现，语义零分叉。
 
 // aggFileRowHits 单文件在一条聚合规则下的条件行命中面：按行号下标存放该行独立
 // 求值的作用域上下文（捕获绑定与序列群组产物；nil=该行未命中）。行间捕获不
@@ -288,6 +305,7 @@ type aggFileRowHits []*ParseContext
 
 // identityValue 解析该文件在本规则下的标识值：各部分按声明序以 NUL 分隔拼接
 // （多部分复合标识防歧义）；任一部分取不到值即整体不可得（该文件不入组）。
+// 聚合标识与元数据文件分组绑定（标识分组形态）共用本实现。
 func (h aggFileRowHits) identityValue(parts []IdentityPart) (string, bool) {
 	if len(parts) == 0 {
 		return "", false
@@ -308,8 +326,10 @@ func (h aggFileRowHits) identityValue(parts []IdentityPart) (string, bool) {
 
 // identityPart 解析单个标识部分：按行序找首个命中且能供值的行——普通捕获名
 // 取该行的前缀绑定（{作品} 一类共享槽跨轨行同名出现，声明行只是名义指向，
-// 取值面按捕获名在命中行间汇流，视频各扩展行/字幕各扩展行取到同一标识）；
-// 序列群键专用名只对写入了群组产物的序列行取值（组内成员共享群键）。
+// 取值面按捕获名在命中行间汇流，视频各扩展行/字幕各扩展行取到同一标识；
+// 仅命中部分行的文件经同名捕获入组——说明文件从自己的命中行取同名捕获，
+// 与资源文件同键进分组）；序列群键专用名只对写入了群组产物的序列行取值
+// （组内成员共享群键）。
 func (h aggFileRowHits) identityPart(part *IdentityPart) (string, bool) {
 	for row := 1; row <= len(h); row++ {
 		ctx := h[row-1]
@@ -327,6 +347,18 @@ func (h aggFileRowHits) identityPart(part *IdentityPart) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// groupingKeyOf 按分组绑定声明求该文件的分组键（统一分组求值器的扇出侧
+// 入口）：标识分组=键部分的复合值（identityValue——与聚合标识同一实现，
+// 含序列群键保留名的取值面）；所在目录分组=目录聚合键（同目录文件同键，
+// 任意名说明文件与资源文件同组）。任一部分取不到值即整体不可得（调用方
+// 按不属任何分组处理——孤文件回退的分组键不可得形态）。
+func (h aggFileRowHits) groupingKeyOf(binding *GroupingBinding, dirNames []string) (string, bool) {
+	if binding.Mode == GroupingModeDirectory {
+		return dirGroupKey(dirNames), true
+	}
+	return h.identityValue(binding.Identity)
 }
 
 // trackRoleOf 取该文件的轨道角色：分轨入口声明序中首个命中的行所分配的角色。
@@ -364,39 +396,40 @@ func (h aggFileRowHits) hitsAnyRow(rows map[int]bool) bool {
 
 // —— 并组主算法 ——
 
-// aggAssignment 单文件的聚合归属结论：WorkKey 为聚合作品键（"f:"+主导文件
-// 相对路径，与选择域的作品键同形——键前缀维持单一；配对段的归属键同构——
-// 单用=主导文件键、并用桥接=组内主导所在作品键）；TrackRole 为本文件的轨道
-// 角色；WorkType 为选中规则声明的作品类型（聚合定义的作品类型，消费面=创建
-// 链子行 ResourceType；并用桥接的说明成员随目标作品携带）；Companion 为伴随
-// 说明成员标记（配对段产：仅绑定行命中、经配对键归并进作品的成员——归进
-// 作品、无轨；轨道成员含轨行兼绑定的双重身份成员照常导入不带标记，聚合段
-// 不产此标记——决策12③）。WorkKey 空=无归属（独立作品，其余字段同空）。
-// GuardLeads 为配对守卫拒绝注记（目录配对多主导时=组内主导候选数）：说明成
-// 员候选行的行详情可见原因数据位，与归属字段互斥（守卫拒绝=零归属）。
+// aggAssignment 单文件的聚合归属与内容扇出结论：WorkKey 为聚合作品键（"f:"+
+// 主导文件相对路径，与选择域的作品键同形——键前缀维持单一）；TrackRole 为
+// 本文件的轨道角色；WorkType 为选中规则声明的作品类型（聚合定义的作品类型，
+// 消费面=创建链子行 ResourceType）；Companion 为说明成员标记（聚合段产：仅
+// 绑定行命中而归进聚合作品的成员——归进作品、无轨、不导入；扇出归属段产：
+// 仅绑定行命中、组内有落点的元数据源文件——不导入、不独立成件）；轨道成员
+// （含轨行兼绑定的双重身份成员）照常导入不带标记。WorkKey 空=无归属（独立
+// 作品，其余归属字段同空）；元数据源文件不获聚合作品键（其同时为聚合成
+// 作品组成员时除外——成员化只属于聚合产出本职）。FanoutWorkKeys 为内容
+// 扇出键集：该文件按分组绑定扇出到达的全部作品键（已被聚合收编=其聚合
+// 作品键、未收编=自身路径键，按组内文件序去重）——内容声明只按此键集
+// 流动；空=无扇出（内容不经扇出面承载）。
 type aggAssignment struct {
-	WorkKey    string
-	TrackRole  string
-	WorkType   string
-	Companion  bool
-	GuardLeads int
+	WorkKey        string
+	TrackRole      string
+	WorkType       string
+	Companion      bool
+	FanoutWorkKeys []string
 }
 
-// aggregateGrouping 标识等值并组+配对归并（纯函数、输入序确定）。两段同位
-// 挂汇流后、配对段居聚合段之后：
+// aggregateGrouping 标识等值并组+扇出归属解析（纯函数、输入序确定）。两段同位
+// 挂汇流后、扇出段居聚合段之后：
 //
 //   - 条件行按既有行求值机制逐文件求命中（捕获绑定、目录命中、序列群组分析全部
 //     走同一 Pattern.Evaluate——目录捕获的目录间共享与序列群键的组内共享由此
 //     自然成立：同目录文件解析出同名目录捕获值、同群组成员解析出同群键）；
 //     布尔组合形态（括号子组/行级非在场）另在行命中面之上加整条布尔求值门
-//     （gate，见 aggregateBooleanGate）——门不过的文件不入命中面（决策10：
-//     分组作用于匹配求值后的命中集）；纯平行行不设门，行命中池 OR 汇聚即
+//     （gate，见 aggregateBooleanGate）——门不过的文件不入命中面（分组
+//     作用于匹配求值后的命中集）；纯平行行不设门，行命中池 OR 汇聚即
 //     命中面（存量聚合规则的既有语义逐字节等值）；
 //   - 成员判定=命中分轨行（轨道行，导入为资源；兼有内容绑定的轨行=双重
-//     身份，照常导入+内容来源，导入身份不受绑定影响）——决策12③ 统一入组
-//     通道：仅绑定未分轨的行（说明行）不再经聚合标识入组，其成员判定归
-//     配对段（配对键驱动）；聚合分组键（标识）取值面仍来自轨行命中与行间
-//     捕获汇流、口径不变；
+//     身份，照常导入+内容来源，导入身份不受绑定影响）或命中绑定行（仅绑定
+//     未分轨=说明成员——归进作品、无轨、不计必含轨单位）；聚合分组键
+//     （标识）取值面来自轨行命中与行间捕获汇流、口径不变；
 //   - 标识值相等者并成一件作品（文件名同名/序列成组/目录成组三种形态同一语法）；
 //   - 必含轨行每组恰一命中才成立：文件/目录行按命中文件数计，序列行按相异群键
 //     数计（集合轨=整序列组 N 存储位计 1 单位）；≠1 即歧义（含零命中），该组
@@ -406,13 +439,19 @@ type aggAssignment struct {
 //     命中定群同款取向）；歧义组成员仍可被后续规则接纳。
 //
 // 非必含轨行零命中=该轨缺席、作品仍成立（单轨形态）；角色基数由类型规约定、
-// 并组不按 Max 截断（聚合表达力不被消费面拖住）。聚合段之后接配对段（一切
-// 含「元数据文件」产出与绑定的启用规则的说明成员归并——单用/并用同通道，
-// 见 buildPairingPlans 与配对段注释）：聚合归属优先（配对不夺已归属成员）、
-// 配对不并作品。
+// 并组不按 Max 截断（聚合表达力不被消费面拖住）。聚合段之后接扇出归属段
+// （一切含「元数据文件」产出与绑定的启用规则的内容扇出与元数据源标记——
+// 单用/并用同通道，见 fanoutAttribution）：聚合归属优先（扇出不夺已归属
+// 成员）、扇出不并作品。
 func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) []aggAssignment {
 	n := len(surface.files)
 	out := make([]aggAssignment, n)
+	// owner 为各文件的归属赋与规则下标（-1=未归属）：扇出归属段辨认「归属
+	// 是否本规则聚合段所赋」的凭据（先到先得的竞争面=归属与内容源认领）。
+	owner := make([]int, n)
+	for i := range owner {
+		owner[i] = -1
+	}
 	for _, plan := range buildAggregationPlans(rules, types) {
 		// 逐文件逐条件行求命中（每行独立作用域，捕获与群组产物留在本行上下文）；
 		// 布尔门先裁（门不过=该文件不在本规则命中集，行求值跳过）。
@@ -435,9 +474,9 @@ func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryI
 			}
 			hits[i] = rowHits
 		}
-		// 成员收集：标识可得、命中分轨行（决策12③：绑定行归配对段——仅绑定
-		// 行命中的文件不构成聚合成员）、且尚未被在先规则归属；组序=标识值首
-		// 成员出现序，组内成员按扫描序（确定性）。
+		// 成员收集：标识可得、命中分轨行或绑定行（仅绑定行命中=说明成员面
+		// ——归进作品、无轨、不计必含轨单位）、且尚未被在先规则归属；组序=
+		// 标识值首成员出现序，组内成员按扫描序（确定性）。
 		type aggMemberGroup struct {
 			members []int
 		}
@@ -447,7 +486,8 @@ func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryI
 			if out[i].WorkKey != "" {
 				continue
 			}
-			if hits[i].trackRoleOf(plan.tracks) == "" {
+			role := hits[i].trackRoleOf(plan.tracks)
+			if role == "" && !hits[i].hitsAnyRow(plan.bindingRows) {
 				continue
 			}
 			v, ok := hits[i].identityValue(plan.identity)
@@ -499,60 +539,57 @@ func aggregateGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryI
 			workKey := "f:" + surface.files[lead].RelPath
 			workType := plan.rule.Aggregate.WorkType
 			for _, i := range g.members {
-				// 成员=轨行命中（成员收集已保证轨道角色在场）：照常落轨导入；
-				// 轨行兼绑定的双重身份成员照常落轨。说明成员标记不在此产——
-				// 仅绑定行命中的文件经配对段归并（决策12③ 统一入组通道）。
-				out[i] = aggAssignment{WorkKey: workKey, TrackRole: hits[i].trackRoleOf(plan.tracks), WorkType: workType}
+				// 成员=轨行命中（照常落轨导入；轨行兼绑定的双重身份成员照常
+				// 落轨）或仅绑定行命中的说明成员（归进作品、无轨、不导入、
+				// 不计必含轨单位——说明成员标记承载处置）。
+				role := hits[i].trackRoleOf(plan.tracks)
+				out[i] = aggAssignment{WorkKey: workKey, TrackRole: role, WorkType: workType, Companion: role == ""}
+				owner[i] = plan.seq
 			}
 		}
 	}
-	pairingGrouping(surface, rules, lib, out)
+	fanoutAttribution(surface, rules, lib, out, owner)
 	return out
 }
 
-// —— 配对段（一切含「元数据文件」产出与绑定的启用规则的说明成员归并；与
-// 聚合段同位挂汇流后、居其后——单用/并用同通道，决策12③ 统一入组通道）——
+// —— 扇出归属段（一切含「元数据文件」产出与内容绑定的启用规则的内容扇出
+// 与元数据源标记；与聚合段同位挂汇流后、居其后——单用/并用同通道）——
 
-// pairingRulePlan 配对求值预案：全部条件行（先序展平叶子行）编译为独立求值
-// 的行包装模式（与聚合段条件行同一编译口径——配对键的取值面按捕获名在命中
-// 行间汇流，见 aggFileRowHits.identityValue），加上绑定行集（说明成员候选的
-// 命中面）与主导行集（主导候选的命中面：非绑定的文件/序列行——目录行只作
-// 配对键源，不产主导候选）与配对键声明；布尔组合形态（括号子组/行级非在
-// 场）另编译整条求值门（与聚合段同一接线——决策10）。
-type pairingRulePlan struct {
+// fanoutRulePlan 扇出归属求值预案：全部条件行（先序展平叶子行）编译为独立
+// 求值的行包装模式（与聚合段条件行同一编译口径——分组键的取值面按捕获名在
+// 命中行间汇流，见 aggFileRowHits.groupingKeyOf），加上绑定行集（内容源候选
+// 的命中面）与目标行集（作品键推导面：非绑定的正向文件/序列行——目录行只
+// 作分组键源，不推导作品键）与生效分组绑定；布尔组合形态（括号子组/行级非
+// 在场）另编译整条求值门（与聚合段同一接线）。
+type fanoutRulePlan struct {
 	// rule 为源规则（引用传入规则序列的条目）。
 	rule *RuleEntry
+	// seq 为规则在规则表中的下标（先到先得的认领凭据）。
+	seq int
 	// rows 为条件行模式（下标+1=先序展平行号）。
 	rows []Pattern
 	// gate 为布尔组合形态的整条求值门（nil=纯平行行不设门——见
 	// aggregateBooleanGate）。
 	gate Pattern
-	// bindingRows 为被内容绑定勾选的行号集合（命中文件=说明成员候选；兼有
-	// 主导行命中=双重身份，按主导处置——配对只归并仅绑定行命中的文件）。
+	// bindingRows 为被内容绑定勾选的行号集合（命中文件=内容源候选；兼有
+	// 目标行命中=双重身份，照常承载作品+内容扇出）。
 	bindingRows map[int]bool
-	// leadRows 为可承载主导候选的行号集合（非绑定的文件/序列目标行）。
-	leadRows map[int]bool
-	// pairing 为配对键声明（映射单用规则载入校验保证在场；并用规则缺省时
-	// 此处已是归一形态——载入面 normalizeCombinedPairingKey 或下方运行时
-	// 镜像兜底，配对键=聚合标识）。
-	pairing *PairingKey
-	// combined 为并用形态标记（规则同时携带聚合产出）：主导候选即便已被
-	// 聚合段收编仍参与配对（桥接指向其所在作品，见 pairingGrouping）。
-	combined bool
+	// targetRows 为可推导作品键的行号集合（非绑定的正向文件/序列目标行）。
+	targetRows map[int]bool
+	// grouping 为生效分组绑定：显式声明在场即用之；缺省（并用且聚合标识
+	// 在场）=聚合标识的等值形态（标识分组、键部分=聚合标识——求值期便利
+	// 缺省，档案不落物化）。
+	grouping *GroupingBinding
 }
 
-// buildPairingPlans 过滤配对规则并编译预案：一切含「元数据文件」产出与内容
-// 绑定、条件行在场的启用规则——含并用形态（决策12③ 统一入组通道：配对段
-// 对并用规则照常运行，配对键是绑定行成员判定的唯一驱动，聚合标识不再替代）。
-// 配对键声明缺省的并用规则取归一形态（pairing={mode:identity,
-// identity:=聚合标识}——载入面 normalizeCombinedPairingKey 的运行时镜像：
-// 未经载入通路的内存形态等值兜底；行为等值转换——绑定行原经聚合标识入组
-// =配对键=聚合标识的效果）。行编译或布尔门编译失败按宁缺勿错整条跳过——
+// buildFanoutPlans 过滤扇出规则并编译预案：一切含「元数据文件」产出与内容
+// 绑定、条件行在场的启用规则——含并用形态（分组绑定可独立于聚合标识声明：
+// 并用缺省绑聚合成作品所绑分组，显式可换）。映射单用缺分组绑定不进预案
+// （载入校验已拒，双保险）。行编译或布尔门编译失败按宁缺勿错整条跳过——
 // 与聚合段同款防御（载入校验已拦的形态在此双保险；括号子组/行级非照常入
-// 预案——决策10 放开行结构限制）。映射单用规则缺配对键同样跳过（载入校验
-// 已拒，双保险）。
-func buildPairingPlans(rules []RuleEntry) []*pairingRulePlan {
-	var plans []*pairingRulePlan
+// 预案——行级命中照常按行）。
+func buildFanoutPlans(rules []RuleEntry) []*fanoutRulePlan {
+	var plans []*fanoutRulePlan
 	for i := range rules {
 		rule := &rules[i]
 		if !rule.Enabled || rule.MetadataFile == nil ||
@@ -560,13 +597,12 @@ func buildPairingPlans(rules []RuleEntry) []*pairingRulePlan {
 			len(rule.Conditions) == 0 {
 			continue
 		}
-		pairing := rule.MetadataFile.Pairing
-		combined := rule.Aggregate != nil
-		if pairing == nil {
-			if !combined || len(rule.Identity) == 0 {
+		grouping := rule.MetadataFile.Grouping
+		if grouping == nil {
+			if rule.Aggregate == nil || len(rule.Identity) == 0 {
 				continue
 			}
-			pairing = &PairingKey{Mode: PairingModeIdentity, Identity: rule.Identity}
+			grouping = &GroupingBinding{Mode: GroupingModeIdentity, Identity: rule.Identity}
 		}
 		leaves := condxLeafRowsOf(rule.Conditions)
 		if len(leaves) == 0 {
@@ -593,58 +629,54 @@ func buildPairingPlans(rules []RuleEntry) []*pairingRulePlan {
 			continue
 		}
 		bindingRows := metadataAssignedRows(rule)
-		leadRows := make(map[int]bool, len(rows))
+		targetRows := make(map[int]bool, len(rows))
 		for _, leaf := range leaves {
 			if bindingRows[leaf.no] || leaf.row.Negated {
-				// 行级非行是过滤行（命中=内层未中），不承载主导候选——
-				// 主导行只认正向的文件/序列目标行。
+				// 行级非行是过滤行（命中=内层未中），不承载作品键推导——
+				// 目标行只认正向的非绑定文件/序列行。
 				continue
 			}
 			if target := leaf.row.Condition.Target; target == CondxTargetFile || target == CondxTargetSeq {
-				leadRows[leaf.no] = true
+				targetRows[leaf.no] = true
 			}
 		}
-		plans = append(plans, &pairingRulePlan{
+		plans = append(plans, &fanoutRulePlan{
 			rule:        rule,
+			seq:         i,
 			rows:        rows,
 			gate:        gate,
 			bindingRows: bindingRows,
-			leadRows:    leadRows,
-			pairing:     pairing,
-			combined:    combined,
+			targetRows:  targetRows,
+			grouping:    grouping,
 		})
 	}
 	return plans
 }
 
-// pairingGrouping 配对段的归并主算法（聚合段之后逐预案执行，预案按档案序；
-// 单用/并用同通道——决策12③ 统一入组通道、I3 桥接语义显式）：
+// fanoutAttribution 扇出归属段的解析主算法（聚合段之后逐预案执行，预案按
+// 档案序）：
 //
-//   - 参与判定：映射单用——已被在先归属（聚合段或在先配对预案）的文件不
-//     参与（聚合归属优先、配对不夺已归属成员，现状语义）；并用——已归属
-//     的说明成员候选同样出局，但已归属的主导候选照常参与（配对目标=其
-//     所在作品，桥接的指向源）；布尔组合形态（括号子组/行级非在场）先过
-//     整条求值门——门不过=不在本规则命中集（决策10：分组作用于匹配求值后
-//     的命中集；纯平行行不设门，行命中池 OR 汇聚即命中面）；命中绑定行或
-//     主导行、且配对键可得的文件入组（配对键取不到=不属任何配对组，维持
-//     独立作品）；
-//   - 分组键：标识配对=配对键部分的复合标识值（捕获值相等即一组，共享捕获
-//     跨行汇流——与聚合并组的标识汇流同一机制）；目录配对=所在目录（保留
-//     形态，任意名说明文件与主导候选同目录即同组）；
-//   - 逐组指向集守卫（I3：说明成员归属=其分组内主导们所在的作品，同件无
-//     歧义/跨件拒绝）：主导候选的配对目标=已被聚合段收编（归属键非空）者
-//     其所在作品、未收编者其主导文件自身作品（单用语义）；组内主导们的
-//     目标集恰一作品才配对成立——零主导（组内全部文件都是绑定行命中）组
-//     不成立，主导跨多件作品守卫拒绝，两种形态下说明成员均维持独立作品
-//     （宁缺勿错）。映射单用的主导全部未收编，目标集大小=主导候选数——
-//     与既有「唯一主导守卫」逐语义等值（现状行为逐字节不变）；
-//   - 归并产出：仅绑定行命中的成员归并到指向集唯一作品（映射单用/并用未
-//     收编主导=键 "f:"+主导文件相对路径；并用桥接=聚合作品键，作品类型随
-//     目标作品携带），无轨、不导入、不独立成作品、带说明成员标记；主导
-//     候选（含兼有绑定行命中的双重身份文件）不获说明成员标记——配对不并
-//     作品，组成员文件各自保持原作品形态。
-func pairingGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryIndex, out []aggAssignment) {
-	for _, plan := range buildPairingPlans(rules) {
+//   - 参与判定：布尔组合形态（括号子组/行级非在场）先过整条求值门——门不过
+//     =不在本规则命中集；命中绑定行或目标行、且分组键可得的文件入组（分组
+//     键取不到=不属任何分组，按独立作品导入——孤文件回退的分组键不可得
+//     形态）；
+//   - 分组键：标识分组=绑定键部分的复合值（捕获值相等即一组，共享捕获跨行
+//     汇流——与聚合并组的标识汇流同一实现）；所在目录分组=所在目录（任意
+//     名说明文件与资源文件同目录即同组）；
+//   - 键集推导：组内目标行命中的文件各推出一个作品键（已被聚合收编=其聚合
+//     作品键；未收编=自身路径键，即该文件自己成一件独立作品）——键集=组内
+//     全部作品的键（按文件序去重）。组内无目标行命中文件（键集空=内容无
+//     落点）→ 绑定行文件不作元数据源、按独立作品导入（孤文件回退——防误
+//     把资源吞成说明文件）；
+//   - 元数据源标记与扇出：组内绑定行命中的文件其内容声明扇出到键集全部
+//     作品（各自成件=各带一份、被聚合成一件=那件带一份；轨行兼绑定的双重
+//     身份文件内容同样扇出，作品承载身份不受影响）。仅绑定行命中的未收编
+//     文件=元数据源（不导入、不独立成件、带说明成员标记）；归属竞争按先
+//     到先得：已被在先规则认领为内容源（扇出键集在场）或被他规则聚合收编
+//     的文件不再改判；本规则聚合段所赋的归属（并用绑定行成员=聚合成作品
+//     组成员、无轨成员）照常保留，只补扇出键集。
+func fanoutAttribution(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryIndex, out []aggAssignment, owner []int) {
+	for _, plan := range buildFanoutPlans(rules) {
 		// 逐文件逐行求命中（每行独立作用域，捕获与群组产物留在本行上下文）；
 		// 布尔门先裁（门不过=该文件不在本规则命中集，行求值跳过）。
 		hits := make([]aggFileRowHits, len(surface.files))
@@ -666,36 +698,22 @@ func pairingGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryInd
 			}
 			hits[i] = rowHits
 		}
-		type pairingMemberGroup struct {
+		type fanoutMemberGroup struct {
 			members []int
 		}
-		groups := make(map[string]*pairingMemberGroup)
+		groups := make(map[string]*fanoutMemberGroup)
 		var order []string
 		for i := range surface.files {
-			isLead := hits[i].hitsAnyRow(plan.leadRows)
-			if out[i].WorkKey != "" && (!plan.combined || !isLead) {
-				// 单用：已归属文件不参与（聚合归属优先、配对不夺已归属
-				// 成员——现状语义）。并用：已归属的说明成员候选同样出局，
-				// 已归属的主导候选照常参与（桥接指向其所在作品——已收编
-				// 主导不作跨作品混挂的归属键改写，配对目标恒为其真实作品）。
+			if !hits[i].hitsAnyRow(plan.bindingRows) && !hits[i].hitsAnyRow(plan.targetRows) {
 				continue
 			}
-			if !isLead && !hits[i].hitsAnyRow(plan.bindingRows) {
+			key, ok := hits[i].groupingKeyOf(plan.grouping, surface.files[i].DirNames)
+			if !ok {
 				continue
-			}
-			var key string
-			if plan.pairing.Mode == PairingModeDirectory {
-				key = dirGroupKey(surface.files[i].DirNames)
-			} else {
-				v, ok := hits[i].identityValue(plan.pairing.Identity)
-				if !ok {
-					continue
-				}
-				key = v
 			}
 			g := groups[key]
 			if g == nil {
-				g = &pairingMemberGroup{}
+				g = &fanoutMemberGroup{}
 				groups[key] = g
 				order = append(order, key)
 			}
@@ -703,54 +721,44 @@ func pairingGrouping(surface *aggEvalSurface, rules []RuleEntry, lib *LibraryInd
 		}
 		for _, key := range order {
 			g := groups[key]
-			leadCount := 0
-			target := ""     // 指向集唯一作品键（空=尚无主导；跨件时置歧义标记）
-			targetType := "" // 桥接携带的作品类型（未收编主导=空——单用形态同值）
-			spanned := false
+			// 键集=组内目标行命中文件推出的作品键全集（已被聚合收编=其聚合
+			// 作品键；未收编=自身路径键），按组内文件序去重（确定性）。
+			var keys []string
+			seen := make(map[string]bool, len(g.members))
 			for _, i := range g.members {
-				if !hits[i].hitsAnyRow(plan.leadRows) {
+				if !hits[i].hitsAnyRow(plan.targetRows) {
 					continue
 				}
-				leadCount++
-				t := out[i].WorkKey
-				tType := ""
-				if t == "" {
-					// 未收编主导（聚合未覆盖的行命中）：按单用语义挂主导
-					// 文件自身作品。
-					t = "f:" + surface.files[i].RelPath
-				} else {
-					// 已被聚合段收编的主导：配对目标=其所在作品（含作品
-					// 类型——与收编结论同源）。
-					tType = out[i].WorkType
+				k := out[i].WorkKey
+				if k == "" {
+					k = "f:" + surface.files[i].RelPath
 				}
-				if target == "" {
-					target, targetType = t, tType
-				} else if t != target {
-					spanned = true
+				if !seen[k] {
+					seen[k] = true
+					keys = append(keys, k)
 				}
 			}
-			if leadCount == 0 || spanned {
-				// 守卫拒绝的可见原因注记（仅目录配对：帧文案按「目录内有 N
-				// 个主导候选」措辞自洽）：多主导时对说明成员候选落主导候选
-				// 数（行详情呈现「目录配对未成立，说明文件维持独立作品」的
-				// 数据位）；零主导组（成员全部绑定行命中）、标识配对的拒绝
-				// 与并用的跨件拒绝形态不落注（无对应帧文案，宁缺勿错）。
-				// 主导候选不落注（维持独立作品是主导的正常形态）。
-				if leadCount > 1 && plan.pairing.Mode == PairingModeDirectory {
-					for _, i := range g.members {
-						if hits[i].hitsAnyRow(plan.leadRows) {
-							continue
-						}
-						out[i].GuardLeads = leadCount
-					}
-				}
+			if len(keys) == 0 {
+				// 孤文件回退：组内全部为绑定行命中（内容无落点）——绑定行
+				// 文件按独立作品导入，不作元数据源。
 				continue
 			}
 			for _, i := range g.members {
-				if hits[i].hitsAnyRow(plan.leadRows) {
+				if !hits[i].hitsAnyRow(plan.bindingRows) {
 					continue
 				}
-				out[i] = aggAssignment{WorkKey: target, WorkType: targetType, Companion: true}
+				if len(out[i].FanoutWorkKeys) > 0 || (out[i].WorkKey != "" && owner[i] != plan.seq) {
+					// 已被在先规则认领为内容源或被他规则聚合收编——先到
+					// 先得，不再改判。
+					continue
+				}
+				out[i].FanoutWorkKeys = keys
+				if out[i].WorkKey == "" && !hits[i].hitsAnyRow(plan.targetRows) {
+					// 仅绑定行命中的未收编文件=元数据源：不导入、不独立成件
+					//（说明成员标记承载处置）；双重身份文件照常承载作品。
+					out[i].Companion = true
+					owner[i] = plan.seq
+				}
 			}
 		}
 	}

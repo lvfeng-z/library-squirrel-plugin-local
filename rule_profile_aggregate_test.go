@@ -123,7 +123,7 @@ func TestValidateMetadataFileTplTailExt(t *testing.T) {
 	entry := metaTailExtEntry("meta-split", "{作品标识}_{序号}",
 		[]CondxAttach{{Kind: CondxAttachFileExt, Value: ".txt"}})
 	entry.MetadataFile = &MetadataFileProduction{
-		Pairing:         &PairingKey{Mode: PairingModeIdentity, Identity: []IdentityPart{{Row: 1, Capture: "work"}, {Row: 1, Capture: "seq"}}},
+		Grouping:        &GroupingBinding{Mode: GroupingModeIdentity, Identity: []IdentityPart{{Row: 1, Capture: "work"}, {Row: 1, Capture: "seq"}}},
 		ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 	}
 	if _, err = ruleFromJSON(entry); err != nil {

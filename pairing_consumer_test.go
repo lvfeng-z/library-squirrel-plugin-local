@@ -1,8 +1,8 @@
-// 配对归属消费面泛化的单元测试（阶段2）：映射单用作品（无聚合产出、配对段
-// 归并）在选择域推导、详情投影、待裁决明细、创建链与执行期落库各消费面按
-// 「配对归属」工作——说明成员归并到主导文件的作品（键=主导路径键）而不并
-// 作品（主导维持独立形态、无轨、无作品类型），聚合场景行为与现状全等由既有
-// 测试锚定（本文件只锚映射单用形态）。
+// 扇出归属消费面的单元测试：映射单用作品（无聚合产出、扇出归属段标记）在
+// 选择域推导、详情投影、待裁决明细、创建链与执行期落库各消费面按「内容
+// 扇出键集」工作——元数据源文件不导入不独立成件、按扇出键集并入各目标
+// 作品（键=目标路径键），目标文件维持独立形态（无轨、无作品类型），聚合
+// 场景行为与现状全等由既有测试锚定（本文件只锚映射单用形态）。
 package main
 
 import (
@@ -15,109 +15,115 @@ import (
 	sdkdto "github.com/lvfeng-z/library-squirrel-sdk/dto"
 )
 
-// pairedSnap 映射单用场景的快照构造：说明成员携带配对归属（键=主导路径键+
-// 说明标记），主导候选无归属（配对不并作品），另含孤立说明文件维持独立。
-func pairedSnap() *RecognitionSnapshot {
+// fanoutSnap 映射单用场景的快照构造：元数据源文件携带内容扇出键集（键集=
+// 组内作品的键）与说明成员标记、零聚合归属，目标文件维持独立形态，另含
+// 孤立说明文件维持独立（孤文件回退）。
+func fanoutSnap() *RecognitionSnapshot {
 	return &RecognitionSnapshot{
 		Files: []SnapFile{
-			// 主导先到形态：cover.jpg 建单文件作品，说明成员后到追加
+			// 目标先到形态：cover.jpg 建单文件作品，元数据源文件后到并入
 			{RelPath: "无题/cover.jpg", FileName: "cover.jpg", DirRelKey: "无题", State: snapStateIdentified,
 				Final: []SnapDecl{{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)}}},
 			{RelPath: "无题/cover.txt", FileName: "cover.txt", DirRelKey: "无题", State: snapStatePlain,
-				Final: []SnapDecl{{Dimension: string(DimDescription), Value: "cover 的说明内容", Source: string(SourceContent)}},
-				AggWorkKey: "f:无题/cover.jpg", AggCompanion: true},
-			// 说明成员先到形态：快照序 txt 在前、主导 jpg 殿后（域推导对位挪前）
+				Final:        []SnapDecl{{Dimension: string(DimDescription), Value: "cover 的说明内容", Source: string(SourceContent)}},
+				AggCompanion: true, FanoutWorkKeys: []string{"f:无题/cover.jpg"}},
+			// 元数据源先到形态：快照序 txt 在前、目标 png 殿后（扇出并入后
+			// Files 首位恒为目标）
 			{RelPath: "无题/无题_01.txt", FileName: "无题_01.txt", DirRelKey: "无题", State: snapStatePlain,
-				Final: []SnapDecl{{Dimension: string(DimDescription), Value: "无题_01 的说明内容", Source: string(SourceContent)}},
-				AggWorkKey: "f:无题/无题_01.png", AggCompanion: true},
+				Final:        []SnapDecl{{Dimension: string(DimDescription), Value: "无题_01 的说明内容", Source: string(SourceContent)}},
+				AggCompanion: true, FanoutWorkKeys: []string{"f:无题/无题_01.png"}},
 			{RelPath: "无题/无题_01.png", FileName: "无题_01.png", DirRelKey: "无题", State: snapStateIdentified,
 				GroupKey: "无题", GroupSeq: 1},
-			// 孤立说明文件（配对键取不到/守卫拒绝形态）：维持独立作品现状
+			// 孤立说明文件（分组键取不到/无落点形态）：按独立作品导入
 			{RelPath: "无题/无题.txt", FileName: "无题.txt", DirRelKey: "无题", State: snapStatePlain},
 		},
 	}
 }
 
-// TestDeriveWorkDomainPairedWorksMerge 映射单用作品的选择域推导：说明成员并入
-// 主导文件的作品（配对组键=主导路径键，与单文件作品键同值——两种到达序收敛
-// 为同一组作品），Files 首位恒为主导（说明成员先到时对位挪前）、CompanionCount
-// 数据位计数；主导候选不获归属（配对不并作品）也不因说明成员先到而丢作品键；
-// 孤立说明文件维持单文件作品；集归属按主导文件群键（序列成员各自成件、各自
-// 带说明——剧本B 帧1 形态的数据面）。
-func TestDeriveWorkDomainPairedWorksMerge(t *testing.T) {
-	domain := DeriveWorkDomain(pairedSnap(), nil)
+// TestDeriveWorkDomainFanoutWorksMerge 映射单用作品的选择域推导：元数据源
+// 文件并入扇出键集内各目标作品（作品键=目标文件路径键——两种到达序收敛为
+// 同一组作品），Files 首位恒为目标文件、CompanionCount 数据位计数；目标文件
+// 不获归属（扇出不并作品）也不因元数据源先到而丢作品键；孤立说明文件维持
+// 单文件作品；集归属按目标文件群键（序列成员各自成件、各自带说明——剧本B
+// 帧1 形态的数据面）。
+func TestDeriveWorkDomainFanoutWorksMerge(t *testing.T) {
+	domain := DeriveWorkDomain(fanoutSnap(), nil)
 
 	if len(domain.Works) != 3 {
-		t.Fatalf("两件配对作品+孤立一件应共 3 件作品（说明成员不各自成件），实际 %d: %+v", len(domain.Works), domain.Works)
+		t.Fatalf("两件扇出作品+孤立一件应共 3 件作品（元数据源不各自成件），实际 %d: %+v", len(domain.Works), domain.Works)
 	}
-	// 主导先到形态：Files=[主导, 说明]、键=主导路径键
+	// 目标先到形态：Files=[目标, 元数据源]、键=目标路径键
 	cover := domain.Work("f:无题/cover.jpg")
 	if cover == nil {
-		t.Fatalf("缺少配对作品 f:无题/cover.jpg（works: %+v）", domain.Works)
+		t.Fatalf("缺少扇出目标作品 f:无题/cover.jpg（works: %+v）", domain.Works)
 	}
 	if !reflect.DeepEqual(cover.Files, []string{"无题/cover.jpg", "无题/cover.txt"}) {
-		t.Fatalf("主导先到的配对作品 Files 应为主导在前双成员，实际 %v", cover.Files)
+		t.Fatalf("目标先到的扇出作品 Files 应为目标在前双成员，实际 %v", cover.Files)
 	}
 	if cover.CompanionCount != 1 || cover.DirRelKey != "无题" {
-		t.Fatalf("配对作品说明计数应为 1、目录键=主导目录键，实际 %+v", cover)
+		t.Fatalf("扇出作品说明计数应为 1、目录键=目标目录键，实际 %+v", cover)
 	}
-	// 说明成员先到形态：对位挪前（Files 首位=主导）
+	// 元数据源先到形态：Files 首位恒为目标
 	member := domain.Work("f:无题/无题_01.png")
 	if member == nil {
-		t.Fatalf("缺少配对作品 f:无题/无题_01.png（works: %+v）", domain.Works)
+		t.Fatalf("缺少扇出目标作品 f:无题/无题_01.png（works: %+v）", domain.Works)
 	}
 	if !reflect.DeepEqual(member.Files, []string{"无题/无题_01.png", "无题/无题_01.txt"}) {
-		t.Fatalf("说明成员先到的配对作品 Files 应对位挪前为主导首位，实际 %v", member.Files)
+		t.Fatalf("元数据源先到的扇出作品 Files 应目标居首，实际 %v", member.Files)
 	}
 	if member.CompanionCount != 1 || member.DirRelKey != "无题" {
-		t.Fatalf("配对作品说明计数应为 1、目录键=后到主导目录键，实际 %+v", member)
+		t.Fatalf("扇出作品说明计数应为 1、目录键=目标目录键，实际 %+v", member)
 	}
-	// 作品键索引无冲突：两件配对作品与孤立作品各占一键
+	// 作品键索引无冲突：两件扇出作品与孤立作品各占一键
 	if len(domain.byWork) != 3 {
-		t.Fatalf("作品键索引应恰 3 键（配对组键与主导单文件键同值不分裂），实际 %d", len(domain.byWork))
+		t.Fatalf("作品键索引应恰 3 键，实际 %d", len(domain.byWork))
 	}
-	// 说明成员 plain 不拉低作品：可选性按主导
+	// 元数据源 plain 不拉低作品：可选性按目标
 	if !cover.Selectable || cover.State != workStateIdentified {
-		t.Fatalf("配对作品应按主导文件可选（identified），实际 selectable=%v state=%s", cover.Selectable, cover.State)
+		t.Fatalf("扇出作品应按目标文件可选（identified），实际 selectable=%v state=%s", cover.Selectable, cover.State)
 	}
 	// 孤立说明文件：维持单文件作品现状
 	lone := domain.Work("f:无题/无题.txt")
 	if lone == nil || len(lone.Files) != 1 || lone.CompanionCount != 0 || lone.Selectable {
 		t.Fatalf("孤立说明文件应为不可选单文件作品（现状维持），实际 %+v", lone)
 	}
-	// 集归属按主导文件群键：序列成员（各自成作品）进集、整件为一集成员
+	// 集归属按目标文件群键：序列成员（各自成作品）进集、整件为一集成员
 	if len(domain.Sets) != 1 || len(domain.Sets[0].Members) != 1 || domain.Sets[0].Members[0] != member.WorkID {
-		t.Fatalf("集视图应以配对作品为单成员（群键=主导文件群键），实际 sets: %+v", domain.Sets)
+		t.Fatalf("集视图应以扇出作品为单成员（群键=目标文件群键），实际 sets: %+v", domain.Sets)
 	}
 }
 
-// TestSelectionPairedLeadMergeProjection 映射单用作品的详情投影与并入冲突：
-// 配对主导（无归属、配对组指向键在场）把说明成员的内容声明并入终选视图
-//（描述补位合成——剧本B 帧2「来源：说明文件」数据面）；同维冲突挂主导文件
-// 待裁决（明细经 workMergePendingOf 供给裁决面）；配对主导自身的声明只在创建
-// 载荷口径收齐、投影口径只补其他成员；普通单文件零并入。
-func TestSelectionPairedLeadMergeProjection(t *testing.T) {
-	snap := pairedSnap()
-	// 主导 cover 补一条与说明成员同维互异的声明（构造冲突面）
+// TestSelectionFanoutLeadMergeProjection 映射单用作品的详情投影与并入冲突：
+// 扇出目标文件（零归属、其作品键在元数据源的扇出键集内）把说明成员的内容
+// 声明并入终选视图（描述补位合成——剧本B 帧2「来源：说明文件」数据面）；
+// 同维冲突挂目标文件待裁决（明细经 workMergePendingOf 供给裁决面）；双重
+// 身份目标（自身携内容声明+扇出键集）的声明只在创建载荷口径收齐、投影口径
+// 只补其他成员；普通单文件零并入。
+func TestSelectionFanoutLeadMergeProjection(t *testing.T) {
+	snap := fanoutSnap()
+	// 目标 cover 补一条与说明成员同维互异的声明（构造冲突面）
 	snap.Files[0].Final = append(snap.Files[0].Final, SnapDecl{
 		Dimension: string(DimDescription), Value: "主导侧描述", Source: string(SourceFilename)})
 
 	contentDecls := workContentDeclsByWork(snap)
-	// 投影口径：说明成员声明归集到配对组键、主导自身不收（cover 无内容声明、
-	// 无题_01 主导亦无——两键各一条说明声明）
+	// 投影口径：元数据源声明归集到扇出键集内各键、目标自身不收（cover 无
+	// 内容声明、无题_01 目标亦无——两键各一条说明声明）
 	if len(contentDecls) != 2 ||
 		len(contentDecls["f:无题/cover.jpg"]) != 1 || len(contentDecls["f:无题/无题_01.png"]) != 1 {
-		t.Fatalf("投影口径应按配对组键各收说明成员声明: %+v", contentDecls)
+		t.Fatalf("投影口径应按扇出键集各收说明成员声明: %+v", contentDecls)
 	}
-	// 载荷口径：配对主导自身的内容声明同样收齐（无题_01 主导补内容声明后计入）
+	// 载荷口径：双重身份目标（无题_01 自身的内容声明随扇出键集收齐）计入
+	//（载荷构造只在快照上临时挂扇出键集，投影口径恢复零键集形态）
+	snap.Files[3].FanoutWorkKeys = []string{"f:无题/无题_01.png"}
 	snap.Files[3].Final = append(snap.Files[3].Final, SnapDecl{
 		Dimension: string(DimTag), Value: "序列标签", Source: string(SourceContent)})
 	payload := workPayloadContentDeclsByWork(snap)
 	if len(payload["f:无题/无题_01.png"]) != 2 {
-		t.Fatalf("载荷口径应收齐主导自身与说明成员的内容声明: %+v", payload["f:无题/无题_01.png"])
+		t.Fatalf("载荷口径应收齐双重身份目标自身与说明成员的内容声明: %+v", payload["f:无题/无题_01.png"])
 	}
+	snap.Files[3].FanoutWorkKeys = nil
 
-	// 投影并入：无冲突主导（无题_01）描述补位合成
+	// 投影并入：无冲突目标（无题_01）描述补位合成
 	merged := projectWorkMergedFile(snap.Files[3], contentDecls)
 	found := false
 	for _, d := range merged.Final {
@@ -127,7 +133,7 @@ func TestSelectionPairedLeadMergeProjection(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("配对主导投影应并入说明成员描述声明（整条保真），实际 %+v", merged.Final)
+		t.Fatalf("扇出目标投影应并入说明成员描述声明（整条保真），实际 %+v", merged.Final)
 	}
 	if len(merged.PendingDims) != 0 {
 		t.Fatalf("无冲突并入不应落待裁决维度，实际 %+v", merged.PendingDims)
@@ -146,7 +152,7 @@ func TestSelectionPairedLeadMergeProjection(t *testing.T) {
 	pendings := workMergePendingOf(snap, contentDecls)
 	if len(pendings) != 1 || pendings[0].RelPath != "无题/cover.jpg" ||
 		pendings[0].Dimension != string(DimDescription) || len(pendings[0].Candidates) != 2 {
-		t.Fatalf("并入冲突明细应挂配对主导文件（两值两来源），实际 %+v", pendings)
+		t.Fatalf("并入冲突明细应挂扇出目标文件（两值两来源），实际 %+v", pendings)
 	}
 	// 普通单文件（孤立说明文件）零并入：原样返回
 	lone := projectWorkMergedFile(snap.Files[4], contentDecls)
@@ -170,11 +176,11 @@ func containsDim(dims []string, want string) bool {
 	return false
 }
 
-// TestEmitSelectedWorksPairedCompanionSingleChild 映射单用作品的创建链：哈希面
-// 剔除说明成员（不哈希、不核对、不导子行——磁盘缺席不阻断创建），主导单条走
-// 单文件子行（无轨道清单）而内容声明随主导子行固化进载荷；说明成员不独立成
+// TestEmitSelectedWorksFanoutCompanionSingleChild 映射单用作品的创建链：哈希面
+// 剔除元数据源文件（不哈希、不核对、不导子行——磁盘缺席不阻断创建），目标单条走
+// 单文件子行（无轨道清单）而内容声明随目标子行固化进载荷；元数据源不独立成
 // 件零子行（剧本B 帧3「3 个文件，另有说明文件 3」的创建数据面——单件口径）。
-func TestEmitSelectedWorksPairedCompanionSingleChild(t *testing.T) {
+func TestEmitSelectedWorksFanoutCompanionSingleChild(t *testing.T) {
 	content := func(dim MetadataDimension, val string) SnapDecl {
 		return SnapDecl{Dimension: string(dim), Value: val, Source: string(SourceContent)}
 	}
@@ -182,22 +188,22 @@ func TestEmitSelectedWorksPairedCompanionSingleChild(t *testing.T) {
 		{RelPath: "无题/无题_01.png", FileName: "无题_01.png", DirRelKey: "无题", State: snapStateIdentified,
 			Final: []SnapDecl{{Dimension: string(DimAuthor), Value: "Isel", Source: string(SourceFilename)}}},
 		{RelPath: "无题/无题_01.txt", FileName: "无题_01.txt", DirRelKey: "无题", State: snapStatePlain,
-			Final:       []SnapDecl{content(DimDescription, "无题_01 的说明内容")},
-			AggWorkKey:  "f:无题/无题_01.png",
-			AggCompanion: true},
+			Final:          []SnapDecl{content(DimDescription, "无题_01 的说明内容")},
+			AggCompanion:   true,
+			FanoutWorkKeys: []string{"f:无题/无题_01.png"}},
 	})
-	// 说明成员磁盘缺席：创建仍须成功（说明文件不 Stat 不哈希——若进哈希面即
+	// 元数据源磁盘缺席：创建仍须成功（说明文件不 Stat 不哈希——若进哈希面即
 	// 「磁盘对账未通过」中止）
 	if err := os.Remove(root + "/无题/无题_01.txt"); err != nil {
-		t.Fatalf("移除说明成员测试文件失败: %v", err)
+		t.Fatalf("移除元数据源测试文件失败: %v", err)
 	}
 
 	if len(works) != 1 {
-		t.Fatalf("两文件应并成一件配对作品，实际 %d: %+v", len(works), works)
+		t.Fatalf("两文件应并成一件扇出目标作品，实际 %d: %+v", len(works), works)
 	}
 	work := works[0]
 	if work.WorkID != "f:无题/无题_01.png" || len(work.Files) != 2 || work.CompanionCount != 1 {
-		t.Fatalf("配对作品应为主导+说明双成员、计数 1，实际 %+v", work)
+		t.Fatalf("扇出作品应为目标+元数据源双成员、计数 1，实际 %+v", work)
 	}
 
 	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "纯映射批次"))
@@ -206,11 +212,11 @@ func TestEmitSelectedWorksPairedCompanionSingleChild(t *testing.T) {
 	}
 	children := resps[0].Children
 	if len(children) != 1 {
-		t.Fatalf("一件配对作品应恰一个子行（说明成员不导子行），实得 %d: %v", len(children), responseChildNames(resps[0]))
+		t.Fatalf("一件扇出作品应恰一个子行（元数据源不导子行），实得 %d: %v", len(children), responseChildNames(resps[0]))
 	}
 	child := children[0]
 	if child.TaskName != "无题_01.png" {
-		t.Fatalf("子行应为哈希面主导文件，实际 %q", child.TaskName)
+		t.Fatalf("子行应为哈希面目标文件，实际 %q", child.TaskName)
 	}
 	var fp FilePluginData
 	if err := json.Unmarshal([]byte(child.PluginData), &fp); err != nil {
@@ -218,26 +224,27 @@ func TestEmitSelectedWorksPairedCompanionSingleChild(t *testing.T) {
 	}
 	// 单文件子行形态：无轨道清单（区别于聚合子行的 Tracks）
 	if len(fp.Tracks) != 0 {
-		t.Fatalf("映射单用作品子行不应携带轨道清单（配对归并不落轨），实际 %+v", fp.Tracks)
+		t.Fatalf("映射单用作品子行不应携带轨道清单（扇出不落轨），实际 %+v", fp.Tracks)
 	}
-	// 内容声明随主导子行固化：说明成员的描述声明在场（任务自包含，执行期并入）
+	// 内容声明随目标子行固化：元数据源的描述声明在场（任务自包含，执行期并入）
 	if len(fp.ContentDecls) != 1 || fp.ContentDecls[0].Value != "无题_01 的说明内容" ||
 		fp.ContentDecls[0].OriginName != "无题_01.txt" {
-		t.Fatalf("说明成员内容声明应固化进主导子行载荷，实际 %+v", fp.ContentDecls)
+		t.Fatalf("元数据源内容声明应固化进目标子行载荷，实际 %+v", fp.ContentDecls)
 	}
 	// 批次摘要：单子行
 	if summary := m.takeCreateBatchSummary(root); summary.total != 1 {
-		t.Fatalf("批次摘要 total 应为 1（主导单子行），实际 %+v", summary)
+		t.Fatalf("批次摘要 total 应为 1（目标单子行），实际 %+v", summary)
 	}
 	_ = contract.StoreTypeSubtitle
 }
 
-// TestContentSourcePairedMappingFullChain 映射单用作品的识别全链（阶段2 退出
+// TestContentSourceFanoutMappingFullChain 映射单用作品的识别全链（阶段2 退出
 // 标准1 的前半链）：采集命中集（真实读盘）→ 内容注入 → 第二相整段取值产声明
-//（描述=说明文件整段）→ 配对段说明成员归并（键=主导路径键+说明标记、无轨、
-// 不落作品类型；主导候选不获归属）→ 快照落档 → 选择域推导（成员并入主导
-// 作品、配对键取不到的说明文件维持独立——剧本B 帧1「无题.txt 独立成件」）。
-func TestContentSourcePairedMappingFullChain(t *testing.T) {
+// （描述=说明文件整段）→ 扇出归属段标记（元数据源=零归属键+说明成员标记+
+// 扇出键集、无轨、不落作品类型；目标文件不获归属）→ 快照落档 → 选择域推导
+// （元数据源并入目标作品、不命中条件行的说明文件按独立作品导入——剧本B
+// 帧1「无题.txt 独立成件」）。
+func TestContentSourceFanoutMappingFullChain(t *testing.T) {
 	root := t.TempDir()
 	entries := []FileEntry{
 		{FullPath: root + "/无题/无题_01.png", RelPath: "无题/无题_01.png"},
@@ -257,11 +264,11 @@ func TestContentSourcePairedMappingFullChain(t *testing.T) {
 		Source:      RuleSourceManual,
 		Enabled:     true,
 		Conditions: []CondxRow{
-			pairingFileRow("{作品}_{序号}", ".png"),
-			pairingFileRow("{作品}_{序号}", ".txt"),
+			fanoutFileRow("{作品}_{序号}", ".png"),
+			fanoutFileRow("{作品}_{序号}", ".txt"),
 		},
 		MetadataFile: &MetadataFileProduction{
-			Pairing: &PairingKey{Mode: PairingModeIdentity, Identity: []IdentityPart{
+			Grouping: &GroupingBinding{Mode: GroupingModeIdentity, Identity: []IdentityPart{
 				{Row: 1, Capture: "work"},
 				{Row: 1, Capture: "seq"},
 			}},
@@ -282,29 +289,31 @@ func TestContentSourcePairedMappingFullChain(t *testing.T) {
 	applyCompanionContent(files, samples)
 	applyCompanionContentDeclarations(conclusions, files, rules, nil)
 
-	// 配对归属与第二相声明：说明成员带描述声明（整段）归并主导、无轨无类型。
+	// 扇出归属与第二相声明：元数据源带描述声明（整段）扇出到组内唯一作品
+	//（零归属键+说明成员标记；目标不获归属——扇出不并作品）。
 	for i := 1; i <= 2; i++ {
 		txt := aggConclusionOf(t, conclusions, "无题/无题_0"+string(rune('0'+i))+".txt")
-		want := "f:无题/无题_0" + string(rune('0'+i)) + ".png"
-		if txt.AggWorkKey != want || txt.AggTrackRole != "" || txt.AggWorkType != "" || !txt.AggCompanion {
-			t.Fatalf("说明文件 %d 归属不符: key=%q role=%q type=%q companion=%v",
-				i, txt.AggWorkKey, txt.AggTrackRole, txt.AggWorkType, txt.AggCompanion)
+		want := []string{"f:无题/无题_0" + string(rune('0'+i)) + ".png"}
+		if txt.AggWorkKey != "" || txt.AggTrackRole != "" || txt.AggWorkType != "" || !txt.AggCompanion ||
+			!reflect.DeepEqual(txt.FanoutWorkKeys, want) {
+			t.Fatalf("说明文件 %d 归属不符: key=%q role=%q type=%q companion=%v fanout=%v",
+				i, txt.AggWorkKey, txt.AggTrackRole, txt.AggWorkType, txt.AggCompanion, txt.FanoutWorkKeys)
 		}
 		if !conclusionHasDecl(txt, DimDescription, "无题_0"+string(rune('0'+i))+" 的说明内容", SourceContent) {
 			t.Fatalf("说明文件 %d 第二相应产整段描述声明: %+v", i, txt.Final)
 		}
 		png := aggConclusionOf(t, conclusions, "无题/无题_0"+string(rune('0'+i))+".png")
 		if png.AggWorkKey != "" || png.AggCompanion {
-			t.Fatalf("主导文件 %d 应不获归属（配对不并作品）: key=%q companion=%v", i, png.AggWorkKey, png.AggCompanion)
+			t.Fatalf("目标文件 %d 应不获归属（扇出不并作品）: key=%q companion=%v", i, png.AggWorkKey, png.AggCompanion)
 		}
 	}
-	// 组级说明文件：配对键取不到（无序号可解析）→ 维持独立作品现状。
+	// 组级说明文件：不命中任何条件行（分组键不可得）→ 按独立作品导入。
 	stray := aggConclusionOf(t, conclusions, "无题/无题.txt")
 	if stray.AggWorkKey != "" || stray.AggCompanion {
-		t.Fatalf("组级说明文件应维持独立作品: key=%q companion=%v", stray.AggWorkKey, stray.AggCompanion)
+		t.Fatalf("组级说明文件应按独立作品导入: key=%q companion=%v", stray.AggWorkKey, stray.AggCompanion)
 	}
 
-	// 快照落档 → 选择域：两件配对作品+一件独立组级说明，成员并入主导作品。
+	// 快照落档 → 选择域：两件扇出作品+一件独立组级说明，元数据源并入目标作品。
 	assignIdx := newAssignmentDirIndex(nil, nil)
 	snap := &RecognitionSnapshot{}
 	for i := range conclusions {
@@ -312,13 +321,13 @@ func TestContentSourcePairedMappingFullChain(t *testing.T) {
 	}
 	domain := DeriveWorkDomain(snap, nil)
 	if len(domain.Works) != 3 {
-		t.Fatalf("两件配对作品+组级说明一件应共 3 件作品，实际 %d: %+v", len(domain.Works), domain.Works)
+		t.Fatalf("两件扇出作品+组级说明一件应共 3 件作品，实际 %d: %+v", len(domain.Works), domain.Works)
 	}
 	for i := 1; i <= 2; i++ {
 		work := domain.Work("f:无题/无题_0" + string(rune('0'+i)) + ".png")
 		if work == nil || len(work.Files) != 2 || work.Files[0] != "无题/无题_0"+string(rune('0'+i))+".png" ||
 			work.CompanionCount != 1 {
-			t.Fatalf("配对作品 %d 应为主导+说明双成员（主导首位、计数 1），实际 %+v", i, work)
+			t.Fatalf("扇出作品 %d 应为目标+说明双成员（目标首位、计数 1），实际 %+v", i, work)
 		}
 	}
 	if lone := domain.Work("f:无题/无题.txt"); lone == nil || len(lone.Files) != 1 {
@@ -337,10 +346,10 @@ func conclusionHasDecl(c *FileConclusion, dim MetadataDimension, val string, src
 	return false
 }
 
-// TestMergeWorkPairedCreateWorkInfoDescription 映射单用作品的执行期落库：主导
-// 子行载荷固化的说明成员内容声明经作品级并入合成——描述=说明文件整段内容落
+// TestMergeWorkFanoutCreateWorkInfoDescription 映射单用作品的执行期落库：目标
+// 子行载荷固化的元数据源内容声明经作品级并入合成——描述=说明文件整段内容落
 // 库（SiteWorkDescription）；主导自身的结论（作者）照常在场（重算 ∪ 载荷）。
-func TestMergeWorkPairedCreateWorkInfoDescription(t *testing.T) {
+func TestMergeWorkFanoutCreateWorkInfoDescription(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root+"/无题/无题_01.png", "图片内容")
 	writeTestFile(t, root+"/无题/无题_01.txt", "无题_01 的说明内容")

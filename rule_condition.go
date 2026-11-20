@@ -1284,7 +1284,7 @@ type condxLeafRow struct {
 
 // condxLeafRowsOf 条件行列表的先序展平叶子行序列（行号 1..N 连续）：括号
 // 子组递归下潜、组结构不产叶子行（布尔组合由 aggregateBooleanGate 消费整条
-// 求值）；供聚合/配对/内容绑定段的行级命中寻址（决策10：行级命中照常按行）。
+// 求值）；供聚合/扇出/内容绑定段的行级命中寻址（决策10：行级命中照常按行）。
 func condxLeafRowsOf(rows []CondxRow) []condxLeafRow {
 	var out []condxLeafRow
 	var walk func(list []CondxRow)
@@ -1303,8 +1303,8 @@ func condxLeafRowsOf(rows []CondxRow) []condxLeafRow {
 }
 
 // condxHasBooleanShape 报告条件行树是否含括号子组或行级非（决策10 放开的
-// 布尔组合形态）：在场时聚合/配对段的成员判定在行命中池之上加整条布尔求值
-// 门（命中集消费）；纯平行行（无括号无行级非——存量聚合/配对规则的现状
+// 布尔组合形态）：在场时聚合/扇出段的成员判定在行命中池之上加整条布尔求值
+// 门（命中集消费）；纯平行行（无括号无行级非——存量聚合/映射规则的现状
 // 形态）不设门，维持行命中池 OR 汇聚的既有语义（连接词不参与成员判定）。
 func condxHasBooleanShape(rows []CondxRow) bool {
 	for i := range rows {

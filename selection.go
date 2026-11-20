@@ -1,6 +1,7 @@
-// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品；配对
-// 归属非空的成员按配对作品键并成一件多成员作品〔聚合在场时=聚合归属、映射
-// 单用时=配对归并〕，其余每文件一件单文件作品；集=序列群、默认聚合单元），
+// 资源选择域：从识别全景快照推导可选作品与集结构（最小选择粒度=作品；聚合
+// 归属非空的成员按聚合作品键并成一件多成员作品，元数据源文件按内容扇出键集
+// 并入各目标作品〔扇出不并作品〕，其余每文件一件单文件作品；集=序列群、
+// 默认聚合单元），
 // 承载选择集的持久化校验、创建编排动作（异步化：创建前目录级 mtime 对账〔逐
 // 文件存在性核对已并入 verify 哈希循环，见 hashWorkFilesAllOrNothing〕→ 一次
 // CreateTask 走 Create 过滤产出分支 → 选择集清理，均移独立 goroutine；进度与
@@ -49,20 +50,20 @@ func splitWorkSetKey(setKey string) (dirRelKey, groupKey string) {
 }
 
 // SelectableWork 可选作品：选择的最小粒度。单文件作品恒一文件；组作品=同
-// 配对作品键的成员并成一件（聚合在场时=聚合归属〔轨道集形态〕，映射单用时=
-// 配对归并〔主导+说明成员〕——Files 多成员、首位=主导文件，作品级结论〔集
-// 归属/呈现态/创建链元数据〕按主导文件结论取值）。Files 保留轨道集形态承载
-// 两类组作品。
+// 作品键的成员并成一件（聚合作品=聚合归属〔轨道集形态〕，扇出归属作品=目标
+// 文件+元数据源成员〔映射单用〕——Files 多成员、首位=主导/目标文件，作品级
+// 结论〔集归属/呈现态/创建链元数据〕按首位文件结论取值）。Files 保留轨道集
+// 形态承载两类组作品。
 type SelectableWork struct {
 	// WorkID 作品键（workKeyPrefixFile + 文件相对路径；组作品=主导文件相对
-	// 路径——聚合归属键与配对组键同形）。
+	// 路径——聚合归属键与扇出目标键同形）。
 	WorkID string `json:"workId"`
 	// DirRelKey 所属目录键（'/' 路径，库根直下为空串；组作品=主导文件目录键）。
 	DirRelKey string `json:"dirRelKey"`
 	// Files 作品全部成员的相对路径（单文件作品恒一条；组作品=成员清单，首位
 	//=主导文件，余按快照序；伴随说明成员随作品联动，亦在清单内）。
 	Files []string `json:"files"`
-	// CompanionCount 伴随说明成员数（组作品专属——聚合作品与配对归并作品
+	// CompanionCount 伴随说明成员数（组作品专属——聚合作品与扇出归属作品
 	// 同构；清单内含说明成员的选择域计数附注数据位——「含说明 N」「另有说明
 	// 文件 N」类文案由前端按本位与 Files 数派生，说明成员不进创建链）。
 	// 单文件作品与无说明成员的组作品零值省略。
@@ -166,7 +167,9 @@ func workVitality(fileByPath map[string]*SnapFile, ignored map[string]bool, file
 // 聚合归属非空的成员按聚合作品键并成一件聚合作品（不再逐文件成件）；GroupKey
 // 非空的文件（规则定群与结构群成员）另按「目录+分组键」归集为集（集内序取快照
 // GroupSeq）——集=默认聚合单元，集内允许作品级显式拆选，集视图以作品为成员
-// （聚合作品整体入集、整件为一成员）。
+// （聚合作品整体入集、整件为一成员）。元数据源文件（扇出面说明成员：仅绑定行
+// 命中、组内有落点、不导入不独立成件）不各自成件，按内容扇出键集并入各目标
+// 作品（一份说明文件扇出到多作品时每件各计一次说明数）。
 //
 // 聚合作品的键=主导文件 f:{相对路径}（聚合段落定的作品键原样沿用，键前缀维持
 // 单一）；Files 首位恒为主导文件（快照序先见伴随成员时入组后对位挪前），目录键、
@@ -185,10 +188,11 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 	for i := range snap.Files {
 		fileByPath[snap.Files[i].RelPath] = &snap.Files[i]
 	}
-	// 单过扫描：有归属成员（聚合轨/说明成员与配对说明成员）并入其配对作品
-	//（作品位=首成员快照序），无归属文件按自身路径键寻址——配对组主导后到
-	// 并入同键组作品（对位挪前）、普通单文件建独立作品，两类作品在 Works 中
-	// 保持快照序（确定序），单文件作品路径零变化。
+	// 单过扫描：有归属成员（聚合轨/说明成员）并入其归属作品（作品位=首成员
+	// 快照序），无归属文件按自身路径键寻址——归属对位主导后到并入同键组作品
+	//（对位挪前）、普通单文件建独立作品，两类作品在 Works 中保持快照序
+	//（确定序），单文件作品路径零变化；元数据源文件（扇出面）不在本扫描
+	// 成件，留待第二遍按扇出键集并入。
 	setMembers := make(map[string][]*SelectableWork)
 	aggByWork := make(map[string]*SelectableWork)
 	for i := range snap.Files {
@@ -225,9 +229,14 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 			}
 			continue
 		}
+		if f.AggCompanion && len(f.FanoutWorkKeys) > 0 {
+			// 元数据源文件（扇出面、无聚合归属）：不独立成件——按扇出键集
+			// 并入各目标作品（见下方第二遍）。
+			continue
+		}
 		key := workKeyPrefixFile + f.RelPath
 		if work := aggByWork[key]; work != nil {
-			// 配对组主导后到（说明成员先建组）：先入清单再对位挪至 Files 首
+			// 归属键对位主导后到（说明成员先建组）：先入清单再对位挪至 Files 首
 			// 位并以其目录键为作品目录键——与聚合主导后到同款对位逻辑。
 			work.Files = append(work.Files, f.RelPath)
 			work.DirRelKey = f.DirRelKey
@@ -242,8 +251,8 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 			DirRelKey: f.DirRelKey,
 			Files:     []string{f.RelPath},
 		}
-		// 登记组作品索引：后到的配对说明成员按同键（归并目标=主导路径键）
-		// 追加进本作品（配对组主导先到形态）。
+		// 登记组作品索引：后到的归属成员按同键（归并目标=主导路径键）
+		// 追加进本作品（归属主导先到形态）。
 		aggByWork[key] = work
 		domain.Works = append(domain.Works, work)
 		domain.byWork[work.WorkID] = work
@@ -252,10 +261,29 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 			setMembers[work.SetKey] = append(setMembers[work.SetKey], work)
 		}
 	}
+	// 第二遍：元数据源文件（扇出面说明成员）按扇出键集并入各目标作品——
+	// 文件行追加在末位（主导恒居 Files 首位）、说明计数随作品累计（作品级
+	// 「含说明 N」/创建「另有说明文件 N」的数据面）；一份说明文件扇出到
+	// 多作品时每件各计一次（各带一份内容）。扇出键无对位作品（键源文件已
+	// 被移出本快照的异常形态）静默跳过。
+	for i := range snap.Files {
+		f := &snap.Files[i]
+		if f.AggWorkKey != "" || !f.AggCompanion || len(f.FanoutWorkKeys) == 0 {
+			continue
+		}
+		for _, key := range f.FanoutWorkKeys {
+			work := aggByWork[key]
+			if work == nil {
+				continue
+			}
+			work.Files = append(work.Files, f.RelPath)
+			work.CompanionCount++
+		}
+	}
 	for _, work := range domain.Works {
 		// 作品级结论=主导文件（Files 首位）——单文件作品 Files 恒一条，两口径
 		// 同值；集归属按主导文件群键整体入集，可选性/呈现态只看主导文件。主导
-		// 先到的单文件/配对作品已在主循环归集（SetKey 非空防重）。
+		// 先到的单文件/扇出归属作品已在主循环归集（SetKey 非空防重）。
 		work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files[:1])
 		if work.SetKey == "" {
 			if lead := fileByPath[work.Files[0]]; lead != nil && lead.GroupKey != "" {
@@ -280,7 +308,7 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 }
 
 // domainViewOf 选择域的前端投影：条目成员数组按预览上限截断——作品的轨道
-//（Files）与集的成员作品键（Members）截前 panoramaMemberPreviewLimit 个（浅拷贝
+// （Files）与集的成员作品键（Members）截前 panoramaMemberPreviewLimit 个（浅拷贝
 // 条目，不动推导域本体；getPanorama domain 分节分页按同一截断逐条投影，语义
 // 守卫=逐页拼接与本全量投影逐条全等，两侧同截断）。截断仅出线层：创建/守卫链
 // 等服务端动作仍消费全量域（workDomainOf），选择/创建按作品键寻址不受影响。
@@ -716,7 +744,7 @@ const (
 // requestCreateCancel 受理取消请求（请求循环调用，创建在独立 goroutine 不受
 // 阻塞）：无在途=idle；原子提交点已过=completed（不置位不回滚，风险10）；否则
 // 置取消位并同步取消 runCtx（读循环 4MB 分块处感知）=accepted。核对相与发射相
-//（含重叠期）均可用；零发射阶段（verify 中）取消则无开批父无行可删、直接终态。
+// （含重叠期）均可用；零发射阶段（verify 中）取消则无开批父无行可删、直接终态。
 func requestCreateCancel(root string) string {
 	st, ok := createRunRegistry.Load(createRunKey(root))
 	if !ok {
@@ -773,7 +801,7 @@ func markCreateCommitted(root string) {
 
 // armCreateRunCancel 登记在途创建的 runCtx 取消函数（verify 发射循环起始调用；
 // 无运行态=直驱路径，无取消面，静默）。登记时取消位已在（置位先于登记的窄窗
-//——如 CreateTask RPC 入口即取消）则立即取消，取消位不丢失。
+// ——如 CreateTask RPC 入口即取消）则立即取消，取消位不丢失。
 func armCreateRunCancel(root string, cancel context.CancelFunc) {
 	st, ok := createRunRegistry.Load(createRunKey(root))
 	if !ok {
@@ -900,7 +928,7 @@ func (m *SessionManager) publishCreateEvent(evt *workbenchFrontendEvent) {
 // 进行中」并发拒绝于链首）→ 置工作台发起标记并暂存任务名原文后立即返回
 // started=true（工作台订阅循环不再被长创建阻塞；前端经 createProgress/createDone
 // 事件感知进度与终态）→ 创建 RPC（含完整 Create 流消费）在独立 goroutine 执行
-//（runCreateTasks）。taskName 为可选自定义任务名（空/全空白=默认名兜底）。任一
+// （runCreateTasks）。taskName 为可选自定义任务名（空/全空白=默认名兜底）。任一
 // 守卫未过即阻断（零任务零标记零运行态残留）。
 func (m *SessionManager) ApplyCreateTasks(root, taskName string) (bool, error) {
 	// 并发防护置首：同库根重复 createTasks 以「创建进行中」拒绝——先于其余守卫，
@@ -962,7 +990,7 @@ func (m *SessionManager) ApplyCreateTasks(root, taskName string) (bool, error) {
 // 计数定格）再发终态。终态经 createDone 事件推送：成功=清空选择集（赋值与快照保留）
 // +摘要文案；失败=abortCreateTasks（保留选择集+在途清理信息，决策4 统一回滚）；取消（甲3/决策3，
 // 判读先于应答形态——取消位与取消意图块的应答形态不保证一致）=finishCancelledCreate
-//（保留选择集+清理量文案；原子提交点已过的取消不成立，照常成功收尾，风险10）。
+// （保留选择集+清理量文案；原子提交点已过的取消不成立，照常成功收尾，风险10）。
 // 运行态由 defer 摘除。
 func (m *SessionManager) runCreateTasks(root, taskName string, workCount int) {
 	defer endCreateRun(root)

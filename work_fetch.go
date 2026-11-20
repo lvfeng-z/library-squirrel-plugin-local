@@ -76,7 +76,7 @@ type FilePluginData struct {
 	// 文件数与角色构成（确认呈现「N 个文件」「视频 + 字幕×N」类文案的数据面）
 	// 由本清单直接可得。
 	Tracks []TrackEntry `json:"tracks,omitempty"`
-	// ContentDecls 作品成员的内容来源声明快照（配对归属作品子行均携带——
+	// ContentDecls 作品成员的内容来源声明快照（归属/扇出作品子行均携带——
 	// 聚合作品与映射单用作品同构，零契约插件自有字段）：创建时点该作品全部
 	// 成员（含主导文件）终选中来源=内容的声明按快照序固化——任务自包含
 	//（执行期单文件重算不重读内容，作品级并入素材全靠本快照），执行期与重算
@@ -322,8 +322,8 @@ func (h *LocalImportWorkFetcher) createWorkbenchFiltered(url, root string, repor
 
 // batchFileItem 批次应答的子行素材：带归属裁决的文件与其所属目录的含义链。
 // 批次父行纯容器（目录含义链不呈现于父行），含义链随子行各自的目录走。
-// contentDecls 为该子行承载的作品内容来源声明快照（配对归属作品的说明成员
-// 内容产出——映射单用作品经主导子行固化；聚合作品子行走显式参数不经本位）。
+// contentDecls 为该子行承载的作品内容来源声明快照（扇出归属作品的元数据源
+// 内容产出——映射单用作品经目标子行固化；聚合作品子行走显式参数不经本位）。
 type batchFileItem struct {
 	af           attributedFile
 	metadata     []PathMeaning
@@ -745,7 +745,7 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 	// worker 池内做，归属裁决与子行构造在放行侧做，保序不变量锚定放行序）。
 	// aggKey 非空=聚合作品（成员文件携带聚合归属，Files 首位=主导文件）——产出
 	// 形态分叉：单子行（不再逐文件扁平），成员对账失败降为整件放弃。哈希面
-	// 剔除说明成员对配对归属作品通用（聚合与映射单用同款，见 workHashFaceOf——
+	// 剔除说明成员对归属/扇出作品通用（聚合与映射单用同款，见 workHashFaceOf——
 	// 成员清单与计数数据面仍是全量 Files，域推导不动，仅创建链消费过滤视图）。
 	type emitUnit struct {
 		work              *SelectableWork
@@ -775,8 +775,8 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 		}
 	}
 
-	// 组作品的内容声明（载荷固化面）：聚合单元或含说明成员的配对作品在场时
-	// 一次收齐按作品键取用——说明成员与被绑定轨行/主导的内容产出经此并入
+	// 组作品的内容声明（载荷固化面）：聚合单元或含说明成员的扇出归属作品在场时
+	// 一次收齐按作品键取用——元数据源与被绑定轨行/目标的内容产出经此并入
 	// 作品元数据（任务自包含，执行期重算不重读内容）；纯单文件批次零工作零
 	// 开销。
 	var payloadContentDecls map[string][]SnapDecl
@@ -1000,8 +1000,8 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			}
 		} else {
 			// 逐文件裁决归属后按原序扁平进批次（目录序内先落单作品后集成
-			// 员——同目录文件不按归属重排）。配对归属作品（映射单用）哈希面
-			// 后恒主导单条：内容声明随主导子行固化进载荷（执行期作品级并入，
+			// 员——同目录文件不按归属重排）。扇出归属作品（映射单用）哈希面
+			// 后恒目标单条：内容声明随目标子行固化进载荷（执行期作品级并入，
 			// 与聚合子行的显式参数形态同构）。
 			unitItems := make([]batchFileItem, 0, len(out.files))
 			for i, f := range out.files {
@@ -1289,7 +1289,7 @@ func buildChildResponses(items []batchFileItem, assigns map[string]SessionAssign
 			snapshot := assign
 			fp.Assignment = &snapshot
 		}
-		// 配对归属作品的内容声明随子行固化（映射单用：说明成员内容经主导子行
+		// 扇出归属作品的内容声明随子行固化（映射单用：元数据源内容经目标子行
 		// 进入任务载荷，执行期与重算结论按作品级并入规则合成）
 		fp.ContentDecls = item.contentDecls
 		fpJSON, _ := json.Marshal(fp)
@@ -1341,12 +1341,13 @@ func aggKeyOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
 	return ""
 }
 
-// workHashFaceOf 创建链的作品哈希面：按配对归属剔除伴随说明成员——说明成员
+// workHashFaceOf 创建链的作品哈希面：按说明成员标记剔除元数据源与绑定行
+// 说明成员——说明成员
 // 只作元数据来源，文件本体不哈希、不核对、不导子行（不进轨道清单与集序素材），
-// 聚合在场时=聚合归属同值（聚合作品主导携带归属键），映射单用时=配对组作品
-//（主导无归属而作品含说明成员）；轨道成员（含被内容绑定的双重身份成员）照常
+// 聚合在场时=聚合归属同值（聚合作品主导携带归属键），映射单用时=扇出归属作品
+//（目标无归属而作品含说明成员）；轨道成员（含被内容绑定的双重身份成员）照常
 // 保留（绑定只叠加内容产出，不改写导入身份）。无说明成员的作品原样返回（零
-// 拷贝，含全部单文件作品——既有路径零变化）；主导文件恒为轨道成员/配对主导，
+// 拷贝，含全部单文件作品——既有路径零变化）；主导文件恒为轨道成员/扇出目标，
 // 过滤不触及 Files 首位。
 func workHashFaceOf(fileByPath map[string]*SnapFile, work *SelectableWork) *SelectableWork {
 	if len(work.Files) == 0 {
@@ -1594,7 +1595,7 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	}
 	final := conclusion.Final
 	if len(fp.ContentDecls) > 0 {
-		// 作品级并入（配对归属通用）：重算结论（主导文件）∪ 载荷固化的成员
+		// 作品级并入（归属/扇出通用）：重算结论（主导文件）∪ 载荷固化的成员
 		// 内容声明——同维多值冲突按主导值落库（冲突呈现归解析工作台的待裁决
 		// 面，裁决经会话赋值重识别生效后载荷随创建时点更新）；描述落库取并入
 		// 后首个声明（值原样入——落库字段无长度约束，采集上限 64KB 即自然上
