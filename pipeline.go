@@ -110,9 +110,10 @@ func RunPipeline(files []ScanFile, rules []RuleEntry, lib *LibraryIndex) []FileD
 //  2. 分组段：顶层 Pattern 为 SiblingPattern 的启用规则逐条求值，首个命中
 //     定群（Group 填充，用户规则先于内置由调用方 EffectiveRules 保证），
 //     无任何分组规则命中即独立文件（Group=nil）；
-//  3. 提取段：其余规则按传入顺序对每文件求值 Pattern，命中即记入
+//  3. 提取段：其余规则（含聚合规则——决策10 解除互斥：携带提取动作时声明
+//     挂各命中文件）按传入顺序对每文件求值 Pattern，命中即记入
 //     MatchedRuleIDs 并依序执行该规则 Extractions 追加声明（声明 RuleID
-//     归属产出规则）；聚合规则整体跳过（不进逐文件求值循环）；
+//     归属产出规则）；
 //  4. 每文件一份 ParseContext，基础字段 DirNames/Depth 按文件预先填入；
 //     分组段写入的群组分析保留在同一 ctx 内，供 FromGroupPrefix 提取消费；
 //  5. 聚合段：汇流后的独立通道（与分组段同相位、居其后——群归属与元数据
@@ -168,8 +169,8 @@ func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rule
 }
 
 // metadataRules 过滤出元数据类别的规则序列（保持原序）：聚合规则不表达目录层
-// 含义（其轨行求值属聚合段），目录含义回放等「逐规则求值产出含义」的消费面
-// 先经本过滤再进入。
+// 含义（其条件行的成员判定属聚合段），目录含义回放等「逐规则求值产出含义」
+// 的消费面先经本过滤再进入。
 func metadataRules(rules []RuleEntry) []RuleEntry {
 	out := make([]RuleEntry, 0, len(rules))
 	for _, rule := range rules {
@@ -193,8 +194,8 @@ func isGroupingRule(rule *RuleEntry) bool {
 	if rule == nil {
 		return false
 	}
-	// 聚合规则不参与定群：其轨行是平行选择器（无布尔组合语义），序列轨行的
-	// 求值与落轨全部发生在汇流后的聚合段。
+	// 聚合规则不参与定群：定群语义由序列主体承载（成员判定与落轨在汇流后
+	// 的聚合段；聚合规则的序列条件行在提取段照常逐文件求值——决策10）。
 	if rule.Category == RuleCategoryAggregate {
 		return false
 	}
@@ -340,11 +341,9 @@ func runExtractionStage(decision *FileDecision, rules []RuleEntry, in *MatchInpu
 		if isGroupingRule(rule) {
 			continue
 		}
-		// 聚合规则不进逐文件求值循环（红线）：轨行求值与捕获汇集全部发生在
-		// 汇流后的聚合段（runAggregationStage）——此处的求值循环对其整体跳过。
-		if rule.Category == RuleCategoryAggregate {
-			continue
-		}
+		// 聚合规则照常逐文件求值（决策10 解除互斥）：携带提取动作时声明挂
+		// 各命中文件、经主导文件结论并入聚合作品元数据；并组判定仍在汇流后
+		// 的聚合段（runAggregationStage——两段各司其职，配对/并入不进本循环）。
 		ruleCtx := ctx.ruleScopedContext()
 		// 作用域附件消费规则：供给方捕获快照按本规则供给方集注入其私有作用域
 		//（限定键通道，refCapture 提取与 when 限定名可读；供给方未命中时快照
@@ -434,8 +433,8 @@ func (g *refGateState) snapshot(memberID string) []CaptureBinding {
 
 // runRefGateStage 门段（求值两段化的第一段，先于提取段主循环——与「定群段
 // 先于提取段」同款机制）：对本批规则中会被求值的规则（启用、模式在场、非定
-// 群形态、非聚合类别）的条件行递归扫描 refScope 附件，对引用到的供给方全体
-// 先求值（needed 收集自行扫描条件行）。
+// 群形态、非聚合类别——聚合条件行禁作用域附件，载入侧已拦）的条件行递归
+// 扫描 refScope 附件，对引用到的供给方全体先求值（needed 收集自行扫描条件行）。
 //   - 供给方仍在各自私有作用域求值（ruleScopedContext）；求值结论不并回共享
 //     上下文（不调 absorbScoped——门段不得扰动主循环的求值次序面，非消费
 //     路径零变化；群组基线取门段时点即定群/结构群补位后的状态）；
@@ -950,7 +949,8 @@ func pickHighTrust(final []MetadataDeclaration, pending []PendingItem, dim Metad
 // —— 伴随说明内容的两相提取（内容绑定 → 命中集登记 → 汇流后整段取值产声明）——
 
 // contentBindingPlan 单条聚合规则内容绑定的求值预案：各绑定行编译为独立求值
-// 的行包装模式（与聚合段轨行同一编译口径，行号即行序前缀）。
+// 的行包装模式（与聚合段条件行同一编译口径，行号=先序展平，括号子组内层行
+// 照常按行寻址）。
 type contentBindingPlan struct {
 	// rule 为源规则（引用传入规则序列的条目）。
 	rule *RuleEntry
@@ -961,10 +961,10 @@ type contentBindingPlan struct {
 }
 
 // contentBindingPlans 过滤携带内容绑定（「元数据文件」产出，住规则级落档位）
-// 的启用规则并编译绑定行——聚合规则（并用）与映射单用规则同源供给。行结构
-// 非法（越界/行级非/括号子组）或编译失败按宁缺勿错整条跳过——与聚合段
-// buildAggregationPlans 同款防御（载入校验已拦的形态在此双保险）。无绑定时
-// 返回空（现状行为零变化）。
+// 的启用规则并编译绑定行——聚合规则（并用）与映射单用规则同源供给。行号
+// 越界或行编译失败按宁缺勿错整条跳过——与聚合段 buildAggregationPlans 同款
+// 防御（载入校验已拦的形态在此双保险；括号子组/行级非行照常编译——决策10
+// 放开行结构限制，行级命中照常按行）。无绑定时返回空（现状行为零变化）。
 func contentBindingPlans(rules []RuleEntry) []*contentBindingPlan {
 	var plans []*contentBindingPlan
 	for i := range rules {
@@ -974,24 +974,28 @@ func contentBindingPlans(rules []RuleEntry) []*contentBindingPlan {
 			len(rule.Conditions) == 0 {
 			continue
 		}
+		leaves := condxLeafRowsOf(rule.Conditions)
+		byNo := make(map[int]*CondxRow, len(leaves))
+		for _, leaf := range leaves {
+			byNo[leaf.no] = leaf.row
+		}
 		bindings := rule.MetadataFile.ContentBindings
 		rows := make([]Pattern, len(bindings))
 		valid := true
 		for j := range bindings {
 			rowNo := bindings[j].Row
-			if rowNo < 1 || rowNo > len(rule.Conditions) {
+			leaf, ok := byNo[rowNo]
+			if !ok {
 				valid = false
 				break
 			}
-			cond := rule.Conditions[rowNo-1]
-			if cond.Negated || cond.Condition == nil {
-				valid = false
-				break
-			}
-			p, err := compileCondx(cond.Condition, rowNo)
+			p, err := compileCondx(leaf.Condition, rowNo)
 			if err != nil {
 				valid = false
 				break
+			}
+			if leaf.Negated {
+				p = Not{Inner: p}
 			}
 			rows[j] = p
 		}
@@ -1034,7 +1038,7 @@ func contentBindingInputs(conclusions []FileConclusion) []*MatchInput {
 }
 
 // anyRowHit 报告输入是否命中该预案的任一绑定行（每行独立作用域求值，与聚合
-// 段轨行同款纪律；命中只判事实，捕获不外溢）。
+// 段条件行同款纪律；命中只判事实，捕获不外溢）。
 func (p *contentBindingPlan) anyRowHit(in *MatchInput) bool {
 	for j := range p.rows {
 		ctx := &ParseContext{DirNames: in.DirNames, Depth: len(in.DirNames)}

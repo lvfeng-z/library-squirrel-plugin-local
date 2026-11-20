@@ -129,10 +129,10 @@ const (
 	// 动作」路径的综合命名，求值零改动）。缺省值——旧档与既有条目不带类别
 	// 字段即属此类，零迁移。
 	RuleCategoryMetadata RuleCategory = "metadata"
-	// RuleCategoryAggregate 表示聚合规则：轨行（四种源任选的普通条件行，模板
-	// 可带捕获）+作品标识声明+分轨入口（聚合成作品产出）。轨行是平行选择器
-	// 非布尔组合，求值挂在汇流后的聚合段（见 pipeline.go），不进逐文件求值
-	// 循环。
+	// RuleCategoryAggregate 表示聚合规则：条件行（四种源任选，模板可带捕获；
+	// 布尔自由——括号子组/行级非放开，决策10）+作品标识声明+分轨入口（聚合成
+	// 作品产出）。条件行照常进逐文件求值循环（可携提取动作），并组判定挂汇流
+	// 后的聚合段（见 pipeline.go）。
 	RuleCategoryAggregate RuleCategory = "aggregate"
 )
 
@@ -468,22 +468,24 @@ type SynthesisPolicy struct {
 	Roles []RoleBinding `json:"roles"`
 }
 
-// IdentityPart 为作品标识声明的一个部分：选自「轨行号·捕获名」——文件名捕获
+// IdentityPart 为作品标识声明的一个部分：选自「条件行号·捕获名」——文件名捕获
 // 与目录名捕获按行内命名捕获组取值（目录捕获被选=同目录文件共享该值，目录
 // 成组）；序列群键用保留名 identityGroupKeyCapture（非序号捕获按序拼接，每
 // 序列组一作品，聚合规则该行须为序列目标）。多个部分按声明序拼成复合标识。
 type IdentityPart struct {
-	// Row 为轨行号（1 起顶层序号；聚合规则只收普通条件行，顶层序号即先序行号）。
+	// Row 为条件行号（1 起先序展平——括号子组内层行照常占号，组行占组内首
+	// 行号；纯平行行的展平行号即顶层序号）。
 	Row int `json:"row"`
 	// Capture 为捕获名（英文组名，如 {作品}→work）；保留名 groupKey=取该行
 	// 序列求值写入的群组键。
 	Capture string `json:"capture"`
 }
 
-// TrackAssign 为分轨入口的单行角色分配：轨行→结构角色。
+// TrackAssign 为分轨入口的单行角色分配：条件行→结构角色。
 type TrackAssign struct {
-	// Row 为轨行号（1 起顶层序号）。序列行=集合轨（整序列组=N 存储位）；目录
-	// 行可作标识源或集合轨（子树命中文件共享同一角色）。
+	// Row 为条件行号（1 起先序展平，与 IdentityPart.Row 同口径）。序列行=集合
+	// 轨（整序列组=N 存储位）；目录行可作标识源或集合轨（子树命中文件共享同
+	// 一角色）。
 	Row int `json:"row"`
 	// Role 为结构角色（如 video 的 videoMain、subtitle；article 的 document
 	// 与内嵌 image）：必含轨所在行（角色在类型规约中 Min≥1）承载聚合作品的
@@ -508,12 +510,13 @@ const (
 
 // ContentBinding 为「元数据文件」产出的一条内容绑定（行→维度指派）：把本
 // 规则一条条件行命中文件的伴随说明内容整段声明到某含义维度。绑定行可为轨
-// 行（并用时照常导入，内容叠加产出）或说明行（不导入——处置归配对/聚合
-// 段）；一期零参数（整段→单维度），「单文件解析逻辑→多维度」为该结构的
-// 参数化扩展位、本批不设计；一行内容可整段同时映射多个维度（多目标=同行
-// 多条绑定），同一行同一维度唯一。
+// 行（照常导入，内容叠加产出）或说明行（不导入——处置归配对段：决策12③
+// 绑定行经配对键入组，单用/并用同通道）；一期零参数（整段→单维度），
+// 「单文件解析逻辑→多维度」为该结构的参数化扩展位、本批不设计；一行内容
+// 可整段同时映射多个维度（多目标=同行多条绑定），同一行同一维度唯一。
 type ContentBinding struct {
-	// Row 为被指派的条件行号（1 起顶层序号，须在本规则条件行范围内）。
+	// Row 为被指派的条件行号（1 起先序展平，须在本规则条件行范围内——括号
+	// 子组内层行照常占号）。
 	Row int `json:"row"`
 	// Dimension 为内容整段声明到的含义维度。
 	Dimension MetadataDimension `json:"dimension"`
@@ -534,7 +537,9 @@ const (
 )
 
 // PairingKey 为映射产出的配对键声明（「元数据文件」产出自己的字段，与聚合
-// 规则的标识声明各自独立、并用互不牵连——规则级 Identity 维持聚合专属）。
+// 规则的标识声明各自独立声明——决策12③：并用形态下配对键仍是绑定行成员
+// 判定的唯一驱动，缺省=载入归一为聚合标识的等值形态；规则级 Identity 维持
+// 聚合专属）。
 type PairingKey struct {
 	// Mode 为配对形态（identity | directory）。
 	Mode PairingMode `json:"mode"`
@@ -546,12 +551,15 @@ type PairingKey struct {
 // MetadataFileProduction 为「元数据文件」产出的独立落档位（规则级产出、与
 // 聚合成作品产出平级，可各自单独使用或同规则并用）：内容绑定列表（哪些条
 // 件行的文件内容→哪个元数据维度）+ 配对键声明（说明文件靠什么找到它所属
-// 的作品）。无聚合产出时按配对键分组做说明成员归并（不并作品——组成员文
-// 件各自保持原作品形态）；有聚合产出时分组由聚合标识驱动（配对键声明在场
-// 而不牵连，行为与既有并用形态全等）。
+// 的作品）。单用（无聚合产出）按配对键分组做说明成员归并（不并作品——组
+// 成员文件各自保持原作品形态）；并用（有聚合产出）绑定行同样经配对键入组
+// （决策12③ 统一入组通道——聚合段成员判定回归轨行），配对目标=组内主导们
+// 所在的作品（桥接，同件无歧义/跨件拒绝）。
 type MetadataFileProduction struct {
 	// Pairing 为配对键声明：映射单用（本规则无聚合产出）时必填，否则说明
-	// 成员无从归属；并用（有聚合产出）时可省略（分组由聚合标识驱动）。
+	// 成员无从归属；并用（有聚合产出）时缺省=载入归一为标识配对
+	// （identity:=聚合标识，见 normalizeCombinedPairingKey——行为等值
+	// 转换，零迁移零拒绝）。
 	Pairing *PairingKey `json:"pairing,omitempty"`
 	// ContentBindings 为内容绑定列表（行→维度，一行可多条目=多目标）：绑定
 	// 行命中文件的伴随说明内容产声明。空=无内容产出（该形态载入拒绝）。
@@ -622,7 +630,8 @@ type RuleEntry struct {
 	// MetadataFile 为「元数据文件」产出（规则级独立落档位，与聚合产出平级、
 	// 各自可单独使用或并用）：内容绑定+配对键声明。元数据规则与聚合规则均可
 	// 携带（映射单用=无聚合产出时按配对键分组归并说明成员、不并作品；并用=
-	// 绑定行随聚合并组，配对键声明不牵连分组）。
+	// 绑定行经配对键入组、配对目标=组内主导所在作品〔桥接〕，配对键缺省载入
+	// 归一为聚合标识——决策12③）。
 	MetadataFile *MetadataFileProduction `json:"metadataFile,omitempty"`
 	// Conditions 为 v4 条件行列表（目标三分+格式+附加+小标）：v4 档案的
 	// 持久化语法。机器规则生产方（问答/泛化）与档案装载同一来源；
@@ -1059,6 +1068,10 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 			return nil, err
 		}
 	}
+	// 并用归一（决策12③ 统一入组通道·I1）：聚合产出与「元数据文件」产出并在
+	// 而配对键缺省的条目，载入归一 pairing={mode:identity, identity:=聚合标识}
+	// ——行为等值转换、零迁移零拒绝（见 normalizeCombinedPairingKey）。
+	normalizeCombinedPairingKey(rj)
 	if err := validateMetadataFileProduction(rj); err != nil {
 		return nil, err
 	}
@@ -1176,14 +1189,17 @@ func condxTplTailKnownExt(tpl string) (string, bool) {
 	return ext, knownFileExtsForTplTail[ext]
 }
 
-// validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（轨行+作品标识
-// 声明+分轨入口）、与其他机制互斥（提取动作/模式树旧形态；内容绑定为规则级
-// 「元数据文件」产出、不占提取动作——互斥不变量的除外条款见
-// validateMetadataFileProduction）、轨行只收普通条件行（平行选择器——括号子组、
-// 行级非、跨行相等值校验均拒绝：轨行独立求值，相等门引用他行绑定恒不可
-// 得）、标识与分轨的行号及捕获名引用存在、处置维度按行级指派口径归一
+// validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（条件行+作品标识
+// 声明+分轨入口）、条件行布尔自由（括号子组/行级非放开——决策10：成员判定
+// 消费规则完整求值的命中集，行级命中照常按行）、提取动作可携带（决策10 解除
+// 互斥——提取声明挂各命中文件，行引用校验照常走 validateExtractions；内容
+// 绑定为规则级「元数据文件」产出、不占提取动作——除外条款见
+// validateMetadataFileProduction）、聚合条件行禁作用域附件（聚合段不跑门段
+// 通道）与跨行相等值校验（行级命中独立求值，相等门引用他行绑定恒不可
+// 得）、标识与分轨的行号及捕获名引用存在（行号=先序展平，组行占组内首行
+// 号）、处置维度按行级指派口径归一
 // （空串/track 归一 track；metadata 为被行级指派取代的拼写，载入即拒并指
-// 路）、文件轨行模板尾字面误写扩展名拒收（模板对去扩展名的文件名求值，
+// 路）、文件条件行模板尾字面误写扩展名拒收（模板对去扩展名的文件名求值，
 // 该形态恒不命中——见 knownFileExtsForTplTail）。
 func validateAggregateEntry(rj *ruleEntryJSON) error {
 	if rj.Aggregate == nil {
@@ -1191,9 +1207,6 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 	}
 	if len(rj.Identity) == 0 {
 		return fmt.Errorf("聚合规则 %q 缺少作品标识声明（identity）", rj.ID)
-	}
-	if len(rj.Extractions) > 0 {
-		return fmt.Errorf("聚合规则 %q 不得携带提取动作（产出为聚合归属，非元数据声明）", rj.ID)
 	}
 	switch rj.Aggregate.CompanionUse {
 	case "", CompanionUseTrack:
@@ -1206,51 +1219,47 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 	if rj.Conditions == nil || rj.Pattern != nil {
 		return fmt.Errorf("聚合规则 %q 须为条件行形态（conditions）", rj.ID)
 	}
-	total := len(rj.Conditions)
-	if total == 0 {
+	if len(rj.Conditions) == 0 {
 		return fmt.Errorf("聚合规则 %q 的条件行非法: 条件行列表不能为空", rj.ID)
 	}
-	// 轨行间无且/或（平行选择器）：行前连接词在聚合规则中无语义，空串一律
-	// 归一为 and——仅为满足行式底盘的落档语法（非首行须带连接词），求值不
-	// 消费连接词。
+	// 行前连接词缺省归一：行式底盘的落档语法要求（非首行须带连接词）；平行
+	// 行（存量聚合规则的现状形态）的连接词不参与成员判定——命中集接线见
+	// aggregation.go 的 aggregateBooleanGate（括号/行级非在场才设门）。
 	for i := range rj.Conditions {
 		if i > 0 && rj.Conditions[i].Connector == "" {
 			rj.Conditions[i].Connector = "and"
 		}
 	}
-	for i := range rj.Conditions {
-		row := &rj.Conditions[i]
-		if row.Negated {
-			return fmt.Errorf("聚合规则 %q 第 %d 行带行级非：轨行不支持行级非", rj.ID, i+1)
-		}
-		if row.Condition == nil {
-			return fmt.Errorf("聚合规则 %q 第 %d 行为括号子组：轨行须为普通条件行（平行选择器，无且/或组合）", rj.ID, i+1)
-		}
-		for _, a := range row.Condition.Attach {
-			// 聚合轨行禁作用域附件（自决4）：聚合段不跑门段通道，附件无处
-			// 求值——载入即拒，不留静默死形态。
+	// 条件行布尔自由（决策10）：括号子组/行级非放开，行号=先序展平（叶子行
+	// 逐行编号，组行占组内首行号）。仍禁两类构造：作用域附件（聚合段不跑
+	// 门段通道，附件无处求值——载入即拒，不留静默死形态）与跨行相等值校验
+	// （行级命中独立求值，相等门引用他行绑定恒不可得）。
+	leaves := condxLeafRowsOf(rj.Conditions)
+	total := len(leaves)
+	for _, leaf := range leaves {
+		for _, a := range leaf.row.Condition.Attach {
 			if a.Kind == CondxAttachRefScope {
-				return fmt.Errorf("聚合规则 %q 第 %d 行携带作用域附件（refScope）：聚合段不跑门段通道，附件无处求值", rj.ID, i+1)
+				return fmt.Errorf("聚合规则 %q 第 %d 行携带作用域附件（refScope）：聚合段不跑门段通道，附件无处求值", rj.ID, leaf.no)
 			}
 		}
-		for _, b := range row.Condition.Badges {
+		for _, b := range leaf.row.Condition.Badges {
 			if b.Kind == CondxBadgeEqual {
-				return fmt.Errorf("聚合规则 %q 第 %d 行携带相等值校验：轨行独立求值，不支持跨行相等", rj.ID, i+1)
+				return fmt.Errorf("聚合规则 %q 第 %d 行携带相等值校验：条件行独立求值，不支持跨行相等", rj.ID, leaf.no)
 			}
 		}
-		// 文件轨行模板尾字面误写扩展名（仅 file 目标行；dir/seq 目标名不去
+		// 文件条件行模板尾字面误写扩展名（仅 file 目标行；dir/seq 目标名不去
 		// 扩展名，模板带点尾合法）：载入即拒并指路 fileExt 终结谓词。
-		if row.Condition.Target == CondxTargetFile && row.Condition.Format.Mode != CondxFormatContains {
-			if ext, hit := condxTplTailKnownExt(row.Condition.Format.Tpl); hit {
-				return fmt.Errorf("聚合规则 %q 第 %d 行的文件轨行模板尾部误写扩展名 %s：模板只匹配去扩展名的文件名，该形态恒不命中，请删除模板尾部的 %s，改用「扩展名是」附加条件承载扩展名", rj.ID, i+1, ext, ext)
+		if leaf.row.Condition.Target == CondxTargetFile && leaf.row.Condition.Format.Mode != CondxFormatContains {
+			if ext, hit := condxTplTailKnownExt(leaf.row.Condition.Format.Tpl); hit {
+				return fmt.Errorf("聚合规则 %q 第 %d 行的文件条件行模板尾部误写扩展名 %s：模板只匹配去扩展名的文件名，该形态恒不命中，请删除模板尾部的 %s，改用「扩展名是」附加条件承载扩展名", rj.ID, leaf.no, ext, ext)
 			}
 		}
 	}
 	rowCaptures := make([]map[string]bool, total)
-	for i := range rj.Conditions {
-		caps, _, err := condxCapturesOf(rj.Conditions[i].Condition)
+	for i, leaf := range leaves {
+		caps, _, err := condxCapturesOf(leaf.row.Condition)
 		if err != nil {
-			return fmt.Errorf("聚合规则 %q 第 %d 行: %w", rj.ID, i+1, err)
+			return fmt.Errorf("聚合规则 %q 第 %d 行: %w", rj.ID, leaf.no, err)
 		}
 		set := make(map[string]bool, len(caps))
 		for _, c := range caps {
@@ -1267,7 +1276,7 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 			return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分缺少捕获名", rj.ID, i+1)
 		}
 		if part.Capture == identityGroupKeyCapture {
-			if rj.Conditions[part.Row-1].Condition.Target != CondxTargetSeq {
+			if leaves[part.Row-1].row.Condition.Target != CondxTargetSeq {
 				return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分：序列群键（%s）只能选自序列目标行", rj.ID, i+1, identityGroupKeyCapture)
 			}
 			continue
@@ -1280,7 +1289,7 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 			}
 		}
 		if !declared {
-			return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分引用的捕获名 %q 未在任何轨行声明", rj.ID, i+1, part.Capture)
+			return fmt.Errorf("聚合规则 %q 的标识声明第 %d 部分引用的捕获名 %q 未在任何条件行声明", rj.ID, i+1, part.Capture)
 		}
 	}
 	for i := range rj.Aggregate.Tracks {
@@ -1324,21 +1333,43 @@ func normalizeLegacyAggregateBindings(rj *ruleEntryJSON) error {
 	return nil
 }
 
+// normalizeCombinedPairingKey 并用归一（决策12③ 统一入组通道·I1 修复）：
+// 聚合产出与「元数据文件」产出并在（内容绑定在场）而配对键缺省的条目，
+// 载入归一 pairing={mode:identity, identity:=聚合标识}——行为等值转换、
+// 零迁移零拒绝：旧 BO 并用档的绑定行原经聚合标识入组，归一后经配对段按
+// 同值配对键入组、归并目标=组内主导所在作品（桥接），行为与升级前等值
+// （绑定行原随聚合标识入组=配对键=聚合标识的效果）。归一只在绑定在场时
+// 成立（无绑定的聚合条目无「元数据文件」产出语义，不触配对面）；保存按
+// 归一形态落档（配对键显式化——与旧档绑定归一同款「载入即归一、保存出
+// 新形态」口径）。求值侧 buildPairingPlans 对未经本通路的内存形态按同式
+// 兜底（运行时镜像）。
+func normalizeCombinedPairingKey(rj *ruleEntryJSON) {
+	if rj.Aggregate == nil || rj.MetadataFile == nil ||
+		rj.MetadataFile.Pairing != nil || len(rj.MetadataFile.ContentBindings) == 0 ||
+		len(rj.Identity) == 0 {
+		return
+	}
+	rj.MetadataFile.Pairing = &PairingKey{Mode: PairingModeIdentity, Identity: rj.Identity}
+}
+
 // validateMetadataFileProduction 「元数据文件」产出（规则级落档位）的载入
 // 校验：绑定行号在本规则条件行范围内、维度为合法维度枚举、同一行同一维度
 // 唯一（一行内容整段可同时映射多个维度=同行多条目，同一维度重复勾选无效果
 // 即拒绝）。配对键按形态校验：标识配对=配对键部分（行·捕获名）的行号与
 // 捕获名引用存在（序列群键保留名只选自序列目标行，与聚合标识声明同口径）；
 // 目录配对=不携带标识部分（目录即配对键）；映射单用（本规则无聚合产出）
-// 时配对键必填——否则说明成员无从归属，并用（有聚合产出）时可省略（分组
-// 由聚合标识驱动，配对键声明在场不牵连）。提取动作面的互斥校验维持不变
-// （聚合规则不带提取动作；元数据规则的内容来源取值拒绝照旧）。
+// 时配对键必填——否则说明成员无从归属，并用（有聚合产出）时缺省=载入归一
+// 为标识配对（配对键:=聚合标识，见 normalizeCombinedPairingKey——归一后
+// 配对键是绑定行成员判定的唯一驱动，聚合标识不再替代）。提取动作面：聚合
+// 并存已放开（决策10 解除互斥——提取声明挂各命中文件，行引用校验照常走
+// validateExtractions）；内容来源取值拒绝照旧（决策3：内容通路唯一面=「元数据
+// 文件」产出的内容绑定）。
 func validateMetadataFileProduction(rj *ruleEntryJSON) error {
 	mf := rj.MetadataFile
 	if mf == nil {
 		return nil
 	}
-	total := len(rj.Conditions)
+	total := countCondxRows(rj.Conditions)
 	if len(mf.ContentBindings) == 0 {
 		return fmt.Errorf("规则 %q 的元数据文件产出缺少内容绑定（行→维度指派）", rj.ID)
 	}
@@ -1362,7 +1393,10 @@ func validateMetadataFileProduction(rj *ruleEntryJSON) error {
 // validatePairingKey 配对键声明的形态与引用校验（validateMetadataFileProduction
 // 的配对面子程序）：形态枚举合法、标识配对的配对键部分行号与捕获名引用存在
 // （捕获名按本规则全部条件行的声明面汇流查证——共享捕获跨行同名，与聚合并
-// 组的取值口径一致）；映射单用（无聚合产出）时配对键必填。
+// 组的取值口径一致）；映射单用（无聚合产出）时配对键必填。并用（有聚合
+// 产出）的缺省配对键已由 normalizeCombinedPairingKey 先行归一（identity:=
+// 聚合标识），到达此处时在场并按同口径校验——下方并用缺省分支为归一缺席
+// 形态的双保险兜底（等值放行，不构成可落档通道）。
 func validatePairingKey(rj *ruleEntryJSON) error {
 	mf := rj.MetadataFile
 	if mf.Pairing == nil {
@@ -1383,15 +1417,14 @@ func validatePairingKey(rj *ruleEntryJSON) error {
 	default:
 		return fmt.Errorf("规则 %q 的配对方式非法: %q（identity=标识配对 / directory=目录配对）", rj.ID, string(mf.Pairing.Mode))
 	}
-	total := len(rj.Conditions)
+	leaves := condxLeafRowsOf(rj.Conditions)
+	total := len(leaves)
 	rowCaptures := make([]map[string]bool, total)
-	for i := range rj.Conditions {
+	for i, leaf := range leaves {
 		set := map[string]bool{}
-		if cond := rj.Conditions[i].Condition; cond != nil {
-			caps, _, err := condxCapturesOf(cond)
-			if err != nil {
-				return fmt.Errorf("规则 %q 第 %d 行: %w", rj.ID, i+1, err)
-			}
+		if caps, _, err := condxCapturesOf(leaf.row.Condition); err != nil {
+			return fmt.Errorf("规则 %q 第 %d 行: %w", rj.ID, leaf.no, err)
+		} else {
 			for _, c := range caps {
 				set[c] = true
 			}
@@ -1407,7 +1440,7 @@ func validatePairingKey(rj *ruleEntryJSON) error {
 			return fmt.Errorf("规则 %q 的配对键第 %d 部分缺少捕获名", rj.ID, i+1)
 		}
 		if part.Capture == identityGroupKeyCapture {
-			if cond := rj.Conditions[part.Row-1].Condition; cond == nil || cond.Target != CondxTargetSeq {
+			if leaves[part.Row-1].row.Condition.Target != CondxTargetSeq {
 				return fmt.Errorf("规则 %q 的配对键第 %d 部分：序列群键（%s）只能选自序列目标行", rj.ID, i+1, identityGroupKeyCapture)
 			}
 			continue

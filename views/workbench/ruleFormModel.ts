@@ -234,7 +234,7 @@ export const CONDX_VOCAB: { word: string; group: string; cls: 'lazy' | 'digit' |
   { word: '集名', group: 'setname', cls: 'lazy', refable: true, note: '贪婪取词；{集名} 一位盖段组合；可带量词 +/*（{集名*} 一类重复段）' },
   { word: '标题', group: 'title', cls: 'lazy', refable: true, note: '贪婪取词' },
   { word: '标签', group: 'tag', cls: 'lazy', refable: true, note: '贪婪取词；可带量词 +/*（{标签+} 一类重复段）' },
-  { word: '作品标识', group: 'work', cls: 'lazy', refable: true, note: '聚合标识专用取值词根（普通命名捕获槽，旧词 {作品} 为别名书写）：聚合轨行模板用它捕获标识值，如 {作品标识}.{任意} 配扩展名谓词 .srt；不可与 {作品号} 同模板并用' },
+  { word: '作品标识', group: 'work', cls: 'lazy', refable: true, note: '聚合标识专用取值词根（普通命名捕获槽，旧词 {作品} 为别名书写）：聚合条件行模板用它捕获标识值，如 {作品标识}.{任意} 配扩展名谓词 .srt；不可与 {作品号} 同模板并用' },
   { word: '序号', group: 'seq', cls: 'alnum', refable: true, note: '字母数字类（[0-9A-Za-z]+）：纯数字照常命中，字母序号（1a/1b）整词命中' },
   { word: '作品号', group: 'workid', cls: 'alnum', refable: true, note: '字母数字类（[0-9A-Za-z]+）：pixiv 作品号/BV 号等编号段整词捕获' },
   { word: '日期', group: 'date', cls: 'digit', refable: true, note: '数字类（[0-9]+，YYYYMMDD 等）' },
@@ -354,7 +354,7 @@ export const CONDX_EXAMPLES: { name: string; template: string; target: 'file' | 
   { name: '多处标签', template: '({标签})[{作者}]{集名}{ ?}[{标签+}]', target: 'file', description: '同占位词多次出现（位次分立）：圆括号内为位1「标签」、尾部方括号组为位2「标签·第2处」（重复段多值），各处独立产出与引用' },
   { name: '分P 双标题', template: '{标题} - {序号}.{标题}(Av{作品号},P{序号})', target: 'file', description: 'bilibili 分P 形态：投稿标题（位1 标题）与 P标题（位2 标题）各自独立取值、序号双写同理（位≥2 组名带 __2 后缀，如 title__2/seq__2，提取/值校验按位寻址）；作品号为字母数字类，Av 前缀后的编号整词捕获（BV 号形态同理，无需拆字面前缀）' },
   { name: '描述括号段', template: '{标题}({描述})', target: 'file', description: '{描述} 为作品描述维度取值词：括号内简介段整词捕获，提取动作接「描述」维度（多值时创建期取首个）' },
-  { name: '聚合标识（带锚形态）', template: '{作品标识}.{任意}', target: 'file', description: '聚合规则的轨行示例：{作品标识} 为聚合标识专用取值词根（命名捕获槽可用词，旧词 {作品} 为其别名、书写合法），`.` 字面锚+{任意} 吞掉语言段——配扩展名谓词 .srt 时 ep01.zh.srt 的标识取 ep01。须写带锚形态而非裸 {作品标识}（无锚时语言段并进标识、同作不同名不可并组）；扩展名由扩展名谓词承载、不写进模板（{作品标识}.srt 一类把扩展名写进模板的形态不命中）' }
+  { name: '聚合标识（带锚形态）', template: '{作品标识}.{任意}', target: 'file', description: '聚合规则的条件行示例：{作品标识} 为聚合标识专用取值词根（命名捕获槽可用词，旧词 {作品} 为其别名、书写合法），`.` 字面锚+{任意} 吞掉语言段——配扩展名谓词 .srt 时 ep01.zh.srt 的标识取 ep01。须写带锚形态而非裸 {作品标识}（无锚时语言段并进标识、同作不同名不可并组）；扩展名由扩展名谓词承载、不写进模板（{作品标识}.srt 一类把扩展名写进模板的形态不命中）' }
 ]
 
 // 模板解析为 chips（literal/word 交替）：未闭合 { 报错（与内核同口径）。
@@ -1772,6 +1772,110 @@ export function extractionCardView(row: ExtractionCardSource, refLabelOf?: (rule
   return { dimLabel: dim ? dim.label : row.dimension, fromText, roleSuffix: suffix.length ? ` · ${suffix.join(' · ')}` : '' }
 }
 
+// —— 分组声明（三子句编辑面·决策9/10 终审重梳轮）——
+// 纯函数与常量：分组声明的表单形态（编辑面专用——分组只在分组区声明、不参与
+// 布尔运算、作用于匹配求值后的命中集）、声明文案（帧锚）与既有键字段的序列化
+// 映射（内核 schema 零改动：聚合产出绑定→identity；「元数据文件」产出绑定→
+// pairing）。载入侧校验在插件 Go 侧。
+
+// 分组声明的键源（D 帧1「键源：[匹配行捕获▾]（另可选：序列群键/所在目录）」）：
+// capture=匹配行捕获（行号+捕获名，可拼接）；seqKey=序列群键（保留名 groupKey，
+// 只选自序列目标行）；directory=所在目录（无键部分——目录即配对键）。
+export type GroupKeySource = 'capture' | 'seqKey' | 'directory'
+
+// 键源选项（分组声明弹窗的「键源：」选择器条目，D 帧1 逐字词）。
+export const GROUP_KEY_SOURCE_OPTIONS: { value: GroupKeySource; label: string }[] = [
+  { value: 'capture', label: '匹配行捕获' },
+  { value: 'seqKey', label: '序列群键' },
+  { value: 'directory', label: '所在目录' }
+]
+
+// 分组声明表单形态：uid 为声明稳定标识（产出绑定引用——聚合/元数据文件产出各
+// 绑一条声明；parts 在 capture/seqKey 形态携带、directory 空）。声明为编辑面
+// 形态，保存时映射到既有键字段（groupDeclIdentityParts/groupDeclPairing）。
+export interface GroupDeclForm {
+  uid: number
+  keySource: GroupKeySource
+  parts: IdentityPartForm[]
+}
+
+// 声明块文案（A 帧1/D 帧1「◇ 按 第1行{作品}+第1行{序号} 分组」）：capture=各
+// 部分「第N行{词}」以 + 连接；seqKey=「第N行序列群键」；directory=「所在目录」。
+export function groupDeclBlockLabel(d: GroupDeclForm): string {
+  if (d.keySource === 'directory') return '按所在目录分组'
+  if (d.keySource === 'seqKey') {
+    const row = d.parts[0] ? d.parts[0].row : 1
+    return `按 第${row}行序列群键 分组`
+  }
+  const segs = (d.parts || [])
+    .map((p) => `第${p.row}行{${aggIdentityWordOf(p.capture)}}`)
+    .join('+')
+  return segs ? `按 ${segs} 分组` : '按（未选键）分组'
+}
+
+// 声明下拉条目文案（A 帧2/D 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」——去「第N行」
+// 前缀的短形态）：capture=各部分「{词}」以 + 连接；seqKey=「序列群键」；
+// directory=「所在目录」。
+export function groupDeclOptionLabel(d: GroupDeclForm): string {
+  if (d.keySource === 'directory') return '◇ 按所在目录分组'
+  if (d.keySource === 'seqKey') return '◇ 按序列群键分组'
+  const segs = (d.parts || []).map((p) => `{${aggIdentityWordOf(p.capture)}}`).join('+')
+  return segs ? `◇ 按 ${segs} 分组` : '◇ 按（未选键）分组'
+}
+
+// 声明 → 聚合产出 identity（保存序列化）：capture/seqKey 携 parts（seqKey 的
+// 保留名即 groupKey）；directory 形态对聚合产出不可绑定（返回 null——聚合作品
+// 键=标识/群键，目录成组走目录捕获），调用方闸门拦。
+export function groupDeclIdentityParts(d: GroupDeclForm | null): IdentityPartForm[] | null {
+  if (!d || d.keySource === 'directory') return null
+  return (d.parts || []).map((p) => ({ row: p.row, capture: p.capture }))
+}
+
+// 声明 → 「元数据文件」产出 pairing（保存序列化）：capture/seqKey → 标识配对
+//（identity 形态，配对键部分=声明 parts）；directory → 目录配对；null（未绑
+// 定声明且无聚合产出）→ undefined（并用时可省略——分组随聚合并组）。
+export function groupDeclPairing(d: GroupDeclForm | null): PairingKeyForm | undefined {
+  if (!d) return undefined
+  if (d.keySource === 'directory') return { mode: 'directory' }
+  return { mode: 'identity', identity: (d.parts || []).map((p) => ({ row: p.row, capture: p.capture })) }
+}
+
+// 聚合 identity → 声明（加载既有档案）：全部部分为保留名 groupKey 时键源=
+// seqKey（单部分），否则 capture（复合键=多部分拼接）。
+export function groupDeclFromIdentity(parts: IdentityPartForm[] | null | undefined, uid: number): GroupDeclForm | null {
+  if (!parts || !parts.length) return null
+  const list = parts.map((p) => ({ row: p.row, capture: p.capture }))
+  if (list.length === 1 && list[0].capture === AGG_GROUP_KEY_CAPTURE) {
+    return { uid, keySource: 'seqKey', parts: list }
+  }
+  return { uid, keySource: 'capture', parts: list }
+}
+
+// 映射 pairing → 声明（加载既有档案）：identity 形态按保留名分辨 seqKey/capture
+//（单保留名部分=seqKey，其余=capture）；directory 形态=所在目录；undefined=
+// 未绑定（并用形态——分组随聚合并组）。
+export function groupDeclFromPairing(pairing: PairingKeyForm | null | undefined, uid: number): GroupDeclForm | null {
+  if (!pairing || !pairing.mode) return null
+  if (pairing.mode === 'directory') return { uid, keySource: 'directory', parts: [] }
+  const list = (pairing.identity || []).map((p) => ({ row: p.row, capture: p.capture }))
+  if (list.length === 1 && list[0].capture === AGG_GROUP_KEY_CAPTURE) {
+    return { uid, keySource: 'seqKey', parts: list }
+  }
+  return { uid, keySource: 'capture', parts: list }
+}
+
+// 未绑定声明的保存拦截文案（微型闸门·未锚微文案——待下轮剧本补锚）。
+export const GROUP_DECL_UNBOUND_ERROR = '分组声明未被产出绑定——请绑定产出或删除声明'
+
+// 「+ 聚合成作品」gating 附注（D 帧4 逐字）。
+export const AGG_ADDITION_GATING_NOTE = '需分组声明或序列行，暂不可加'
+
+// 聚合产出入场条件（D 帧4 系统回应）：分组在场=分组声明或序列行的群键。
+export function aggAdditionGated(decls: GroupDeclForm[], rows: CondxRowForm[]): boolean {
+  if (decls.some((d) => d && d.keySource !== 'directory')) return false
+  return !condxFlatRows(rows).some((f) => f.condx && f.condx.target === 'seq')
+}
+
 // —— 聚合规则表单模型（两级类别·聚合声明镜像）——
 // 纯函数与常量：作品标识声明（IdentityPart）、分轨入口（AggregateProduction/
 // TrackAssign）的表单形态、类型投影消费（类型标签/角色标签/可用轨清单）与保存
@@ -1804,7 +1908,8 @@ export interface ContentBindingForm {
   dimension: string
 }
 
-// 配对方式取值（与内核 PairingMode 同集）：identity=标识配对（配对键部分=行号+
+// 配对方式取值（与内核 PairingMode 同集；序列化字段词汇——编辑面以「分组」
+// 呈现，绑定声明映射到本字段）：identity=标识分组（配对键部分=行号+
 // 捕获名按声明序拼成复合标识，捕获值相等即一组——说明文件与资源文件各自从
 // 自己的命中行取同名捕获）；directory=目录配对（同目录主导候选唯一时任意的
 // 说明文件归并给该主导，不携带标识部分）。
@@ -2110,15 +2215,15 @@ export function condxFileRowInlineExtError(rows: CondxRowForm[]): string {
   return ''
 }
 
-// 聚合表单保存闸门（纯函数）：轨行结构限制（平行选择器——括号子组/行级非/跨行
-// 相等均拒绝，与内核 validateAggregateEntry 同口径）+ 文件轨行模板尾部误写
-// 扩展名拒绝（模板只匹配去扩展名的文件名，该形态恒不命中——与内核同口径）+
-// 标识声明（行号界内、捕获在轨行声明、群键只选自序列行）+ 分轨入口（类型
-// 在册、角色∈类型规约、行号界内、必含角色被至少一轨行覆盖）。内容绑定已迁至
-// 规则级「元数据文件」产出（metadataFileFormErrors）。companionUse 处置维度不
-// 进本闸门：内核口径=规则级仅 track 可写（metadata 载入即拒并指路行级指派——
-// 分轨入口+内容绑定勾选合成表达），前端表单不出 metadata 选项、载荷恒归一
-// track。返回错误清单（空=通过）；文案为编辑面锚文案。
+// 聚合表单保存闸门（纯函数）：条件行布尔自由（括号子组/行级非放开——决策10
+// 与内核 validateAggregateEntry 同口径；跨行相等值校验与作用域附件仍拒——
+// 内核同口径拦）+ 文件条件行模板尾部误写扩展名拒绝（模板只匹配去扩展名的
+// 文件名，该形态恒不命中——与内核同口径）+ 标识声明（=绑定的分组声明展开；
+// 行号界内、捕获在条件行声明、群键只选自序列行）+ 分轨入口（类型在册、
+// 角色∈类型规约、行号界内、必含角色被至少一条件行覆盖）。companionUse 处置
+// 维度不进本闸门：内核口径=规则级仅 track 可写（metadata 载入即拒并指路行级
+// 指派——分轨入口+内容绑定勾选合成表达），前端表单不出 metadata 选项、载荷
+// 恒归一 track。返回错误清单（空=通过）；文案为编辑面锚文案。
 export function aggFormErrors(
   rows: CondxRowForm[],
   identity: IdentityPartForm[],
@@ -2129,7 +2234,7 @@ export function aggFormErrors(
   const flat = condxFlatRows(rows)
   const total = flat.length
   if (!flat.length) {
-    errs.push('轨行区条件行列表不能为空（聚合规则须至少一行轨行）')
+    errs.push('条件行列表不能为空（聚合规则须至少一行条件行）')
   }
   const knownExts = aggFileExtWhitelist(types)
   let n = 0
@@ -2141,39 +2246,26 @@ export function aggFormErrors(
       }
       n += 1
       if (!row.condition) continue
-      if (row.negated) {
-        errs.push(`第 ${n} 行带行级非：轨行不支持行级非`)
-      }
       for (const b of row.condition.badges || []) {
         if (b && b.kind === 'equal') {
-          errs.push(`第 ${n} 行携带相等值校验：轨行独立求值，不支持跨行相等`)
+          errs.push(`第 ${n} 行携带相等值校验：条件行独立求值，不支持跨行相等`)
         }
       }
-      // 文件轨行模板尾部误写扩展名（仅 file 目标行；dir/seq 目标名不去扩展名，
+      // 文件条件行模板尾部误写扩展名（仅 file 目标行；dir/seq 目标名不去扩展名，
       // 模板带点尾合法）：拒绝并指路 fileExt 谓词（「扩展名是」）。
       if (row.condition.target === 'file' && row.condition.format.mode !== 'contains') {
         const ext = condxTplTailKnownExt(row.condition.format.tpl || '', knownExts)
         if (ext) {
           errs.push(
-            `第 ${n} 行模板尾部误写扩展名 ${ext}：文件轨行模板只匹配去扩展名的文件名，该形态恒不命中，请删除模板尾部的 ${ext}，改用「扩展名是」附加条件承载扩展名`
+            `第 ${n} 行模板尾部误写扩展名 ${ext}：文件条件行模板只匹配去扩展名的文件名，该形态恒不命中，请删除模板尾部的 ${ext}，改用「扩展名是」附加条件承载扩展名`
           )
         }
       }
     }
   }
   walkShape(rows)
-  // 括号子组按最外层组计一次错（组行行号=组内首行序号，与行号口径一致）。
-  let m = 0
-  for (const row of rows) {
-    if (row.group) {
-      errs.push(`第 ${m + 1} 行为括号子组：轨行须为普通条件行（平行选择器，无且/或组合）`)
-      m += condxFlatRows(row.group).length
-      continue
-    }
-    m += 1
-  }
   if (!identity.length) {
-    errs.push('缺少作品标识声明——标识值相等即并组，请从各轨行捕获中选择标识')
+    errs.push('缺少分组绑定——作品标识=绑定的分组，请先在分组区加分组声明并在「聚合成作品」内绑定')
   }
   const candidates = new Set(aggIdentityCandidates(rows).map((c) => `${c.row}/${c.group}`))
   const anyRowCaptures = new Set(aggIdentityCandidates(rows).map((c) => c.group))
@@ -2199,8 +2291,8 @@ export function aggFormErrors(
     if (!candidates.has(`${part.row}/${part.capture}`)) {
       errs.push(
         anyRowCaptures.has(part.capture)
-          ? `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选轨行汇集候选中的同词位）`
-          : `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何轨行声明`
+          ? `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选条件行汇集候选中的同词位）`
+          : `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何条件行声明`
       )
     }
   }
@@ -2232,7 +2324,7 @@ export function aggFormErrors(
         }
         const covered = (prod.tracks || []).some((ta) => ta && legalRoles.has(ta.role) && aggRoleRequired(spec, ta.role))
         if (!covered) {
-          errs.push('分轨入口未覆盖必含角色（类型规约 Min≥1 的角色）——主导文件无从判定，请把某轨行分到必含轨')
+          errs.push('分轨入口未覆盖必含角色（类型规约 Min≥1 的角色）——主导文件无从判定，请把某条件行分到必含轨')
         }
       }
     }
@@ -2278,27 +2370,27 @@ export function metadataFileFormErrors(
       errs.push(`内容绑定第 ${i + 1} 项维度非法: "${b.dimension}"（内容去向只出 描述/标签/标题/作者/作品集 枚举）`)
     }
   }
-  // 配对键校验（与内核 validatePairingKey 同口径）
+  // 分组绑定校验（配对键与内核 validatePairingKey 同口径；编辑面词汇=分组）
   const pairing = mf.pairing
   if (!pairing || !pairing.mode) {
     if (!hasAggregate) {
-      errs.push('元数据文件产出缺少配对键声明（无聚合产出时须声明配对方式：标识配对或目录配对）')
+      errs.push('元数据文件产出缺少分组绑定（无聚合产出时须绑定分组：分组声明或按所在目录）')
     }
     return errs
   }
   if (pairing.mode === 'directory') {
     if ((pairing.identity || []).length) {
-      errs.push('配对键为目录配对，不得携带标识配对部分（所在目录即配对键）')
+      errs.push('分组为按所在目录，不得携带键部分（所在目录即分组键）')
     }
     return errs
   }
   if (pairing.mode !== 'identity') {
-    errs.push(`配对方式非法: "${pairing.mode}"（identity=标识配对 / directory=目录配对）`)
+    errs.push(`分组绑定非法: "${pairing.mode}"（identity=标识分组 / directory=所在目录）`)
     return errs
   }
   const parts = pairing.identity || []
   if (!parts.length) {
-    errs.push('配对键为标识配对但缺少配对键部分（行·捕获名）')
+    errs.push('分组为标识分组但缺少键部分（行·捕获名）')
     return errs
   }
   const candidates = new Set(aggIdentityCandidates(rows).map((c) => `${c.row}/${c.group}`))
@@ -2308,25 +2400,25 @@ export function metadataFileFormErrors(
     const part = parts[i]
     if (!part) continue
     if (part.row < 1 || part.row > total) {
-      errs.push(`配对键第 ${i + 1} 部分行号 ${part.row} 越界（共 ${total} 行）`)
+      errs.push(`分组键第 ${i + 1} 部分行号 ${part.row} 越界（共 ${total} 行）`)
       continue
     }
     if (!part.capture) {
-      errs.push(`配对键第 ${i + 1} 部分缺少捕获名`)
+      errs.push(`分组键第 ${i + 1} 部分缺少捕获名`)
       continue
     }
     if (part.capture === AGG_GROUP_KEY_CAPTURE) {
       const target = rowByNo.get(part.row)
       if (!target || target.target !== 'seq') {
-        errs.push(`配对键第 ${i + 1} 部分：序列群键只能选自序列目标行`)
+        errs.push(`分组键第 ${i + 1} 部分：序列群键只能选自序列目标行`)
       }
       continue
     }
     if (!candidates.has(`${part.row}/${part.capture}`)) {
       errs.push(
         anyRowCaptures.has(part.capture)
-          ? `配对键第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选条件行汇集候选中的同词位）`
-          : `配对键第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何条件行声明`
+          ? `分组键第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选条件行汇集候选中的同词位）`
+          : `分组键第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何条件行声明`
       )
     }
   }

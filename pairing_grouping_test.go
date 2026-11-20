@@ -30,7 +30,7 @@ func pairingFileRow(tpl, ext string) CondxRow {
 }
 
 // pairingMappingRule 构造映射单用规则（元数据类别、无聚合产出）：两行条件
-//（资源行+说明行），说明行绑定→维度，配对键按入参声明。
+// （资源行+说明行），说明行绑定→维度，配对键按入参声明。
 func pairingMappingRule(id string, pairing *PairingKey, bindings ...ContentBinding) RuleEntry {
 	return RuleEntry{
 		ID:          id,
@@ -236,7 +236,7 @@ func TestPairingNoLeadGroupDissolves(t *testing.T) {
 // —— 与聚合段的次序与并用 ——
 
 // TestPairingAggregatePriorityOverMapping 聚合归属优先锚：聚合规则先归属
-//（聚合在前），映射规则不夺已归属成员——即便映射规则在档案序居前，已被聚合
+// （聚合在前），映射规则不夺已归属成员——即便映射规则在档案序居前，已被聚合
 // 并组的文件不再参与配对（主导候选与说明成员双双出局），聚合结论原样保持。
 func TestPairingAggregatePriorityOverMapping(t *testing.T) {
 	mapping := RuleEntry{
@@ -287,10 +287,14 @@ func TestPairingAggregatePriorityOverMapping(t *testing.T) {
 	}
 }
 
-// TestPairingDormantKeyAlongsideAggregate 并用时配对键不牵连锚：聚合规则同时
-// 携带「元数据文件」产出与配对键声明（键与聚合标识各不相同），分组仍由聚合
-// 标识驱动——并用路径与不带配对键的现状全等。
-func TestPairingDormantKeyAlongsideAggregate(t *testing.T) {
+// TestPairingAlongsideAggregateTrackEquivalence 并用配对段运行不扰轨道结论锚
+// （决策12③ 后原「并用配对键休眠」锚翻新——I2 机制不因并存而消失：配对段对
+// 并用规则照常运行）：聚合规则同时携带「元数据文件」产出与配对键声明（键与
+// 聚合标识各不相同）——轨道成员结论与不带配对键的现状全等（聚合成员判定=
+// 轨行命中；绑定行=字幕轨行兼绑定的双重身份成员，已被聚合收编、不参与配对；
+// 目录配对组内两主导分属两件作品=桥接跨件守卫拒绝，组内无待归并说明成员、
+// 结论零扰动）。
+func TestPairingAlongsideAggregateTrackEquivalence(t *testing.T) {
 	rule := RuleEntry{
 		ID:          "agg-with-key",
 		Description: "测试：并用配对键不牵连",
@@ -310,8 +314,9 @@ func TestPairingDormantKeyAlongsideAggregate(t *testing.T) {
 			},
 		},
 		MetadataFile: &MetadataFileProduction{
-			// 配对键声明与聚合标识的取值形态不同（目录配对）——在场不牵连
-			// 分组：并用路径的分组恒由聚合标识驱动。
+			// 配对键声明与聚合标识的取值形态不同（目录配对）——配对段照常
+			// 运行（决策12③：键驱动绑定行成员判定）；本场景绑定行兼为轨行，
+			// 成员已由聚合收编，配对组无可归并说明成员，轨道结论与现状全等。
 			Pairing:         &PairingKey{Mode: PairingModeDirectory},
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
@@ -402,7 +407,8 @@ func TestPairingLoadValidation(t *testing.T) {
 		})
 	}
 
-	// 并用（聚合在场）时配对键可省略（旧档归一形态），声明在场须合法。
+	// 并用（聚合在场）时配对键可省略——载入归一为标识配对（决策12③：
+	// identity:=聚合标识，行为等值转换零拒绝）；声明在场须合法。
 	mixed := pairingRuleJSON("map-agg-ok", nil)
 	mixed.Category = RuleCategoryAggregate
 	mixed.Identity = []IdentityPart{{Row: 1, Capture: "work"}}
@@ -410,8 +416,15 @@ func TestPairingLoadValidation(t *testing.T) {
 		WorkType: sdkdto.ResourceTypeImage,
 		Tracks:   []TrackAssign{{Row: 1, Role: contract.StoreTypeImage}},
 	}
-	if _, err := ruleFromJSON(mixed); err != nil {
-		t.Fatalf("并用条目省略配对键应载入: %v", err)
+	mixedEntry, err := ruleFromJSON(mixed)
+	if err != nil {
+		t.Fatalf("并用条目省略配对键应载入（归一）: %v", err)
+	}
+	if mixedEntry.MetadataFile == nil || mixedEntry.MetadataFile.Pairing == nil ||
+		mixedEntry.MetadataFile.Pairing.Mode != PairingModeIdentity ||
+		len(mixedEntry.MetadataFile.Pairing.Identity) != 1 ||
+		mixedEntry.MetadataFile.Pairing.Identity[0].Capture != "work" {
+		t.Fatalf("并用缺省配对键应归一为聚合标识的标识配对: %+v", mixedEntry.MetadataFile)
 	}
 }
 
@@ -445,15 +458,23 @@ func TestPairingLegacyArchiveNormalization(t *testing.T) {
 	if entry.Aggregate == nil || entry.Aggregate.WorkType != sdkdto.ResourceTypeImage {
 		t.Fatalf("聚合产出应原样保留: %+v", entry.Aggregate)
 	}
+	// 决策12③ 并用归一：缺省配对键归一为标识配对（identity:=聚合标识）——
+	// 旧档绑定行原经聚合标识入组=配对键=聚合标识的效果，行为等值转换。
 	if entry.MetadataFile == nil || len(entry.MetadataFile.ContentBindings) != 1 ||
 		entry.MetadataFile.ContentBindings[0].Row != 2 ||
 		entry.MetadataFile.ContentBindings[0].Dimension != DimDescription ||
-		entry.MetadataFile.Pairing != nil {
-		t.Fatalf("旧档绑定应归一到规则级落档位（无配对键=并用形态）: %+v", entry.MetadataFile)
+		entry.MetadataFile.Pairing == nil ||
+		entry.MetadataFile.Pairing.Mode != PairingModeIdentity ||
+		len(entry.MetadataFile.Pairing.Identity) != 1 ||
+		entry.MetadataFile.Pairing.Identity[0].Row != 1 ||
+		entry.MetadataFile.Pairing.Identity[0].Capture != "work" {
+		t.Fatalf("旧档绑定应归一到规则级落档位且配对键归一为聚合标识（identity:=标识声明）: %+v", entry.MetadataFile)
 	}
 
-	// 归一载入后的求值行为与并用现状全等：同名图片+文本对=图片聚合作品+伴随
-	// 说明成员（说明成员照常归并，无需配对键）。
+	// 归一载入后的求值行为与升级前等值（决策12③：机制路径翻新——绑定行不再
+	// 经聚合标识入组〔聚合成员=轨行命中〕，经配对段按归一配对键入组、桥接到
+	// 组内主导所在作品，结论与原聚合并组路径全等）：同名图片+文本对=图片聚合
+	// 作品+伴随说明成员（说明成员照常归并）。
 	files := aggScanFiles("img/无题.jpg", "img/无题.txt")
 	conclusions := pairingRun(t, files, profile.Rules)
 	lead := aggConclusionOf(t, conclusions, "img/无题.jpg")
@@ -467,8 +488,8 @@ func TestPairingLegacyArchiveNormalization(t *testing.T) {
 			member.AggWorkKey, member.AggTrackRole, member.AggCompanion)
 	}
 
-	// 往返等值：保存只出新键位（绑定住 metadataFile.contentBindings、聚合产出
-	// 不再携带绑定键），重载后条目与归一形态等值。
+	// 往返等值：保存只出新键位（绑定住 metadataFile.contentBindings、配对键
+	// 归一形态随档、聚合产出不再携带绑定键），重载后条目与归一形态等值。
 	data, err := json.Marshal(profile)
 	if err != nil {
 		t.Fatalf("档案序列化失败: %v", err)
@@ -485,6 +506,9 @@ func TestPairingLegacyArchiveNormalization(t *testing.T) {
 	mfObj := rules[0].(map[string]any)["metadataFile"].(map[string]any)
 	if bindings, ok := mfObj["contentBindings"].([]any); !ok || len(bindings) != 1 {
 		t.Fatalf("规则级落档位应携带绑定: %v", mfObj)
+	}
+	if pairing, ok := mfObj["pairing"].(map[string]any); !ok || pairing["mode"] != string(PairingModeIdentity) {
+		t.Fatalf("归一配对键应随档显式落键（保存出新形态）: %v", mfObj)
 	}
 	profile2, errs := ParseProfile(data)
 	if len(errs) != 0 {

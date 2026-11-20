@@ -22,36 +22,19 @@
           <el-switch v-model="enabledInput" active-text="启用" inactive-text="停用" />
         </div>
 
-        <!-- 规则类别选择（新建首步·剧本3 帧2）：两级综合类别——[元数据规则]（既有
-             编辑面原样）|[聚合规则]（轨行+作品标识+分轨入口）。仅新建可选（既有
-             条目类别固定）；选中态=主色按钮 -->
-        <div v-if="rule && rule.isNew" class="li-red-cat">
-          <span class="li-red-label">规则类别</span>
-          <el-button
-            size="small"
-            :type="categoryInput === 'metadata' ? 'primary' : ''"
-            @click="switchCategory('metadata')"
-          >[元数据规则]</el-button>
-          <el-button
-            size="small"
-            :type="categoryInput === 'aggregate' ? 'primary' : ''"
-            @click="switchCategory('aggregate')"
-          >[聚合规则]</el-button>
-          <span class="li-red-cat-note">{{ categoryInput === 'aggregate' ? '轨行+作品标识+分轨入口（聚合成作品）' : '条件行+元数据产出（既有形态）' }}</span>
-        </div>
-        <p class="li-red-hint">
-          新建先选类别：[元数据规则] [聚合规则]——前者=条件行+元数据产出（既有形态），后者=轨行+作品标识+分轨入口（聚合成作品）；两类共用同一条件行机制（三种源任选：文件名/目录名/序列），选定后仍可加轨/改模板
-        </p>
+        <!-- 三子句形态（决策9·终审重梳轮）：一条规则=匹配（谓词行布尔自由+属性
+             派生）/分组（属性选键声明）/产出（三产出零互斥）——类别步与「元数据
+             规则｜聚合规则」两分概念退役（落档类别=推导细节：有聚合成作品产出=
+             aggregate）；条件行服务一切产出、「轨行」词汇退役 -->
 
-        <!-- 上半（元数据=识别规则 / 聚合=轨行区）：卡片总览——条件卡与轨行卡同款
-             （CondxRowsEditor，序号/目标/模板摘要/复杂度徽标/接词，恒定高度）；
-             逐条件编辑经条件编辑弹窗（三步漏斗=目标三卡〔文件名/目录名/序列〕→
-             格式模板→附加条件+值校验）；括号子组页内直显（组框缩进承载
-             成员卡，嵌套封顶 3 层） -->
+        <!-- 匹配区（三子句之一）：卡片总览——条件卡（CondxRowsEditor，序号/目标/
+              模板摘要/复杂度徽标/接词，恒定高度）；谓词行布尔自由恒开（聚合产出
+              在场不再隐藏/清空提取与布尔能力）；逐条件编辑经条件编辑弹窗（三步
+              漏斗=目标三卡〔文件名/目录名/序列〕→格式模板→附加条件+值校验）；
+              括号子组页内直显（组框缩进承载成员卡，嵌套封顶 3 层） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
-            <h4 v-if="!isAggregate" class="li-red-sec-title">识别规则<span class="li-red-sec-note">上半 · 决定规则命中哪些文件</span></h4>
-            <h4 v-else class="li-red-sec-title">聚合规则 · 轨行区<span class="li-red-sec-note">上半 · 轨行=普通条件行，三种源任选</span></h4>
+            <h4 class="li-red-sec-title">匹配<span class="li-red-sec-note">谓词行布尔自由 · 决定规则命中哪些文件</span></h4>
             <el-button size="small" text @click="toggleCondxJson">
               {{ condxJsonMode ? '切回结构化编辑' : '高级（JSON）' }}
             </el-button>
@@ -67,19 +50,19 @@
                  逐条件编辑经条件编辑弹窗（editRow 开窗，组内成员卡同一链路）、
                  提取区 JSON 模式经 extractionsJsonMode 下传（移动按钮禁用） -->
             <div class="li-red-zone-head">
-              <span class="li-red-zone-title">{{ isAggregate ? `轨行（${condxCardCount}）` : `条件（${condxCardCount}）` }}</span>
+              <span class="li-red-zone-title">匹配（{{ condxCardCount }}）</span>
             </div>
             <CondxRowsEditor
               v-model:rows="condxRows"
               :occur-drift="occurDrift"
               :extractions-json-mode="extractionsJsonMode"
-              :add-label="isAggregate ? '+ 加轨' : '+ 加条件'"
-              :agg-mode="isAggregate"
+              add-label="+ 加条件"
+              :agg-mode="!!aggProduction"
               :ref-label-of="refRuleLabel"
               @edit-row="openCondxRowEdit"
               @moved="onCondxRowsMoved"
             />
-            <!-- 占位词捕获清单（行号+词）：提取段/作品标识引用的唯一来源 -->
+            <!-- 占位词捕获清单（行号+词）：提取段/分组声明引用的唯一来源 -->
             <div v-if="captureList.length" class="li-red-caps">
               <span class="li-red-label">占位词捕获清单</span>
               <div v-for="(c, i) in captureList" :key="`${c.row}/${c.word}/${i}`" class="li-red-cap-row">
@@ -91,9 +74,7 @@
               </p>
             </div>
             <p v-else class="li-red-hint">
-              {{ isAggregate
-                ? '尚无可选的占位词——在轨行模板中写入 {作品标识} 等词条后，作品标识才能引用其捕获值'
-                : '尚无可引用的占位词——在行模板中写入 {作者}/{标题} 等词条后，提取段才能引用其捕获值' }}
+              尚无可引用的占位词——在行模板中写入 {作者}/{标题} 等词条后，提取与分组才能引用其捕获值
             </p>
           </template>
 
@@ -113,23 +94,57 @@
           </template>
         </section>
 
-        <!-- 下半（元数据=提取规则）：逐维度行 = 维度 ← 来源 + 条件勾选；行可增删；
-             聚合规则的下半为「标识与分轨」（紧随本节），提取动作与聚合类别互斥 -->
-        <section v-if="!isAggregate" class="li-red-sec">
+        <!-- 分组区（三子句之二·决策9）：分组声明=属性选键（匹配行捕获/序列群键/
+             所在目录，单一或拼接），可多条——分组只在此声明、不参与布尔运算、
+             作用于匹配求值后的命中集；产出绑定消费（聚合成作品/元数据文件各绑
+             一条声明——序列化映射到既有键字段，内核 schema 零改动） -->
+        <section class="li-red-sec">
           <div class="li-red-sec-head">
-            <h4 class="li-red-sec-title">提取规则<span class="li-red-sec-note">下半 · 命中后取值声明到维度</span></h4>
+            <h4 class="li-red-sec-title">分组<span class="li-red-sec-note">属性选键声明 · 作用于匹配求值后的命中集</span></h4>
+          </div>
+          <div class="li-red-zone-head">
+            <span class="li-red-zone-title">分组（{{ groupDecls.length }}）</span>
+          </div>
+          <div v-for="(d, di) in groupDecls" :key="d.uid" class="li-out-card">
+            <div class="li-condx-card-line">
+              <span class="li-out-mark">◇</span>
+              <span class="li-condx-card-tpl" :title="groupDeclBlockLabel(d)">{{ groupDeclBlockLabel(d) }}</span>
+              <el-button size="small" text @click="editGroupDecl(di)">[ 编辑 ]</el-button>
+              <el-button size="small" text type="danger" @click="removeGroupDecl(di)">[删]</el-button>
+            </div>
+          </div>
+          <el-button size="small" text @click="addGroupDecl">+ 加分组</el-button>
+          <p class="li-red-hint">
+            分组键=逐文件属性（匹配行捕获/序列行群键/所在目录，单一或拼接）；未被产出绑定的声明保存时拦截
+          </p>
+          <p v-for="e in groupDeclErrors" :key="`gde-${e}`" class="li-red-row-hint">{{ e }}</p>
+        </section>
+
+        <!-- 产出区（三子句之三）：三产出零互斥并存——提取元数据/元数据文件/聚合成
+             作品（绑定分组）；条目符号统一 ◇；gating：无分组声明且无序列行时
+             「+ 聚合成作品」置灰附因（D 帧4） -->
+        <section class="li-red-sec">
+          <div class="li-red-sec-head">
+            <h4 class="li-red-sec-title">产出<span class="li-red-sec-note">三产出自由组合 · 命中后取值声明到维度</span></h4>
             <el-button size="small" text @click="toggleExtractionsJson">
               {{ extractionsJsonMode ? '切回结构化编辑' : '高级（JSON）' }}
             </el-button>
           </div>
           <p class="li-red-hint">
-            元数据只在这里产生：把上半某个捕获槽的值「赋给维度」才是识别——上半匹配命中而下半没有赋值行时，不产出任何元数据
+            元数据只在这里产生：把匹配区某个捕获槽的值「赋给维度」才是识别——匹配命中而产出没有赋值行时，不产出任何元数据
           </p>
 
           <template v-if="!extractionsJsonMode">
             <div class="li-red-zone-head">
-              <!-- 产出计数=提取行数+「元数据文件」条目数（平级产出各计一条） -->
-              <span class="li-red-zone-title">产出（{{ extractionRows.length + (metadataFileProduction ? 1 : 0) }}）</span>
+              <!-- 产出计数=提取行数+「元数据文件」条目数+「聚合成作品」条目数（平级产出各计一条） -->
+              <span class="li-red-zone-title">产出（{{ productionCount }}）</span>
+            </div>
+            <!-- 提取元数据汇总卡（D 帧3「◇ 提取元数据（2）：作者←{作者} 标题←{标题}」） -->
+            <div v-if="extractionRows.length" class="li-out-card li-red-metadata-card">
+              <div class="li-condx-card-line">
+                <span class="li-out-mark">◇</span>
+                <span class="li-condx-card-tpl" :title="extractionSummaryText">提取元数据（{{ extractionRows.length }}）：{{ extractionSummaryText }}</span>
+              </div>
             </div>
             <template v-for="(row, i) in extractionRows" :key="i">
               <!-- 「来自供给方规则」分组头：置于首个供给方捕获行之前，转写提示
@@ -143,7 +158,7 @@
                    不过的行恒展开（保存闸门呈现不因收起而不可见） -->
               <div class="li-out-card" :class="{ 'is-invalid': !!extractionRowHint(row) }">
                 <div class="li-condx-card-line">
-                  <span class="li-out-mark">▸</span>
+                  <span class="li-out-mark">◇</span>
                   <span class="li-condx-card-tpl" :title="outCardText(row)">{{ outCardText(row) }}</span>
                   <span
                     v-if="extractionDriftWarn(row) || refCaptureMirrorWarn(row, i)"
@@ -249,7 +264,7 @@
                 </div>
               </div>
             </template>
-            <el-button size="small" text @click="addExtractionRow">+ 加一行</el-button>
+            <el-button size="small" text @click="addExtractionRow">+ 提取元数据</el-button>
           </template>
 
           <template v-else>
@@ -265,9 +280,8 @@
           </template>
 
           <!-- 元数据文件条目（产出区平级条目·决策1，与「聚合成作品」平级、可各自
-               单独添加或并存）：未加=「+ 元数据文件」添加入口（剧本A 帧1——与
-               「+ 聚合成作品」平级并列，无聚合产出也可仅配映射）；加了=◇ 条目卡
-               （[打开]进指派弹窗、[移除]去产出） -->
+               单独添加或并存）：未加=「+ 元数据文件」添加入口（剧本A 帧1）；加了
+               =◇ 条目卡（[打开]进指派弹窗、[移除]去产出） -->
           <div v-if="metadataFileProduction" class="li-out-card li-red-metadata-card">
             <div class="li-condx-card-line">
               <span class="li-out-mark">◇</span>
@@ -277,103 +291,31 @@
             </div>
           </div>
           <el-button v-else size="small" text @click="openMetadataDialog">+ 元数据文件</el-button>
-          <!-- 「+ 聚合成作品」平级入口：加聚合产出即升级聚合类别形态（平级产出
-               可并存） -->
-          <el-button size="small" text @click="upgradeToAggregate">+ 聚合成作品</el-button>
-          <!-- 「元数据文件」产出保存闸门错误清单（仅映射形态） -->
-          <p v-for="(e, ei) in metadataFileErrors" :key="`mfm-${ei}`" class="li-red-row-hint">{{ e }}</p>
-        </section>
-
-        <!-- 下半（聚合=标识与分轨·剧本3 帧3）：作品标识声明（候选=各轨行捕获汇集）
-             + 分轨入口（产出区「聚合成作品」行——〔编辑〕开分轨入口弹窗：类型先行
-             →可用轨亮出→轨行→角色分配；弹窗确定就地回写产出卡摘要） -->
-        <section v-if="isAggregate" class="li-red-sec">
-          <div class="li-red-sec-head">
-            <h4 class="li-red-sec-title">聚合规则 · 标识与分轨<span class="li-red-sec-note">下半 · 标识值相等即并组，按分轨入口聚合成作品</span></h4>
-          </div>
-
-          <!-- 作品标识声明：从轨行捕获中选（文件名捕获/目录名捕获/序列群键） -->
-          <div class="li-red-agg-identity">
-            <span class="li-red-label">作品标识:</span>
-            <template v-for="(part, pi) in identityRows" :key="pi">
-              <el-select
-                :model-value="part.capture ? `${part.row}/${part.capture}` : ''"
-                size="small"
-                class="li-red-agg-ident"
-                placeholder="选占位词捕获"
-                @update:model-value="setIdentityPart(pi, $event)"
-              >
-                <el-option-group v-for="g in identityGroups" :key="g.row" :label="`轨${g.row}`">
-                  <el-option
-                    v-for="c in g.candidates"
-                    :key="`${g.row}/${c.group}`"
-                    :label="`{${c.word}}`"
-                    :value="`${g.row}/${c.group}`"
-                  />
-                </el-option-group>
-                <!-- 失效捕获残影选项：轨行模板改写后原引用不在声明中——仅供呈现，
-                     不可重选（保存闸门拦） -->
-                <el-option
-                  v-for="o in identityStaleOptions"
-                  :key="`stale-${o.value}`"
-                  :label="o.label"
-                  :value="o.value"
-                  disabled
-                />
-              </el-select>
-              <el-button
-                size="small"
-                text
-                type="danger"
-                :disabled="identityRows.length <= 1"
-                @click="identityRows.splice(pi, 1)"
-              >删</el-button>
-            </template>
-            <el-button size="small" text @click="addIdentityPart">+ 加一部分</el-button>
-          </div>
-          <p class="li-red-hint">
-            （候选=各轨行捕获：轨1·{作品标识}、轨2·{作品标识}…；目录轨行的目录捕获、序列轨行的群键同样可选）
-          </p>
-          <p v-if="!identityRows.length" class="li-red-row-hint">
-            尚未选择作品标识——多文件按标识值相等并成一件作品；多个部分按声明序拼成复合标识
-          </p>
-
-          <!-- 分轨入口（产出区「聚合成作品」行）：无产出=加入口按钮；有产出=产出卡
-               摘要（〔编辑〕开分轨入口弹窗） -->
-          <div class="li-red-zone-head">
-            <span class="li-red-zone-title">分轨 · 聚合成作品</span>
-          </div>
+          <!-- 聚合成作品条目（D 帧3「◇ 聚合成作品 · 图文（article）  [ 编辑 ] [移除]」）：
+               分组绑定声明（作品标识=绑定分组）+类型+轨道分配（两步弹窗） -->
           <div v-if="aggProduction" class="li-out-card" :class="{ 'is-invalid': aggErrors.length > 0 }">
             <div class="li-condx-card-line">
-              <span class="li-out-mark">▸</span>
-              <span class="li-condx-card-tpl" :title="aggCardText">{{ aggCardText }}</span>
-              <el-button size="small" text @click="openTrackDialog">[编辑]</el-button>
-            </div>
-          </div>
-          <el-button v-else size="small" text @click="openTrackDialog">+ 聚合成作品</el-button>
-          <!-- 元数据文件入口（元数据文件映射与聚合解耦·剧本A 帧1/BO 剧本1 帧1）：
-               产出区平级条目——聚合形态恒卡（未指派=「元数据文件（0）」态，BO 帧1
-               锚）；◇ 元数据文件（N）：第 X 行 → 描述（多目标连写「描述+标签」）；
-               [打开]进独立弹窗（唯一指派面，帧2——勾选+内容去向〔一行可多选〕+
-               配对方式） -->
-          <div class="li-out-card li-red-metadata-card">
-            <div class="li-condx-card-line">
               <span class="li-out-mark">◇</span>
-              <span class="li-condx-card-tpl" :title="metadataFileSummary">{{ metadataFileSummary }}</span>
-              <el-button size="small" text @click="openMetadataDialog">[打开]</el-button>
+              <span class="li-condx-card-tpl" :title="aggCardText">{{ aggCardText }}</span>
+              <el-button size="small" text @click="openTrackDialog">[ 编辑 ]</el-button>
+              <el-button size="small" text type="danger" @click="removeAggregateProduction">[移除]</el-button>
             </div>
           </div>
-          <p class="li-red-hint">
-            类型先行：作品类型选自运行时注册表投影（内置+插件自定义类型）→可用轨亮出→轨行→角色分配，角色按类型规约过滤
-          </p>
+          <template v-else>
+            <el-button size="small" text :disabled="aggAdditionGated" @click="openTrackDialog">+ 聚合成作品</el-button>
+            <!-- gating 附注（D 帧4「（需分组声明或序列行，暂不可加）」）：置灰有因，
+                 加分组声明（帧1）即解 -->
+            <span v-if="aggAdditionGated" class="li-red-hint">（{{ AGG_ADDITION_GATING_NOTE }}）</span>
+          </template>
+          <!-- 「元数据文件」产出保存闸门错误清单 -->
+          <p v-for="(e, ei) in metadataFileErrors" :key="`mfm-${ei}`" class="li-red-row-hint">{{ e }}</p>
           <!-- 聚合面保存闸门错误清单（保存被拦时逐条在场） -->
-          <p v-for="(e, ei) in aggErrors" :key="ei" class="li-red-row-hint">{{ e }}</p>
-          <!-- 「元数据文件」产出保存闸门错误清单（并用形态） -->
-          <p v-for="(e, ei) in metadataFileErrors" :key="`mf-${ei}`" class="li-red-row-hint">{{ e }}</p>
+          <p v-for="(e, ei) in aggErrors" :key="`agg-${ei}`" class="li-red-row-hint">{{ e }}</p>
         </section>
 
-        <!-- 合成策略（随旧表单随迁）：角色绑定 + 维度策略；聚合规则无元数据产出不出 -->
-        <section v-if="!isAggregate" class="li-red-sec">
+        <!-- 合成策略（随旧表单随迁）：角色绑定 + 维度策略（提取元数据产出在场即相关，
+             聚合并存已放开——决策10） -->
+        <section class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">合成策略<span class="li-red-sec-note">该规则产出声明的合成方式</span></h4>
           </div>
@@ -422,10 +364,11 @@
           @cancel="onCondxRowEditCancel"
         />
 
-        <!-- 分轨入口弹窗（剧本3 帧3）：类型先行〔清单含插件自定义类型〕→类型「X」
-             的可用轨亮出→轨行→角色分配（角色下拉按类型规约过滤、必含角色带
-             「（必含）」标记）。深拷贝草稿编辑、〔完成〕就地回写产出卡；footer
-             恒两按钮（高度静态）；常驻挂载、开关纯由 state 控制 -->
+        <!-- 聚合成作品弹窗（D 帧2·三子句定稿轮）：分组绑定行（作品标识=绑定的分组
+             ——下拉可换绑分组区声明）+ 两步（第一步·作品类型下拉〔清单含插件自
+             定义类型〕→第二步·轨道分配：条件行→角色，角色下拉按类型规约过滤）。
+             深拷贝草稿编辑、〔确定〕就地回写产出卡；footer 恒两按钮（高度静态）；
+             常驻挂载、开关纯由 state 控制 -->
         <AutoHeightDialog
           v-model:state="trackDialogState"
           width="min(680px, 94vw)"
@@ -435,34 +378,58 @@
         >
           <template #header>
             <div class="li-red-header">
-              <span class="li-red-title">分轨 · 聚合成作品</span>
+              <span class="li-red-title">聚合成作品 · {{ descInput }}</span>
             </div>
           </template>
           <div v-if="trackDraft" class="li-red-body li-red-track-body">
+            <!-- 分组绑定行（D 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」）：作品标识=
+                 绑定的分组，不再单独声明、不悬于产出区上方；可换绑分组区声明或
+                 虚拟序列群键项（选定即物化为声明） -->
+            <div class="li-red-agg-track li-red-agg-grouping">
+              <span class="li-red-label">分组：</span>
+              <el-select
+                :model-value="trackGroupingValue"
+                size="small"
+                class="li-red-agg-role"
+                placeholder="选择分组声明"
+                @update:model-value="setTrackGrouping"
+              >
+                <el-option
+                  v-for="o in bindableGroupOptions"
+                  :key="o.value"
+                  :label="o.label"
+                  :value="o.value"
+                />
+              </el-select>
+            </div>
             <p class="li-red-agg-step">第一步·作品类型:</p>
-            <div v-if="trackTypeOptions.length" class="li-red-types">
-              <button
+            <el-select
+              v-if="trackTypeOptions.length"
+              v-model="trackDraft.workType"
+              size="small"
+              class="li-red-agg-role"
+              placeholder="选择作品类型"
+              @change="onTrackTypeChange"
+            >
+              <el-option
                 v-for="t in trackTypeOptions"
                 :key="t.value"
-                type="button"
-                class="li-red-type-card"
-                :class="{ 'is-active': trackDraft.workType === t.value }"
-                :title="aggAvailableTracksText(t.spec)"
-                @click="chooseTrackType(t.value)"
-              >{{ t.label }}</button>
-            </div>
+                :label="`${t.label}（${t.value}）`"
+                :value="t.value"
+              />
+            </el-select>
             <p v-else class="li-red-error">
               类型清单不可用（资源类型注册表查询失败或为空）——无法分配轨道；可关闭弹窗稍后重试
             </p>
             <p class="li-red-hint">
-              选定类型后亮出该类型的可用轨清单（如：类型「视频」的可用轨：视频主体（必含）· 视频轨 · 音频轨 · 字幕轨 · 缩略图），再把各轨行分到其中的角色
+              选定类型后亮出该类型的可用轨清单（如：类型「视频」的可用轨：视频主体（必含）· 视频轨 · 音频轨 · 字幕轨 · 缩略图），再把各条件行分到其中的角色
             </p>
             <template v-if="trackSpec">
               <p class="li-red-summary">{{ aggAvailableTracksText(trackSpec) }}</p>
               <p class="li-red-agg-step">第二步·轨道分配:</p>
               <div v-for="t in trackAssignRows" :key="t.no" class="li-red-agg-track">
-                <span class="li-condx-card-no">轨 {{ t.no }}</span>
-                <span class="li-condx-card-tpl" :title="t.text">（{{ t.text }}）</span>
+                <span class="li-condx-card-no">第 {{ t.no }} 行</span>
+                <span class="li-condx-card-tpl" :title="t.text">· {{ t.text }}</span>
                 <span class="li-red-arrow">→</span>
                 <el-select
                   :model-value="trackRoleOf(t.no)"
@@ -482,7 +449,7 @@
                 </el-select>
               </div>
               <p class="li-red-hint">
-                必含轨所在行承载聚合作品的主导文件（每组恰一命中，否则该组不成立）；未分配的轨行只作标识源、其命中文件不入轨
+                必含轨所在行承载聚合作品的主导文件（每组恰一命中，否则该组不成立）；未分配的条件行只作分组键源、其命中文件不入轨
               </p>
             </template>
             <p v-if="trackDialogError" class="li-red-row-hint">{{ trackDialogError }}</p>
@@ -490,26 +457,109 @@
           <template #footer>
             <div class="li-cred-actions">
               <el-button @click="trackDialogState = false">取消</el-button>
-              <el-button type="primary" @click="confirmTrackDialog">完成</el-button>
+              <el-button type="primary" @click="confirmTrackDialog">确定</el-button>
             </div>
           </template>
         </AutoHeightDialog>
 
-        <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3）：
+        <!-- 分组声明弹窗（D 帧1·三子句定稿轮）：键源（匹配行捕获/序列群键/所在
+             目录）+键（捕获可拼接；序列群键=选序列行；所在目录=无键部分）。
+             深拷贝草稿编辑、〔确定〕就地回写声明块；常驻挂载、开关纯由 state 控制 -->
+        <AutoHeightDialog
+          v-model:state="groupDialogState"
+          width="min(560px, 94vw)"
+          :close-on-click-modal="false"
+          :close-on-press-escape="false"
+          :show-close="false"
+        >
+          <template #header>
+            <div class="li-red-header">
+              <span class="li-red-title">分组声明</span>
+            </div>
+          </template>
+          <div v-if="groupDraft" class="li-red-body">
+            <div class="li-red-inline-row">
+              <span class="li-red-label">键源：</span>
+              <el-select v-model="groupDraft.keySource" size="small" class="li-red-agg-role" @change="onGroupKeySourceChange">
+                <el-option v-for="o in GROUP_KEY_SOURCE_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+              </el-select>
+              <span class="li-red-hint">（另可选：序列群键/所在目录）</span>
+            </div>
+            <template v-if="groupDraft.keySource === 'capture'">
+              <div class="li-red-agg-identity">
+                <span class="li-red-label">键：</span>
+                <template v-for="(part, pi) in groupDraft.parts" :key="pi">
+                  <el-select
+                    :model-value="part.capture ? `${part.row}/${part.capture}` : ''"
+                    size="small"
+                    class="li-red-agg-ident"
+                    placeholder="选占位词捕获"
+                    @update:model-value="setGroupDraftPart(pi, $event)"
+                  >
+                    <el-option-group v-for="g in identityGroups" :key="g.row" :label="`第${g.row}行`">
+                      <el-option
+                        v-for="c in g.candidates"
+                        :key="`${g.row}/${c.group}`"
+                        :label="`{${c.word}}`"
+                        :value="`${g.row}/${c.group}`"
+                      />
+                    </el-option-group>
+                  </el-select>
+                  <el-button
+                    v-if="groupDraft.parts.length > 1"
+                    size="small"
+                    text
+                    type="danger"
+                    @click="groupDraft.parts.splice(pi, 1)"
+                  >删</el-button>
+                </template>
+                <el-button size="small" text @click="addGroupDraftPart">+ 加一部分</el-button>
+              </div>
+              <p class="li-red-hint">
+                分组键=逐文件属性，可拼接（如 第1行{作品}+第1行{序号}）；分组只在此声明、作用于匹配求值后的命中集
+              </p>
+            </template>
+            <template v-else-if="groupDraft.keySource === 'seqKey'">
+              <div class="li-red-agg-identity">
+                <span class="li-red-label">键：</span>
+                <el-select
+                  :model-value="groupDraft.parts[0] && groupDraft.parts[0].capture ? String(groupDraft.parts[0].row) : ''"
+                  size="small"
+                  class="li-red-agg-ident"
+                  placeholder="选序列行"
+                  @update:model-value="setGroupDraftSeqRow($event)"
+                >
+                  <el-option v-for="s in seqRowOptions" :key="s.row" :label="`第${s.row}行 · ${s.text}`" :value="String(s.row)" />
+                </el-select>
+              </div>
+              <p class="li-red-hint">序列群键：同一序列组的成员共享群键，每序列组一件作品</p>
+            </template>
+            <p v-else class="li-red-hint">所在目录即分组键——同目录的文件归为一组（映射产出的配对形态之一）</p>
+          </div>
+          <template #footer>
+            <div class="li-cred-actions">
+              <el-button @click="groupDialogState = false">取消</el-button>
+              <el-button type="primary" @click="confirmGroupDecl">确定</el-button>
+            </div>
+          </template>
+        </AutoHeightDialog>
+
+        <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3·三子句定稿轮）：
              「元数据文件」产出唯一指派面——勾选本规则条件行+内容去向（一行可
-             多选）+配对方式（标识配对/目录配对；映射单用必选、并用可省略）；
+             多选）+分组绑定（A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」+按所在
+             目录选项；映射单用必选、并用可省略）；
              确定回写产出（勾选未选去向=帧3 拦截态：⚠ 行+[知道了]、勾选保留）；
-             轨道随行标注随聚合在场才显示（并用=BO 帧2 画面叠加配对方式区）；
+             轨道随行标注随聚合产出在场才显示；
              常驻挂载、开关纯由 state 控制 -->
         <MetadataFileDialog
           v-model:state="metadataDialogState"
           :rule-title="descInput"
           :rows="metadataDialogRows"
-          :show-tracks="isAggregate"
+          :show-tracks="!!aggProduction"
           :bindings="metadataFileProduction && metadataFileProduction.contentBindings ? metadataFileProduction.contentBindings : []"
-          :pairing="metadataFileProduction && metadataFileProduction.pairing ? metadataFileProduction.pairing : null"
+          :bound-group-value="mfBoundGroupValue"
+          :group-options="metadataGroupOptions"
           :has-aggregate="!!aggProduction"
-          :identity-candidates="metadataIdentityCandidates"
           @confirm="onMetadataConfirm"
         />
       </template>
@@ -615,26 +665,21 @@
 // 两段式规则编辑弹窗（剧本F）：主程序全局注册的 AutoHeightDialog 壳（内容随窗口
 // 高度封顶内滚，EntryConfirmDialog 先例——无需 import）。所有规则编辑处共用本
 // 组件，两入口挂载、按 mode 分形：
-//   ① rule（SubpageRules「编辑/新建」）：上半=识别规则（一行人话摘要+结构化形态
-//      编辑〔文件名形态/目录锚定/序列群组/组合，RulePatternNode 递归展开〕+捕获组
-//      声明清单+「高级（JSON）」切换双向同步），下半=提取规则（逐维度行=维度←
-//      来源下拉〔捕获组只列上半声明的组/目录名/群组前缀/常量〕+条件勾选〔仅序列
-//      成员产出等，逐行〕；行可增删；行级就地校验）；合成策略随旧
-//      表单随迁。保存载荷经 emit 交父组件走既有 saveRule RPC。
-//      聚合类别（两级类别·剧本3）：新建先选类别〔[元数据规则]|[聚合规则]〕——
-//      聚合形态上半=轨行区（同一 CondxRowsEditor 条件卡，模板可带捕获、禁括号
-//      子组/行级非/跨行相等/组合引用），下半=标识与分轨（作品标识候选=各轨行
-//      捕获汇集；分轨入口=产出区「聚合成作品」行，〔编辑〕开分轨入口弹窗：
-//      类型先行〔运行时注册表投影〕→可用轨亮出→轨行→角色分配，角色按类型规约
-//      过滤、必含角色带（必含）标记）。产出区平级条目（决策1）：「元数据文件」
-//      与「聚合成作品」平级、各自可单独添加或同规则并存——元数据类别未加时出
-//      「+ 元数据文件」入口（剧本A 帧1，无聚合产出也可仅配映射；「+ 聚合成
-//      作品」=升级聚合类别形态），聚合类别恒出「元数据文件（N）」卡（BO 帧1）；
-//      指派面=MetadataFileDialog（勾选行+内容去向〔一行可多选〕+配对方式〔标识
-//      配对/目录配对，映射单用必选〕），落规则级 metadataFile 键（内容绑定已从
-//      aggregate 迁出）。保存校验=ruleFormModel 纯函数闸门（aggFormErrors+
-//      metadataFileFormErrors），载入校验在插件 Go 侧 validateAggregateEntry/
-//      validateMetadataFileProduction。
+//   ① rule（SubpageRules「编辑/新建」）——三子句形态（决策9/10·终审重梳轮）：
+//      匹配区=条件行（CondxRowsEditor 条件卡，谓词行布尔自由恒开+属性派生——
+//      聚合产出在场不再隐藏/清空提取与布尔能力）、分组区=分组声明（属性选键：
+//      匹配行捕获/序列群键/所在目录，可多条；声明为编辑面形态，保存时序列化映射
+//      到既有键字段——聚合产出绑定→identity、元数据文件产出绑定→pairing，内核
+//      schema 零改动）、产出区=三产出零互斥并存（提取元数据/元数据文件/聚合成
+//      作品；聚合产出卡显示绑定分组；无分组声明且无序列行时「+ 聚合成作品」
+//      置灰附因〔D 帧4〕）。类别步退役：保存时推导落档类别（有聚合成作品产出=
+//      aggregate）；加载既有档案（两类）全部内容装进统一表单。聚合成作品弹窗
+//      （D 帧2）=分组绑定行+两步（第一步·作品类型下拉〔运行时注册表投影〕→
+//      第二步·轨道分配：条件行→角色，角色按类型规约过滤）；元数据文件弹窗
+//      （A 帧2）=勾选行+内容去向〔一行可多选〕+分组绑定〔分组区声明下拉+按所在
+//      目录〕。保存校验=ruleFormModel 纯函数闸门（aggFormErrors+
+//      metadataFileFormErrors+未绑定声明拦截），载入校验在插件 Go 侧
+//      validateAggregateEntry/validateMetadataFileProduction。
 //   ② setAdjust（SetRulePanel「调整规则」）：上半=草稿识别形态（只读呈现），
 //      下半=指派行——剧本E 全部语义随迁：线索三族（序列 seqKey/目录段/文件名段）
 //      作为来源选项、默认指派预填、目录段多段连续勾选、互斥校验「一个维度只能有
@@ -697,6 +742,16 @@ import {
   aggIdentityWordOf,
   aggFormErrors,
   metadataFileFormErrors,
+  GROUP_KEY_SOURCE_OPTIONS,
+  AGG_ADDITION_GATING_NOTE,
+  GROUP_DECL_UNBOUND_ERROR,
+  aggAdditionGated as aggAdditionGatedOf,
+  groupDeclBlockLabel,
+  groupDeclOptionLabel,
+  groupDeclIdentityParts,
+  groupDeclPairing,
+  groupDeclFromIdentity,
+  groupDeclFromPairing,
   type CondxRowForm,
   type CondxRowNoMap,
   type CondxCaptureDecl,
@@ -707,6 +762,8 @@ import {
   type ContentBindingForm,
   type PairingKeyForm,
   type MetadataFileProductionForm,
+  type GroupDeclForm,
+  type GroupKeySource,
   type AggTypeSpec,
   type AggIdentityCandidate
 } from './ruleFormModel'
@@ -875,8 +932,8 @@ const sourceLabels: Record<string, string> = {
 
 const headerTitle = computed((): string => {
   if (props.mode === 'rule') {
-    if (props.rule && props.rule.isNew) return '新建规则 · 选类别'
-    return props.rule && isAggregate.value ? '编辑聚合规则' : '编辑规则'
+    if (props.rule && props.rule.isNew) return '新建规则'
+    return '编辑规则'
   }
   return '调整规则'
 })
@@ -923,55 +980,109 @@ const condxRowEditTarget = ref<CondxRowForm | null>(null)
 const condxRowEditNo = ref(1)
 const condxRowEditMode = ref<'edit' | 'add'>('edit')
 
-// —— 聚合规则编辑态（两级类别·剧本3）：类别、作品标识声明与分轨入口 ——
+// —— 三子句编辑态（决策9/10·终审重梳轮）：分组声明与三产出（类别步退役——
+//    落档类别=保存时推导：有聚合成作品产出=aggregate） ——
 
-// 规则类别（metadata|aggregate）：既有条目按档案类别固定；新建经类别选择步切换
-const categoryInput = ref<'metadata' | 'aggregate'>('metadata')
-const isAggregate = computed((): boolean => categoryInput.value === 'aggregate')
+// 分组声明（分组区编辑态；声明=编辑面形态，保存时映射到既有键字段——聚合产出
+// 绑定→identity、元数据文件产出绑定→pairing，内核 schema 零改动）
+const groupDecls = ref<GroupDeclForm[]>([])
+let groupDeclUidSeq = 1
 
-// 作品标识声明（IdentityPart 表单形态）：每部分=轨行号+捕获名（序列群键保留名
-// groupKey 只在序列轨行候选中出现）
-const identityRows = ref<IdentityPartForm[]>([])
+// 产出的分组绑定（uid → groupDecls 条目；null=未绑定——聚合成作品未绑=保存闸门
+// 拦；元数据文件未绑且无聚合产出=保存闸门拦）
+const aggGroupingUid = ref<number | null>(null)
+const mfGroupingUid = ref<number | null>(null)
 
 // 分轨入口（AggregateProduction 表单形态；null=尚未加「聚合成作品」产出）
 const aggProduction = ref<AggregateProductionForm | null>(null)
 
 // 「元数据文件」产出（规则级独立落档位，与「聚合成作品」平级；null=尚未加该
-// 产出——元数据类别显示「+ 元数据文件」入口、聚合类别显示「元数据文件（0）」
-// 恒卡；不随类别切换复位〔平级能力跟规则走，单用/并用自由组合〕）
+// 产出——「+ 元数据文件」入口）
 const metadataFileProduction = ref<MetadataFileProductionForm | null>(null)
 
-// 新建类别切换：轨行/条件行同机制原样保留；类别专属面各自复位——聚合（提取
-// 动作与类别互斥）清提取行，元数据恢复缺省提取样例
-function switchCategory(cat: 'metadata' | 'aggregate'): void {
-  if (categoryInput.value === cat) return
-  categoryInput.value = cat
-  identityRows.value = []
-  aggProduction.value = null
-  trackDialogState.value = false
-  trackDraft.value = null
-  metadataDialogState.value = false
-  // 「元数据文件」产出不随类别复位：平级产出跟规则走（元数据类别=仅映射，
-  // 聚合类别=并用），切换只复位聚合专属面（标识与分轨）
-  if (cat === 'aggregate') {
-    // 新建未改动的缺省样例行不带入聚合形态（轨行区从「+ 加轨」起步）
-    if (props.rule && props.rule.isNew && condxRows.value.length === 1) {
-      const only = condxRows.value[0]
-      if (only && !only.group && only.condition && only.condition.format.tpl === '【{作者}】{标题}') {
-        condxRows.value = []
-      }
-    }
-    extractionRows.value = []
-    extractionsJsonMode.value = false
-    extractionsError.value = ''
-    return
-  }
-  if (!extractionRows.value.length && !extractionsJsonMode.value) {
-    extractionRows.value = (cloneJSON(NEW_EXTRACTIONS_SAMPLE) as ExtractionActionJSON[]).map(actionToRow)
-  }
+// 按声明 uid 取声明（缺席=null）
+function groupDeclByUid(uid: number | null): GroupDeclForm | null {
+  if (uid == null) return null
+  return groupDecls.value.find((d) => d.uid === uid) || null
 }
 
-// 标识候选分组（按轨行号）：文件名捕获/目录行捕获/序列行群键同列
+// 聚合产出的分组绑定候选（非 directory 形态——所在目录对聚合产出不可绑：聚合
+// 作品键=标识/群键，目录成组走目录捕获）+ 序列行虚拟项（选定即物化为声明，
+// D 帧4 gating 的序列行解锁路径）
+const bindableGroupOptions = computed<{ value: string; label: string }[]>(() => {
+  const out: { value: string; label: string }[] = []
+  for (const d of groupDecls.value) {
+    if (d.keySource === 'directory') continue
+    out.push({ value: `decl:${d.uid}`, label: groupDeclOptionLabel(d) })
+  }
+  const declaredSeqRows = new Set(
+    groupDecls.value.filter((d) => d.keySource === 'seqKey').map((d) => (d.parts[0] ? d.parts[0].row : -1))
+  )
+  for (const s of seqRowOptions.value) {
+    if (declaredSeqRows.has(s.row)) continue
+    out.push({ value: `seq:${s.row}`, label: `◇ 按序列群键分组` })
+  }
+  return out
+})
+
+// 序列行清单（序列群键声明与虚拟项的候选源）
+const seqRowOptions = computed<{ row: number; text: string }[]>(() => {
+  const out: { row: number; text: string }[] = []
+  for (const f of condxFlatRows(activeCondxRows.value)) {
+    if (f.condx && f.condx.target === 'seq') {
+      const tpl = f.condx.format.mode === 'contains'
+        ? `含「${f.condx.format.word || '?'}」`
+        : condxNormalizeTpl(f.condx.format.tpl || '')
+      out.push({ row: f.row, text: `${tpl}${condxRowExtSuffix(f.condx)}` })
+    }
+  }
+  return out
+})
+
+// 「+ 聚合成作品」gating（D 帧4：无分组声明且无序列行→置灰附因）
+const aggAdditionGated = computed((): boolean =>
+  aggAdditionGatedOf(groupDecls.value, activeCondxRows.value)
+)
+
+// 未绑定声明的保存拦截（微型闸门·未锚微文案）
+const groupDeclErrors = computed((): string[] => {
+  const errs: string[] = []
+  const bound = new Set<number>()
+  if (aggProduction.value && aggGroupingUid.value != null) bound.add(aggGroupingUid.value)
+  if (metadataFileProduction.value && mfGroupingUid.value != null) bound.add(mfGroupingUid.value)
+  // 并用形态（聚合在场）下元数据文件可省略分组绑定（分组随聚合并组）——
+  // 未绑定的声明仍一律拦截
+  if (groupDecls.value.some((d) => !bound.has(d.uid))) errs.push(GROUP_DECL_UNBOUND_ERROR)
+  return errs
+})
+
+// 产出计数（三产出各计一条——提取行数+元数据文件+聚合成作品）
+const productionCount = computed((): number =>
+  extractionRows.value.length + (metadataFileProduction.value ? 1 : 0) + (aggProduction.value ? 1 : 0)
+)
+
+// 提取元数据汇总卡文案（D 帧3「作者←{作者} 标题←{标题}」）
+const extractionSummaryText = computed((): string =>
+  extractionRows.value.map((r) => extractionSummarySeg(r)).join(' ')
+)
+
+// 单条提取行的汇总段：「维度←来源摘要」（capture={词}、constant=常量值、其余=来源短词）
+function extractionSummarySeg(row: ExtractionRow): string {
+  const dim = row.dimension || '?'
+  let src = row.from || '?'
+  if (row.from === 'capture') src = `{${aggIdentityWordOf(row.captureName) || row.captureName}}`
+  else if (row.from === 'constant' || row.from === 'adjudication') src = row.constant || '常量'
+  return `${dim}←${src}`
+}
+
+// 聚合绑定的分组声明展开为 identity 部分（保存序列化与闸门共用）
+const aggIdentityParts = computed((): IdentityPartForm[] => {
+  const parts = groupDeclIdentityParts(groupDeclByUid(aggGroupingUid.value))
+  return parts || []
+})
+
+// 标识/分组键候选分组（按条件行号）：文件名捕获/目录行捕获/序列行群键同列
+// （分组声明弹窗的键部分选择与聚合闸门候选同源）
 const identityGroups = computed<{ row: number; candidates: AggIdentityCandidate[] }[]>(() => {
   const out: { row: number; candidates: AggIdentityCandidate[] }[] = []
   for (const c of aggIdentityCandidates(activeCondxRows.value)) {
@@ -982,50 +1093,22 @@ const identityGroups = computed<{ row: number; candidates: AggIdentityCandidate[
   return out
 })
 
-// 失效捕获残影选项（轨行模板改写后原引用不在声明中）：仅供行上呈现、不可重选
-const identityStaleOptions = computed<{ value: string; label: string }[]>(() => {
-  const declared = new Set(identityGroups.value.flatMap((g) => g.candidates.map((c) => `${g.row}/${c.group}`)))
-  const out: { value: string; label: string }[] = []
-  const seen = new Set<string>()
-  for (const p of identityRows.value) {
-    const key = `${p.row}/${p.capture}`
-    if (!p.capture || declared.has(key) || seen.has(key)) continue
-    seen.add(key)
-    out.push({ value: key, label: `轨${p.row}·{${aggIdentityWordOf(p.capture)}}` })
-  }
-  return out
-})
-
-// 标识部分取值拆装（值编码 行号/捕获名，从左拆一刀）
-function setIdentityPart(pi: number, value: string): void {
-  const idx = value.indexOf('/')
-  if (idx < 0) return
-  const part = identityRows.value[pi]
-  if (!part) return
-  part.row = Number(value.slice(0, idx)) || 1
-  part.capture = value.slice(idx + 1)
-}
-
-// 加一部分：缺省选中首个候选（无候选时空选、行级闸门提示）
-function addIdentityPart(): void {
-  const first = aggIdentityCandidates(activeCondxRows.value)[0]
-  identityRows.value.push(first ? { row: first.row, capture: first.group } : { row: 1, capture: '' })
-}
-
-// 聚合面保存闸门错误（纯函数派生；保存与预览共用）
+// 聚合面保存闸门错误（纯函数派生；保存与预览共用——identity=绑定声明的展开）
 const aggErrors = computed((): string[] =>
-  aggFormErrors(activeCondxRows.value, identityRows.value, aggProduction.value, props.aggTypes || [])
+  aggFormErrors(activeCondxRows.value, aggIdentityParts.value, aggProduction.value, props.aggTypes || [])
 )
 
 // 产出卡摘要（「聚合成作品 · 视频（主体+字幕轨）」）
 const aggCardText = computed((): string => aggProductionSummary(props.aggTypes || [], aggProduction.value))
 
-// —— 分轨入口弹窗（类型先行→可用轨→轨行→角色） ——
+// —— 聚合成作品弹窗（分组绑定+两步：类型→轨道分配）与分组声明弹窗 ——
 
 const trackDialogState = ref(false)
 const trackDraft = ref<AggregateProductionForm | null>(null)
+// 草稿的分组绑定（uid 声明引用；虚拟序列项选定即物化为声明）
+const trackDraftGroupingUid = ref<number | null>(null)
 
-// 类型按钮清单（滤除无结构角色类型；投影缺席=空清单→类型步不可用提示）
+// 类型下拉清单（滤除无结构角色类型；投影缺席=空清单→类型步不可用提示）
 const trackTypeOptions = computed(() => aggTypeOptions(props.aggTypes || []))
 
 // 草稿当前类型的规约（未选类型=null）
@@ -1040,7 +1123,7 @@ const trackRoleOptions = computed((): string[] => {
   return (spec.roles || []).map((r) => (r ? r.storeType : '')).filter((s) => s)
 })
 
-// 轨道分配行：各轨行（模板+扩展名谓词的整体形态）与其当前角色
+// 轨道分配行：各条件行（模板+扩展名谓词的整体形态）与其当前角色
 const trackAssignRows = computed<{ no: number; text: string }[]>(() => {
   const out: { no: number; text: string }[] = []
   for (const f of condxFlatRows(activeCondxRows.value)) {
@@ -1052,29 +1135,57 @@ const trackAssignRows = computed<{ no: number; text: string }[]>(() => {
   return out
 })
 
-// 弹窗级错误（类型未选/未覆盖必含角色——完成闸门呈现）
+// 草稿分组绑定的下拉取值（decl:uid=既有声明；seq:N=虚拟序列群键项）
+const trackGroupingValue = computed((): string => {
+  const d = groupDeclByUid(trackDraftGroupingUid.value)
+  if (d) return `decl:${d.uid}`
+  return ''
+})
+
+// 分组绑定改选（虚拟序列项=物化为 seqKey 声明后绑定）
+function setTrackGrouping(value: string): void {
+  if (!value) {
+    trackDraftGroupingUid.value = null
+    return
+  }
+  if (value.startsWith('decl:')) {
+    trackDraftGroupingUid.value = Number(value.slice(5)) || null
+    return
+  }
+  if (value.startsWith('seq:')) {
+    const row = Number(value.slice(4)) || 1
+    const decl: GroupDeclForm = { uid: groupDeclUidSeq++, keySource: 'seqKey', parts: [{ row, capture: 'groupKey' }] }
+    groupDecls.value.push(decl)
+    trackDraftGroupingUid.value = decl.uid
+  }
+}
+
+// 弹窗级错误（分组未绑/类型未选/未覆盖必含角色——确定闸门呈现）
 const trackDialogError = computed((): string => {
   const draft = trackDraft.value
   if (!draft) return ''
+  if (!groupDeclByUid(trackDraftGroupingUid.value)) return '分组未绑定——作品标识=绑定的分组，请先在分组区加分组声明（或在分组下拉选序列群键）'
   if (!draft.workType) return '作品类型未选择（类型先行：类型规约决定可用轨与角色基数）'
   const spec = aggTypeSpecOf(props.aggTypes || [], draft.workType)
   if (!spec) return `作品类型「${draft.workType}」不在资源类型注册表（可能已随插件停用或卸载注销）`
   const covered = (draft.tracks || []).some((ta) => ta && aggRoleRequired(spec, ta.role))
-  if (!covered) return '分轨入口未覆盖必含角色（类型规约 Min≥1 的角色）——主导文件无从判定，请把某轨行分到必含轨'
+  if (!covered) return '分轨入口未覆盖必含角色（类型规约 Min≥1 的角色）——主导文件无从判定，请把某条件行分到必含轨'
   return ''
 })
 
-// 开窗（产出卡〔编辑〕/「+ 聚合成作品」）：深拷贝草稿编辑，完成才回写
+// 开窗（产出卡〔编辑〕/「+ 聚合成作品」）：深拷贝草稿编辑，确定才回写
 function openTrackDialog(): void {
+  if (aggAdditionGated.value && !aggProduction.value) return
   trackDraft.value = aggProduction.value
     ? cloneJSON(aggProduction.value)
     : { workType: '', tracks: [], companionUse: 'track' }
+  trackDraftGroupingUid.value = aggGroupingUid.value
   trackDialogState.value = true
 }
 
-// 类型选定：清轨道分配并把首个必含角色自动落给轨 1（帧3「轨1 自动落必含轨」；
-// 用户随后可逐轨改选——下拉只出该类型可用轨）
-function chooseTrackType(type: string): void {
+// 类型选定（下拉）：清轨道分配并把首个必含角色自动落给行 1（用户随后可逐行
+// 改选——角色下拉只出该类型可用轨）
+function onTrackTypeChange(type: string): void {
   const draft = trackDraft.value
   if (!draft) return
   draft.workType = type
@@ -1083,7 +1194,7 @@ function chooseTrackType(type: string): void {
   draft.tracks = required ? [{ row: 1, role: required.storeType }] : []
 }
 
-// 单轨行角色改选（清空=移除分配：该轨行只作标识源、不入轨）
+// 单条件行角色改选（清空=移除分配：该行只作分组键源、不入轨）
 function trackRoleOf(no: number): string {
   const draft = trackDraft.value
   const hit = draft && draft.tracks ? draft.tracks.find((t) => t && t.row === no) : undefined
@@ -1103,22 +1214,136 @@ function setTrackRole(no: number, role: string): void {
   else draft.tracks.push({ row: no, role })
 }
 
-// 〔完成〕：草稿过类型/必含闸门后就地回写产出卡；不过不关窗（错误行内在场）
+// 〔确定〕：草稿过分组/类型/必含闸门后就地回写产出卡与分组绑定；不过不关窗
+//（错误行内在场）
 function confirmTrackDialog(): void {
   if (trackDialogError.value) return
   if (!trackDraft.value) return
   aggProduction.value = cloneJSON(trackDraft.value)
+  aggGroupingUid.value = trackDraftGroupingUid.value
   trackDialogState.value = false
 }
 
-// —— 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧1/帧2）：「元数据文件」
-// 产出的唯一指派面（内容绑定+配对方式，无聚合产出也可开窗指派） ——
+// 产出卡〔移除〕：去聚合产出（分组声明不动——其他产出可能仍绑定）
+function removeAggregateProduction(): void {
+  aggProduction.value = null
+  aggGroupingUid.value = null
+  trackDialogState.value = false
+  trackDraft.value = null
+}
+
+// —— 分组声明弹窗（键源+键，D 帧1） ——
+
+const groupDialogState = ref(false)
+const groupDialogEditIdx = ref(-1)
+const groupDraft = ref<{ keySource: GroupKeySource; parts: IdentityPartForm[] } | null>(null)
+
+// 「+ 加分组」：缺省键源=匹配行捕获、预置首个候选部分
+function addGroupDecl(): void {
+  const first = aggIdentityCandidates(activeCondxRows.value)[0]
+  groupDraft.value = {
+    keySource: 'capture',
+    parts: [first ? { row: first.row, capture: first.group } : { row: 1, capture: '' }]
+  }
+  groupDialogEditIdx.value = -1
+  groupDialogState.value = true
+}
+
+// 声明块〔编辑〕：草稿深拷贝（uid 不动——绑定引用稳定）
+function editGroupDecl(idx: number): void {
+  const d = groupDecls.value[idx]
+  if (!d) return
+  groupDraft.value = { keySource: d.keySource, parts: cloneJSON(d.parts || []) }
+  groupDialogEditIdx.value = idx
+  groupDialogState.value = true
+}
+
+// 声明块〔删〕：解除引用它的产出绑定（聚合产出绑定被解=其闸门拦补绑）
+function removeGroupDecl(idx: number): void {
+  const d = groupDecls.value[idx]
+  if (!d) return
+  if (aggGroupingUid.value === d.uid) {
+    aggGroupingUid.value = null
+    removeAggregateProduction()
+  }
+  if (mfGroupingUid.value === d.uid) mfGroupingUid.value = null
+  groupDecls.value.splice(idx, 1)
+}
+
+// 键源切换：按源形态重置键部分（capture=首个候选；seqKey=首个序列行；directory=空）
+function onGroupKeySourceChange(): void {
+  const draft = groupDraft.value
+  if (!draft) return
+  if (draft.keySource === 'directory') {
+    draft.parts = []
+    return
+  }
+  if (draft.keySource === 'seqKey') {
+    const first = seqRowOptions.value[0]
+    draft.parts = [first ? { row: first.row, capture: 'groupKey' } : { row: 1, capture: 'groupKey' }]
+    return
+  }
+  const cand = aggIdentityCandidates(activeCondxRows.value)[0]
+  draft.parts = [cand ? { row: cand.row, capture: cand.group } : { row: 1, capture: '' }]
+}
+
+// 键部分取值拆装（值编码 行号/捕获名，从左拆一刀）
+function setGroupDraftPart(pi: number, value: string): void {
+  const idx = value.indexOf('/')
+  if (idx < 0) return
+  const part = groupDraft.value && groupDraft.value.parts[pi]
+  if (!part) return
+  part.row = Number(value.slice(0, idx)) || 1
+  part.capture = value.slice(idx + 1)
+}
+
+// 加一部分：缺省选中首个候选
+function addGroupDraftPart(): void {
+  const draft = groupDraft.value
+  if (!draft) return
+  const first = aggIdentityCandidates(activeCondxRows.value)[0]
+  draft.parts.push(first ? { row: first.row, capture: first.group } : { row: 1, capture: '' })
+}
+
+// 序列群键行选定
+function setGroupDraftSeqRow(value: string): void {
+  const draft = groupDraft.value
+  if (!draft) return
+  const row = Number(value) || 1
+  draft.parts = [{ row, capture: 'groupKey' }]
+}
+
+// 〔确定〕：键合法（capture=至少一部分且已选捕获；seqKey=已选序列行）才回写
+function confirmGroupDecl(): void {
+  const draft = groupDraft.value
+  if (!draft) return
+  if (draft.keySource === 'capture') {
+    const parts = draft.parts.filter((p) => p && p.capture)
+    if (!parts.length) return
+    draft.parts = parts
+  } else if (draft.keySource === 'seqKey') {
+    if (!draft.parts.length || !draft.parts[0].capture) return
+  }
+  if (groupDialogEditIdx.value >= 0) {
+    const d = groupDecls.value[groupDialogEditIdx.value]
+    if (d) {
+      d.keySource = draft.keySource
+      d.parts = cloneJSON(draft.parts)
+    }
+  } else {
+    groupDecls.value.push({ uid: groupDeclUidSeq++, keySource: draft.keySource, parts: cloneJSON(draft.parts) })
+  }
+  groupDialogState.value = false
+}
+
+// —— 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧1/帧2·三子句定稿轮）：
+//    「元数据文件」产出的唯一指派面（内容绑定+分组绑定，无聚合产出也可开窗指派） ——
 
 const metadataDialogState = ref(false)
 
 // 弹窗行清单（与条件行区同源）：行号+模板形态（剧本A 帧2 行文案「第 N 行 ·
 // {作品}_{序号}（.png）」——扩展名附加条件括注尾接、模板字面扩展名直拼）+
-// 轨道短词（按当前分轨入口的角色分配；空=未分配轨道；聚合形态才随行标注）
+// 轨道短词（按当前分轨入口的角色分配；空=未分配轨道；聚合产出在场才随行标注）
 const metadataDialogRows = computed<{ no: number; text: string; track: string }[]>(() => {
   const roleByRow = new Map<number, string>()
   if (aggProduction.value && aggProduction.value.tracks) {
@@ -1147,11 +1372,24 @@ function metadataRowText(no: number): string {
   return ''
 }
 
-// 配对键部分候选（全部条件行的命名捕获+序列行群键，与聚合标识声明同源——
-// 配对键是「元数据文件」产出自己的声明，候选不分轨）
-const metadataIdentityCandidates = computed<AggIdentityCandidate[]>(() =>
-  aggIdentityCandidates(activeCondxRows.value)
-)
+// 分组绑定下拉条目（A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」+按所在目录选项）：
+// 分组区声明（capture/seqKey/directory 全列）+ 无 directory 声明时的虚拟
+//「按所在目录」项（选定即物化为 directory 声明）
+const metadataGroupOptions = computed<{ value: string; label: string }[]>(() => {
+  const out: { value: string; label: string }[] = []
+  const hasDirectory = groupDecls.value.some((d) => d.keySource === 'directory')
+  for (const d of groupDecls.value) {
+    out.push({ value: `decl:${d.uid}`, label: groupDeclOptionLabel(d) })
+  }
+  if (!hasDirectory) out.push({ value: 'dir:', label: '◇ 按所在目录分组' })
+  return out
+})
+
+// 当前分组绑定的下拉取值（decl:uid；未绑定=''——并用形态可省略）
+const mfBoundGroupValue = computed((): string => {
+  const d = groupDeclByUid(mfGroupingUid.value)
+  return d ? `decl:${d.uid}` : ''
+})
 
 // 产出区入口摘要（帧1「元数据文件（0）」/帧2 系统回应「元数据文件（1）：第 2 行
 // → 描述」，多目标连写「描述+标签」）
@@ -1160,34 +1398,43 @@ const metadataFileSummary = computed((): string =>
 )
 
 // 「元数据文件」产出保存闸门（纯函数派生；保存与预览共用——与内核
-// validateMetadataFileProduction/validatePairingKey 同口径）
-const metadataFileErrors = computed((): string[] =>
-  metadataFileFormErrors(activeCondxRows.value, metadataFileProduction.value, !!aggProduction.value)
-)
+// validateMetadataFileProduction/validatePairingKey 同口径；pairing=绑定声明的展开，
+// 未绑定且聚合在场=undefined〔并用可省略——分组随聚合并组〕）
+const metadataFileErrors = computed((): string[] => {
+  const mf = metadataFileProduction.value
+  const pairingDerived = mf ? groupDeclPairing(groupDeclByUid(mfGroupingUid.value)) : undefined
+  return metadataFileFormErrors(
+    activeCondxRows.value,
+    mf ? { pairing: pairingDerived, contentBindings: mf.contentBindings } : null,
+    !!aggProduction.value
+  )
+})
 
 function openMetadataDialog(): void {
   metadataDialogState.value = true
 }
 
-// 条目卡〔移除〕（元数据类别的产出移除入口；聚合类别恒卡不出——开窗清空勾选
-// 确定即回「元数据文件（0）」态）
+// 条目卡〔移除〕（产出移除入口——开窗清空勾选确定即移除）
 function removeMetadataFile(): void {
   metadataFileProduction.value = null
 }
 
-// 弹窗〔确定〕：绑定清单与配对键声明回写「元数据文件」产出（空清单=移除该
-// 产出——该规则行为回到现状；非空=落规则级 metadataFile 键）
-function onMetadataConfirm(bindings: ContentBindingForm[], pairing: PairingKeyForm | null): void {
+// 弹窗〔确定〕：绑定清单与分组绑定回写「元数据文件」产出（空清单=移除该
+// 产出——该规则行为回到现状；非空=落规则级 metadataFile 键——pairing 由绑定
+// 声明序列化映射）；虚拟「按所在目录」选定即物化为 directory 声明
+function onMetadataConfirm(bindings: ContentBindingForm[], groupingValue: string): void {
+  if (groupingValue === 'dir:') {
+    const decl: GroupDeclForm = { uid: groupDeclUidSeq++, keySource: 'directory', parts: [] }
+    groupDecls.value.push(decl)
+    mfGroupingUid.value = decl.uid
+  } else if (groupingValue.startsWith('decl:')) {
+    mfGroupingUid.value = Number(groupingValue.slice(5)) || null
+  } else {
+    mfGroupingUid.value = null
+  }
   metadataFileProduction.value = bindings.length
-    ? { pairing: pairing || undefined, contentBindings: cloneJSON(bindings) }
+    ? { contentBindings: cloneJSON(bindings) }
     : null
-}
-
-// 元数据类别产出区「+ 聚合成作品」（产出区平级入口·决策1）：加聚合产出即升级
-// 聚合类别形态（提取动作与聚合互斥，随类别切换清除）并直开分轨弹窗
-function upgradeToAggregate(): void {
-  if (!isAggregate.value) switchCategory('aggregate')
-  openTrackDialog()
 }
 
 // 条件卡〔编辑〕/〔+ 加条件〕开窗（顶层卡与组框内成员卡同一链路——成员卡经组框
@@ -1855,11 +2102,15 @@ function initFromProps(): void {
     // 内容，本组件 setup 态跨开关存留——每个字段都须重置后再按初值分支）
     condxJsonMode.value = false
     condxText.value = ''
-    // 聚合编辑态复位：类别按档案（新建缺省元数据；复制条目携类别与内容）；标识
-    // 与分轨从档案条目镜像
-    categoryInput.value = rule && rule.category === 'aggregate' ? 'aggregate' : 'metadata'
+    // 三子句编辑态复位：分组声明与产出绑定从档案键字段还原为声明（聚合
+    // identity→声明绑定聚合产出；映射 pairing→声明绑定元数据文件产出——两类
+    // 类别全部内容装进统一表单，类别步退役）
+    groupDecls.value = []
+    groupDeclUidSeq = 1
+    aggGroupingUid.value = null
+    mfGroupingUid.value = null
     const initIdentity = rule && Array.isArray(rule.identity) ? rule.identity : []
-    identityRows.value = initIdentity
+    const initIdentityParts = initIdentity
       .filter((p): p is { row: number; capture: string } => !!p && typeof p.row === 'number' && typeof p.capture === 'string')
       .map((p) => ({ row: p.row || 1, capture: p.capture }))
     const initAgg = rule && rule.aggregate ? rule.aggregate : null
@@ -1872,27 +2123,19 @@ function initFromProps(): void {
           companionUse: initAgg.companionUse || 'track'
         }
       : null
+    if (aggProduction.value) {
+      const decl = groupDeclFromIdentity(initIdentityParts, groupDeclUidSeq++)
+      if (decl) {
+        groupDecls.value.push(decl)
+        aggGroupingUid.value = decl.uid
+      }
+    }
     // 「元数据文件」产出装载（规则级 metadataFile 键——内容绑定已从 aggregate
     // 迁出，读写一律走本键；旧档 aggregate.contentBindings 由内核载入归一到
-    // 本键后经 rulesView 投影，前端不读旧键）
+    // 本键后经 rulesView 投影，前端不读旧键；pairing 还原为分组声明并绑定）
     const initMf = rule && rule.metadataFile ? rule.metadataFile : null
     metadataFileProduction.value = initMf
       ? {
-          pairing:
-            initMf.pairing && (initMf.pairing.mode === 'identity' || initMf.pairing.mode === 'directory')
-              ? {
-                  mode: initMf.pairing.mode,
-                  identity:
-                    initMf.pairing.mode === 'identity' && Array.isArray(initMf.pairing.identity)
-                      ? initMf.pairing.identity
-                          .filter(
-                            (p): p is { row: number; capture: string } =>
-                              !!p && typeof p.row === 'number' && typeof p.capture === 'string'
-                          )
-                          .map((p) => ({ row: p.row, capture: p.capture }))
-                      : undefined
-                }
-              : undefined,
           contentBindings: Array.isArray(initMf.contentBindings)
             ? initMf.contentBindings
                 .filter(
@@ -1903,6 +2146,22 @@ function initFromProps(): void {
             : undefined
         }
       : null
+    if (metadataFileProduction.value && initMf && initMf.pairing &&
+        (initMf.pairing.mode === 'identity' || initMf.pairing.mode === 'directory')) {
+      const parts = initMf.pairing.mode === 'identity' && Array.isArray(initMf.pairing.identity)
+        ? initMf.pairing.identity
+            .filter((p): p is { row: number; capture: string } => !!p && typeof p.row === 'number' && typeof p.capture === 'string')
+            .map((p) => ({ row: p.row || 1, capture: p.capture }))
+        : []
+      const decl = groupDeclFromPairing(
+        { mode: initMf.pairing.mode as PairingKeyForm['mode'], identity: parts.length ? parts : undefined },
+        groupDeclUidSeq++
+      )
+      if (decl) {
+        groupDecls.value.push(decl)
+        mfGroupingUid.value = decl.uid
+      }
+    }
     trackDialogState.value = false
     trackDraft.value = null
     metadataDialogState.value = false
@@ -1997,59 +2256,33 @@ function buildRulePayload(): RuleSavePayload | null {
   if (condxJsonMode.value) {
     if (condxError.value || !condxParsed.value) return null
   }
-  // 聚合规则载荷（类别专属闸门）：轨行结构/标识/分轨校验不过 → 标识与分轨区已
-  // 逐条标红，此处拦住不保存；提取动作与聚合类别互斥、恒空落档。「元数据文件」
-  // 产出（并用形态）闸门同拦，载荷落规则级 metadataFile 键
-  if (isAggregate.value) {
-    if (!condxJsonMode.value) {
-      const rowErr = condxRowsError(condxRows.value)
-      if (rowErr) {
-        condxError.value = rowErr
-        return null
-      }
-    }
-    if (aggErrors.value.length) return null
-    if (metadataFileErrors.value.length) return null
-    const rule = props.rule
-    return {
-      id: rule && !rule.isNew ? rule.id : '',
-      description: descInput.value,
-      source: (rule && rule.source) || 'manual',
-      enabled: enabledInput.value,
-      category: 'aggregate',
-      identity: identityRows.value.map((p) => ({ row: p.row, capture: p.capture })),
-      aggregate: aggProduction.value
-        ? {
-            workType: aggProduction.value.workType,
-            tracks: aggProduction.value.tracks.map((t) => ({ row: t.row, role: t.role })),
-            // 规则级处置维度恒归一 track（metadata 由行级指派合成表达——内核载入
-            // 对规则级 metadata 拒载；前端表单不出该值）
-            companionUse: 'track'
-          }
-        : null,
-      metadataFile: buildMetadataFilePayload(),
-      conditions: condxNormalizeRows(condxJsonMode.value ? condxParsed.value ?? [] : condxRows.value),
-      extractions: [],
-      synthesis: { dimPolicies: [], roles: [] }
+  // 条件行完整性闸门（v4·全类别统一）：行表校验不过 → 行内已标红，此处拦住
+  if (!condxJsonMode.value) {
+    const rowErr = condxRowsError(condxRows.value)
+    if (rowErr) {
+      condxError.value = rowErr
+      return null
     }
   }
-  // 条件行完整性闸门（v4）：行表校验不过（词表外/相邻占位/段界非法/附加缺
-  // 字段等）→ 行内已标红，此处拦住不保存
-  if (!condxJsonMode.value && condxRowsError(condxRows.value)) {
-    condxError.value = condxRowsError(condxRows.value)
-    return null
-  }
-  // 元数据类别行式底盘的模板尾内联扩展名守卫（决策8 甲案·与内核同口径）：
-  // 文件名行模板对去扩展名的文件名求值，尾字面白名单扩展名恒不命中——保存
-  // 拦截并指路「扩展名是」附加条件（结构化与 JSON 高级模式同拦）；聚合类别
-  // 由聚合面闸门（aggFormErrors「文件轨行」措辞）先行，此处不覆盖、聚合
-  // 路径零变化。
-  const metaTailExtErr = condxFileRowInlineExtError(
-    condxJsonMode.value ? condxParsed.value ?? [] : condxRows.value
-  )
-  if (metaTailExtErr) {
-    condxError.value = metaTailExtErr
-    return null
+  // 聚合面闸门（聚合产出在场才适用）：分组绑定（标识=绑定声明展开）/分轨
+  // 校验不过 → 产出区已逐条标红，此处拦住不保存
+  if (aggProduction.value && aggErrors.value.length) return null
+  // 「元数据文件」产出闸门：分组绑定/绑定行非法 → 产出区已逐条标红
+  if (metadataFileErrors.value.length) return null
+  // 未绑定分组声明拦截（微型闸门·三子句定稿轮）
+  if (groupDeclErrors.value.length) return null
+  // 模板尾内联扩展名守卫（决策8 甲案·与内核同口径）：文件名行模板对去扩展名
+  // 的文件名求值，尾字面白名单扩展名恒不命中——保存拦截并指路「扩展名是」
+  // 附加条件（结构化与 JSON 高级模式同拦）；聚合产出在场时由聚合面闸门
+  //（aggFormErrors「文件条件行」措辞）先行，此处不覆盖。
+  if (!aggProduction.value) {
+    const metaTailExtErr = condxFileRowInlineExtError(
+      condxJsonMode.value ? condxParsed.value ?? [] : condxRows.value
+    )
+    if (metaTailExtErr) {
+      condxError.value = metaTailExtErr
+      return null
+    }
   }
   // 保存载荷构造层统一执行旧词归一（{键} → {公共段}、{作品} → {作品标识}，
   // 语义等价）：结构化与
@@ -2067,14 +2300,13 @@ function buildRulePayload(): RuleSavePayload | null {
       return null
     }
     extractionsError.value = ''
-    // 占位词引用校验（JSON 模式聚合呈现）：引用未声明「行N·{词}」→ 行号化
-    // 错误就地列出
+    // 占位词引用校验（JSON 模式）：引用未声明「行N·{词}」→ 行号化错误就地列出
     const problems: string[] = []
     ;(parsed.value as ExtractionActionJSON[]).forEach((action, i) => {
       if (action && action.from === 'capture' && action.captureName) {
         const rowNo = action.row || 1
         if (!declaredCaptures.value.has(`${rowNo}/${action.captureName}`)) {
-          problems.push(`第 ${i + 1} 行引用占位词「第 ${rowNo} 行·{${action.captureName}}」未在上半声明`)
+          problems.push(`第 ${i + 1} 行引用占位词「第 ${rowNo} 行·{${action.captureName}}」未在匹配区声明`)
         }
       }
       if (action && action.from === 'refCapture') {
@@ -2095,15 +2327,28 @@ function buildRulePayload(): RuleSavePayload | null {
     if (extractionRows.value.some((row) => extractionRowHint(row))) return null
     extractions = rowsToActions()
   }
-  // 「元数据文件」产出闸门（仅映射形态可单独在场）：配对键缺失/绑定非法 →
-  // 产出区已逐条标红，此处拦住不保存
-  if (metadataFileErrors.value.length) return null
   const rule = props.rule
+  // 落档类别推导（决策9：类别步退役——有「聚合成作品」产出=aggregate，否则
+  // metadata 键不落档）；聚合声明三件（category/identity/aggregate）随推导落档，
+  // identity=绑定分组声明的展开；提取动作与聚合并存（决策10 解除互斥）
   return {
     id: rule && !rule.isNew ? rule.id : '',
     description: descInput.value,
     source: (rule && rule.source) || 'manual',
     enabled: enabledInput.value,
+    category: aggProduction.value ? 'aggregate' : undefined,
+    identity: aggProduction.value
+      ? aggIdentityParts.value.map((p) => ({ row: p.row, capture: p.capture }))
+      : undefined,
+    aggregate: aggProduction.value
+      ? {
+          workType: aggProduction.value.workType,
+          tracks: aggProduction.value.tracks.map((t) => ({ row: t.row, role: t.role })),
+          // 规则级处置维度恒归一 track（metadata 由行级指派合成表达——内核载入
+          // 对规则级 metadata 拒载；前端表单不出该值）
+          companionUse: 'track'
+        }
+      : undefined,
     metadataFile: buildMetadataFilePayload(),
     conditions: conditions,
     extractions: extractions,
@@ -2114,22 +2359,14 @@ function buildRulePayload(): RuleSavePayload | null {
   }
 }
 
-// 「元数据文件」产出的保存载荷构造（两类类别共用）：未加产出=undefined 键不
-// 落档（omitempty 镜像）；配对键按形态展开（标识配对携部分、目录配对不携带、
-// 未声明不落键）；绑定空数组不落键（该形态由闸门拦，构造层兜底不产出空键）
+// 「元数据文件」产出的保存载荷构造：未加产出=undefined 键不落档（omitempty
+// 镜像）；配对键=绑定分组声明的序列化映射（capture/seqKey→identity 形态、
+// directory→directory 形态、未绑定且聚合在场=不落键〔并用可省略〕）；绑定空
+// 数组不落键（该形态由闸门拦，构造层兜底不产出空键）
 function buildMetadataFilePayload(): RuleSavePayload['metadataFile'] {
   const mf = metadataFileProduction.value
   if (!mf) return undefined
-  const pairing =
-    mf.pairing && (mf.pairing.mode === 'identity' || mf.pairing.mode === 'directory')
-      ? {
-          mode: mf.pairing.mode,
-          identity:
-            mf.pairing.mode === 'identity' && (mf.pairing.identity || []).length
-              ? mf.pairing.identity.map((p) => ({ row: p.row, capture: p.capture }))
-              : undefined
-        }
-      : undefined
+  const pairing = groupDeclPairing(groupDeclByUid(mfGroupingUid.value))
   const contentBindings = (mf.contentBindings || []).map((b) => ({ row: b.row, dimension: b.dimension }))
   return { pairing, contentBindings }
 }
@@ -2373,7 +2610,7 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   padding: 8px 0;
 }
 
-/* 产出卡摘要行首的「▸」记号 */
+/* 产出卡摘要行首的「◇」记号（条目符号统一 ◇·D 帧3） */
 .li-out-mark {
   flex: none;
   color: var(--app-text-secondary);
@@ -2920,12 +3157,17 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   background: var(--el-color-primary-light-9);
 }
 
-/* 轨道分配行：「轨 N（模板+扩展名）→ 角色下拉」（帧3） */
+/* 轨道分配行：「第 N 行 · 模板+扩展名 → 角色下拉」（D 帧2） */
 .li-red-agg-track {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+/* 分组绑定行（D 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」） */
+.li-red-agg-grouping {
+  margin-bottom: 4px;
 }
 
 .li-red-agg-role {

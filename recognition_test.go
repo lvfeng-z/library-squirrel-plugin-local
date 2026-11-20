@@ -4177,12 +4177,14 @@ func TestSnapshotGroupMembersNaturalOrder(t *testing.T) {
 }
 
 // TestAggregationCompanionRowGrouping 混合规则（轨行+说明行）并组锚：被指派为
-// 元数据文件的行（内容绑定勾选、未分配轨道）命中的文件按标识等值归进作品
-// ——有归属、无轨、带说明成员标记；未指派未分轨的行命中不构成成员（两处
-// 皆无=不参与成员判定）；说明成员不计必含轨单位——无必含命中的组不成立，
-// 说明文件维持独立作品。
+// 元数据文件的行（内容绑定勾选、未分配轨道）命中的文件经配对键归并进作品
+// （决策12③ 翻新：绑定行不再经聚合标识入组——聚合成员=轨行命中；说明成员
+// 由配对段产出，配对键缺省的并用规则按归一形态=聚合标识取键）——有归属、
+// 无轨、带说明成员标记、随作品类型；未指派未分轨的行命中不构成聚合成员，
+// 但其文件作为未收编主导参与配对（聚合未覆盖的行命中按单用语义承载）——
+// 与已收编主导同组时配对目标跨件，守卫拒绝、说明文件维持独立作品（I3）。
 func TestAggregationCompanionRowGrouping(t *testing.T) {
-	files := aggScanFiles("d/ep01.mp4", "d/ep01.zh.srt", "d/ep01.nfo", "d/ep01.log", "s/only.nfo")
+	files := aggScanFiles("d/ep01.mp4", "d/ep01.zh.srt", "d/ep01.nfo", "s/only.nfo")
 	rule := RuleEntry{
 		ID:       "agg-mixed",
 		Enabled:  true,
@@ -4206,6 +4208,8 @@ func TestAggregationCompanionRowGrouping(t *testing.T) {
 			},
 		},
 		MetadataFile: &MetadataFileProduction{
+			// 配对键缺省=归一形态（identity:=聚合标识 {row1,work}——运行时
+			// 镜像与载入归一同式）。
 			ContentBindings: []ContentBinding{{Row: 3, Dimension: DimDescription}},
 		},
 	}
@@ -4225,18 +4229,36 @@ func TestAggregationCompanionRowGrouping(t *testing.T) {
 	}
 	nfo := aggConclusionOf(t, conclusions, "d/ep01.nfo")
 	if nfo.AggWorkKey != "f:d/ep01.mp4" || nfo.AggTrackRole != "" || !nfo.AggCompanion {
-		t.Fatalf("说明行成员应归进作品（无轨+说明成员标记）: key=%q role=%q companion=%v",
+		t.Fatalf("说明行成员应经配对键归并进作品（无轨+说明成员标记）: key=%q role=%q companion=%v",
 			nfo.AggWorkKey, nfo.AggTrackRole, nfo.AggCompanion)
 	}
-	logFile := aggConclusionOf(t, conclusions, "d/ep01.log")
+	lone := aggConclusionOf(t, conclusions, "s/only.nfo")
+	if lone.AggWorkKey != "" || lone.AggCompanion {
+		t.Fatalf("无主导同组的说明文件不应独立成聚合作品: key=%q companion=%v",
+			lone.AggWorkKey, lone.AggCompanion)
+	}
+
+	// 未指派未分轨的行（.log）命中文件不构成聚合成员（轨道/绑定两处指派皆
+	// 无）；配对面它承载未收编主导候选——与已收编主导（mp4/srt 同属 W）同配
+	// 对键时目标集跨件（W ∪ 主导文件自身作品），守卫拒绝、说明文件维持独立
+	// 作品（I3 跨件拒绝的正例锚；主导候选维持独立不受扰）。
+	mixed := aggScanFiles("d/ep01.mp4", "d/ep01.zh.srt", "d/ep01.nfo", "d/ep01.log")
+	mixedConclusions := MergedRecognition(mixed, rules, nil, nil)
+	runAggregationOnConclusions(mixedConclusions, mixed, mixed, rules, nil, testAggTypeIndex())
+	logFile := aggConclusionOf(t, mixedConclusions, "d/ep01.log")
 	if logFile.AggWorkKey != "" || logFile.AggCompanion {
 		t.Fatalf("未指派未分轨的行命中不应入组: key=%q companion=%v",
 			logFile.AggWorkKey, logFile.AggCompanion)
 	}
-	lone := aggConclusionOf(t, conclusions, "s/only.nfo")
-	if lone.AggWorkKey != "" || lone.AggCompanion {
-		t.Fatalf("无必含轨命中的说明文件不应独立成聚合作品: key=%q companion=%v",
-			lone.AggWorkKey, lone.AggCompanion)
+	guarded := aggConclusionOf(t, mixedConclusions, "d/ep01.nfo")
+	if guarded.AggWorkKey != "" || guarded.AggCompanion {
+		t.Fatalf("主导跨件（收编主导+未收编主导同键）的说明文件应守卫拒绝、维持独立作品: key=%q companion=%v",
+			guarded.AggWorkKey, guarded.AggCompanion)
+	}
+	mixedVideo := aggConclusionOf(t, mixedConclusions, "d/ep01.mp4")
+	if mixedVideo.AggWorkKey != "f:d/ep01.mp4" || mixedVideo.AggTrackRole != sdkdto.StoreRoleVideoMain {
+		t.Fatalf("守卫拒绝不应扰动主导的聚合结论: key=%q role=%q",
+			mixedVideo.AggWorkKey, mixedVideo.AggTrackRole)
 	}
 }
 
@@ -4328,7 +4350,7 @@ func TestAggregationCompanionSnapshotMark(t *testing.T) {
 }
 
 // TestAggregationPresetImageCompanionSeed 预置种子「单图+说明文本」收编边界锚
-//（决策4 甲·纯映射形态）：聚合归属优先——同名图片+文本对与孤立 txt 均由
+// （决策4 甲·纯映射形态）：聚合归属优先——同名图片+文本对与孤立 txt 均由
 // 图文种子聚合收编（图文种子正文行 {作品} 模板吞任意主干名，孤立 txt 单必含
 // 轨成组为单正文 article 作品，目录配对对其不可达；同名对=正文轨主导+内嵌图
 // 轨，与「一图一文本」种子现状行为一致——聚合段在先、映射不夺已归属成员）；
@@ -4583,7 +4605,7 @@ func imageTypeSpec() *sdkdto.ResourceTypeSpec {
 }
 
 // newWorkMergeConflictSession 跨文件并入冲突会话环境：同名 jpg+txt 聚合成组
-//（txt 行绑定→作者、说明成员）+ 主导常量作者——主导推导值与说明内容值互异，
+// （txt 行绑定→作者、说明成员）+ 主导常量作者——主导推导值与说明内容值互异，
 // 冲突只在全景投影呈现；返回完成首轮全量识别的管理器与库根。
 func newWorkMergeConflictSession(t *testing.T) (*SessionManager, string) {
 	t.Helper()

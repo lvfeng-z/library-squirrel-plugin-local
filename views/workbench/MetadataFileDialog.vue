@@ -1,12 +1,11 @@
 <template>
-  <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3）：「元数据文件」
-       产出的唯一指派面——勾选本规则条件行+为每行勾选内容去向（一行可多选，
-       整段同时写入所有勾选维度）+声明配对方式（标识配对/目录配对，映射单用时
-       必填）。行清单与编辑弹窗条件行区同源（父组件组装传入）；轨道随行标注随
-       聚合在场才显示（并用形态=BO 剧本1 帧2 画面叠加配对方式区，其余不变；
-       映射单用时行无轨概念）。帧3 失败路径=勾选行未选去向→确定被拦（正文只出
-       ⚠ 行+[知道了]，回列表勾选保留）。壳=AutoHeightDialog（主程序全局注册，
-       RuleEditDialog 同款、无需 import）。 -->
+  <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3·三子句定稿轮）：
+       「元数据文件」产出的唯一指派面——勾选本规则条件行+为每行勾选内容去向（一行
+       可多选，整段同时写入所有勾选维度）+分组绑定（分组区声明下拉+按所在目录
+       选项，映射单用时必填）。行清单与编辑弹窗条件行区同源（父组件组装传入）；
+       轨道随行标注随聚合产出在场才显示。帧3 失败路径=勾选行未选去向→确定被拦
+      （正文只出 ⚠ 行+[知道了]，回列表勾选保留）。壳=AutoHeightDialog（主程序
+       全局注册，RuleEditDialog 同款、无需 import）。 -->
   <AutoHeightDialog
     v-model:state="visible"
     width="min(620px, 94vw)"
@@ -45,63 +44,23 @@
         <span class="li-mfd-dest-note">（整段）</span>
       </div>
       <p v-if="!checkedDrafts.length" class="li-mfd-dest-empty">（未勾选任何行——不指派时该规则行为与现状完全一致）</p>
-      <!-- 配对方式区（剧本A 帧2「配对方式：[标识配对▾]」）：映射单用时必选（保存
-           闸门兜底）；并用时可清空=省略声明（分组随聚合并组）。标识配对下亮出
-           配对键部分行（「配对：第 1 行 · {作品}+{序号}」形态，候选=全部条件行
-           的命名捕获+序列行群键） -->
+      <!-- 分组绑定区（剧本A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」·三子句定稿轮）：
+           绑定分组区声明（下拉可换绑）或「按所在目录」虚拟项（选定即物化为
+           directory 声明）；映射单用时必选（保存闸门兜底）、并用时可清空=省略
+           声明（分组随聚合并组） -->
       <div class="li-mfd-pair">
-        <span class="li-mfd-pair-title">配对方式：</span>
+        <span class="li-mfd-pair-title">分组：</span>
         <el-select
-          v-model="pairingMode"
+          v-model="groupingValue"
           size="small"
           class="li-mfd-pair-select"
           clearable
-          :placeholder="hasAggregate ? '未声明（随聚合并组）' : '选择配对方式'"
-          @change="onPairingModeChange"
+          :placeholder="hasAggregate ? '未声明（随聚合并组）' : '选择分组'"
         >
-          <el-option v-for="m in PAIRING_MODE_OPTIONS" :key="m.value" :label="m.label" :value="m.value" />
+          <el-option v-for="o in groupOptions" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </div>
-      <div v-if="pairingMode === 'identity'" class="li-mfd-pair-line">
-        <span class="li-mfd-pair-label">配对：</span>
-        <template v-for="(part, pi) in pairingParts" :key="pi">
-          <span v-if="pi > 0" class="li-mfd-pair-plus">+</span>
-          <el-select
-            :model-value="part.capture ? `${part.row}/${part.capture}` : ''"
-            size="small"
-            class="li-mfd-pair-part"
-            placeholder="选占位词捕获"
-            @update:model-value="setPairingPart(pi, $event)"
-          >
-            <el-option-group v-for="g in pairingGroups" :key="g.row" :label="`第 ${g.row} 行`">
-              <el-option
-                v-for="c in g.candidates"
-                :key="`${g.row}/${c.group}`"
-                :label="`第 ${g.row} 行 · {${c.word}}`"
-                :value="`${g.row}/${c.group}`"
-              />
-            </el-option-group>
-            <!-- 失效捕获残影选项（条件行模板改写后原引用不在声明中）：仅供呈现，
-                 不可重选（保存闸门拦） -->
-            <el-option
-              v-for="o in pairingStaleOptions"
-              :key="`stale-${o.value}`"
-              :label="o.label"
-              :value="o.value"
-              disabled
-            />
-          </el-select>
-          <el-button
-            v-if="pairingParts.length > 1"
-            size="small"
-            text
-            type="danger"
-            @click="pairingParts.splice(pi, 1)"
-          >删</el-button>
-        </template>
-        <el-button size="small" text @click="addPairingPart">+ 加一部分</el-button>
-      </div>
-      <p class="li-mfd-hint">ℹ 说明文件归进配对作品、不导入；若本规则另有聚合产出，命中行照常作为轨导入，内容来源叠加</p>
+      <p class="li-mfd-hint">ℹ 说明文件归进分组作品、不导入；若本规则另有聚合成作品产出，命中行照常作为轨导入，内容来源叠加</p>
     </div>
     <template #footer>
       <div class="li-mfd-actions">
@@ -118,26 +77,20 @@
 </template>
 
 <script setup lang="ts">
-// 元数据文件弹窗（元数据文件映射与聚合解耦·阶段3 前端镜像）：「元数据文件」
+// 元数据文件弹窗（元数据文件映射与聚合解耦·三子句定稿轮）：「元数据文件」
 // 产出的唯一指派面。行身份由两处指派合成——分轨入口（并用时轨道行=导入，随行
 // 标注轨道词）与本弹窗勾选（内容产出元数据）；两者兼有=双重身份（照常导入）；
-// 仅勾选未分配轨道=伴随说明文件处置（归进配对作品、无轨、不导入、不独立成
-// 作品）。配对方式是「元数据文件」产出自己的声明——与聚合的作品标识各自独立、
-// 并用互不牵连：标识配对=配对键部分（行号+捕获名）拼成复合标识，目录配对=所在
-// 目录即配对键；映射单用（无聚合产出）时必选（保存闸门兜底，本弹窗不拦）、
-// 并用时可清空省略（分组随聚合并组）。确定把绑定清单（一行多目标=同行多条目）
-// 与配对键声明经 confirm 回写父组件（规则级 metadataFile 落档）；取消不保存。
+// 仅勾选未分配轨道=伴随说明文件处置（归进分组作品、无轨、不导入、不独立成
+// 作品）。分组绑定是「元数据文件」产出自己的声明绑定——与聚合产出的分组绑定
+// 各自独立、并用互不牵连（序列化映射：capture/seqKey 声明→pairing identity
+// 形态、directory 声明→pairing directory 形态，父组件物化与序列化）；映射
+// 单用（无聚合产出）时必选（保存闸门兜底，本弹窗不拦）、并用时可清空省略
+//（分组随聚合并组）。确定把绑定清单（一行多目标=同行多条目）与分组绑定值经
+// confirm 回写父组件；取消不保存。
 import { ref, computed, watch } from 'vue'
 import {
   CONTENT_BINDING_DIMENSIONS,
-  PAIRING_MODE_OPTIONS,
-  aggIdentityWordOf,
-  cloneJSON,
-  type ContentBindingForm,
-  type IdentityPartForm,
-  type PairingKeyForm,
-  type PairingModeForm,
-  type AggIdentityCandidate
+  type ContentBindingForm
 } from './ruleFormModel'
 
 const props = defineProps<{
@@ -147,24 +100,24 @@ const props = defineProps<{
   // 行清单（与编辑弹窗条件行区同源）：no=行号、text=模板形态（扩展名附加条件
   // 括注尾接）、track=轨道短词（空=未分配轨道）
   rows: { no: number; text: string; track: string }[]
-  // 轨道随行标注的显示开关（聚合形态=true：BO 剧本1 帧2「（轨道：视频）」
+  // 轨道随行标注的显示开关（聚合产出在场=true：BO 剧本1 帧2「（轨道：视频）」
   //「（未分配轨道）」；映射单用=false——行无轨概念，不渲染标注）
   showTracks: boolean
   // 已落档内容绑定（开窗预勾选+带入去向；一行多目标=同行多条目）
   bindings: ContentBindingForm[]
-  // 已落档配对键声明（null=未声明——并用形态的省略态）
-  pairing: PairingKeyForm | null
-  // 聚合产出是否在场（并用=true：配对方式可清空省略；映射单用=false：必选，
+  // 已绑定的分组声明下拉取值（decl:uid；''=未绑定——并用形态的省略态）
+  boundGroupValue: string
+  // 分组绑定下拉条目（父组件按分组区声明态组装传入：decl:uid 项+按所在目录
+  // 虚拟项 dir:）
+  groupOptions: { value: string; label: string }[]
+  // 聚合产出是否在场（并用=true：分组绑定可清空省略；映射单用=false：必选，
   // 保存闸门兜底）
   hasAggregate: boolean
-  // 配对键部分候选（全部条件行的命名捕获+序列行群键，父组件按当前条件行态
-  // 组装传入）
-  identityCandidates: AggIdentityCandidate[]
 }>()
 
 const emit = defineEmits<{
   (e: 'update:state', value: boolean): void
-  (e: 'confirm', bindings: ContentBindingForm[], pairing: PairingKeyForm | null): void
+  (e: 'confirm', bindings: ContentBindingForm[], groupingValue: string): void
 }>()
 
 interface MetaDraftRow {
@@ -179,10 +132,8 @@ interface MetaDraftRow {
 const drafts = ref<MetaDraftRow[]>([])
 // 帧3 拦截态：首个「已勾选未选去向」的行号（0=正常行清单态）
 const blockedRow = ref(0)
-// 配对方式草稿（''=未声明——并用形态的省略态；单用时保存闸门拦）
-const pairingMode = ref<PairingModeForm | ''>('')
-// 标识配对的配对键部分草稿（行号+捕获名；目录配对不携带）
-const pairingParts = ref<IdentityPartForm[]>([])
+// 分组绑定草稿（''=未声明——并用形态的省略态；单用时保存闸门拦）
+const groupingValue = ref('')
 
 const visible = computed({
   get: (): boolean => props.state,
@@ -190,7 +141,7 @@ const visible = computed({
 })
 
 // 开窗取初值：行清单=父组件传入的当前条件行区态；已绑定行预勾选并带入去向
-//（同行多条目=多目标并入同一行的勾选集）；配对键按落档声明带入
+//（同行多条目=多目标并入同一行的勾选集）；分组绑定按落档绑定值带入
 watch(
   () => props.state,
   (open) => {
@@ -209,11 +160,7 @@ watch(
       checked: (bound.get(r.no) || []).length > 0,
       dims: bound.get(r.no) || []
     }))
-    pairingMode.value = props.pairing && props.pairing.mode ? props.pairing.mode : ''
-    pairingParts.value =
-      props.pairing && props.pairing.mode === 'identity' && Array.isArray(props.pairing.identity)
-        ? cloneJSON(props.pairing.identity)
-        : []
+    groupingValue.value = props.boundGroupValue || ''
     blockedRow.value = 0
   },
   { immediate: true }
@@ -229,69 +176,14 @@ function toggleDraftDim(r: MetaDraftRow, dim: string): void {
   else r.dims.push(dim)
 }
 
-// 配对键候选分组（按行号）：文件名捕获/目录行捕获/序列行群键同列
-const pairingGroups = computed<{ row: number; candidates: AggIdentityCandidate[] }[]>(() => {
-  const out: { row: number; candidates: AggIdentityCandidate[] }[] = []
-  for (const c of props.identityCandidates || []) {
-    const last = out[out.length - 1]
-    if (last && last.row === c.row) last.candidates.push(c)
-    else out.push({ row: c.row, candidates: [c] })
-  }
-  return out
-})
-
-// 失效捕获残影选项（条件行模板改写后原引用不在声明中）：仅供行上呈现、不可重选
-const pairingStaleOptions = computed<{ value: string; label: string }[]>(() => {
-  const declared = new Set(
-    pairingGroups.value.flatMap((g) => g.candidates.map((c) => `${g.row}/${c.group}`))
-  )
-  const out: { value: string; label: string }[] = []
-  const seen = new Set<string>()
-  for (const p of pairingParts.value) {
-    const key = `${p.row}/${p.capture}`
-    if (!p.capture || declared.has(key) || seen.has(key)) continue
-    seen.add(key)
-    out.push({ value: key, label: `第 ${p.row} 行 · {${aggIdentityWordOf(p.capture)}}` })
-  }
-  return out
-})
-
-// 配对方式切换：切到标识配对而无部分时缺省预置首个候选（无候选时空选、保存
-// 闸门提示）；切到目录配对清空部分（目录配对不携带标识部分）
-function onPairingModeChange(mode: PairingModeForm | ''): void {
-  if (mode === 'identity' && !pairingParts.value.length) {
-    const first = (props.identityCandidates || [])[0]
-    pairingParts.value = [first ? { row: first.row, capture: first.group } : { row: 1, capture: '' }]
-  }
-  if (mode === 'directory') {
-    pairingParts.value = []
-  }
-}
-
-// 配对键部分取值拆装（值编码 行号/捕获名，从左拆一刀）
-function setPairingPart(pi: number, value: string): void {
-  const idx = value.indexOf('/')
-  if (idx < 0) return
-  const part = pairingParts.value[pi]
-  if (!part) return
-  part.row = Number(value.slice(0, idx)) || 1
-  part.capture = value.slice(idx + 1)
-}
-
-// 加一部分：缺省选中首个候选（无候选时空选、保存闸门提示）
-function addPairingPart(): void {
-  const first = (props.identityCandidates || [])[0]
-  pairingParts.value.push(first ? { row: first.row, capture: first.group } : { row: 1, capture: '' })
-}
-
 function cancel(): void {
   emit('update:state', false)
 }
 
-// 确定（帧2 手势=勾选→选去向→选配对方式→单次点）：每行勾选必须配至少一个
+// 确定（帧2 手势=勾选→选去向→绑分组→单次点）：每行勾选必须配至少一个
 // 内容去向——首个未选行进帧3 拦截态（弹窗留在原地、勾选保留，补选后确定照常）；
 // 全配齐则回写绑定清单（一行多目标=按枚举序展开为同行多条目；空清单=清除指派，
-// 该规则行为回到现状）与配对键声明（未声明=null——并用省略态合法、单用由保存
+// 该规则行为回到现状）与分组绑定值（''=未声明——并用省略态合法、单用由保存
 // 闸门拦）并关窗
 function confirm(): void {
   const first = checkedDrafts.value.find((r) => !r.dims.length)
@@ -305,13 +197,7 @@ function confirm(): void {
       if (r.dims.indexOf(d.value) >= 0) bindings.push({ row: r.no, dimension: d.value })
     }
   }
-  let pairing: PairingKeyForm | null = null
-  if (pairingMode.value === 'identity') {
-    pairing = { mode: 'identity', identity: cloneJSON(pairingParts.value) }
-  } else if (pairingMode.value === 'directory') {
-    pairing = { mode: 'directory' }
-  }
-  emit('confirm', bindings, pairing)
+  emit('confirm', bindings, groupingValue.value || '')
   emit('update:state', false)
 }
 </script>
@@ -425,8 +311,7 @@ function confirm(): void {
   color: var(--app-text-secondary);
 }
 
-/* 配对方式区（剧本A 帧2）：「配对方式：[标识配对▾]」+ 标识配对下的配对键
-   部分行（「配对：第 1 行 · {作品}+{序号}」） */
+/* 分组绑定区（剧本A 帧2）：「分组：[◇ 按 {作品}+{序号} 分组▾]」 */
 .li-mfd-pair {
   display: flex;
   align-items: center;
@@ -441,33 +326,10 @@ function confirm(): void {
 }
 
 .li-mfd-pair-select {
-  width: 200px;
+  width: 260px;
 }
 
-.li-mfd-pair-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.li-mfd-pair-label {
-  flex: none;
-  font-size: 13px;
-  color: var(--app-text-primary);
-}
-
-.li-mfd-pair-plus {
-  flex: none;
-  font-size: 12px;
-  color: var(--app-text-regular);
-}
-
-.li-mfd-pair-part {
-  width: 190px;
-}
-
-/* ℹ 提示（帧2：配对归并语义+并用叠加口径） */
+/* ℹ 提示（帧2：分组归并语义+并用叠加口径） */
 .li-mfd-hint {
   margin: 4px 0 0;
   font-size: 12px;

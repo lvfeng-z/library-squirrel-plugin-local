@@ -1273,6 +1273,48 @@ func countCondxRows(rows []CondxRow) int {
 	return n
 }
 
+// condxLeafRow 条件行树的先序展平叶子行（括号子组递归内层；行级非行照收）：
+// row 为叶子行引用（含行级非标记），no 为全局行号（1 起先序编号，与
+// compileCondxRow 的 counter 推进一致——组行占其组内首行号，后续行接续组内
+// 展平计数；countCondxRows 即叶子行总数）。
+type condxLeafRow struct {
+	row *CondxRow
+	no  int
+}
+
+// condxLeafRowsOf 条件行列表的先序展平叶子行序列（行号 1..N 连续）：括号
+// 子组递归下潜、组结构不产叶子行（布尔组合由 aggregateBooleanGate 消费整条
+// 求值）；供聚合/配对/内容绑定段的行级命中寻址（决策10：行级命中照常按行）。
+func condxLeafRowsOf(rows []CondxRow) []condxLeafRow {
+	var out []condxLeafRow
+	var walk func(list []CondxRow)
+	walk = func(list []CondxRow) {
+		for i := range list {
+			row := &list[i]
+			if row.Condition != nil {
+				out = append(out, condxLeafRow{row: row, no: len(out) + 1})
+				continue
+			}
+			walk(row.Group)
+		}
+	}
+	walk(rows)
+	return out
+}
+
+// condxHasBooleanShape 报告条件行树是否含括号子组或行级非（决策10 放开的
+// 布尔组合形态）：在场时聚合/配对段的成员判定在行命中池之上加整条布尔求值
+// 门（命中集消费）；纯平行行（无括号无行级非——存量聚合/配对规则的现状
+// 形态）不设门，维持行命中池 OR 汇聚的既有语义（连接词不参与成员判定）。
+func condxHasBooleanShape(rows []CondxRow) bool {
+	for i := range rows {
+		if rows[i].Negated || len(rows[i].Group) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // compileCondxRows 把行列表编译为模式树：且连接紧于或连接（或分支=按 or 切段，
 // 段内 and 链），括号子组最紧，单子归一，行级非包裹整行——与前端行式底盘的
 // 组合语义一致（前端 rowsToTree 的内核侧锚定实现）。行号（先序展平，1 起）

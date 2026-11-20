@@ -136,9 +136,10 @@ func TestValidateMetadataFileTplTailExt(t *testing.T) {
 	if _, err = ruleFromJSON(dirEntry); err != nil {
 		t.Fatalf("dir 目标行带点尾不应误报: %v", err)
 	}
-	// 聚合路径零变化：聚合条目同形态由聚合守卫拦截（「文件轨行」措辞）
+	// 聚合路径零变化：聚合条目同形态由聚合守卫拦截（「文件条件行」措辞——
+	// 决策10 词汇 sweep：轨行→条件行）
 	aggErr := validateAggregateEntry(aggTailExtEntry("agg-dead-mp4", CondxTargetFile, "{任意} - {任意}({标题}).mp4", nil, "title"))
-	if aggErr == nil || !strings.Contains(aggErr.Error(), "文件轨行模板尾部误写扩展名 .mp4") {
+	if aggErr == nil || !strings.Contains(aggErr.Error(), "文件条件行模板尾部误写扩展名 .mp4") {
 		t.Fatalf("聚合守卫应维持原措辞拦截: %v", aggErr)
 	}
 }
