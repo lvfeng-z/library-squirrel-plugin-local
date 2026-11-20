@@ -216,9 +216,9 @@
                 @mouseleave="hoverAggKey = ''"
               >
                 <div class="li-ws-list-spacer" :style="{ height: `${visibleRange.start * ROW_H}px` }"></div>
-                <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 自身轨道标（聚合成员，未配对
+                <!-- 行 = 选择复选（作品级）+ 状态点 + 路径 + 自身轨道标（聚合成员，无聚合归属
                      行无标）+ 声明/线索摘要 + 差异标 + 已赋值标；悬停聚合成员行→同作品
-                     其他成员行整行高亮（aggWorkKey 联动，未配对行无联动）；行点击 =
+                     其他成员行整行高亮（aggWorkKey 联动，无聚合归属行无联动）；行点击 =
                      选中联动右栏（选中键 = 文件相对路径），与复选不互斥 -->
                 <div
                   v-for="row in visibleFiles"
@@ -255,10 +255,6 @@
                     <!-- 行详情·内容采集状态（剧本1 帧8）：被指派行命中非文本文件
                          等场景的可见原因 -->
                     <span v-if="row.contentState" class="li-ws-row-contentstate">详情：{{ companionContentStateText(row.contentState) }}</span>
-                    <!-- 行详情·目录配对守卫拒绝（剧本B 帧4）：说明成员候选行参与
-                         目录配对、组内主导候选多于一个被守卫拒绝——可见原因携带
-                         主导候选数 -->
-                    <span v-if="row.pairingGuardLeads" class="li-ws-row-contentstate">详情：目录内有 {{ row.pairingGuardLeads }} 个主导候选，目录配对未成立，说明文件维持独立作品</span>
                     <span v-if="row.assigned" class="li-ws-row-assigned">已赋值</span>
                   </span>
                 </div>
@@ -328,8 +324,6 @@
                       <span v-if="row.file.pendingDims && row.file.pendingDims.length" class="li-ws-row-pending">待裁决:{{ row.file.pendingDims.join('/') }}</span>
                       <!-- 行详情·内容采集状态（剧本1 帧8）：与平铺行同款 -->
                       <span v-if="row.file.contentState" class="li-ws-row-contentstate">详情：{{ companionContentStateText(row.file.contentState) }}</span>
-                      <!-- 行详情·目录配对守卫拒绝（剧本B 帧4）：与平铺行同款 -->
-                      <span v-if="row.file.pairingGuardLeads" class="li-ws-row-contentstate">详情：目录内有 {{ row.file.pairingGuardLeads }} 个主导候选，目录配对未成立，说明文件维持独立作品</span>
                       <span v-if="row.file.assigned" class="li-ws-row-assigned">已赋值</span>
                     </span>
                   </div>
@@ -678,13 +672,22 @@
                 </div>
                 <div class="li-ws-sec">
                   <h4 class="li-ws-sec-title">识别结果</h4>
-                  <!-- 跨文件并入冲突·待裁决（剧本2 帧3/帧4）：主导文件结论 × 伴随说明
-                       成员声明同维不同值——「待裁决（A：vA ｜ B：vB）」两来源各带一枚
-                       快裁键（点=接既有裁决/会话赋值通路：按文件+维度写会话赋值、增量
-                       重识别后终选更新，帧4「（裁决：采用说明文件）」附注随之呈现）；
-                       识别期同维冲突仍由下方解析面板的既有待裁决区承载 -->
-                  <div v-for="p in contentPendingItems" :key="`cp-${p.dimension}`" class="li-ws-decl is-content-pending">
-                    <span class="li-ws-decl-main">{{ dimLabel(p.dimension) }}　待裁决（{{ pendingCandidatesText(p) }}）</span>
+                  <!-- 跨文件并入冲突·待裁决（剧本2 帧3/帧4·剧本B 帧4）：主导文件
+                       结论 × 伴随说明成员声明同维不同值——两来源各带一枚快裁键
+                       （点=接既有裁决/会话赋值通路：按文件+维度写会话赋值、增量
+                       重识别后终选更新，帧4「（裁决：采用说明文件）」附注随之
+                       呈现）；识别期同维冲突仍由下方解析面板的既有待裁决区承载。
+                       双形态：内容来源候选 ≥2（扇出形态——多份说明内容同维候选，
+                       来源词同为「说明文件」不可辨，剧本B 帧4）＝清单形态
+                       「维度（N 个候选，待裁决）：」+逐候选「· 来源文件名：值」；
+                       其余（主导推导×说明并入，BO 剧本2 帧3）＝行内形态
+                       「待裁决（A：vA ｜ B：vB）」逐字不变 -->
+                  <div v-for="p in contentPendingItems" :key="`cp-${p.dimension}`" class="li-ws-decl is-content-pending" :class="{ 'is-content-pending-list': pendingListMode(p) }">
+                    <span v-if="pendingListMode(p)" class="li-ws-decl-main">{{ dimLabel(p.dimension) }}（{{ (p.candidates || []).length }} 个候选，待裁决）：</span>
+                    <span v-else class="li-ws-decl-main">{{ dimLabel(p.dimension) }}　待裁决（{{ pendingCandidatesText(p) }}）</span>
+                    <div v-if="pendingListMode(p)" class="li-ws-pending-list">
+                      <p v-for="(c, j) in p.candidates || []" :key="`cpl-${j}`" class="li-ws-pending-list-item">· {{ pendingCandidateListLabel(p, j) }}：{{ c ? c.value : '' }}</p>
+                    </div>
                     <div class="li-ws-pending-actions">
                       <button
                         v-for="(c, j) in p.candidates || []"
@@ -693,7 +696,7 @@
                         class="li-ws-pending-pick"
                         :disabled="adjudicatingQuick"
                         @click="adjudicateCandidate(p, j)"
-                      >用{{ pendingCandidateWord(p, j) }}</button>
+                      >用{{ pendingPickWord(p, j) }}</button>
                     </div>
                   </div>
                   <!-- 快裁失败提示（错误路径可见：后端拒绝时不静默，卡面不动） -->
@@ -960,11 +963,6 @@ interface SnapFile {
   // uncollected=未采集（无内容游标的异常态）；已产内容来源声明的行不带（声明
   // 本体即产出事实）、非说明成员不带。
   contentState?: string
-  // 目录配对守卫拒绝注记（配对段数据位）：说明成员候选行参与目录配对、组内
-  // 主导候选多于一个被守卫拒绝时的候选数——行详情可见原因
-  //（「目录内有 N 个主导候选，目录配对未成立，说明文件维持独立作品」）；
-  // 0=无注记（配对成立/零主导组/标识配对拒绝/非候选）。
-  pairingGuardLeads?: number
   assigned?: boolean
 }
 
@@ -1636,6 +1634,29 @@ function pendingCandidatesText(p: SnapPending): string {
   return (p.candidates || [])
     .map((c, j) => `${pendingCandidateWord(p, j)}：${c ? c.value : ''}`)
     .join(' ｜ ')
+}
+
+// 清单形态判定（剧本B 帧4 扇出形态）：内容来源候选 ≥2——多份说明内容同维候选
+// 的来源词同为「说明文件」行内不可辨，改清单逐候选列来源文件名；主导推导×说明
+// 并入（BO 剧本2 帧3 双候选）维持行内形态，BO 断言锚逐字不变
+function pendingListMode(p: SnapPending): boolean {
+  return (p.candidates || []).filter((c) => c && c.source === 'content').length >= 2
+}
+
+// 清单条目的来源标注（B 帧4「· 无题_01.txt：无题_01 的说明内容…」）：内容候选=
+// 来源成员文件名（清单内以文件名辨源）；主导侧推导候选=推导统称（行内形态同词）
+function pendingCandidateListLabel(p: SnapPending, idx: number): string {
+  const c = (p.candidates || [])[idx]
+  if (c && c.source === 'content') {
+    return c.originName || (selectedFile.value ? selectedFile.value.fileName : '')
+  }
+  return '文件名推导'
+}
+
+// 快裁键取词：清单形态=来源文件名（同词辨源）；行内形态=来源词（帧3 剧本2
+//「[用文件名推导] [用说明文件]」两键逐字）
+function pendingPickWord(p: SnapPending, idx: number): string {
+  return pendingListMode(p) ? pendingCandidateListLabel(p, idx) : pendingCandidateWord(p, idx)
 }
 
 // 快裁后的采用侧记忆（帧4「（裁决：采用说明文件）」附注的数据面——赋值声明本体
@@ -2593,7 +2614,7 @@ const AGG_TRACK_SHORTS: Record<string, string> = {
   audioMain: '音频主体'
 }
 
-// 行级轨道标：未配对行（角色空）返回空串、模板不渲染标记（非空串占位）
+// 行级轨道标：无聚合归属行（角色空）返回空串、模板不渲染标记（非空串占位）
 const aggTrackLabel = (role?: string): string => (role ? AGG_TRACK_LABELS[role] || role : '')
 
 // 伴随说明成员行的内容采集状态呈现（剧本1 帧8 行详情）：rejected=采集过但未按
@@ -2605,7 +2626,7 @@ const companionContentStateText = (state: string): string => {
 }
 
 // 悬停联动（剧本1 帧2/帧4）：指针悬停聚合成员行时记录其聚合作品键，同键成员行
-// 整行高亮（含指针行，共同表达「这几行是同一件作品」）；未配对行键为空、无联动；
+// 整行高亮（含指针行，共同表达「这几行是同一件作品」）；无聚合归属行键为空、无联动；
 // 移开即恢复。平铺/目录树两种模式共用同一键（=识别快照 aggWorkKey）
 const hoverAggKey = ref('')
 const aggHoverClass = (key?: string): string => (key && key === hoverAggKey.value ? 'is-agg-hover' : '')
@@ -3922,7 +3943,7 @@ onUnmounted(() => {
   color: var(--app-text-primary);
 }
 
-/* 自身轨道标（多文件聚合成员行，帧1/帧4：每文件行标自己的轨道；未配对行不渲染） */
+/* 自身轨道标（多文件聚合成员行，帧1/帧4：每文件行标自己的轨道；无聚合归属行不渲染） */
 .li-ws-row-track {
   flex: none;
   font-size: 11px;
@@ -4123,7 +4144,7 @@ onUnmounted(() => {
 }
 
 /* 悬停联动（剧本1 帧2/帧4）：指针悬停聚合成员行→同 aggWorkKey 成员行整行高亮
-   （含指针行，主色淡底；置于原生 :hover 之后同特异性覆盖灰底）；未配对行无联动 */
+   （含指针行，主色淡底；置于原生 :hover 之后同特异性覆盖灰底）；无聚合归属行无联动 */
 .li-ws-row.is-agg-hover,
 .li-ws-tree-file.is-agg-hover {
   background: color-mix(in srgb, var(--app-color-primary) 12%, transparent);
@@ -4846,6 +4867,21 @@ onUnmounted(() => {
    与终选声明行同容器形态、警示色分野 */
 .li-ws-decl.is-content-pending .li-ws-decl-main {
   color: var(--app-color-warning, var(--app-text-primary));
+}
+
+/* 待裁决候选清单（剧本B 帧4「描述（4 个候选，待裁决）：」+「· 文件名：值」
+   逐行——扇出形态多候选列源） */
+.li-ws-pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.li-ws-pending-list-item {
+  margin: 0;
+  font-size: 12px;
+  color: var(--app-text-regular);
+  word-break: break-all;
 }
 
 /* 快裁键（帧3「[用文件名推导] [用说明文件]」两键：接既有裁决/会话赋值通路） */

@@ -237,7 +237,7 @@ interface DimPolicyView {
 // v4/v5 档案条件只落 conditions，模式树为编译缓存不落档；category/identity/
 // aggregate 为聚合规则的类别与两件声明——元数据规则三者缺省；metadataFile=
 // 规则级「元数据文件」产出〔与聚合产出平级，元数据规则与聚合规则均可携带——
-// 内容绑定+配对键声明，内容绑定已从 aggregate 迁出〕）
+// 内容绑定+分组绑定声明，内容绑定已从 aggregate 迁出〕）
 interface RuleEntryView {
   id: string
   description: string
@@ -251,7 +251,7 @@ interface RuleEntryView {
     companionUse?: string
   } | null
   metadataFile?: {
-    pairing?: { mode: string; identity?: { row: number; capture: string }[] } | null
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
   conditions?: unknown
@@ -603,7 +603,7 @@ interface RuleDialogInput {
     companionUse?: string
   } | null
   metadataFile?: {
-    pairing?: { mode: string; identity?: { row: number; capture: string }[] } | null
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
   conditions?: unknown

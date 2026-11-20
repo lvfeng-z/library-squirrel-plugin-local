@@ -94,16 +94,29 @@
           </template>
         </section>
 
-        <!-- 分组区（三子句之二·决策9）：分组声明=属性选键（匹配行捕获/序列群键/
+        <!-- 分组区（三子句之二·决策9/17）：分组声明=属性选键（匹配行捕获/序列群键/
              所在目录，单一或拼接），可多条——分组只在此声明、不参与布尔运算、
-             作用于匹配求值后的命中集；产出绑定消费（聚合成作品/元数据文件各绑
-             一条声明——序列化映射到既有键字段，内核 schema 零改动） -->
+             作用于匹配求值后的命中集；序列/目录行在场另自动出现只读自动项
+            （目录/序列自带分组素材的提示，可被产出绑定、不可编辑）；产出绑定
+             消费（聚合成作品/元数据文件各绑一项——显式声明或自动项，序列化映射
+             到键字段 identity/grouping） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">分组<span class="li-red-sec-note">属性选键声明 · 作用于匹配求值后的命中集</span></h4>
           </div>
           <div class="li-red-zone-head">
-            <span class="li-red-zone-title">分组（{{ groupDecls.length }}）</span>
+            <!-- 分组计数=自动项+显式声明（A 帧1「分组（2）」=1 自动项+1 声明） -->
+            <span class="li-red-zone-title">分组（{{ groupDecls.length + visibleAutoItems.length }}）</span>
+          </div>
+          <!-- 只读自动项（决策17·A 帧1「◇ 序列分组 · 第 1 行群键（自动·只读）」/
+               「◇ 目录分组 · 所在目录（自动·只读）」）：序列/目录行派生、不可编辑，
+               同形显式声明在场时隐去（同形去重，验收9） -->
+          <div v-for="a in visibleAutoItems" :key="groupAutoShapeKey(a)" class="li-out-card">
+            <div class="li-condx-card-line">
+              <span class="li-out-mark">◇</span>
+              <span class="li-condx-card-tpl">{{ groupAutoBlockLabel(a) }}</span>
+              <span class="li-red-group-auto-note">（自动·只读）</span>
+            </div>
           </div>
           <div v-for="(d, di) in groupDecls" :key="d.uid" class="li-out-card">
             <div class="li-condx-card-line">
@@ -121,8 +134,8 @@
         </section>
 
         <!-- 产出区（三子句之三）：三产出零互斥并存——提取元数据/元数据文件/聚合成
-             作品（绑定分组）；条目符号统一 ◇；gating：无分组声明且无序列行时
-             「+ 聚合成作品」置灰附因（D 帧4） -->
+             作品（绑定分组）；条目符号统一 ◇；gating：分组区无可绑定分组（自动
+             或声明）时「+ 聚合成作品」置灰附因（D 帧4） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
             <h4 class="li-red-sec-title">产出<span class="li-red-sec-note">三产出自由组合 · 命中后取值声明到维度</span></h4>
@@ -309,8 +322,11 @@
           </template>
           <!-- 「元数据文件」产出保存闸门错误清单 -->
           <p v-for="(e, ei) in metadataFileErrors" :key="`mfm-${ei}`" class="li-red-row-hint">{{ e }}</p>
-          <!-- 聚合面保存闸门错误清单（保存被拦时逐条在场） -->
-          <p v-for="(e, ei) in aggErrors" :key="`agg-${ei}`" class="li-red-row-hint">{{ e }}</p>
+          <!-- 聚合面保存闸门错误清单（聚合产出在场才求值渲染——耦合面8 顺批修复：
+               无聚合产出时不产出「缺少分组绑定/缺少分轨入口」类聚合配置错误提示） -->
+          <template v-if="aggProduction">
+            <p v-for="(e, ei) in aggErrors" :key="`agg-${ei}`" class="li-red-row-hint">{{ e }}</p>
+          </template>
         </section>
 
         <!-- 合成策略（随旧表单随迁）：角色绑定 + 维度策略（提取元数据产出在场即相关，
@@ -534,7 +550,7 @@
               </div>
               <p class="li-red-hint">序列群键：同一序列组的成员共享群键，每序列组一件作品</p>
             </template>
-            <p v-else class="li-red-hint">所在目录即分组键——同目录的文件归为一组（映射产出的配对形态之一）</p>
+            <p v-else class="li-red-hint">所在目录即分组键——同目录的文件归为一组（元数据文件产出的分组形态之一）</p>
           </div>
           <template #footer>
             <div class="li-cred-actions">
@@ -544,10 +560,11 @@
           </template>
         </AutoHeightDialog>
 
-        <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3·三子句定稿轮）：
+        <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3·彻底解耦轮）：
              「元数据文件」产出唯一指派面——勾选本规则条件行+内容去向（一行可
-             多选）+分组绑定（A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」+按所在
-             目录选项；映射单用必选、并用可省略）；
+             多选）+分组绑定（A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」——自动项+
+             显式声明并列下拉；映射单用必选、并用可清空缺省〔=聚合成作品所绑
+             分组，装载时物化为显式引用〕）；
              确定回写产出（勾选未选去向=帧3 拦截态：⚠ 行+[知道了]、勾选保留）；
              轨道随行标注随聚合产出在场才显示；
              常驻挂载、开关纯由 state 控制 -->
@@ -669,8 +686,8 @@
 //      匹配区=条件行（CondxRowsEditor 条件卡，谓词行布尔自由恒开+属性派生——
 //      聚合产出在场不再隐藏/清空提取与布尔能力）、分组区=分组声明（属性选键：
 //      匹配行捕获/序列群键/所在目录，可多条；声明为编辑面形态，保存时序列化映射
-//      到既有键字段——聚合产出绑定→identity、元数据文件产出绑定→pairing，内核
-//      schema 零改动）、产出区=三产出零互斥并存（提取元数据/元数据文件/聚合成
+//      到键字段——聚合产出绑定→identity、元数据文件产出绑定→grouping（只落
+//      新键））、产出区=三产出零互斥并存（提取元数据/元数据文件/聚合成
 //      作品；聚合产出卡显示绑定分组；无分组声明且无序列行时「+ 聚合成作品」
 //      置灰附因〔D 帧4〕）。类别步退役：保存时推导落档类别（有聚合成作品产出=
 //      aggregate）；加载既有档案（两类）全部内容装进统一表单。聚合成作品弹窗
@@ -749,9 +766,17 @@ import {
   groupDeclBlockLabel,
   groupDeclOptionLabel,
   groupDeclIdentityParts,
-  groupDeclPairing,
+  groupDeclGrouping,
   groupDeclFromIdentity,
-  groupDeclFromPairing,
+  groupDeclFromGrouping,
+  groupDeclShapeKey,
+  groupAutoBlockLabel,
+  groupAutoGrouping,
+  groupAutoIdentityParts,
+  groupAutoItems,
+  groupAutoOptionLabel,
+  groupAutoShapeKey,
+  groupingRefValue,
   type CondxRowForm,
   type CondxRowNoMap,
   type CondxCaptureDecl,
@@ -760,7 +785,9 @@ import {
   type IdentityPartForm,
   type AggregateProductionForm,
   type ContentBindingForm,
-  type PairingKeyForm,
+  type GroupingBindingForm,
+  type GroupingRef,
+  type GroupAutoItem,
   type MetadataFileProductionForm,
   type GroupDeclForm,
   type GroupKeySource,
@@ -800,7 +827,7 @@ interface RuleInput {
     companionUse?: string
   } | null
   metadataFile?: {
-    pairing?: { mode: string; identity?: { row: number; capture: string }[] } | null
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
   conditions?: unknown
@@ -864,8 +891,8 @@ const props = defineProps<{
 // 为 v4 条件行（目录行可多段/挂作用域附件），pattern 不再发送；category/
 // identity/aggregate 为聚合规则的类别与两件声明（元数据规则三者缺省——
 // omitempty 落档零残留）。metadataFile=规则级「元数据文件」产出（内容绑定+
-// 配对键声明；元数据规则与聚合规则均可携带，未加产出=undefined 键不落档=
-// omitempty 镜像）。
+// 分组绑定声明，分组只落 grouping 新键；元数据规则与聚合规则均可携带，未加
+// 产出=undefined 键不落档=omitempty 镜像）。
 interface RuleSavePayload {
   id: string
   description: string
@@ -879,7 +906,7 @@ interface RuleSavePayload {
     companionUse?: string
   } | null
   metadataFile?: {
-    pairing?: { mode: string; identity?: { row: number; capture: string }[] }
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] }
     contentBindings?: { row: number; dimension: string }[]
   }
   conditions: unknown
@@ -983,15 +1010,23 @@ const condxRowEditMode = ref<'edit' | 'add'>('edit')
 // —— 三子句编辑态（决策9/10·终审重梳轮）：分组声明与三产出（类别步退役——
 //    落档类别=保存时推导：有聚合成作品产出=aggregate） ——
 
-// 分组声明（分组区编辑态；声明=编辑面形态，保存时映射到既有键字段——聚合产出
-// 绑定→identity、元数据文件产出绑定→pairing，内核 schema 零改动）
+// 分组声明（分组区编辑态；声明=编辑面形态，保存时映射到键字段——聚合产出
+// 绑定→identity、元数据文件产出绑定→grouping〔只落新键〕）
 const groupDecls = ref<GroupDeclForm[]>([])
 let groupDeclUidSeq = 1
 
-// 产出的分组绑定（uid → groupDecls 条目；null=未绑定——聚合成作品未绑=保存闸门
-// 拦；元数据文件未绑且无聚合产出=保存闸门拦）
-const aggGroupingUid = ref<number | null>(null)
-const mfGroupingUid = ref<number | null>(null)
+// 产出的分组绑定引用（decl=显式声明 uid 引用；auto=自动项引用——行派生只读
+// 项、选定即绑不物化为声明；null=未绑定——聚合成作品未绑=保存闸门拦；元数据
+// 文件未绑且无聚合产出=保存闸门拦，并用未绑=缺省〔聚合成作品所绑分组〕）
+const aggGroupingRef = ref<GroupingRef | null>(null)
+const mfGroupingRef = ref<GroupingRef | null>(null)
+
+// 分组区自动项（决策17）：序列/目录行派生、只读；同形显式声明在场时隐去
+//（同形去重，验收9——分组区与产出分组下拉同口径）
+const visibleAutoItems = computed((): GroupAutoItem[] => {
+  const declared = new Set(groupDecls.value.map((d) => groupDeclShapeKey(d)))
+  return groupAutoItems(activeCondxRows.value).filter((a) => !declared.has(groupAutoShapeKey(a)))
+})
 
 // 分轨入口（AggregateProduction 表单形态；null=尚未加「聚合成作品」产出）
 const aggProduction = ref<AggregateProductionForm | null>(null)
@@ -1006,21 +1041,29 @@ function groupDeclByUid(uid: number | null): GroupDeclForm | null {
   return groupDecls.value.find((d) => d.uid === uid) || null
 }
 
-// 聚合产出的分组绑定候选（非 directory 形态——所在目录对聚合产出不可绑：聚合
-// 作品键=标识/群键，目录成组走目录捕获）+ 序列行虚拟项（选定即物化为声明，
-// D 帧4 gating 的序列行解锁路径）
+// 绑定引用 → 声明/自动项解析（decl 引用且声明已删=null）
+function groupingRefTarget(r: GroupingRef | null): GroupDeclForm | GroupAutoItem | null {
+  if (!r) return null
+  if (r.kind === 'auto') return r.item
+  return groupDeclByUid(r.uid)
+}
+
+// 聚合产出的分组绑定候选（显式声明——directory 形态除外：所在目录对聚合产出
+// 不可绑，聚合作品键=标识/群键，目录成组走目录捕获）+ 序列行自动项（决策17：
+// 自动项+显式声明并列，同形显式声明在场时不重复出）——D 帧4 gating 的序列行
+// 解锁路径（选定即绑自动项引用，不物化为声明）
 const bindableGroupOptions = computed<{ value: string; label: string }[]>(() => {
   const out: { value: string; label: string }[] = []
+  const autoKeys = new Set(groupAutoItems(activeCondxRows.value).map((a) => groupAutoShapeKey(a)))
   for (const d of groupDecls.value) {
     if (d.keySource === 'directory') continue
     out.push({ value: `decl:${d.uid}`, label: groupDeclOptionLabel(d) })
+    if (d.keySource === 'seqKey') autoKeys.delete(groupDeclShapeKey(d))
   }
-  const declaredSeqRows = new Set(
-    groupDecls.value.filter((d) => d.keySource === 'seqKey').map((d) => (d.parts[0] ? d.parts[0].row : -1))
-  )
-  for (const s of seqRowOptions.value) {
-    if (declaredSeqRows.has(s.row)) continue
-    out.push({ value: `seq:${s.row}`, label: `◇ 按序列群键分组` })
+  for (const a of groupAutoItems(activeCondxRows.value)) {
+    if (a.kind !== 'seqKey') continue
+    if (!autoKeys.has(groupAutoShapeKey(a))) continue
+    out.push({ value: groupingRefValue({ kind: 'auto', item: a }), label: groupAutoOptionLabel(a) })
   }
   return out
 })
@@ -1039,7 +1082,7 @@ const seqRowOptions = computed<{ row: number; text: string }[]>(() => {
   return out
 })
 
-// 「+ 聚合成作品」gating（D 帧4：无分组声明且无序列行→置灰附因）
+// 「+ 聚合成作品」gating（D 帧4：分组区无可绑定分组〔自动或声明〕→置灰附因）
 const aggAdditionGated = computed((): boolean =>
   aggAdditionGatedOf(groupDecls.value, activeCondxRows.value)
 )
@@ -1048,10 +1091,10 @@ const aggAdditionGated = computed((): boolean =>
 const groupDeclErrors = computed((): string[] => {
   const errs: string[] = []
   const bound = new Set<number>()
-  if (aggProduction.value && aggGroupingUid.value != null) bound.add(aggGroupingUid.value)
-  if (metadataFileProduction.value && mfGroupingUid.value != null) bound.add(mfGroupingUid.value)
-  // 并用形态（聚合在场）下元数据文件可省略分组绑定（分组随聚合并组）——
-  // 未绑定的声明仍一律拦截
+  if (aggProduction.value && aggGroupingRef.value && aggGroupingRef.value.kind === 'decl') bound.add(aggGroupingRef.value.uid)
+  if (metadataFileProduction.value && mfGroupingRef.value && mfGroupingRef.value.kind === 'decl') bound.add(mfGroupingRef.value.uid)
+  // 并用形态（聚合在场）下元数据文件可省略分组绑定（缺省=聚合成作品所绑
+  // 分组）——未绑定的声明仍一律拦截（自动项=行派生只读项，无未绑定形态）
   if (groupDecls.value.some((d) => !bound.has(d.uid))) errs.push(GROUP_DECL_UNBOUND_ERROR)
   return errs
 })
@@ -1075,10 +1118,12 @@ function extractionSummarySeg(row: ExtractionRow): string {
   return `${dim}←${src}`
 }
 
-// 聚合绑定的分组声明展开为 identity 部分（保存序列化与闸门共用）
+// 聚合绑定的分组声明/自动项展开为 identity 部分（保存序列化与闸门共用）
 const aggIdentityParts = computed((): IdentityPartForm[] => {
-  const parts = groupDeclIdentityParts(groupDeclByUid(aggGroupingUid.value))
-  return parts || []
+  const r = aggGroupingRef.value
+  if (!r) return []
+  if (r.kind === 'auto') return groupAutoIdentityParts(r.item) || []
+  return groupDeclIdentityParts(groupDeclByUid(r.uid)) || []
 })
 
 // 标识/分组键候选分组（按条件行号）：文件名捕获/目录行捕获/序列行群键同列
@@ -1093,9 +1138,13 @@ const identityGroups = computed<{ row: number; candidates: AggIdentityCandidate[
   return out
 })
 
-// 聚合面保存闸门错误（纯函数派生；保存与预览共用——identity=绑定声明的展开）
+// 聚合面保存闸门错误（纯函数派生；保存与预览共用——identity=绑定声明/自动项
+// 的展开）。聚合产出在场才求值（耦合面8 顺批修复：无聚合产出时不产出
+//「缺少分组绑定/缺少分轨入口」类聚合配置错误提示，也不渲染）
 const aggErrors = computed((): string[] =>
-  aggFormErrors(activeCondxRows.value, aggIdentityParts.value, aggProduction.value, props.aggTypes || [])
+  aggProduction.value
+    ? aggFormErrors(activeCondxRows.value, aggIdentityParts.value, aggProduction.value, props.aggTypes || [])
+    : []
 )
 
 // 产出卡摘要（「聚合成作品 · 视频（主体+字幕轨）」）
@@ -1105,8 +1154,9 @@ const aggCardText = computed((): string => aggProductionSummary(props.aggTypes |
 
 const trackDialogState = ref(false)
 const trackDraft = ref<AggregateProductionForm | null>(null)
-// 草稿的分组绑定（uid 声明引用；虚拟序列项选定即物化为声明）
-const trackDraftGroupingUid = ref<number | null>(null)
+// 草稿的分组绑定引用（decl 声明引用/auto 自动项引用；自动项选定即绑、不物化
+// 为声明）
+const trackDraftGroupingRef = ref<GroupingRef | null>(null)
 
 // 类型下拉清单（滤除无结构角色类型；投影缺席=空清单→类型步不可用提示）
 const trackTypeOptions = computed(() => aggTypeOptions(props.aggTypes || []))
@@ -1135,28 +1185,22 @@ const trackAssignRows = computed<{ no: number; text: string }[]>(() => {
   return out
 })
 
-// 草稿分组绑定的下拉取值（decl:uid=既有声明；seq:N=虚拟序列群键项）
-const trackGroupingValue = computed((): string => {
-  const d = groupDeclByUid(trackDraftGroupingUid.value)
-  if (d) return `decl:${d.uid}`
-  return ''
-})
+// 草稿分组绑定的下拉取值（decl:uid=显式声明；auto:seqKey:N=序列行自动项）
+const trackGroupingValue = computed((): string => groupingRefValue(trackDraftGroupingRef.value))
 
-// 分组绑定改选（虚拟序列项=物化为 seqKey 声明后绑定）
+// 分组绑定改选（decl=绑声明引用；auto=绑自动项引用——不物化为声明）
 function setTrackGrouping(value: string): void {
   if (!value) {
-    trackDraftGroupingUid.value = null
+    trackDraftGroupingRef.value = null
     return
   }
   if (value.startsWith('decl:')) {
-    trackDraftGroupingUid.value = Number(value.slice(5)) || null
+    trackDraftGroupingRef.value = { kind: 'decl', uid: Number(value.slice(5)) || 0 }
     return
   }
-  if (value.startsWith('seq:')) {
-    const row = Number(value.slice(4)) || 1
-    const decl: GroupDeclForm = { uid: groupDeclUidSeq++, keySource: 'seqKey', parts: [{ row, capture: 'groupKey' }] }
-    groupDecls.value.push(decl)
-    trackDraftGroupingUid.value = decl.uid
+  if (value.startsWith('auto:seqKey:')) {
+    const row = Number(value.slice(12)) || 1
+    trackDraftGroupingRef.value = { kind: 'auto', item: { kind: 'seqKey', row } }
   }
 }
 
@@ -1164,7 +1208,7 @@ function setTrackGrouping(value: string): void {
 const trackDialogError = computed((): string => {
   const draft = trackDraft.value
   if (!draft) return ''
-  if (!groupDeclByUid(trackDraftGroupingUid.value)) return '分组未绑定——作品标识=绑定的分组，请先在分组区加分组声明（或在分组下拉选序列群键）'
+  if (!groupingRefTarget(trackDraftGroupingRef.value)) return '分组未绑定——作品标识=绑定的分组，请先在分组区加分组声明（或在分组下拉选序列群键）'
   if (!draft.workType) return '作品类型未选择（类型先行：类型规约决定可用轨与角色基数）'
   const spec = aggTypeSpecOf(props.aggTypes || [], draft.workType)
   if (!spec) return `作品类型「${draft.workType}」不在资源类型注册表（可能已随插件停用或卸载注销）`
@@ -1179,7 +1223,7 @@ function openTrackDialog(): void {
   trackDraft.value = aggProduction.value
     ? cloneJSON(aggProduction.value)
     : { workType: '', tracks: [], companionUse: 'track' }
-  trackDraftGroupingUid.value = aggGroupingUid.value
+  trackDraftGroupingRef.value = aggGroupingRef.value ? cloneJSON(aggGroupingRef.value) : null
   trackDialogState.value = true
 }
 
@@ -1220,14 +1264,14 @@ function confirmTrackDialog(): void {
   if (trackDialogError.value) return
   if (!trackDraft.value) return
   aggProduction.value = cloneJSON(trackDraft.value)
-  aggGroupingUid.value = trackDraftGroupingUid.value
+  aggGroupingRef.value = trackDraftGroupingRef.value ? cloneJSON(trackDraftGroupingRef.value) : null
   trackDialogState.value = false
 }
 
 // 产出卡〔移除〕：去聚合产出（分组声明不动——其他产出可能仍绑定）
 function removeAggregateProduction(): void {
   aggProduction.value = null
-  aggGroupingUid.value = null
+  aggGroupingRef.value = null
   trackDialogState.value = false
   trackDraft.value = null
 }
@@ -1262,11 +1306,13 @@ function editGroupDecl(idx: number): void {
 function removeGroupDecl(idx: number): void {
   const d = groupDecls.value[idx]
   if (!d) return
-  if (aggGroupingUid.value === d.uid) {
-    aggGroupingUid.value = null
+  if (aggGroupingRef.value && aggGroupingRef.value.kind === 'decl' && aggGroupingRef.value.uid === d.uid) {
+    aggGroupingRef.value = null
     removeAggregateProduction()
   }
-  if (mfGroupingUid.value === d.uid) mfGroupingUid.value = null
+  if (mfGroupingRef.value && mfGroupingRef.value.kind === 'decl' && mfGroupingRef.value.uid === d.uid) {
+    mfGroupingRef.value = null
+  }
   groupDecls.value.splice(idx, 1)
 }
 
@@ -1372,24 +1418,28 @@ function metadataRowText(no: number): string {
   return ''
 }
 
-// 分组绑定下拉条目（A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」+按所在目录选项）：
-// 分组区声明（capture/seqKey/directory 全列）+ 无 directory 声明时的虚拟
-//「按所在目录」项（选定即物化为 directory 声明）
+// 分组绑定下拉条目（A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」）：分组区显式
+// 声明（capture/seqKey/directory 全列）+ 序列行自动项（决策17：自动项+显式
+// 声明并列，同形显式声明在场时不重复出——验收9）+ 无 directory 形态时的
+//「◇ 目录分组 · 所在目录」虚拟项（选定即物化为 directory 声明——所在目录分组
+// 不依赖目录行在场，每文件恒有目录可依）
 const metadataGroupOptions = computed<{ value: string; label: string }[]>(() => {
   const out: { value: string; label: string }[] = []
-  const hasDirectory = groupDecls.value.some((d) => d.keySource === 'directory')
+  const declared = new Set(groupDecls.value.map((d) => groupDeclShapeKey(d)))
   for (const d of groupDecls.value) {
     out.push({ value: `decl:${d.uid}`, label: groupDeclOptionLabel(d) })
   }
-  if (!hasDirectory) out.push({ value: 'dir:', label: '◇ 按所在目录分组' })
+  for (const a of groupAutoItems(activeCondxRows.value)) {
+    if (a.kind !== 'seqKey') continue
+    if (declared.has(groupAutoShapeKey(a))) continue
+    out.push({ value: groupingRefValue({ kind: 'auto', item: a }), label: groupAutoOptionLabel(a) })
+  }
+  if (!declared.has('directory')) out.push({ value: 'dir:', label: groupAutoOptionLabel({ kind: 'directory' }) })
   return out
 })
 
-// 当前分组绑定的下拉取值（decl:uid；未绑定=''——并用形态可省略）
-const mfBoundGroupValue = computed((): string => {
-  const d = groupDeclByUid(mfGroupingUid.value)
-  return d ? `decl:${d.uid}` : ''
-})
+// 当前分组绑定的下拉取值（decl:uid / auto:seqKey:N；未绑定=''——并用形态可缺省）
+const mfBoundGroupValue = computed((): string => groupingRefValue(mfGroupingRef.value))
 
 // 产出区入口摘要（帧1「元数据文件（0）」/帧2 系统回应「元数据文件（1）：第 2 行
 // → 描述」，多目标连写「描述+标签」）
@@ -1398,14 +1448,15 @@ const metadataFileSummary = computed((): string =>
 )
 
 // 「元数据文件」产出保存闸门（纯函数派生；保存与预览共用——与内核
-// validateMetadataFileProduction/validatePairingKey 同口径；pairing=绑定声明的展开，
-// 未绑定且聚合在场=undefined〔并用可省略——分组随聚合并组〕）
+// validateMetadataFileProduction/validateGroupingBinding 同口径；grouping=绑定
+// 声明/自动项的展开，未绑定且聚合在场=undefined〔并用可缺省——缺省=聚合成
+// 作品所绑分组〕）
 const metadataFileErrors = computed((): string[] => {
   const mf = metadataFileProduction.value
-  const pairingDerived = mf ? groupDeclPairing(groupDeclByUid(mfGroupingUid.value)) : undefined
+  const groupingDerived = mf ? groupingBindingOfRef(mfGroupingRef.value) : undefined
   return metadataFileFormErrors(
     activeCondxRows.value,
-    mf ? { pairing: pairingDerived, contentBindings: mf.contentBindings } : null,
+    mf ? { grouping: groupingDerived, contentBindings: mf.contentBindings } : null,
     !!aggProduction.value
   )
 })
@@ -1419,18 +1470,29 @@ function removeMetadataFile(): void {
   metadataFileProduction.value = null
 }
 
+// 绑定引用 → 「元数据文件」产出的分组绑定序列化（decl=声明映射、auto=自动项
+// 映射、null=未绑定〔并用缺省——不落 grouping 键〕）
+function groupingBindingOfRef(r: GroupingRef | null): GroupingBindingForm | undefined {
+  if (!r) return undefined
+  if (r.kind === 'auto') return groupAutoGrouping(r.item)
+  return groupDeclGrouping(groupDeclByUid(r.uid))
+}
+
 // 弹窗〔确定〕：绑定清单与分组绑定回写「元数据文件」产出（空清单=移除该
-// 产出——该规则行为回到现状；非空=落规则级 metadataFile 键——pairing 由绑定
-// 声明序列化映射）；虚拟「按所在目录」选定即物化为 directory 声明
+// 产出——该规则行为回到现状；非空=落规则级 metadataFile 键——grouping 由绑定
+// 声明/自动项序列化映射）；虚拟「目录分组 · 所在目录」选定即物化为 directory
+// 声明；自动项（序列群键）选定即绑自动项引用（不物化为声明）
 function onMetadataConfirm(bindings: ContentBindingForm[], groupingValue: string): void {
   if (groupingValue === 'dir:') {
     const decl: GroupDeclForm = { uid: groupDeclUidSeq++, keySource: 'directory', parts: [] }
     groupDecls.value.push(decl)
-    mfGroupingUid.value = decl.uid
+    mfGroupingRef.value = { kind: 'decl', uid: decl.uid }
   } else if (groupingValue.startsWith('decl:')) {
-    mfGroupingUid.value = Number(groupingValue.slice(5)) || null
+    mfGroupingRef.value = { kind: 'decl', uid: Number(groupingValue.slice(5)) || 0 }
+  } else if (groupingValue.startsWith('auto:seqKey:')) {
+    mfGroupingRef.value = { kind: 'auto', item: { kind: 'seqKey', row: Number(groupingValue.slice(12)) || 1 } }
   } else {
-    mfGroupingUid.value = null
+    mfGroupingRef.value = null
   }
   metadataFileProduction.value = bindings.length
     ? { contentBindings: cloneJSON(bindings) }
@@ -2103,12 +2165,12 @@ function initFromProps(): void {
     condxJsonMode.value = false
     condxText.value = ''
     // 三子句编辑态复位：分组声明与产出绑定从档案键字段还原为声明（聚合
-    // identity→声明绑定聚合产出；映射 pairing→声明绑定元数据文件产出——两类
+    // identity→声明绑定聚合产出；映射 grouping→声明绑定元数据文件产出——两类
     // 类别全部内容装进统一表单，类别步退役）
     groupDecls.value = []
     groupDeclUidSeq = 1
-    aggGroupingUid.value = null
-    mfGroupingUid.value = null
+    aggGroupingRef.value = null
+    mfGroupingRef.value = null
     const initIdentity = rule && Array.isArray(rule.identity) ? rule.identity : []
     const initIdentityParts = initIdentity
       .filter((p): p is { row: number; capture: string } => !!p && typeof p.row === 'number' && typeof p.capture === 'string')
@@ -2127,12 +2189,13 @@ function initFromProps(): void {
       const decl = groupDeclFromIdentity(initIdentityParts, groupDeclUidSeq++)
       if (decl) {
         groupDecls.value.push(decl)
-        aggGroupingUid.value = decl.uid
+        aggGroupingRef.value = { kind: 'decl', uid: decl.uid }
       }
     }
     // 「元数据文件」产出装载（规则级 metadataFile 键——内容绑定已从 aggregate
     // 迁出，读写一律走本键；旧档 aggregate.contentBindings 由内核载入归一到
-    // 本键后经 rulesView 投影，前端不读旧键；pairing 还原为分组声明并绑定）
+    // 本键后经 rulesView 投影，前端不读旧键；grouping 还原为分组声明并绑定——
+    // 旧档 pairing 键由内核载入即归一到 grouping，前端不读旧键）
     const initMf = rule && rule.metadataFile ? rule.metadataFile : null
     metadataFileProduction.value = initMf
       ? {
@@ -2146,21 +2209,27 @@ function initFromProps(): void {
             : undefined
         }
       : null
-    if (metadataFileProduction.value && initMf && initMf.pairing &&
-        (initMf.pairing.mode === 'identity' || initMf.pairing.mode === 'directory')) {
-      const parts = initMf.pairing.mode === 'identity' && Array.isArray(initMf.pairing.identity)
-        ? initMf.pairing.identity
+    if (metadataFileProduction.value && initMf && initMf.grouping &&
+        (initMf.grouping.mode === 'identity' || initMf.grouping.mode === 'directory')) {
+      const parts = initMf.grouping.mode === 'identity' && Array.isArray(initMf.grouping.identity)
+        ? initMf.grouping.identity
             .filter((p): p is { row: number; capture: string } => !!p && typeof p.row === 'number' && typeof p.capture === 'string')
             .map((p) => ({ row: p.row || 1, capture: p.capture }))
         : []
-      const decl = groupDeclFromPairing(
-        { mode: initMf.pairing.mode as PairingKeyForm['mode'], identity: parts.length ? parts : undefined },
+      const decl = groupDeclFromGrouping(
+        { mode: initMf.grouping.mode as GroupingBindingForm['mode'], identity: parts.length ? parts : undefined },
         groupDeclUidSeq++
       )
       if (decl) {
         groupDecls.value.push(decl)
-        mfGroupingUid.value = decl.uid
+        mfGroupingRef.value = { kind: 'decl', uid: decl.uid }
       }
+    }
+    // 并用缺省绑定物化（方案·钉死）：聚合产出在场且分组绑定缺省（档案未落
+    // grouping 键）时，编辑面把分组下拉物化为聚合成作品所绑分组的显式引用
+    //（用户可换选、保存落档——后端求值期缺省=同一分组，物化前后行为等值）
+    if (metadataFileProduction.value && !mfGroupingRef.value && aggGroupingRef.value) {
+      mfGroupingRef.value = cloneJSON(aggGroupingRef.value)
     }
     trackDialogState.value = false
     trackDraft.value = null
@@ -2360,15 +2429,16 @@ function buildRulePayload(): RuleSavePayload | null {
 }
 
 // 「元数据文件」产出的保存载荷构造：未加产出=undefined 键不落档（omitempty
-// 镜像）；配对键=绑定分组声明的序列化映射（capture/seqKey→identity 形态、
-// directory→directory 形态、未绑定且聚合在场=不落键〔并用可省略〕）；绑定空
-// 数组不落键（该形态由闸门拦，构造层兜底不产出空键）
+// 镜像）；分组绑定=绑定声明/自动项的序列化映射（capture/seqKey→identity 形态、
+// directory→directory 形态、未绑定且聚合在场=不落键〔并用缺省——后端求值期取
+// 聚合成作品所绑分组〕）；绑定空数组不落键（该形态由闸门拦，构造层兜底不产出
+// 空键）；只落 grouping 新键（旧 pairing 键退役，内核载入归一）
 function buildMetadataFilePayload(): RuleSavePayload['metadataFile'] {
   const mf = metadataFileProduction.value
   if (!mf) return undefined
-  const pairing = groupDeclPairing(groupDeclByUid(mfGroupingUid.value))
+  const grouping = groupingBindingOfRef(mfGroupingRef.value)
   const contentBindings = (mf.contentBindings || []).map((b) => ({ row: b.row, dimension: b.dimension }))
-  return { pairing, contentBindings }
+  return { grouping, contentBindings }
 }
 
 function save(): void {
@@ -2969,6 +3039,15 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 分组区只读自动项标注（决策17·A 帧1「（自动·只读）」——行派生分组素材的
+   提示，不可编辑） */
+.li-red-group-auto-note {
+  flex: none;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  white-space: nowrap;
 }
 
 /* 卡片徽标（引用/✗/⚠ 等）：小色块 */

@@ -1,8 +1,8 @@
 <template>
-  <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3·三子句定稿轮）：
+  <!-- 元数据文件弹窗（元数据文件映射与聚合解耦·剧本A 帧2/帧3·彻底解耦轮）：
        「元数据文件」产出的唯一指派面——勾选本规则条件行+为每行勾选内容去向（一行
-       可多选，整段同时写入所有勾选维度）+分组绑定（分组区声明下拉+按所在目录
-       选项，映射单用时必填）。行清单与编辑弹窗条件行区同源（父组件组装传入）；
+       可多选，整段同时写入所有勾选维度）+分组绑定（分组区自动项+声明并列下拉，
+       映射单用时必填）。行清单与编辑弹窗条件行区同源（父组件组装传入）；
        轨道随行标注随聚合产出在场才显示。帧3 失败路径=勾选行未选去向→确定被拦
       （正文只出 ⚠ 行+[知道了]，回列表勾选保留）。壳=AutoHeightDialog（主程序
        全局注册，RuleEditDialog 同款、无需 import）。 -->
@@ -45,22 +45,25 @@
       </div>
       <p v-if="!checkedDrafts.length" class="li-mfd-dest-empty">（未勾选任何行——不指派时该规则行为与现状完全一致）</p>
       <!-- 分组绑定区（剧本A 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」·三子句定稿轮）：
-           绑定分组区声明（下拉可换绑）或「按所在目录」虚拟项（选定即物化为
-           directory 声明）；映射单用时必选（保存闸门兜底）、并用时可清空=省略
-           声明（分组随聚合并组） -->
-      <div class="li-mfd-pair">
-        <span class="li-mfd-pair-title">分组：</span>
+           绑定分组区自动项与显式声明并列（同形显式声明在场时自动项不重复
+           出），另含「目录分组 · 所在目录」虚拟项（选定即物化为 directory
+           声明）；映射单用时必选（保存闸门兜底）、并用时可清空=缺省（=聚合成
+           作品所绑分组，后端求值期取用；编辑面装载并用规则时物化为显式引用） -->
+      <div class="li-mfd-group">
+        <span class="li-mfd-group-title">分组：</span>
         <el-select
           v-model="groupingValue"
           size="small"
-          class="li-mfd-pair-select"
+          class="li-mfd-group-select"
           clearable
-          :placeholder="hasAggregate ? '未声明（随聚合并组）' : '选择分组'"
+          :placeholder="hasAggregate ? '未声明（缺省=聚合成作品所绑分组）' : '选择分组'"
         >
           <el-option v-for="o in groupOptions" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </div>
-      <p class="li-mfd-hint">ℹ 说明文件归进分组作品、不导入；若本规则另有聚合成作品产出，命中行照常作为轨导入，内容来源叠加</p>
+      <!-- ℹ 信息文案（A 帧2 逐字——扇出语义、孤文件回退与并用叠加口径；换行按
+           帧内排版自然呈现，字符串内容逐字） -->
+      <p class="li-mfd-hint">ℹ 说明文件内容并入分组内全部作品（每件各带一份、说明文件自身不导入）；组内无其他文件时说明文件维持独立作品；若本规则另有聚合成作品产出，命中行照常作为轨导入，内容来源叠加</p>
     </div>
     <template #footer>
       <div class="li-mfd-actions">
@@ -77,16 +80,17 @@
 </template>
 
 <script setup lang="ts">
-// 元数据文件弹窗（元数据文件映射与聚合解耦·三子句定稿轮）：「元数据文件」
+// 元数据文件弹窗（元数据文件映射与聚合解耦·彻底解耦轮）：「元数据文件」
 // 产出的唯一指派面。行身份由两处指派合成——分轨入口（并用时轨道行=导入，随行
 // 标注轨道词）与本弹窗勾选（内容产出元数据）；两者兼有=双重身份（照常导入）；
-// 仅勾选未分配轨道=伴随说明文件处置（归进分组作品、无轨、不导入、不独立成
-// 作品）。分组绑定是「元数据文件」产出自己的声明绑定——与聚合产出的分组绑定
-// 各自独立、并用互不牵连（序列化映射：capture/seqKey 声明→pairing identity
-// 形态、directory 声明→pairing directory 形态，父组件物化与序列化）；映射
-// 单用（无聚合产出）时必选（保存闸门兜底，本弹窗不拦）、并用时可清空省略
-//（分组随聚合并组）。确定把绑定清单（一行多目标=同行多条目）与分组绑定值经
-// confirm 回写父组件；取消不保存。
+// 仅勾选未分配轨道=元数据源文件（仅绑定行命中且组内有落点：无轨、不导入、
+// 内容扇出给组内全部作品）。分组绑定是「元数据文件」产出自己的声明绑定——与
+// 聚合产出的分组绑定各自独立、并用互不牵连（序列化映射：capture/seqKey 声明
+// →grouping identity 形态、directory 声明→grouping directory 形态，父组件
+// 物化与序列化，只落 grouping 新键）；映射单用（无聚合产出）时必选（保存闸门
+// 兜底，本弹窗不拦）、并用时可清空缺省（=聚合成作品所绑分组，后端求值期取
+// 用——编辑面装载时物化为显式引用）。确定把绑定清单（一行多目标=同行多条目）
+// 与分组绑定值经 confirm 回写父组件；取消不保存。
 import { ref, computed, watch } from 'vue'
 import {
   CONTENT_BINDING_DIMENSIONS,
@@ -105,12 +109,13 @@ const props = defineProps<{
   showTracks: boolean
   // 已落档内容绑定（开窗预勾选+带入去向；一行多目标=同行多条目）
   bindings: ContentBindingForm[]
-  // 已绑定的分组声明下拉取值（decl:uid；''=未绑定——并用形态的省略态）
+  // 已绑定的分组声明/自动项下拉取值（decl:uid / auto:seqKey:N；''=未绑定——
+  // 并用形态的缺省态）
   boundGroupValue: string
-  // 分组绑定下拉条目（父组件按分组区声明态组装传入：decl:uid 项+按所在目录
-  // 虚拟项 dir:）
+  // 分组绑定下拉条目（父组件按分组区声明态组装传入：decl:uid 项+auto:seqKey:N
+  // 自动项+按所在目录虚拟项 dir:）
   groupOptions: { value: string; label: string }[]
-  // 聚合产出是否在场（并用=true：分组绑定可清空省略；映射单用=false：必选，
+  // 聚合产出是否在场（并用=true：分组绑定可清空缺省；映射单用=false：必选，
   // 保存闸门兜底）
   hasAggregate: boolean
 }>()
@@ -132,7 +137,7 @@ interface MetaDraftRow {
 const drafts = ref<MetaDraftRow[]>([])
 // 帧3 拦截态：首个「已勾选未选去向」的行号（0=正常行清单态）
 const blockedRow = ref(0)
-// 分组绑定草稿（''=未声明——并用形态的省略态；单用时保存闸门拦）
+// 分组绑定草稿（''=未声明——并用形态的缺省态；单用时保存闸门拦）
 const groupingValue = ref('')
 
 const visible = computed({
@@ -183,7 +188,7 @@ function cancel(): void {
 // 确定（帧2 手势=勾选→选去向→绑分组→单次点）：每行勾选必须配至少一个
 // 内容去向——首个未选行进帧3 拦截态（弹窗留在原地、勾选保留，补选后确定照常）；
 // 全配齐则回写绑定清单（一行多目标=按枚举序展开为同行多条目；空清单=清除指派，
-// 该规则行为回到现状）与分组绑定值（''=未声明——并用省略态合法、单用由保存
+// 该规则行为回到现状）与分组绑定值（''=未声明——并用缺省态合法、单用由保存
 // 闸门拦）并关窗
 function confirm(): void {
   const first = checkedDrafts.value.find((r) => !r.dims.length)
@@ -311,21 +316,21 @@ function confirm(): void {
   color: var(--app-text-secondary);
 }
 
-/* 分组绑定区（剧本A 帧2）：「分组：[◇ 按 {作品}+{序号} 分组▾]」 */
-.li-mfd-pair {
+/* 分组绑定区（剧本A 帧2） */
+.li-mfd-group {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 4px;
 }
 
-.li-mfd-pair-title {
+.li-mfd-group-title {
   flex: none;
   font-size: 13px;
   color: var(--app-text-primary);
 }
 
-.li-mfd-pair-select {
+.li-mfd-group-select {
   width: 260px;
 }
 
