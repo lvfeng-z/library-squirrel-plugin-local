@@ -164,6 +164,15 @@ type FileConclusion struct {
 	// 落点——不导入、不独立成件，内容只作扇出来源，不获聚合作品键）；
 	// 轨道成员（含轨行兼绑定的双重身份成员）与无归属文件不带标记。
 	AggCompanion bool
+	// SetGroupKey / SetName / SetRuleID 为集归属（产出四「作品集聚合」汇流后
+	// 求值结论）：GroupKey 为按归集依据算出的组键（身份复合键 NUL 连接／序列
+	// 群键／目录聚合键），SetName 为规则匹配层模板产出的集名，SetRuleID 为
+	// 产出该归属的规则 ID。三字段同空=不入集（已被聚合收编/说明成员/分组键
+	// 不可得/集名不可得）；同非空=该文件作为独立作品归入集——消费面按
+	// 「SetGroupKey+SetName」识别集、按 SetRuleID 追溯规则。
+	SetGroupKey string
+	SetName     string
+	SetRuleID   string
 	// rawDecls 为提取段原始声明（合成前中间产物）：预览基座规则相关件的铸造
 	// 原料，快照与呈现不消费（本类型为进程内求值产物，不经序列化）。
 	rawDecls []MetadataDeclaration
@@ -978,8 +987,10 @@ const (
 // → Elements 元素数组（元素级内核 批次二）、候选增 KeyElements 键元素池；旧
 // 快照（v1）反序列化按空元素数组降级——识别重跑即重建。v3：SnapFile 增聚合
 // 归属两字段（aggWorkKey/aggTrackRole，空=无聚合）；旧快照（v2）反序列化按
-// 空聚合降级，识别重跑即重建。
-const recognitionSnapshotSchemaVersion = 3
+// 空聚合降级，识别重跑即重建。v4：SnapFile 增集归属三字段（setGroupKey/
+// setName/setRuleId，空=无作品集聚合归属）；旧快照（v3 及更早）反序列化按
+// 零值降级（JSON 未知/缺失字段按零值），识别重跑即重建。
+const recognitionSnapshotSchemaVersion = 4
 
 // RecognitionSnapshot 识别全景快照：识别时点的全景结论缓存（可按「原始路径+档案」
 // 重算），以裁剪形态入会话 KV——只存呈现与增量复用所需字段：不含文件完整路径
@@ -1009,6 +1020,12 @@ type RecognitionSnapshot struct {
 	Files []SnapFile `json:"files"`
 	// Groups 序列群（元素4）：公共前缀、组大小与成员序号形态。
 	Groups []SnapGroup `json:"groups"`
+	// DirGroups 目录分组（分组层产物，独立于 Groups 序列群卡分节）：目录名含
+	// 作品号（保守提取命中）或目录内直接子文件已单一群键成集的整目录分组事实，
+	// 集名候选墙的目录来源由本分节投影。群卡消费面（选择域/集序/命中统计）不读
+	// 本分节（序列群卡与目录分组两类事实彼此独立）。旧快照零值载入即无目录分组
+	// 分节（加法字段不升 SchemaVersion，识别重跑即重建）。
+	DirGroups []SnapDirGroup `json:"dirGroups"`
 	// Candidates 集名候选主清单（元素8，批次三阶段5）：目录/序列群两类来源
 	// 合流的候选墙单一数据源（成员带序列块区间），A 档库内集识别注记
 	//（互证/归入既有集）随卡携带；已忽略/已确认的候选分仓至对应清单、不
@@ -1093,6 +1110,16 @@ type SnapFile struct {
 	// 独立于空 aggTrackRole 的「无聚合」含义（说明成员=轨道角色空+本标记
 	// 真）。零值=非说明成员（旧快照载入即现状语义，无迁移）。
 	AggCompanion bool `json:"aggCompanion,omitempty"`
+	// SetGroupKey / SetName / SetRuleID 集归属（产出四「作品集聚合」求值结论，
+	// 识别快照 v4 起在场）：SetGroupKey 为按归集依据算出的组键（身份复合键
+	// NUL 连接／序列群键／目录聚合键），SetName 为规则匹配层模板产出的集名，
+	// SetRuleID 为产出该归属的规则 ID。三字段同空=不入集（无产出四规则、已被
+	// 聚合收编、说明成员、分组键或集名不可得）；消费面按「SetGroupKey+SetName」
+	// 识别一个集、按 SetRuleID 追溯产出规则。旧快照（v3 及更早）零值载入即
+	// 无集归属语义（无迁移），识别重跑即重建。
+	SetGroupKey string `json:"setGroupKey,omitempty"`
+	SetName     string `json:"setName,omitempty"`
+	SetRuleID   string `json:"setRuleId,omitempty"`
 	// ContentSize / ContentModTime 内容游标（尺寸+修改时间 UnixNano）：该文件
 	// 上轮被采集过内容片段时在场，增量轮目录被 mtime 跳过时逐文件 stat
 	// 比对，失配即整目录拉回求值面（内容原地修改不改父目录 mtime，目录级
@@ -1161,6 +1188,31 @@ type SnapGroupMember struct {
 	// Elements 文件名元素数组（批次二起取代 Segs 区间）：按序拼接 text 还原
 	// 去扩展名正文；公共性终判（title/plain）由 markCommonElements 统一落格。
 	Elements []SnapEl `json:"elements,omitempty"`
+}
+
+// SnapDirGroup 目录分组（分组层产物，独立分节）：目录名含作品号（workNumberOf
+// 保守提取命中）或目录内直接子文件已单一群键成集 → 整目录归集分组。成员=目录
+// 直接子文件全部（不含子目录文件；序号原文与元素数组按结构形态现算），直接子
+// 文件 <2 不出分组，已被规则定群覆盖的目录不重复出（序列群卡已承载该事实），
+// 库根本身（RelKey 空）不出分组。本分节只承载目录分组事实，采集消费面为集名
+// 候选墙投影与疑似作品集页目录卡；集归属字段（SnapFile）与产出四求值另居其位
+// （求值通道），本结构不承载集名/规则归属。
+type SnapDirGroup struct {
+	// Dir 分组所在目录键（相对库根的 '/' 目录路径）。
+	Dir string `json:"dir"`
+	// Key 分组键=剥壳目录名（剥壳未命中时=目录名）；集名候选键。
+	Key string `json:"key"`
+	// WorkNo 探测条件一：目录名内保守提取的作品号（空=无作品号信号）。
+	WorkNo string `json:"workNo,omitempty"`
+	// SingleGroup 探测条件二：目录直接子文件全部有群键且同属单一群键。
+	SingleGroup bool `json:"singleGroup,omitempty"`
+	// Size 成员数（=目录直接子文件数）。
+	Size int `json:"size"`
+	// Members 成员清单（目录直接子文件全部，按快照文件序；成员形态与集名候选
+	// 成员同构）。
+	Members []SnapCandMember `json:"members"`
+	// KeyElements 键元素池（目录名剥壳内名元素）。
+	KeyElements []SnapEl `json:"keyElements,omitempty"`
 }
 
 // SnapPending 待裁决明细（元素5）：合成层声明冲突的维度、候选对照与原因。
@@ -1265,6 +1317,7 @@ func aggregatePanorama(in aggregateInput) *RecognitionSnapshot {
 		Dirs:       make([]SnapDir, 0, len(in.enumRes.Dirs)),
 		Files:      make([]SnapFile, 0, len(in.enumRes.AllFiles)),
 		Groups:     make([]SnapGroup, 0),
+		DirGroups:  make([]SnapDirGroup, 0),
 		Candidates: make([]SnapCandidate, 0),
 		RuleStats:  make([]SnapRuleStat, 0, len(in.enabledRules)),
 	}
@@ -1524,6 +1577,8 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIn
 		MatchedRuleIDs: c.MatchedRuleIDs,
 		AggWorkKey:     c.AggWorkKey, AggTrackRole: c.AggTrackRole, AggWorkType: c.AggWorkType,
 		AggCompanion: c.AggCompanion,
+		// 集归属三字段随快照落档（产出四求值结论；消费面按组键+集名识别集）。
+		SetGroupKey: c.SetGroupKey, SetName: c.SetName, SetRuleID: c.SetRuleID,
 		// 内容扇出键集随快照落档（作品级并入与创建载荷两口径按键集路由）。
 		FanoutWorkKeys: c.FanoutWorkKeys,
 	}
@@ -2264,12 +2319,14 @@ func (c SnapCandidate) target() string {
 	return c.Source + "\x00" + c.Dir + "\x00" + c.Key
 }
 
-// buildSnapshotCandidates 候选墙装配（元素8 入口）：三类来源合流为快照主清单
-// （buildWorkSetCandidates），再按会话态目标键分仓——ignored 进
-// IgnoredCandidates、confirmed 进 ConfirmedCandidates（带确认集名与既有集行
-// id：确认集名取成员赋值的 collection〔确认动作的落点〕，既有 id 取会话旁路
-// 簿记），分仓候选移出主清单。
+// buildSnapshotCandidates 候选墙装配（元素8 入口）：先产出目录分组分节
+// （detectDirGroups，分组层事实入快照），再合流为快照主清单
+// （buildWorkSetCandidates：群卡 + 目录分组分节投影），最后按会话态目标键分仓
+// ——ignored 进 IgnoredCandidates、confirmed 进 ConfirmedCandidates（带确认集名
+// 与既有集行 id：确认集名取成员赋值的 collection〔确认动作的落点〕，既有 id 取
+// 会话旁路簿记），分仓候选移出主清单。
 func buildSnapshotCandidates(snap *RecognitionSnapshot, lib *LibraryIndex, in aggregateInput) {
+	snap.DirGroups = detectDirGroups(snap)
 	snap.Candidates = buildWorkSetCandidates(snap, lib)
 	if len(in.ignoredTargets) == 0 && len(in.confirmedTargets) == 0 {
 		return
@@ -2324,11 +2381,12 @@ func groupKeyElements(g *SnapGroup) []SnapEl {
 	return out
 }
 
-// buildWorkSetCandidates 候选主清单装配（纯函数）：① 目录候选
-// （detectDirCandidates：目录名含作品号/整目录单一群键成集）；② 序列群全部
-// （快照 Groups 即全集——结构/规则/页级定群同权出卡）；③ A 档库内集识别对
-// 全部候选注记（matchExistingWorkSet：键∈集名全集=互证、键作品号与集名内
-// 作品号唯一相等=归入既有集）。清单按目录、候选键、来源稳定排序。
+// buildWorkSetCandidates 候选主清单装配（纯函数）：① 目录候选（目录分组分节
+// snap.DirGroups 的投影，探测与成员计算在分组层 detectDirGroups——目录名含作品
+// 号/整目录单一群键成集）；② 序列群全部（快照 Groups 即全集——结构/规则/页级
+// 定群同权出卡）；③ A 档库内集识别对全部候选注记（matchExistingWorkSet：键∈
+// 集名全集=互证、键作品号与集名内作品号唯一相等=归入既有集）。清单按目录、
+// 候选键、来源稳定排序。
 func buildWorkSetCandidates(snap *RecognitionSnapshot, lib *LibraryIndex) []SnapCandidate {
 	cands := make([]SnapCandidate, 0, len(snap.Groups))
 	for _, g := range snap.Groups {
@@ -2351,7 +2409,7 @@ func buildWorkSetCandidates(snap *RecognitionSnapshot, lib *LibraryIndex) []Snap
 		}
 		cands = append(cands, cand)
 	}
-	cands = append(cands, detectDirCandidates(snap)...)
+	cands = append(cands, dirGroupCandidates(snap.DirGroups)...)
 	for i := range cands {
 		cands[i].CrossMatch, cands[i].ExistingSetID, cands[i].ExistingSetName =
 			matchExistingWorkSet(cands[i].Key, lib)
@@ -2368,13 +2426,14 @@ func buildWorkSetCandidates(snap *RecognitionSnapshot, lib *LibraryIndex) []Snap
 	return cands
 }
 
-// detectDirCandidates 目录候选探测（纯函数）：目录名含作品号（workNumberOf
-// 保守提取命中）或目录内直接子文件已单一群键成集 → 整目录归集候选。成员=
-// 目录直接子文件全部（不含子目录文件；区间与序号原文按结构形态表现算），
-// 直接子文件 <2 不出候选；已被规则定群覆盖的目录（任一直接子文件是规则
-// 定群群成员）不重复出——群来源已有候选卡。库根本身（RelKey 空）不出目录
-// 候选。
-func detectDirCandidates(snap *RecognitionSnapshot) []SnapCandidate {
+// detectDirGroups 目录分组探测（纯函数，分组层产物）：目录名含作品号
+// （workNumberOf 保守提取命中）或目录内直接子文件已单一群键成集 → 整目录分组。
+// 成员=目录直接子文件全部（不含子目录文件；序号原文与元素数组按结构形态现算），
+// 直接子文件 <2 不出分组；已被规则定群覆盖的目录（任一直接子文件是规则定群群
+// 成员）不重复出——序列群卡已承载该事实。库根本身（RelKey 空）不出目录分组。
+// 探测条件/键/成员口径与集名候选墙的目录来源同源（候选由 dirGroupCandidates
+// 从本分节投影）。
+func detectDirGroups(snap *RecognitionSnapshot) []SnapDirGroup {
 	ruleGroupKeys := make(map[string]bool, len(snap.Groups))
 	for _, g := range snap.Groups {
 		if g.RuleID != "" {
@@ -2385,7 +2444,7 @@ func detectDirCandidates(snap *RecognitionSnapshot) []SnapCandidate {
 	for _, f := range snap.Files {
 		filesByDir[f.DirRelKey] = append(filesByDir[f.DirRelKey], f)
 	}
-	var cands []SnapCandidate
+	groups := make([]SnapDirGroup, 0)
 	for _, dir := range snap.Dirs {
 		if dir.RelKey == "" {
 			continue
@@ -2420,19 +2479,9 @@ func detectDirCandidates(snap *RecognitionSnapshot) []SnapCandidate {
 		if _, inner, ok := stripShell(dir.Name); ok {
 			key = inner
 		}
-		var parts []string
-		if workNo != "" {
-			parts = append(parts, "目录名含作品号 "+workNo)
-		}
-		if singleGroup {
-			parts = append(parts, fmt.Sprintf("目录内 %d 个文件已成一集", len(members)))
-		} else {
-			parts = append(parts, fmt.Sprintf("目录内 %d 个文件", len(members)))
-		}
-		cand := SnapCandidate{
-			Key: key, Dir: dir.RelKey, Source: candSourceDir, Size: len(members),
-			Reason:      strings.Join(parts, "，"),
-			Members:     make([]SnapCandMember, 0, len(members)),
+		group := SnapDirGroup{
+			Dir: dir.RelKey, Key: key, WorkNo: workNo, SingleGroup: singleGroup,
+			Size: len(members), Members: make([]SnapCandMember, 0, len(members)),
 			KeyElements: dirNameElements(key),
 		}
 		for _, f := range members {
@@ -2449,9 +2498,36 @@ func detectDirCandidates(snap *RecognitionSnapshot) []SnapCandidate {
 				}
 				mem.Elements = els
 			}
-			cand.Members = append(cand.Members, mem)
+			group.Members = append(group.Members, mem)
 		}
-		cands = append(cands, cand)
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+// dirGroupCandidates 目录分组分节 → 集名候选卡（纯函数，候选墙的目录来源投影）：
+// 探测条件、键、成员清单逐字段取自分组层分节；理由文本按探测条件现拼（目录名
+// 含作品号/目录内文件数/「已成一集」）。与迁移前的目录候选探测同口径（判定与
+// 成员的唯一来源已上移至 detectDirGroups）。
+func dirGroupCandidates(groups []SnapDirGroup) []SnapCandidate {
+	cands := make([]SnapCandidate, 0, len(groups))
+	for i := range groups {
+		g := &groups[i]
+		var parts []string
+		if g.WorkNo != "" {
+			parts = append(parts, "目录名含作品号 "+g.WorkNo)
+		}
+		if g.SingleGroup {
+			parts = append(parts, fmt.Sprintf("目录内 %d 个文件已成一集", g.Size))
+		} else {
+			parts = append(parts, fmt.Sprintf("目录内 %d 个文件", g.Size))
+		}
+		cands = append(cands, SnapCandidate{
+			Key: g.Key, Dir: g.Dir, Source: candSourceDir, Size: g.Size,
+			Reason:      strings.Join(parts, "，"),
+			Members:     g.Members,
+			KeyElements: g.KeyElements,
+		})
 	}
 	return cands
 }
@@ -2867,6 +2943,10 @@ func panoramaOverviewViewOf(snap *RecognitionSnapshot) RecognitionSnapshot {
 	view := *snap
 	view.DirMtimes = nil
 	view.Files = nil
+	// 目录分组分节为重载荷成员清单（成员全量、条目按目录量级）：overview 整答
+	// 不携带（与文件明细同口径），由快照持久化保留、消费面按需经分节读取；候选
+	// 墙的目录来源卡已由本分节投影，呈现面不经 overview 直读分节。
+	view.DirGroups = nil
 	view.Groups = previewSnapGroups(view.Groups)
 	view.Candidates = previewSnapCandidates(view.Candidates)
 	view.IgnoredCandidates = previewSnapCandidates(view.IgnoredCandidates)
@@ -3808,13 +3888,15 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 	return nil
 }
 
-// runAggregationOnConclusions 识别轮汇流点的聚合段与扇出归属段入口（与
-// pipeline.go 的 runAggregationStage 同一算法，作用对象为合并求值结论）：
-// conclusions 与 files 按下标对齐（调用方保证同一求值清单），聚合归属与
-// 内容扇出结论（扇出段居聚合段之后、聚合归属优先——元数据源标记与扇出
-// 键集只补不改写聚合归属）直接写入结论字段。
+// runAggregationOnConclusions 识别轮汇流点的聚合段、扇出归属段与作品集聚合段
+// 入口（与 pipeline.go 的 runAggregationStage 同一算法，作用对象为合并求值
+// 结论）：conclusions 与 files 按下标对齐（调用方保证同一求值清单），聚合归属
+// 与内容扇出结论（扇出段居聚合段之后、聚合归属优先——元数据源标记与扇出
+// 键集只补不改写聚合归属）直接写入结论字段；作品集聚合段（产出四）居其后，
+// 聚合归属先到先得，集归属三字段（组键/集名/规则ID）写入未占用命中文件。
 func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) {
-	assigns := aggregateGrouping(newAggEvalSurface(files, treeFiles), rules, lib, types)
+	surface := newAggEvalSurface(files, treeFiles)
+	assigns := aggregateGrouping(surface, rules, lib, types)
 	for i := range conclusions {
 		if i >= len(assigns) {
 			break
@@ -3825,6 +3907,37 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 		conclusions[i].AggCompanion = assigns[i].Companion
 		conclusions[i].FanoutWorkKeys = assigns[i].FanoutWorkKeys
 	}
+	// 作品集聚合段（产出四）：组键的库级取值源索引由汇流结论的分组归属反查
+	// （行内群产物优先，本索引兜底）；集名取规则匹配层模板产出的作品集维度
+	// 声明（按规则 ID 归位）；既有聚合归属/说明成员先到先得不入集。
+	setAssigns := workSetAggregation(surface, rules, lib,
+		libraryGroupKeysOfConclusions(conclusions),
+		workSetSetNamesOfConclusions(conclusions),
+		workSetTakenOfConclusions(conclusions))
+	for i := range conclusions {
+		if i >= len(setAssigns) {
+			break
+		}
+		conclusions[i].SetGroupKey = setAssigns[i].GroupKey
+		conclusions[i].SetName = setAssigns[i].SetName
+		conclusions[i].SetRuleID = setAssigns[i].RuleID
+	}
+}
+
+// libraryGroupKeysOfConclusions 库级序列群键反查索引（产出四组键绑定的库级
+// 取值源接线点）：由汇流结论的分组归属按成员路径反查群卡键——群卡覆盖规则
+// 定群与结构群两类成员（含已识别成员，其文件行不落群组键、群归属只在群卡），
+// 与 workset_order.go 的群卡反查口径一致。产出四组键绑定求值前以本索引配合
+// groupingKeyOfWithLibrarySource 使用（行内群产物优先、本索引兜底）；既有
+// 「元数据文件」分组绑定不取本索引（行内独占，行为零漂移）。
+func libraryGroupKeysOfConclusions(conclusions []FileConclusion) libraryGroupKeyIndex {
+	idx := make(libraryGroupKeyIndex)
+	for i := range conclusions {
+		if g := conclusions[i].Group; g != nil {
+			idx.put(conclusions[i].RelPath, g.Key)
+		}
+	}
+	return idx
 }
 
 // indexSize 谓词索引的名字总量（进度呈现用；nil 索引为 0）。

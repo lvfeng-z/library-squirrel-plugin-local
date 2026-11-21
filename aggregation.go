@@ -297,6 +297,48 @@ func metadataAssignedRows(rule *RuleEntry) map[int]bool {
 // 汇流（首个能供值的命中行）、序列群键专用名只对写入了群组产物的序列行
 // 取值、所在目录形态=目录聚合键。聚合侧与扇出侧的等值要求（三向回放全等
 // 锚）：两消费面调同一实现，语义零分叉。
+//
+// 序列群键保留名的取值源按消费产出形态授权：既有两类消费面（聚合标识、
+// 「元数据文件」分组绑定）只读行内序列行群产物；产出四「作品集聚合」的组键
+// 绑定另可经库级群卡键兜底（行内优先、库级次之）。库级取值源只经
+// identityValueWithLibrarySource/groupingKeyOfWithLibrarySource 入口开启，
+// 既有入口语义不扩。
+
+// groupKeySource 序列群键保留名的取值源授权形态（由消费产出形态静态选择，
+// 不落档案）。
+type groupKeySource int
+
+const (
+	// groupKeySourceInline 只读行内序列行群产物：聚合标识与「元数据文件」分组
+	// 绑定的既有取值面。
+	groupKeySourceInline groupKeySource = iota
+	// groupKeySourceLibraryFallback 行内群产物优先、取不到时按成员路径反查库级
+	// 群卡键：产出四「作品集聚合」的组键绑定专用，既有绑定形态不启。
+	groupKeySourceLibraryFallback
+)
+
+// libraryGroupKeyIndex 库级序列群键反查索引（成员相对路径 → 群卡分组键）：由
+// 分组层群卡按成员路径反查（同 workset_order.go buildGroupSeqIndex 口径：群卡
+// 成员覆盖规则定群与结构群两类，含已识别成员——其文件行不落群组键、群归属只
+// 在群卡），供产出四组键绑定的库级取值源使用。nil/缺项=该成员无库级群归属。
+type libraryGroupKeyIndex map[string]string
+
+// groupKeyOf 按成员相对路径反查库级群卡键。
+func (idx libraryGroupKeyIndex) groupKeyOf(relPath string) (string, bool) {
+	key, ok := idx[relPath]
+	if !ok || key == "" {
+		return "", false
+	}
+	return key, true
+}
+
+// put 收录一条成员群键（空路径或空键不计，nil 索引静默忽略）。
+func (idx libraryGroupKeyIndex) put(relPath, key string) {
+	if idx == nil || relPath == "" || key == "" {
+		return
+	}
+	idx[relPath] = key
+}
 
 // aggFileRowHits 单文件在一条聚合规则下的条件行命中面：按行号下标存放该行独立
 // 求值的作用域上下文（捕获绑定与序列群组产物；nil=该行未命中）。行间捕获不
@@ -305,14 +347,28 @@ type aggFileRowHits []*ParseContext
 
 // identityValue 解析该文件在本规则下的标识值：各部分按声明序以 NUL 分隔拼接
 // （多部分复合标识防歧义）；任一部分取不到值即整体不可得（该文件不入组）。
-// 聚合标识与元数据文件分组绑定（标识分组形态）共用本实现。
+// 聚合标识与元数据文件分组绑定（标识分组形态）共用本实现——序列群键保留名
+// 只读行内群产物（库级取值源不经本入口）。
 func (h aggFileRowHits) identityValue(parts []IdentityPart) (string, bool) {
+	return h.identityValueWithSource(parts, groupKeySourceInline, "", nil)
+}
+
+// identityValueWithLibrarySource 标识值求值（库级取值源形态，产出四「作品集
+// 聚合」组键绑定专用）：序列群键保留名行内群产物优先、取不到时按成员路径反查
+// 库级群卡键；其余部分与既有实现同口径。既有元数据文件分组绑定与聚合标识走
+// identityValue（行内独占），不经本入口。
+func (h aggFileRowHits) identityValueWithLibrarySource(parts []IdentityPart, relPath string, library libraryGroupKeyIndex) (string, bool) {
+	return h.identityValueWithSource(parts, groupKeySourceLibraryFallback, relPath, library)
+}
+
+// identityValueWithSource 标识值求值的单一实现（取值源按消费形态授权）。
+func (h aggFileRowHits) identityValueWithSource(parts []IdentityPart, src groupKeySource, relPath string, library libraryGroupKeyIndex) (string, bool) {
 	if len(parts) == 0 {
 		return "", false
 	}
 	var sb strings.Builder
 	for i := range parts {
-		v, ok := h.identityPart(&parts[i])
+		v, ok := h.identityPart(&parts[i], src, relPath, library)
 		if !ok {
 			return "", false
 		}
@@ -329,8 +385,8 @@ func (h aggFileRowHits) identityValue(parts []IdentityPart) (string, bool) {
 // 取值面按捕获名在命中行间汇流，视频各扩展行/字幕各扩展行取到同一标识；
 // 仅命中部分行的文件经同名捕获入组——说明文件从自己的命中行取同名捕获，
 // 与资源文件同键进分组）；序列群键专用名只对写入了群组产物的序列行取值
-// （组内成员共享群键）。
-func (h aggFileRowHits) identityPart(part *IdentityPart) (string, bool) {
+// （组内成员共享群键），库级取值源形态下行内取不到再按成员路径反查群卡键。
+func (h aggFileRowHits) identityPart(part *IdentityPart, src groupKeySource, relPath string, library libraryGroupKeyIndex) (string, bool) {
 	for row := 1; row <= len(h); row++ {
 		ctx := h[row-1]
 		if ctx == nil {
@@ -346,19 +402,35 @@ func (h aggFileRowHits) identityPart(part *IdentityPart) (string, bool) {
 			return v, true
 		}
 	}
+	if part.Capture == identityGroupKeyCapture && src == groupKeySourceLibraryFallback {
+		return library.groupKeyOf(relPath)
+	}
 	return "", false
 }
 
 // groupingKeyOf 按分组绑定声明求该文件的分组键（统一分组求值器的扇出侧
 // 入口）：标识分组=键部分的复合值（identityValue——与聚合标识同一实现，
-// 含序列群键保留名的取值面）；所在目录分组=目录聚合键（同目录文件同键，
+// 序列群键保留名只读行内群产物）；所在目录分组=目录聚合键（同目录文件同键，
 // 任意名说明文件与资源文件同组）。任一部分取不到值即整体不可得（调用方
-// 按不属任何分组处理——孤文件回退的分组键不可得形态）。
+// 按不属任何分组处理——孤文件回退的分组键不可得形态）。既有「元数据文件」
+// 分组绑定走本入口，取值面不扩库级分组。
 func (h aggFileRowHits) groupingKeyOf(binding *GroupingBinding, dirNames []string) (string, bool) {
 	if binding.Mode == GroupingModeDirectory {
 		return dirGroupKey(dirNames), true
 	}
 	return h.identityValue(binding.Identity)
+}
+
+// groupingKeyOfWithLibrarySource 分组键求值（库级取值源形态，产出四「作品集
+// 聚合」组键绑定专用）：所在目录分组=目录聚合键（库级源不参与——所在目录键
+// 恒可得）；标识分组=identityValueWithLibrarySource（序列群键保留名行内优先、
+// 库级群卡键兜底）。既有「元数据文件」分组绑定仍走 groupingKeyOf——行内无群
+// 产物的文件不入组语义保持不变。
+func (h aggFileRowHits) groupingKeyOfWithLibrarySource(binding *GroupingBinding, dirNames []string, relPath string, library libraryGroupKeyIndex) (string, bool) {
+	if binding.Mode == GroupingModeDirectory {
+		return dirGroupKey(dirNames), true
+	}
+	return h.identityValueWithLibrarySource(binding.Identity, relPath, library)
 }
 
 // trackRoleOf 取该文件的轨道角色：分轨入口声明序中首个命中的行所分配的角色。

@@ -2014,6 +2014,65 @@ export interface MetadataFileProductionForm {
   contentBindings?: ContentBindingForm[]
 }
 
+// —— 「作品集聚合」产出（产出四·剧本A）表单形态 ——
+// 归集依据三选（剧本A 帧2「归集依据：(○序列分组键 ●所在目录 ○行捕获)」）：
+// seqKey=序列分组键（绑定所选序列行的群键保留名）、directory=所在目录、capture=
+// 行捕获（键部分=条件行号+捕获名按声明序拼成复合键）。产出四不带集名来源
+//（决策5）：集名只从匹配层模板来（条件里的集名捕获/提取），本形态不携集名字段。
+export type WorkSetBasisForm = 'seqKey' | 'directory' | 'capture'
+
+export interface WorkSetAggregationForm {
+  basis: WorkSetBasisForm
+  // seqRow 为序列分组键所选序列条件行号（取值源由产出形态静态授权：行内序列行
+  // 群产物优先、库级群卡键兜底——行号只定位行内群产物来源行）。
+  seqRow: number
+  // captures 为行捕获键部分（按声明序拼接成复合键）。
+  captures: IdentityPartForm[]
+}
+
+// 集名行提示（剧本A 帧2「集名：来自条件里的 {集名} 捕获」；序列分组键形态集名=
+// 公共段，帧3「…捕获（公共段）」）：产出四不带集名来源，本行只提示集名来自
+// 匹配层模板（条件里的集名捕获/提取），不提供选择。
+export const WORKSET_NAME_HINT = '集名：来自条件里的 {集名} 捕获'
+export const WORKSET_NAME_HINT_SEQ = '集名：来自条件里的 {集名} 捕获（公共段）'
+
+// 归集依据预览行（剧本A 帧2：随归集依据实时改口）。
+export const WORKSET_PREVIEW_DIR = '预览：同目录的命中文件将归为同一作品集'
+export const WORKSET_PREVIEW_SEQ = '预览：成套命中的文件（同前缀+序号）将各成作品并归入同一作品集，集名=公共段'
+
+// 集名行红字：条件里（提取声明面）没有集名产出时实时提示；保存被拦时换成带
+// 指路的全文（剧本A 帧2/帧3 逐字）。
+export const WORKSET_NAME_MISSING = '请先在条件里给集名留捕获'
+export const WORKSET_SAVE_NAME_MISSING = '请先在条件里给集名留捕获（如目录名/公共段）'
+
+// 保存闸门红字：行捕获形态未选捕获名（帧3）；序列分组键形态无序列条件行
+//（行内群产物来源行缺席——保存面兜底，内核同拒）。
+export const WORKSET_SAVE_CAPTURE_MISSING = '请选择参与归集依据的捕获'
+export const WORKSET_SAVE_SEQ_MISSING = '序列分组键需要序列条件行'
+
+// 归集依据 → 组键绑定（保存序列化）：seqKey→标识分组（键部分=群键保留名
+// groupKey）、directory→所在目录分组、capture→标识分组（键部分=所选捕获）；
+// 行捕获未选捕获名=undefined（保存闸门拦，载荷构造层兜底不产出空键）。
+export function workSetGrouping(f: WorkSetAggregationForm | null): GroupingBindingForm | undefined {
+  if (!f) return undefined
+  if (f.basis === 'directory') return { mode: 'directory' }
+  if (f.basis === 'seqKey') return { mode: 'identity', identity: [{ row: f.seqRow, capture: AGG_GROUP_KEY_CAPTURE }] }
+  if (!f.captures.length) return undefined
+  return { mode: 'identity', identity: f.captures.map((p) => ({ row: p.row, capture: p.capture })) }
+}
+
+// 组键绑定 → 归集依据表单（载入既有档案）：directory→所在目录；单群键保留名→
+// 序列分组键（行=声明行）；其余→行捕获（键部分原样还原）。
+export function workSetFromGrouping(grouping: GroupingBindingForm | null | undefined): WorkSetAggregationForm | null {
+  if (!grouping || !grouping.mode) return null
+  if (grouping.mode === 'directory') return { basis: 'directory', seqRow: 1, captures: [] }
+  const parts = (grouping.identity || []).map((p) => ({ row: p.row, capture: p.capture }))
+  if (parts.length === 1 && parts[0].capture === AGG_GROUP_KEY_CAPTURE) {
+    return { basis: 'seqKey', seqRow: parts[0].row, captures: [] }
+  }
+  return { basis: 'capture', seqRow: 1, captures: parts }
+}
+
 // 分轨入口表单形态。companionUse 为规则级历史字段——内核口径=规则级仅 track
 // 可写（空串载入归一 track；metadata 载入即拒并指路行级指派——处置语义由分轨
 // 入口（轨道行=导入）+内容绑定勾选（内容产出元数据）合成表达，见插件 Go 侧

@@ -61,18 +61,40 @@ func buildGroupSeqIndex(snap *RecognitionSnapshot) map[string]worksetGroupSeq {
 	return idx
 }
 
+// isSequenceGroupSetRule 规则是否以序列群键为归集依据（产出四组键=序列群键
+// 保留名的单一标识部分）：只有这类集的成员具备群卡身份、集归属组键=群卡分组键，
+// 集内序可按群卡序号供出；行捕获复合与所在目录集的组键不是成员群卡键，供序会
+// 与集声明的结构语义相违（其序由宿主创建序兜底）。
+func isSequenceGroupSetRule(rule *RuleEntry) bool {
+	wa := rule.WorkSetAggregation
+	if wa == nil || wa.Grouping == nil {
+		return false
+	}
+	g := wa.Grouping
+	return g.Mode == GroupingModeIdentity && len(g.Identity) == 1 && g.Identity[0].Capture == identityGroupKeyCapture
+}
+
 // collectWorkSetOrderUpdates 从批次子行素材归集各集的本批成员条目（集业务键 →
-// 成员列表）。集归属来源两处，与执行期作品应答的集声明同源：快照终选的集维度
-// 声明（集名赋值与规则提取产物，全部归属形态适用）与目录含义链的 workSet 项
+// 成员列表）。集归属来源三处，与执行期作品应答的集声明同源：快照终选的集维度
+// 声明（集名赋值与规则提取产物，全部归属形态适用）、目录含义链的 workSet 项
 // （仅 local 归属子行——真实域作品的站点侧集 ID 无法从名字派生，执行期作品
-// 应答同样跳过该含义）。成员的集内序号以群卡反查为主、文件行群组序兜底（规则
-// 群成员的文件行携带群组序号；序号原文只存于群卡，兜底路径为空）。无群组身份
-// （无集内序）的成员不落记录：作答不含该成员，宿主侧其原站序保持空、由本地
-// 续排兜底。作品身份键与批次子行同源同值（真实域页级作品 ID 或文件内容哈希）。
-func collectWorkSetOrderUpdates(snap *RecognitionSnapshot, items []batchFileItem) map[string][]worksetOrderMember {
+// 应答同样跳过该含义）与产出四集归属的集名快照（组键+集名；同文件同集名只落
+// 一条）。产出四集的供序形态裁定：仅序列群键归集依据的集供集内序（见
+// isSequenceGroupSetRule）——行捕获复合/所在目录集即便成员带群卡身份也不供序。
+// 成员的集内序号以群卡反查为主、文件行群组序兜底（规则群成员的文件行携带群组
+// 序号；序号原文只存于群卡，兜底路径为空）。无群组身份（无集内序）的成员不落
+// 记录：作答不含该成员，宿主侧其原站序保持空、由本地续排兜底。作品身份键与
+// 批次子行同源同值（真实域页级作品 ID 或文件内容哈希）。
+func collectWorkSetOrderUpdates(snap *RecognitionSnapshot, items []batchFileItem, rules []RuleEntry) map[string][]worksetOrderMember {
 	updates := make(map[string][]worksetOrderMember)
 	if snap == nil {
 		return updates
+	}
+	seqSetRules := make(map[string]bool)
+	for i := range rules {
+		if isSequenceGroupSetRule(&rules[i]) {
+			seqSetRules[rules[i].ID] = true
+		}
 	}
 	fileByPath := make(map[string]*SnapFile, len(snap.Files))
 	for i := range snap.Files {
@@ -82,16 +104,23 @@ func collectWorkSetOrderUpdates(snap *RecognitionSnapshot, items []batchFileItem
 	for _, item := range items {
 		rel := item.af.entry.RelPath
 		rec := fileByPath[rel]
+		// 产出四集归属的集名是否供序：仅序列群键归集依据的集（组键=成员群卡键）
+		seqSetName := rec != nil && rec.SetName != "" && seqSetRules[rec.SetRuleID]
 
 		// 集归属归集：同文件多来源同名集只落一条
 		var setNames []string
 		seenSet := make(map[string]bool)
 		if rec != nil {
 			for _, decl := range rec.Final {
-				if decl.Dimension == string(DimCollection) && decl.Value != "" && !seenSet[decl.Value] {
-					seenSet[decl.Value] = true
-					setNames = append(setNames, decl.Value)
+				if decl.Dimension != string(DimCollection) || decl.Value == "" || seenSet[decl.Value] {
+					continue
 				}
+				// 非序列群键归集依据的产出四集名不供集内序（同上裁定）
+				if decl.Value == rec.SetName && !seqSetName {
+					continue
+				}
+				seenSet[decl.Value] = true
+				setNames = append(setNames, decl.Value)
 			}
 		}
 		if !item.af.attr.isReal() {
@@ -101,6 +130,12 @@ func collectWorkSetOrderUpdates(snap *RecognitionSnapshot, items []batchFileItem
 					setNames = append(setNames, m.Name)
 				}
 			}
+		}
+		if seqSetName && !seenSet[rec.SetName] {
+			// 产出四集成员可能未在本文件复现集名声明（集名取自同组其他成员）：
+			// 归属事实的集名快照补位，供集内序记录
+			seenSet[rec.SetName] = true
+			setNames = append(setNames, rec.SetName)
 		}
 		if len(setNames) == 0 {
 			continue
@@ -177,7 +212,7 @@ func (h *LocalImportWorkFetcher) recordWorkSetOrders(snap *RecognitionSnapshot, 
 	if h.ctx == nil {
 		return
 	}
-	updates := collectWorkSetOrderUpdates(snap, items)
+	updates := collectWorkSetOrderUpdates(snap, items, h.resolvePipelineRules())
 	if len(updates) == 0 {
 		return
 	}

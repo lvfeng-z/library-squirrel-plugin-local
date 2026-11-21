@@ -43,10 +43,28 @@ func workSetKey(dirRelKey, groupKey string) string {
 	return dirRelKey + "\x00" + groupKey
 }
 
-// splitWorkSetKey 集键 → 目录键与分组键（集名候选）。
-func splitWorkSetKey(setKey string) (dirRelKey, groupKey string) {
-	dirRelKey, groupKey, _ = strings.Cut(setKey, "\x00")
-	return dirRelKey, groupKey
+// workSetKeyOfAttribution 产出四集归属的集键：组键与集名共同标识一个集（集名
+// 非空即归属在场；同名同组键=同一集，与宿主按名 upsert 的集身份一致）。NUL
+// 前缀与 workSetKey 的「目录键+NUL+群组键」形态不相交（目录键为 '/' 路径不含
+// NUL），两类集键不会误并为同一集。
+func workSetKeyOfAttribution(setGroupKey, setName string) string {
+	return "\x00set\x00" + setGroupKey + "\x00" + setName
+}
+
+// workSetKeyOfFile 文件行的集键：产出四集归属优先（按「组键+集名」识别一个集，
+// 集可跨目录）；无集归属时既有序列群键（目录+文件行群组键）；两者皆无=不属
+// 任何集。同一文件至多属一个集——归属为声明式事实，优先于临时群组键。
+func workSetKeyOfFile(f *SnapFile) string {
+	if f == nil {
+		return ""
+	}
+	if f.SetName != "" {
+		return workSetKeyOfAttribution(f.SetGroupKey, f.SetName)
+	}
+	if f.GroupKey != "" {
+		return workSetKey(f.DirRelKey, f.GroupKey)
+	}
+	return ""
 }
 
 // SelectableWork 可选作品：选择的最小粒度。单文件作品恒一文件；组作品=同
@@ -68,7 +86,7 @@ type SelectableWork struct {
 	// 文件 N」类文案由前端按本位与 Files 数派生，说明成员不进创建链）。
 	// 单文件作品与无说明成员的组作品零值省略。
 	CompanionCount int `json:"companionCount,omitempty"`
-	// SetKey 所属集键（仅序列群成员非空；落单文件不属任何集）。
+	// SetKey 所属集键（序列群成员与产出四集归属成员非空；落单文件不属任何集）。
 	SetKey string `json:"setKey,omitempty"`
 	// Selectable 可选=文件已识别且无待裁决（未识别与待裁决均不可选——
 	// 任务数据=识别结论的闭环保持完整）。
@@ -77,9 +95,11 @@ type SelectableWork struct {
 	State string `json:"state"`
 }
 
-// WorkSetView 集（序列群）的呈现视图：成员作品键按集内序排列。
+// WorkSetView 集的呈现视图：序列群集（目录+文件行群组键）与产出四集归属集
+// （组键+集名）同构——成员作品键按集内序排列。
 type WorkSetView struct {
-	// SetKey 集键；DirRelKey 所在目录键；Key 分组键（公共前缀=集名候选）。
+	// SetKey 集键；DirRelKey 所在目录键（产出四跨目录集取首成员目录键）；
+	// Key 呈现键（序列群集=分组键/公共前缀，产出四集=集名）。
 	SetKey    string `json:"setKey"`
 	DirRelKey string `json:"dirRelKey"`
 	Key       string `json:"key"`
@@ -164,12 +184,17 @@ func workVitality(fileByPath map[string]*SnapFile, ignored map[string]bool, file
 }
 
 // DeriveWorkDomain 从识别全景快照推导选择域：每个文件各自成一件单文件作品，
-// 聚合归属非空的成员按聚合作品键并成一件聚合作品（不再逐文件成件）；GroupKey
-// 非空的文件（规则定群与结构群成员）另按「目录+分组键」归集为集（集内序取快照
-// GroupSeq）——集=默认聚合单元，集内允许作品级显式拆选，集视图以作品为成员
-// （聚合作品整体入集、整件为一成员）。元数据源文件（扇出面说明成员：仅绑定行
-// 命中、组内有落点、不导入不独立成件）不各自成件，按内容扇出键集并入各目标
-// 作品（一份说明文件扇出到多作品时每件各计一次说明数）。
+// 聚合归属非空的成员按聚合作品键并成一件聚合作品（不再逐文件成件）；文件行另
+// 按集归属归集成集——产出四（作品集聚合）集归属在场时按「组键+集名」识别一个
+// 集（集可跨目录），缺席时 GroupKey 非空的文件（规则定群与结构群成员）按
+// 「目录+分组键」归集为既有序列群集——集=默认聚合单元，集内允许作品级显式
+// 拆选，集视图以作品为成员（聚合作品整体入集、整件为一成员）。元数据源文件
+// （扇出面说明成员：仅绑定行命中、组内有落点、不导入不独立成件）不各自成件，
+// 按内容扇出键集并入各目标作品（一份说明文件扇出到多作品时每件各计一次说明数）。
+//
+// 集内序：既有序列群集取快照 GroupSeq；产出四集按群卡身份序（buildGroupSeqIndex
+// 口径：群卡反查为主、文件行群组序兜底），无群卡身份的成员按快照序稳定殿后
+// 排列——行捕获复合/所在目录集的成员通常无群卡身份，序由宿主创建序兜底。
 //
 // 聚合作品的键=主导文件 f:{相对路径}（聚合段落定的作品键原样沿用，键前缀维持
 // 单一）；Files 首位恒为主导文件（快照序先见伴随成员时入组后对位挪前），目录键、
@@ -194,6 +219,30 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 	//（确定序），单文件作品路径零变化；元数据源文件（扇出面）不在本扫描
 	// 成件，留待第二遍按扇出键集并入。
 	setMembers := make(map[string][]*SelectableWork)
+	// 集视图元数据：集键 → 所在目录键 / 呈现键，及「产出四集归属」标记（集内序
+	// 走群卡身份序）。旧形态集首次成员出现时按「目录+群组键」落，产出四集按
+	// 「首成员目录+集名」落。
+	setDirs := make(map[string]string)
+	setDisplay := make(map[string]string)
+	setAttribution := make(map[string]bool)
+	addSetMember := func(work *SelectableWork, f *SnapFile) {
+		setKey := workSetKeyOfFile(f)
+		if setKey == "" {
+			return
+		}
+		work.SetKey = setKey
+		setMembers[setKey] = append(setMembers[setKey], work)
+		if _, seen := setDirs[setKey]; seen {
+			return
+		}
+		setDirs[setKey] = f.DirRelKey
+		if f.SetName != "" {
+			setDisplay[setKey] = f.SetName
+			setAttribution[setKey] = true
+			return
+		}
+		setDisplay[setKey] = f.GroupKey
+	}
 	aggByWork := make(map[string]*SelectableWork)
 	for i := range snap.Files {
 		f := &snap.Files[i]
@@ -256,10 +305,7 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 		aggByWork[key] = work
 		domain.Works = append(domain.Works, work)
 		domain.byWork[work.WorkID] = work
-		if f.GroupKey != "" {
-			work.SetKey = workSetKey(f.DirRelKey, f.GroupKey)
-			setMembers[work.SetKey] = append(setMembers[work.SetKey], work)
-		}
+		addSetMember(work, f)
 	}
 	// 第二遍：元数据源文件（扇出面说明成员）按扇出键集并入各目标作品——
 	// 文件行追加在末位（主导恒居 Files 首位）、说明计数随作品累计（作品级
@@ -282,27 +328,40 @@ func DeriveWorkDomain(snap *RecognitionSnapshot, ignored map[string]bool) *WorkD
 	}
 	for _, work := range domain.Works {
 		// 作品级结论=主导文件（Files 首位）——单文件作品 Files 恒一条，两口径
-		// 同值；集归属按主导文件群键整体入集，可选性/呈现态只看主导文件。主导
+		// 同值；集归属按主导文件集归属整体入集，可选性/呈现态只看主导文件。主导
 		// 先到的单文件/扇出归属作品已在主循环归集（SetKey 非空防重）。
 		work.Selectable, work.State = workVitality(fileByPath, ignored, work.Files[:1])
 		if work.SetKey == "" {
-			if lead := fileByPath[work.Files[0]]; lead != nil && lead.GroupKey != "" {
-				work.SetKey = workSetKey(lead.DirRelKey, lead.GroupKey)
-				setMembers[work.SetKey] = append(setMembers[work.SetKey], work)
-			}
+			addSetMember(work, fileByPath[work.Files[0]])
 		}
 	}
+	groupSeq := buildGroupSeqIndex(snap)
 	for _, setKey := range sortedKeys(setMembers) {
 		members := setMembers[setKey]
-		sort.SliceStable(members, func(i, j int) bool {
-			return fileByPath[members[i].Files[0]].GroupSeq < fileByPath[members[j].Files[0]].GroupSeq
-		})
-		dirKey, groupKey := splitWorkSetKey(setKey)
+		if setAttribution[setKey] {
+			// 产出四集：有群卡身份的成员按群卡序（群卡反查优先、文件行群组序
+			// 兜底）；无群卡身份的成员保持快照序（稳定排序比较器只对成序成员
+			// 生效，其余按原序殿后）。
+			sort.SliceStable(members, func(i, j int) bool {
+				gi, oki := groupSeq[members[i].Files[0]]
+				gj, okj := groupSeq[members[j].Files[0]]
+				if !oki || !okj {
+					return false
+				}
+				return seqMemberLess(gi.seq, gi.seqText, gj.seq, gj.seqText)
+			})
+		} else {
+			sort.SliceStable(members, func(i, j int) bool {
+				return fileByPath[members[i].Files[0]].GroupSeq < fileByPath[members[j].Files[0]].GroupSeq
+			})
+		}
 		ids := make([]string, 0, len(members))
 		for _, member := range members {
 			ids = append(ids, member.WorkID)
 		}
-		domain.Sets = append(domain.Sets, &WorkSetView{SetKey: setKey, DirRelKey: dirKey, Key: groupKey, Members: ids})
+		domain.Sets = append(domain.Sets, &WorkSetView{
+			SetKey: setKey, DirRelKey: setDirs[setKey], Key: setDisplay[setKey], Members: ids,
+		})
 	}
 	return domain
 }

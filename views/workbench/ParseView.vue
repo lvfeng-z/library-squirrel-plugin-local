@@ -958,6 +958,12 @@ interface SnapFile {
   // 文件（未分配轨道）而归进聚合作品——无轨、不导入、不独立成作品；清单行挂
   // 「说明」徽章（与 contentState 无关的身份位）、同作品悬停/复选联动照常。
   aggCompanion?: boolean
+  // 集归属（产出四「作品集聚合」求值结论，快照 v4 起在场）：组键+集名+产出
+  // 规则 ID，三字段同空=不入集；集名非空即文件已被声明归入某作品集——「隐藏
+  // 已识别」口径的集维度事实位（成员可能未在本文件复现集维度终选声明）。
+  setGroupKey?: string
+  setName?: string
+  setRuleId?: string
   // 内容采集状态（阶段4 投影位，呈现态数据）：伴随说明成员行的行详情可见原因
   //——rejected=采集过但未按文本产出声明（二进制嗅探拒读或内容全空白）、
   // uncollected=未采集（无内容游标的异常态）；已产内容来源声明的行不带（声明
@@ -1275,17 +1281,19 @@ const listMode = ref<'tree' | 'flat' | 'sets'>('tree')
 // 候选/两分仓清单来自快照（后端 buildSnapshotCandidates 三类合流）；动作走本组件唯一
 // workbench 请求通道，应答先回、分仓随自动重识别的快照事件刷新（既有事件通路联动）
 const candidates = computed<SnapCandidate[]>(() => (snapshot.value && snapshot.value.candidates) || [])
-// 已识别候选过滤（2026-10-27 用户二拍板改口径）：候选成员**全部**已带集维度
-// 最终结论（snapshot.files 的 final 含 dimension=collection——规则识别与赋值
-// 存档同源计入，后端 applyAssignmentToConclusion 合并）= 已被识别为作品集 →
-// 默认隐藏可关；existingSetId（库内作品号比对）/crossMatch（同名互证）不再
-// 作隐藏依据；部分成员未识别的候选保留（残员仍需人工处理）。已归集/已忽略
-// 收纳分组不受此过滤影响。
+// 已识别候选过滤（2026-10-27 用户二拍板改口径，2026-11-21 并入产出四集归属）：
+// 候选成员**全部**已带集维度结论（snapshot.files 的 final 含 dimension=collection
+// ——规则识别与赋值存档同源计入，后端 applyAssignmentToConclusion 合并；产出四集
+// 归属文件名非空同权计入——成员可能未在本文件复现集维度终选声明，集归属事实即
+// 「已识别为作品集」）= 已被识别为作品集 → 默认隐藏可关；existingSetId（库内
+// 作品号比对）/crossMatch（同名互证）不再作隐藏依据；部分成员未识别的候选保留
+//（残员仍需人工处理）。已归集/已忽略收纳分组不受此过滤影响。
 const hideIdentifiedCandidates = ref(true)
 const fileHasCollection = computed(() => {
   const m = new Map<string, boolean>()
   for (const f of (snapshot.value && snapshot.value.files) || []) {
-    m.set(f.relPath, !!(f.final && f.final.some(d => d.dimension === 'collection')))
+    const hasDecl = !!(f.final && f.final.some(d => d.dimension === 'collection'))
+    m.set(f.relPath, hasDecl || !!f.setName)
   }
   return m
 })

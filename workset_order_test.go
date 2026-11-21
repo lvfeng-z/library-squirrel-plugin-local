@@ -311,7 +311,7 @@ func TestCollectWorkSetOrderUpdatesSourcesAndGuards(t *testing.T) {
 		}, metadata: metadata},
 	}
 
-	updates := collectWorkSetOrderUpdates(snap, items)
+	updates := collectWorkSetOrderUpdates(snap, items, nil)
 	if len(updates) != 2 {
 		t.Fatalf("应恰两个集键（集甲=真实域声明、集乙=含义链 local 归属），实际 %v", updates)
 	}

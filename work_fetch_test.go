@@ -949,8 +949,8 @@ func TestCreateAggregatedWorksSingleChildAndTracks(t *testing.T) {
 	if err := json.Unmarshal([]byte(video.PluginData), &vfp); err != nil {
 		t.Fatalf("解析聚合子行 PluginData 失败: %v", err)
 	}
-	if vfp.SchemaVersion != 4 || len(vfp.Tracks) != 3 {
-		t.Fatalf("聚合子行 PluginData 应为 v4 三轨清单，实际 schema=%d tracks=%+v", vfp.SchemaVersion, vfp.Tracks)
+	if vfp.SchemaVersion != currentPluginDataVersion || len(vfp.Tracks) != 3 {
+		t.Fatalf("聚合子行 PluginData 应为当前版本（v4 起）三轨清单，实际 schema=%d tracks=%+v", vfp.SchemaVersion, vfp.Tracks)
 	}
 	if vfp.RelPath != "剧集/ep01.mp4" || vfp.Hash != hashOf("剧集/ep01.mp4") {
 		t.Fatalf("v4 顶层字段应为主导文件结论，实际 relPath=%q hash 有无=%v", vfp.RelPath, vfp.Hash == hashOf("剧集/ep01.mp4"))

@@ -254,6 +254,11 @@ interface RuleEntryView {
     grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
+  // workSetAggregation 为规则级「作品集聚合」产出（与既有三产出平级、并用零
+  // 互斥）：归集依据=组键绑定，产出四不带集名来源（集名只从匹配层模板来）。
+  workSetAggregation?: {
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
+  } | null
   conditions?: unknown
   extractions?: unknown
   synthesis?: { dimPolicies?: DimPolicyView[] | null; roles?: RoleBindingView[] | null }
@@ -606,6 +611,11 @@ interface RuleDialogInput {
     grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
+  // workSetAggregation 为规则级「作品集聚合」产出（归集依据=组键绑定；产出四
+  // 不带集名来源）——复制条目时随载。
+  workSetAggregation?: {
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
+  } | null
   conditions?: unknown
   extractions: unknown
   synthesis: { dimPolicies: DimPolicyView[]; roles: RoleBindingView[] }
@@ -690,7 +700,8 @@ function hitCountOf(rule: RuleEntryView): number | null {
 // 普通行=「目标类别 · N 形态」（类别=条件行目标并集去重、多类别以 + 并列；
 // 条件行缺失的坏档行不显示）；规则带「元数据文件」产出（元数据规则与聚合
 // 规则均可——映射单用/并用）时附「元数据文件（N）」（与编辑弹窗产出区摘要
-// 同词——元数据文件映射与聚合解耦）
+// 同词——元数据文件映射与聚合解耦）；带「作品集聚合」产出（剧本A 帧3）时摘要
+// 尾追加「归集成集」（以「 · 」相连即帧内「· 归集成集」形态）
 function shapeSummaryOf(rule: RuleEntryView): string {
   const shape = condxShapeSummary(rule.conditions)
   const parts: string[] = []
@@ -699,6 +710,7 @@ function shapeSummaryOf(rule: RuleEntryView): string {
   if (Array.isArray(bindings) && bindings.length > 0) {
     parts.push(aggMetadataFileSummary(bindings))
   }
+  if (rule.workSetAggregation) parts.push('归集成集')
   return parts.join(' · ')
 }
 
@@ -715,6 +727,7 @@ function openNew(): void {
     identity: null,
     aggregate: null,
     metadataFile: null,
+    workSetAggregation: null,
     conditions: null,
     extractions: null,
     synthesis: { dimPolicies: [], roles: [] }
@@ -738,6 +751,7 @@ function ruleToDialogInput(rule: RuleEntryView, asCopy: boolean): RuleDialogInpu
     identity: rule.identity ?? null,
     aggregate: rule.aggregate ?? null,
     metadataFile: rule.metadataFile ?? null,
+    workSetAggregation: rule.workSetAggregation ?? null,
     conditions: rule.conditions ?? null,
     extractions: rule.extractions ?? [],
     synthesis: {

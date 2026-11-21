@@ -2709,7 +2709,8 @@ func TestDirCollectionCandidate(t *testing.T) {
 			{DirRelKey: "结构群目录", Key: "散集", Size: 2, FormName: "尾缀数字"},
 		},
 	}
-	cands := detectDirCandidates(snap)
+	groups := detectDirGroups(snap)
+	cands := dirGroupCandidates(groups)
 	if len(cands) != 3 {
 		t.Fatalf("目录候选 = %d，期望 3（作品号目录/剥壳目录/单一结构群目录）：%+v", len(cands), cands)
 	}
@@ -2771,6 +2772,7 @@ func TestDirCandidateBareBracketKey(t *testing.T) {
 		},
 	}
 	lib := &LibraryIndex{WorkSetNames: map[string]struct{}{"100423502": {}}}
+	snap.DirGroups = detectDirGroups(snap)
 	cands := buildWorkSetCandidates(snap, lib)
 	if len(cands) != 1 {
 		t.Fatalf("裸括号作品号目录应出 1 卡，实际 %d: %+v", len(cands), cands)
@@ -4046,12 +4048,12 @@ func TestAggregationPresetSeedFirstInitToggleRestore(t *testing.T) {
 	}
 }
 
-// TestAggregationSnapshotV3RoundTrip 快照 v3 读写往返+旧快照降级锚：聚合归属
-// （作品键/轨道角色/声明作品类型）随快照往返保真、结构版本为 3；v2 旧快照
+// TestAggregationSnapshotV4RoundTrip 快照 v4 读写往返+旧快照降级锚：聚合归属
+// （作品键/轨道角色/声明作品类型）随快照往返保真、结构版本为 4；v2 旧快照
 // （无聚合字段）读入按空聚合降级。
-func TestAggregationSnapshotV3RoundTrip(t *testing.T) {
-	if recognitionSnapshotSchemaVersion != 3 {
-		t.Fatalf("快照结构版本应为 3: %d", recognitionSnapshotSchemaVersion)
+func TestAggregationSnapshotV4RoundTrip(t *testing.T) {
+	if recognitionSnapshotSchemaVersion != 4 {
+		t.Fatalf("快照结构版本应为 4: %d", recognitionSnapshotSchemaVersion)
 	}
 	snap := &RecognitionSnapshot{
 		SchemaVersion: recognitionSnapshotSchemaVersion,
@@ -4071,7 +4073,7 @@ func TestAggregationSnapshotV3RoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatalf("反序列化快照失败: %v", err)
 	}
-	if back.SchemaVersion != 3 || back.Files[0].AggWorkKey != "f:a.mp4" ||
+	if back.SchemaVersion != 4 || back.Files[0].AggWorkKey != "f:a.mp4" ||
 		back.Files[0].AggTrackRole != sdkdto.StoreRoleVideoMain ||
 		back.Files[1].AggWorkKey != "f:a.mp4" || back.Files[1].AggTrackRole != contract.StoreTypeSubtitle {
 		t.Fatalf("聚合归属两字段应随快照往返保真: %+v", back.Files)

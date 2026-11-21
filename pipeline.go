@@ -60,6 +60,13 @@ type FileDecision struct {
 	// 后），组内目标文件推出的全部作品键（已被聚合收编=其聚合作品键、未
 	// 收编=自身路径键）；组内无落点（孤文件回退）与未参与扇出的文件零值。
 	AggFanoutWorkKeys []string
+	// SetGroupKey / SetName / SetRuleID 为集归属（产出四「作品集聚合」汇流后
+	// 求值结论）：组键+集名+产出规则 ID，三字段同空=不入集。消费面按
+	// 「SetGroupKey+SetName」识别集、按 SetRuleID 追溯规则（字段语义与
+	// FileConclusion 同名三字段一致）。
+	SetGroupKey string
+	SetName     string
+	SetRuleID   string
 }
 
 // ScanNote 为一条贪婪识别歧义记录。
@@ -155,8 +162,9 @@ func RunPipelineWithTypes(files []ScanFile, rules []RuleEntry, lib *LibraryIndex
 // runAggregationStage 聚合段：汇流后的独立通道（与分组段同相位、居其后）——
 // 群归属与元数据结论在分组段/提取段已定，本段只消费既有结论不改写：对求值面
 // 执行聚合规则的标识等值并组（算法见 aggregateGrouping），把聚合归属（作品键
-// +轨道角色）落回与文件对位序的各条结论。decisions 与 surface.files 按下标
-// 对齐（调用方保证同一清单）。
+// +轨道角色）落回与文件对位序的各条结论。其后接作品集聚合段（产出四）：聚合
+// 归属先到先得，本段只对剩余命中文件按组键归集并落集归属（见 workSetAggregation）。
+// decisions 与 surface.files 按下标对齐（调用方保证同一清单）。
 func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) {
 	assigns := aggregateGrouping(surface, rules, lib, types)
 	for i := range decisions {
@@ -168,6 +176,21 @@ func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rule
 		decisions[i].AggWorkType = assigns[i].WorkType
 		decisions[i].AggCompanion = assigns[i].Companion
 		decisions[i].AggFanoutWorkKeys = assigns[i].FanoutWorkKeys
+	}
+	// 作品集聚合段（产出四）：居聚合段之后——既有聚合归属优先（已被聚合收编
+	// 或说明成员标记的文件不入集），本段只对剩余命中文件按归集依据的组键归组
+	// 并落集归属（组键+集名+规则ID）。
+	setAssigns := workSetAggregation(surface, rules, lib,
+		libraryGroupKeysOfDecisions(decisions),
+		workSetSetNamesOfDecisions(decisions),
+		workSetTakenOfDecisions(decisions))
+	for i := range decisions {
+		if i >= len(setAssigns) {
+			break
+		}
+		decisions[i].SetGroupKey = setAssigns[i].GroupKey
+		decisions[i].SetName = setAssigns[i].SetName
+		decisions[i].SetRuleID = setAssigns[i].RuleID
 	}
 }
 

@@ -27,10 +27,12 @@ import (
 // v2：FilePluginData 增加可选归属字段（siteKey/siteWorkId，扫描期归属裁决结果）；
 // v3：FilePluginData 增加任务级赋值快照（assignment，工作台创建时固化的会话赋值，
 // 执行期重算优先消费）；v4：FilePluginData 增加成员轨道清单（tracks，聚合作品
-// 子行——一件聚合作品一个子行多轨，清单序=轨道发射序）；v0/v1/v2/v3 旧数据无
-// 对应字段，读侧按零值走既有路径（无归属=local 回退、无赋值快照=纯档案求值、
-// 无轨道清单=单文件作品）
-const currentPluginDataVersion = 4
+// 子行——一件聚合作品一个子行多轨，清单序=轨道发射序）；v5：FilePluginData
+// 增加产出四集归属的集名快照（setName，工作台创建时固化识别快照的成员集名，
+// 执行期按名挂集）；v0/v1/v2/v3/v4 旧数据无对应字段，读侧按零值走既有路径
+// （无归属=local 回退、无赋值快照=纯档案求值、无轨道清单=单文件作品、无集名
+// 快照=集名只来自匹配层模板声明）
+const currentPluginDataVersion = 5
 
 // checkPluginDataVersion 校验 task PluginData 格式版本：
 // 0(旧数据，引入版本约定前写入)与当前支持版本走现有逻辑；高于当前=由更新版本插件写入，拒绝执行防静默数据损坏。
@@ -83,6 +85,10 @@ type FilePluginData struct {
 	// 结论按作品级并入规则合成。说明成员本身不导入不哈希，其内容声明只经本
 	// 字段进入作品元数据。空=无内容绑定（既有载荷零值兼容）。
 	ContentDecls []SnapDecl `json:"contentDecls,omitempty"`
+	// SetName 产出四集归属的集名快照（v5，创建时点识别快照的成员集归属集名，
+	// 空=无集归属）：执行期重算的匹配层模板未在该文件上复现集名声明时（分组
+	// 集名取自同组其他成员），创建链据此按名挂集；同名声明与既有集名来源去重。
+	SetName string `json:"setName,omitempty"`
 }
 
 // hasRealAttribution PluginData 是否携带真实域归属（裁决出真实站点与页级作品 ID）
@@ -328,6 +334,8 @@ type batchFileItem struct {
 	af           attributedFile
 	metadata     []PathMeaning
 	contentDecls []SnapDecl
+	// setName 产出四集归属的集名快照（创建时点识别快照成员行取值；空=无集归属）
+	setName string
 }
 
 // —— 大批次子行分帧（契约 21 B1+，大载荷分页方案·设计 B）——
@@ -976,14 +984,17 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 					members = append(members, aggTrackMember{entry: f, role: role})
 				}
 				attr := resolveWorkAttribution(filepath.Base(out.files[0].FullPath), unit.classifiedSiteKey)
-				child := buildAggregatedChildResponse(members, attr, unit.metadata, sess.Assignments, workType, payloadContentDecls[unit.aggKey])
+				setName := snapshotSetNameOf(snapFileByPath, out.files[0].RelPath)
+				child := buildAggregatedChildResponse(members, attr, unit.metadata, sess.Assignments, workType, payloadContentDecls[unit.aggKey], setName)
 				if child == nil {
 					// 构造期成员 Stat 失败（哈希刚完成的窄窗竞态）——同整件放弃半径
 					plannedTotal -= rowsOfUnit
 					dropSamples = append(dropSamples, hashDropSample{workID: unit.work.WorkID, err: fmt.Errorf("成员文件构造期不可访问")})
 				} else {
 					// 集序记录面按作品身份落一条（主导文件条目——身份键与子行同源同值）
-					allItems = append(allItems, batchFileItem{af: attributedFile{entry: out.files[0], attr: attr}, metadata: unit.metadata})
+					allItems = append(allItems, batchFileItem{
+						af: attributedFile{entry: out.files[0], attr: attr}, metadata: unit.metadata, setName: setName,
+					})
 					totalBuilt++
 					if child.SiteKey != "" {
 						nonLocalSiteKeys = append(nonLocalSiteKeys, child.SiteKey)
@@ -1006,7 +1017,10 @@ func (h *LocalImportWorkFetcher) emitSelectedWorks(root string, sess *WorkbenchS
 			unitItems := make([]batchFileItem, 0, len(out.files))
 			for i, f := range out.files {
 				attr := resolveWorkAttribution(filepath.Base(f.FullPath), unit.classifiedSiteKey)
-				item := batchFileItem{af: attributedFile{entry: f, attr: attr}, metadata: unit.metadata}
+				item := batchFileItem{
+					af: attributedFile{entry: f, attr: attr}, metadata: unit.metadata,
+					setName: snapshotSetNameOf(snapFileByPath, f.RelPath),
+				}
 				if i == 0 {
 					item.contentDecls = payloadContentDecls[unit.work.WorkID]
 				}
@@ -1292,6 +1306,7 @@ func buildChildResponses(items []batchFileItem, assigns map[string]SessionAssign
 		// 扇出归属作品的内容声明随子行固化（映射单用：元数据源内容经目标子行
 		// 进入任务载荷，执行期与重算结论按作品级并入规则合成）
 		fp.ContentDecls = item.contentDecls
+		fp.SetName = item.setName
 		fpJSON, _ := json.Marshal(fp)
 
 		children = append(children, &sdkdto.TaskCreateChildResponse{
@@ -1337,6 +1352,16 @@ func aggKeyOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
 	}
 	if rec := fileByPath[work.Files[0]]; rec != nil {
 		return rec.AggWorkKey
+	}
+	return ""
+}
+
+// snapshotSetNameOf 快照成员行的产出四集归属集名（无记录/无归属为空串）：
+// 创建链把该事实固化进子行载荷，执行期按名挂集（任务自包含，会话删除不影响
+// 在途任务）。
+func snapshotSetNameOf(snapFileByPath map[string]*SnapFile, relPath string) string {
+	if rec := snapFileByPath[relPath]; rec != nil {
+		return rec.SetName
 	}
 	return ""
 }
@@ -1407,7 +1432,7 @@ func aggTypeOf(fileByPath map[string]*SnapFile, work *SelectableWork) string {
 // 载荷供执行期作品级并入）；作品身份/归属键与单文件子行同构（真实域=页级
 // 作品 ID、local 回退=主导文件内容哈希）。成员 Stat 失败（构造期窄窗竞态）
 // 返回 nil，调用方按整件放弃处理。
-func buildAggregatedChildResponse(members []aggTrackMember, attr workAttribution, metadata []PathMeaning, assigns map[string]SessionAssignment, workType string, contentDecls []SnapDecl) *sdkdto.TaskCreateChildResponse {
+func buildAggregatedChildResponse(members []aggTrackMember, attr workAttribution, metadata []PathMeaning, assigns map[string]SessionAssignment, workType string, contentDecls []SnapDecl, setName string) *sdkdto.TaskCreateChildResponse {
 	if len(members) == 0 {
 		return nil
 	}
@@ -1435,6 +1460,7 @@ func buildAggregatedChildResponse(members []aggTrackMember, attr workAttribution
 		Metadata:      metadata,
 		Tracks:        tracks,
 		ContentDecls:  contentDecls,
+		SetName:       setName,
 	}
 	// 作品身份：真实域=解析出的页级作品 ID，local 回退=主导文件内容哈希
 	workID := lead.entry.Hash
@@ -1707,6 +1733,28 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
 				SiteWorkSetId: workSetBizKey(m.Name),
 				WorkSetName:   m.Name,
+			})
+		}
+	}
+
+	// 集归属第三源：任务载荷携带的产出四集名快照（创建时点识别快照的成员集
+	// 归属集名）。成员可能未在本文件复现集名声明（分组集名取自同组其他成员的
+	// 匹配层模板产出），此时前两源（终选声明/含义链）皆无该集——按集名声明
+	// 补位（宿主按业务键 upsert 的同名同集通路，与既有来源同形）；与既有来源
+	// 同名只声明一次。
+	if fp.SetName != "" {
+		bizKey := workSetBizKey(fp.SetName)
+		declared := false
+		for _, ws := range resp.WorkSets {
+			if ws.SiteWorkSetId == bizKey {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
+				SiteWorkSetId: bizKey,
+				WorkSetName:   fp.SetName,
 			})
 		}
 	}

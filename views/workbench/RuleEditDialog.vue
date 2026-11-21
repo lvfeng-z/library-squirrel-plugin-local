@@ -133,12 +133,12 @@
           <p v-for="e in groupDeclErrors" :key="`gde-${e}`" class="li-red-row-hint">{{ e }}</p>
         </section>
 
-        <!-- 产出区（三子句之三）：三产出零互斥并存——提取元数据/元数据文件/聚合成
-             作品（绑定分组）；条目符号统一 ◇；gating：分组区无可绑定分组（自动
-             或声明）时「+ 聚合成作品」置灰附因（D 帧4） -->
+        <!-- 产出区（三子句之三）：产出零互斥并存——提取元数据/元数据文件/聚合成
+             作品（绑定分组）/作品集聚合；条目符号统一 ◇；gating：分组区无可绑定
+             分组（自动或声明）时「+ 聚合成作品」置灰附因（D 帧4） -->
         <section class="li-red-sec">
           <div class="li-red-sec-head">
-            <h4 class="li-red-sec-title">产出<span class="li-red-sec-note">三产出自由组合 · 命中后取值声明到维度</span></h4>
+            <h4 class="li-red-sec-title">产出<span class="li-red-sec-note">四产出自由组合 · 命中后取值声明到维度</span></h4>
             <el-button size="small" text @click="toggleExtractionsJson">
               {{ extractionsJsonMode ? '切回结构化编辑' : '高级（JSON）' }}
             </el-button>
@@ -292,6 +292,84 @@
             <p class="li-red-hint">JSON 数组（dimension / from / captureName / constant / roleName / when 条件表达式）</p>
           </template>
 
+          <!-- 作品集聚合条目（产出四·剧本A 帧1/帧2/帧3）：未加=「+ 作品集聚合」
+               添加入口（帧1），加了=卡片（归集依据三选+集名行+预览行）。集名只
+               从条件里的集名捕获/提取来（产出四不带集名来源，决策5）——条件里
+               没有集名产出时集名行红字；行捕获形态在预览行列可选捕获名；保存
+               被拦（行捕获未选捕获名/无集名产出）时卡片红字、其余输入保留 -->
+          <div
+            v-if="workSetAggregation"
+            class="li-out-card li-red-metadata-card"
+            :class="{ 'is-invalid': worksetCardInvalid }"
+          >
+            <div class="li-condx-card-line">
+              <span class="li-out-mark">◇</span>
+              <span class="li-condx-card-tpl" :title="worksetCardText">{{ worksetCardText }}</span>
+              <el-button size="small" text type="danger" @click="removeWorkSetAggregation">[移除]</el-button>
+            </div>
+            <div class="li-workset-body">
+              <!-- 归集依据三选（帧2/帧3「(○序列分组键 ●所在目录 ○行捕获)」）：
+                   序列分组键需要序列条件行（无序列行时置灰）；多序列行时并列
+                   出行选择 -->
+              <div class="li-workset-row">
+                <span class="li-workset-label">归集依据：</span>
+                <el-radio-group v-model="workSetAggregation.basis" size="small">
+                  <el-radio value="seqKey" :disabled="!seqRowOptions.length">序列分组键</el-radio>
+                  <el-radio value="directory">所在目录</el-radio>
+                  <el-radio value="capture">行捕获</el-radio>
+                </el-radio-group>
+                <el-select
+                  v-if="workSetAggregation.basis === 'seqKey' && seqRowOptions.length > 1"
+                  :model-value="String(worksetSeqRow)"
+                  size="small"
+                  class="li-workset-row-select"
+                  @update:model-value="setWorkSetSeqRow"
+                >
+                  <el-option
+                    v-for="o in seqRowOptions"
+                    :key="o.row"
+                    :label="`第 ${o.row} 行 · ${o.text}`"
+                    :value="String(o.row)"
+                  />
+                </el-select>
+              </div>
+              <!-- 集名行（帧2「集名：来自条件里的 {集名} 捕获」；序列分组键形态
+                   集名=公共段，帧3 加「（公共段）」）：条件里没有集名产出时红字
+                   （保存被拦时换带指路的全文） -->
+              <div class="li-workset-row">
+                <span v-if="worksetNameMissing" class="li-red-row-hint">集名：{{ worksetSaveBlocked ? WORKSET_SAVE_NAME_MISSING : WORKSET_NAME_MISSING }}</span>
+                <span v-else class="li-workset-text">{{ workSetAggregation.basis === 'seqKey' ? WORKSET_NAME_HINT_SEQ : WORKSET_NAME_HINT }}</span>
+              </div>
+              <!-- 预览行（帧2：随归集依据实时改口；行捕获形态列可选捕获名） -->
+              <div class="li-workset-row">
+                <span v-if="workSetAggregation.basis !== 'capture'" class="li-workset-text">{{ workSetAggregation.basis === 'seqKey' ? WORKSET_PREVIEW_SEQ : WORKSET_PREVIEW_DIR }}</span>
+                <template v-else>
+                  <span class="li-workset-label">预览：</span>
+                  <el-select
+                    :model-value="worksetCaptureValues"
+                    multiple
+                    collapse-tags
+                    size="small"
+                    placeholder="可选捕获名"
+                    class="li-workset-capture-select"
+                    @update:model-value="setWorkSetCaptures"
+                  >
+                    <el-option
+                      v-for="c in worksetCaptureOptions"
+                      :key="`${c.row}/${c.group}`"
+                      :label="`第 ${c.row} 行 · {${c.word}}`"
+                      :value="`${c.row}/${c.group}`"
+                    />
+                  </el-select>
+                </template>
+              </div>
+              <!-- 保存闸门红字（帧3：保存被拦时卡片红字、其余输入保留） -->
+              <template v-if="worksetSaveBlocked">
+                <p v-for="(e, ei) in worksetMissingErrors" :key="`ws-${ei}`" class="li-red-row-hint">{{ e }}</p>
+              </template>
+            </div>
+          </div>
+          <el-button v-else size="small" text @click="addWorkSetAggregation">+ 作品集聚合</el-button>
           <!-- 元数据文件条目（产出区平级条目·决策1，与「聚合成作品」平级、可各自
                单独添加或并存）：未加=「+ 元数据文件」添加入口（剧本A 帧1）；加了
                =◇ 条目卡（[打开]进指派弹窗、[移除]去产出） -->
@@ -759,6 +837,16 @@ import {
   aggIdentityWordOf,
   aggFormErrors,
   metadataFileFormErrors,
+  WORKSET_NAME_HINT,
+  WORKSET_NAME_HINT_SEQ,
+  WORKSET_NAME_MISSING,
+  WORKSET_PREVIEW_DIR,
+  WORKSET_PREVIEW_SEQ,
+  WORKSET_SAVE_CAPTURE_MISSING,
+  WORKSET_SAVE_NAME_MISSING,
+  WORKSET_SAVE_SEQ_MISSING,
+  workSetFromGrouping,
+  workSetGrouping,
   GROUP_KEY_SOURCE_OPTIONS,
   AGG_ADDITION_GATING_NOTE,
   GROUP_DECL_UNBOUND_ERROR,
@@ -789,6 +877,7 @@ import {
   type GroupingRef,
   type GroupAutoItem,
   type MetadataFileProductionForm,
+  type WorkSetAggregationForm,
   type GroupDeclForm,
   type GroupKeySource,
   type AggTypeSpec,
@@ -829,6 +918,11 @@ interface RuleInput {
   metadataFile?: {
     grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
+  } | null
+  // workSetAggregation 为规则级「作品集聚合」产出（与既有三产出平级、并用零
+  // 互斥）：归集依据=组键绑定，产出四不带集名来源（集名只从匹配层模板来）。
+  workSetAggregation?: {
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
   } | null
   conditions?: unknown
   extractions: unknown
@@ -908,6 +1002,11 @@ interface RuleSavePayload {
   metadataFile?: {
     grouping?: { mode: string; identity?: { row: number; capture: string }[] }
     contentBindings?: { row: number; dimension: string }[]
+  }
+  // workSetAggregation 为「作品集聚合」产出（规则级落档位，未加产出=undefined
+  // 键不落档=omitempty 镜像）：归集依据=组键绑定，不带集名来源（决策5）。
+  workSetAggregation?: {
+    grouping?: { mode: string; identity?: { row: number; capture: string }[] }
   }
   conditions: unknown
   extractions: unknown
@@ -1035,6 +1134,122 @@ const aggProduction = ref<AggregateProductionForm | null>(null)
 // 产出——「+ 元数据文件」入口）
 const metadataFileProduction = ref<MetadataFileProductionForm | null>(null)
 
+// 「作品集聚合」产出（产出四·剧本A；null=尚未加该产出——「+ 作品集聚合」入口）：
+// 归集依据三选（序列分组键/所在目录/行捕获）+行捕获键部分。产出四不带集名来源
+//（决策5），集名行只提示集名来自匹配层模板。
+const workSetAggregation = ref<WorkSetAggregationForm | null>(null)
+// 保存被拦标志（帧3：保存校验不过时卡片红字、其余输入保留）——点保存才亮红、
+// 下一次通过闸门的保存尝试或重新打开弹窗复位。
+const worksetSaveBlocked = ref(false)
+
+// 归集依据卡摘要（产出卡标题行恒为「作品集聚合」）
+const worksetCardText = computed((): string => '作品集聚合')
+
+// 序列分组键所选序列行：所选行已不在序列行清单时回落首行；无序列行=0（保存
+// 闸门拦）。
+const worksetSeqRow = computed((): number => {
+  const ws = workSetAggregation.value
+  const rows = seqRowOptions.value
+  if (!ws || !rows.length) return 0
+  const hit = rows.find((o: { row: number; text: string }) => o.row === ws.seqRow)
+  return (hit || rows[0]).row
+})
+
+// 行捕获候选（条件行全部命名捕获+序列行群键保留名，与聚合标识候选同源）
+const worksetCaptureOptions = computed((): AggIdentityCandidate[] =>
+  aggIdentityCandidates(activeCondxRows.value)
+)
+
+// 行捕获键部分（按候选声明面过滤：条件行改动后失效的残影不参与保存闸门）
+const worksetCaptureParts = computed((): IdentityPartForm[] => {
+  const ws = workSetAggregation.value
+  if (!ws) return []
+  const declared = new Set(worksetCaptureOptions.value.map((c: AggIdentityCandidate) => `${c.row}/${c.group}`))
+  return (ws.captures || []).filter((p: IdentityPartForm) => declared.has(`${p.row}/${p.capture}`))
+})
+
+// 行捕获多选取值编码（row/group——与选项 value 同形；残影保留呈现供用户改选）
+const worksetCaptureValues = computed((): string[] => {
+  const ws = workSetAggregation.value
+  if (!ws) return []
+  return (ws.captures || []).map((p: IdentityPartForm) => `${p.row}/${p.capture}`)
+})
+
+// 集名产出在场（条件/提取声明面）：collection 维度提取动作=集名只从匹配层模板
+// 来的产出面（内核 ruleProducesCollectionDeclaration 同口径；JSON 高级模式按
+// 文本解析）。缺席时集名行红字、保存被拦。
+const worksetNameProduced = computed((): boolean => {
+  if (extractionsJsonMode.value) {
+    const parsed = tryParseJSON(extractionsText.value)
+    if (!parsed.ok || !Array.isArray(parsed.value)) return false
+    return (parsed.value as ExtractionActionJSON[]).some((a: ExtractionActionJSON) => !!a && a.dimension === 'collection')
+  }
+  return extractionRows.value.some((r: ExtractionRow) => r.dimension === 'collection')
+})
+
+const worksetNameMissing = computed((): boolean => !worksetNameProduced.value)
+
+// 保存闸门错误（帧3：行捕获未选捕获名 / 序列分组键无序列条件行；集名缺失由集名
+// 行红字呈现——保存被拦时换带指路的全文）
+const worksetMissingErrors = computed((): string[] => {
+  const ws = workSetAggregation.value
+  if (!ws) return []
+  const errs: string[] = []
+  if (ws.basis === 'capture' && !worksetCaptureParts.value.length) errs.push(WORKSET_SAVE_CAPTURE_MISSING)
+  if (ws.basis === 'seqKey' && worksetSeqRow.value < 1) errs.push(WORKSET_SAVE_SEQ_MISSING)
+  return errs
+})
+
+// 卡片拦截态（红边框）：保存被拦且归集依据/集名面有红字
+const worksetCardInvalid = computed((): boolean =>
+  worksetSaveBlocked.value && (worksetNameMissing.value || worksetMissingErrors.value.length > 0)
+)
+
+// 保存载荷用的归集依据（序列分组键用有效序列行、行捕获用过滤后的键部分）
+const worksetResolvedForm = computed((): WorkSetAggregationForm | null => {
+  const ws = workSetAggregation.value
+  if (!ws) return null
+  if (ws.basis === 'seqKey') return { basis: 'seqKey', seqRow: worksetSeqRow.value, captures: [] }
+  if (ws.basis === 'capture') return { basis: 'capture', seqRow: 1, captures: worksetCaptureParts.value }
+  return { basis: 'directory', seqRow: 1, captures: [] }
+})
+
+// 「+ 作品集聚合」入场（帧1：点加卡出现空白卡——缺省归集依据=所在目录，
+// 帧2「归集依据保持所在目录」）
+function addWorkSetAggregation(): void {
+  workSetAggregation.value = {
+    basis: 'directory',
+    seqRow: seqRowOptions.value.length ? seqRowOptions.value[0].row : 1,
+    captures: []
+  }
+  worksetSaveBlocked.value = false
+}
+
+// 产出卡〔移除〕：去「作品集聚合」产出（其余产出与分组声明不动）
+function removeWorkSetAggregation(): void {
+  workSetAggregation.value = null
+  worksetSaveBlocked.value = false
+}
+
+// 归集依据改选序列行（多序列行时并列行选择）
+function setWorkSetSeqRow(value: string): void {
+  const ws = workSetAggregation.value
+  if (!ws) return
+  ws.seqRow = Number(value) || 0
+}
+
+// 行捕获多选回写（value=row/group 编码）
+function setWorkSetCaptures(values: string[]): void {
+  const ws = workSetAggregation.value
+  if (!ws) return
+  ws.captures = (values || [])
+    .map((v: string) => {
+      const sep = v.indexOf('/')
+      return { row: Number(v.slice(0, sep)), capture: v.slice(sep + 1) }
+    })
+    .filter((p: IdentityPartForm) => p.row >= 1 && !!p.capture)
+}
+
 // 按声明 uid 取声明（缺席=null）
 function groupDeclByUid(uid: number | null): GroupDeclForm | null {
   if (uid == null) return null
@@ -1099,9 +1314,12 @@ const groupDeclErrors = computed((): string[] => {
   return errs
 })
 
-// 产出计数（三产出各计一条——提取行数+元数据文件+聚合成作品）
+// 产出计数（产出各计一条——提取行数+元数据文件+聚合成作品+作品集聚合）
 const productionCount = computed((): number =>
-  extractionRows.value.length + (metadataFileProduction.value ? 1 : 0) + (aggProduction.value ? 1 : 0)
+  extractionRows.value.length +
+  (metadataFileProduction.value ? 1 : 0) +
+  (aggProduction.value ? 1 : 0) +
+  (workSetAggregation.value ? 1 : 0)
 )
 
 // 提取元数据汇总卡文案（D 帧3「作者←{作者} 标题←{标题}」）
@@ -2171,6 +2389,8 @@ function initFromProps(): void {
     groupDeclUidSeq = 1
     aggGroupingRef.value = null
     mfGroupingRef.value = null
+    workSetAggregation.value = null
+    worksetSaveBlocked.value = false
     const initIdentity = rule && Array.isArray(rule.identity) ? rule.identity : []
     const initIdentityParts = initIdentity
       .filter((p): p is { row: number; capture: string } => !!p && typeof p.row === 'number' && typeof p.capture === 'string')
@@ -2224,6 +2444,25 @@ function initFromProps(): void {
         groupDecls.value.push(decl)
         mfGroupingRef.value = { kind: 'decl', uid: decl.uid }
       }
+    }
+    // 「作品集聚合」产出装载（规则级 workSetAggregation 键——归集依据=组键绑定，
+    // 产出四不带集名来源：identity 单群键保留名→序列分组键、directory→所在目录、
+    // 其余 identity→行捕获键部分原样还原）
+    const initWs = rule && rule.workSetAggregation ? rule.workSetAggregation : null
+    if (initWs && initWs.grouping && (initWs.grouping.mode === 'identity' || initWs.grouping.mode === 'directory')) {
+      const rawParts: unknown[] =
+        initWs.grouping.mode === 'identity' && Array.isArray(initWs.grouping.identity) ? initWs.grouping.identity : []
+      const parts = rawParts.flatMap((p: unknown): { row: number; capture: string }[] => {
+        if (!p || typeof p !== 'object') return []
+        const row = (p as { row?: unknown }).row
+        const capture = (p as { capture?: unknown }).capture
+        if (typeof row !== 'number' || typeof capture !== 'string') return []
+        return [{ row: row || 1, capture }]
+      })
+      workSetAggregation.value = workSetFromGrouping({
+        mode: initWs.grouping.mode as GroupingBindingForm['mode'],
+        identity: parts.length ? parts : undefined
+      })
     }
     // 并用缺省绑定物化（方案·钉死）：聚合产出在场且分组绑定缺省（档案未落
     // grouping 键）时，编辑面把分组下拉物化为聚合成作品所绑分组的显式引用
@@ -2396,10 +2635,20 @@ function buildRulePayload(): RuleSavePayload | null {
     if (extractionRows.value.some((row) => extractionRowHint(row))) return null
     extractions = rowsToActions()
   }
+  // 「作品集聚合」产出闸门（产出四·剧本A 帧3）：行捕获未选捕获名 / 序列分组键
+  // 无序列条件行 / 无集名产出（collection 维度提取动作）→ 保存被拦，卡片红字
+  //（集名行红字在保存被拦时换带指路的全文），其余输入保留
+  if (workSetAggregation.value) {
+    if (!worksetNameProduced.value || worksetMissingErrors.value.length) {
+      worksetSaveBlocked.value = true
+      return null
+    }
+  }
   const rule = props.rule
   // 落档类别推导（决策9：类别步退役——有「聚合成作品」产出=aggregate，否则
   // metadata 键不落档）；聚合声明三件（category/identity/aggregate）随推导落档，
   // identity=绑定分组声明的展开；提取动作与聚合并存（决策10 解除互斥）
+  worksetSaveBlocked.value = false
   return {
     id: rule && !rule.isNew ? rule.id : '',
     description: descInput.value,
@@ -2419,6 +2668,7 @@ function buildRulePayload(): RuleSavePayload | null {
         }
       : undefined,
     metadataFile: buildMetadataFilePayload(),
+    workSetAggregation: buildWorkSetAggregationPayload(),
     conditions: conditions,
     extractions: extractions,
     synthesis: {
@@ -2439,6 +2689,18 @@ function buildMetadataFilePayload(): RuleSavePayload['metadataFile'] {
   const grouping = groupingBindingOfRef(mfGroupingRef.value)
   const contentBindings = (mf.contentBindings || []).map((b) => ({ row: b.row, dimension: b.dimension }))
   return { grouping, contentBindings }
+}
+
+// 「作品集聚合」产出的保存载荷构造：未加产出=undefined 键不落档（omitempty
+// 镜像）；归集依据三选映射到组键绑定（序列分组键→标识分组群键保留名、所在
+// 目录→directory、行捕获→标识分组键部分）；空键形态由闸门拦，构造层兜底不
+// 产出空键。
+function buildWorkSetAggregationPayload(): RuleSavePayload['workSetAggregation'] {
+  const ws = worksetResolvedForm.value
+  if (!ws) return undefined
+  const grouping = workSetGrouping(ws)
+  if (!grouping) return undefined
+  return { grouping }
 }
 
 function save(): void {
@@ -2678,6 +2940,43 @@ function previewSampleLine(s: RulePreviewSampleView): string {
   gap: 6px;
   border-top: 1px dashed var(--app-border-color-lighter, var(--app-border-color-light));
   padding: 8px 0;
+}
+
+/* 作品集聚合卡正文（归集依据/集名/预览三行，卡内纵向排列） */
+.li-workset-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed var(--app-border-color-lighter, var(--app-border-color-light));
+  padding: 8px 0;
+}
+
+.li-workset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.li-workset-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--app-text-regular);
+}
+
+.li-workset-text {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  line-height: 1.6;
+}
+
+.li-workset-row-select {
+  width: 200px;
+}
+
+.li-workset-capture-select {
+  width: 260px;
 }
 
 /* 产出卡摘要行首的「◇」记号（条目符号统一 ◇·D 帧3） */
