@@ -731,6 +731,18 @@
                     </div>
                   </template>
                   <p v-else class="li-ws-empty">无识别结果</p>
+                  <!-- 集归属两行（交互剧本「识别结果补作品集行」帧2B·2026-11-23 用户
+                       裁决=末行）：落在提取明细之后、「命中规则」区之上，只读两行——
+                       集名行 + 来处行（哪张作品集聚合卡的第几行、规则描述）。数据只取
+                       识别快照子行的集归属（setName/setEntryIndex/setRuleId，产出四
+                       求值结论），不读已退役的「提取元数据」集维度（决策7 甲）；帧3：
+                       无集归属（setName 空）不渲染任何节点——不显示占位、不显示「未归集」 -->
+                  <div v-if="selectedSetAttrib" class="li-ws-decl is-set-attrib">
+                    <span class="li-ws-decl-main">作品集={{ selectedSetAttrib.name }}</span>
+                    <span class="li-ws-decl-src">
+                      <span class="li-ws-decl-src-text">作品集聚合 · 第 {{ selectedSetAttrib.entryNo }} 行 · {{ selectedSetAttrib.ruleText }}</span>
+                    </span>
+                  </div>
                 </div>
                 <div class="li-ws-sec">
                   <h4 class="li-ws-sec-title">{{ hitRuleCount ? `命中规则（${hitRuleCount}）` : '命中规则' }}</h4>
@@ -959,11 +971,14 @@ interface SnapFile {
   // 「说明」徽章（与 contentState 无关的身份位）、同作品悬停/复选联动照常。
   aggCompanion?: boolean
   // 集归属（产出四「作品集聚合」求值结论，快照 v4 起在场）：组键+集名+产出
-  // 规则 ID，三字段同空=不入集；集名非空即文件已被声明归入某作品集——「隐藏
-  // 已识别」口径的集维度事实位（成员可能未在本文件复现集维度终选声明）。
+  // 规则 ID+条目序，四字段同空=不入集；集名非空即文件已被声明归入某作品集——
+  // 「隐藏已识别」口径的集维度事实位（成员可能未在本文件复现集维度终选声明）。
+  // setEntryIndex=规则内条目序（0 起、声明序；快照 omitempty，缺失即首条目），
+  // 识别结果末行「作品集聚合 · 第 N 行 · 规则描述」的定位数据位。
   setGroupKey?: string
   setName?: string
   setRuleId?: string
+  setEntryIndex?: number
   // 内容采集状态（阶段4 投影位，呈现态数据）：伴随说明成员行的行详情可见原因
   //——rejected=采集过但未按文本产出声明（二进制嗅探拒读或内容全空白）、
   // uncollected=未采集（无内容游标的异常态）；已产内容来源声明的行不带（声明
@@ -1872,6 +1887,21 @@ const ruleNameMap = computed<Record<string, string>>(() => {
   return map
 })
 const ruleNameOf = (ruleId: string): string => ruleNameMap.value[ruleId] || ruleId
+
+// 识别结果·集归属两行（交互剧本「识别结果补作品集行」帧2B=末行，2026-11-23 用户
+// 裁决）：数据只取识别快照子行的集归属（setName / setEntryIndex / setRuleId——产出四
+// 「作品集聚合」求值结论），不消费已退役的「提取元数据」集维度（决策7 甲，本剧本
+// 存在的理由）；集名非空即渲染——帧3 无集归属时返回 null（不渲染任何节点，无占位、
+// 无「未归集」字样）。条目序快照 0 起（omitempty 缺失=首条目），呈现按 1 起。
+const selectedSetAttrib = computed<{ name: string; entryNo: number; ruleText: string } | null>(() => {
+  const file = selectedFile.value
+  if (!file || !file.setName) return null
+  return {
+    name: file.setName,
+    entryNo: (file.setEntryIndex || 0) + 1,
+    ruleText: file.setRuleId ? ruleNameOf(file.setRuleId) : ''
+  }
+})
 
 // 声明来源规则名直达编辑：跳规则管理子页并携规则 ID——子页载入规则档案后按 ID
 // 打开该规则编辑态。规则名出现在待裁决候选/终选声明的来源小字处（含泛化规则），
