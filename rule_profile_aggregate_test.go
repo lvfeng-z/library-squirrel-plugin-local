@@ -5,12 +5,11 @@
 // 影响。档案级断言锚「条目跳过 + 带规则 ID 告警」的既有坏条目呈现。
 //
 // 另附「作品集聚合」产出四的阶段1 档案结构锚：多条目（各自分组绑定+集名来源）、
-// 逐条校验与 1:1（含跨「聚合成作品」）、旧档单条对象载入归一（含目录行捕获绑
-// 目录分组、无可用捕获告警），见文件末节。
+// 逐条校验与 1:1（含跨「聚合成作品」）、单条对象旧形态拒收（不做兼容）、无集名
+// 来源的保存闸门，见文件末节。
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -150,7 +149,7 @@ func TestValidateMetadataFileTplTailExt(t *testing.T) {
 	}
 }
 
-// —— 作品集聚合（产出四）多条档案结构 + 旧档归一（阶段1） ——
+// —— 作品集聚合（产出四）多条档案结构（阶段1） ——
 
 // wsAggConditions 两条条件行底盘：行1 文件「{集名}_{序号}」（声明集名/序号捕获）、
 // 行2 目录「作者{作者}」（声明作者捕获）——多条目、复合分组键与目录行集名共用。
@@ -344,159 +343,42 @@ func TestWorkSetAggGroupingOneToOne(t *testing.T) {
 	})
 }
 
-// legacyWSRule 旧档单条形态的规则 JSON 载体：workSetAggregation 为单对象（新结构
-// 序列化恒出数组，旧形态只能显式声明本载体构造）。
-type legacyWSRule struct {
-	ID          string                        `json:"id"`
-	Description string                        `json:"description,omitempty"`
-	Source      RuleSource                    `json:"source"`
-	Enabled     bool                          `json:"enabled"`
-	Category    RuleCategory                  `json:"category,omitempty"`
-	Identity    []IdentityPart                `json:"identity,omitempty"`
-	Aggregate   *AggregateProduction          `json:"aggregate,omitempty"`
-	WorkSet     *WorkSetAggregationProduction `json:"workSetAggregation,omitempty"`
-	Conditions  []CondxRow                    `json:"conditions,omitempty"`
-	Extractions []ExtractionAction            `json:"extractions"`
-}
-
-// legacyWSProfileData 序列化旧档形态档案（单条 workSetAggregation 对象）。
-func legacyWSProfileData(t *testing.T, rule legacyWSRule) []byte {
-	t.Helper()
-	data, err := json.Marshal(&struct {
-		SchemaVersion int            `json:"schemaVersion"`
-		Rules         []legacyWSRule `json:"rules"`
-	}{CurrentSchemaVersion, []legacyWSRule{rule}})
-	if err != nil {
-		t.Fatalf("序列化旧档测试档案失败: %v", err)
+// TestWorkSetAggSingleObjectRejected 旧形态拒收：workSetAggregation 写成单条对象
+// （{…}）不做兼容转换，载入按明确错误拒收（须为条目数组）。
+func TestWorkSetAggSingleObjectRejected(t *testing.T) {
+	doc := []byte(fmt.Sprintf(`{"schemaVersion":%d,"rules":[{"id":"ws-single","description":"单条对象","source":"manual","enabled":true,"workSetAggregation":{"grouping":{"mode":"directory"}},"conditions":[{"condition":{"target":"file","format":{"mode":"template","tpl":"{作品}"}}}],"extractions":[]}]}`, CurrentSchemaVersion))
+	profile, errs := ParseProfile(doc)
+	loaded := 0
+	if profile != nil {
+		loaded = len(profile.Rules)
 	}
-	return data
-}
-
-// TestWorkSetAggLegacySingleObjectNormalizes 旧档归一锚（甲案）：旧档单条对象
-// （workSetAggregation:{grouping}）+ 条件行的作品集 collection 提取行，载入即把
-// 提取行搬进首条目作 NameExtraction（行号+捕获名）——不拒收；捕获来自文件行时
-// 分组绑定保留；提取行搬走后从条件行清掉（collection 维度已退役，不留第二条集
-// 名声明通路）。保存形态归一为条目数组。
-func TestWorkSetAggLegacySingleObjectNormalizes(t *testing.T) {
-	data := legacyWSProfileData(t, legacyWSRule{
-		ID:          "ws-legacy",
-		Description: "测试：旧档单条归一",
-		Source:      RuleSourceManual,
-		Enabled:     true,
-		WorkSet: &WorkSetAggregationProduction{Grouping: &GroupingBinding{
-			Mode: GroupingModeIdentity, Identity: []IdentityPart{{Row: 1, Capture: "setname"}},
-		}},
-		Conditions:  wsAggConditions(),
-		Extractions: []ExtractionAction{{Dimension: DimCollection, From: FromCapture, CaptureName: "setname", Row: 1}},
-	})
-	// 前置断言：本档确为旧档单对象形态（不是新数组）。
-	var probe struct {
-		Rules []struct {
-			WorkSet json.RawMessage `json:"workSetAggregation"`
-		} `json:"rules"`
+	if loaded != 0 {
+		t.Fatalf("单条对象形态应被载入拒绝，实际载入 %d 条: %v", loaded, errs)
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		t.Fatalf("旧档测试档解析失败: %v", err)
+	if len(errs) == 0 {
+		t.Fatal("单条对象形态拒收应带告警文本")
 	}
-	if len(probe.Rules) != 1 || !bytes.HasPrefix(bytes.TrimSpace(probe.Rules[0].WorkSet), []byte("{")) {
-		t.Fatalf("旧档测试档应携带单对象形态的 workSetAggregation: %s", data)
+	if !strings.Contains(errs[0].Error(), "工作集聚合须为条目数组") {
+		t.Fatalf("拒收告警应点名须为条目数组: %v", errs[0])
 	}
-
-	profile, errs := ParseProfile(data)
-	if len(errs) != 0 || profile == nil || len(profile.Rules) != 1 {
-		t.Fatalf("旧档旧形态应载入即归一、不拒收: errs=%v", errs)
-	}
-	rule := profile.Rules[0]
-	if len(rule.WorkSetAggregation) != 1 {
-		t.Fatalf("旧档归一后应恰一条目，实际 %d: %+v", len(rule.WorkSetAggregation), rule.WorkSetAggregation)
-	}
-	entry := rule.WorkSetAggregation[0]
-	if entry.NameExtraction == nil || entry.NameExtraction.Row != 1 || entry.NameExtraction.Capture != "setname" {
-		t.Fatalf("集名提取行应搬进条目作集名来源（行1 setname）: %+v", entry.NameExtraction)
-	}
-	if entry.Grouping == nil || entry.Grouping.Mode != GroupingModeIdentity ||
-		len(entry.Grouping.Identity) != 1 || entry.Grouping.Identity[0].Capture != "setname" {
-		t.Fatalf("捕获来自文件行时分组绑定应保留: %+v", entry.Grouping)
-	}
-	// 搬走而非复制：集名提取行归一后从条件行清掉（collection 维度已退役，集名
-	// 只剩条目 NameExtraction 一个出口）。
-	if len(rule.Extractions) != 0 {
-		t.Fatalf("归一后旧档作品集提取行应从条件行清掉: %+v", rule.Extractions)
-	}
-	// 保存形态归一：再序列化落数组。
-	again := wsProfileData(t, rule)
-	if !strings.Contains(string(again), `"workSetAggregation":[{`) {
-		t.Fatalf("归一后保存应落条目数组形态: %s", again)
+	// 拒收发生在反序列化层：整份档案按反序列化失败拒载（不是逐条跳过）。
+	if !strings.Contains(errs[0].Error(), "规则档案反序列化失败") {
+		t.Fatalf("单条对象拒收应走档案反序列化失败通道: %v", errs[0])
 	}
 }
 
-// TestWorkSetAggLegacyDirRowCaptureBindsDirectoryGrouping 旧档归一锚（目录行捕获）：
-// 集名提取行的捕获原来自目录行时，该条目分组同时绑成「目录分组 · 所在目录」
-// （同目录文件共享该集名），即便旧档分组绑定声明的是标识分组。
-func TestWorkSetAggLegacyDirRowCaptureBindsDirectoryGrouping(t *testing.T) {
-	data := legacyWSProfileData(t, legacyWSRule{
-		ID:          "ws-legacy-dir",
-		Description: "测试：旧档目录行集名归一",
-		Source:      RuleSourceManual,
-		Enabled:     true,
-		WorkSet: &WorkSetAggregationProduction{Grouping: &GroupingBinding{
-			Mode: GroupingModeIdentity, Identity: []IdentityPart{{Row: 1, Capture: "work"}},
-		}},
-		Conditions: []CondxRow{
-			{Condition: &Condx{Target: CondxTargetFile, Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "{作品}"}}},
-			{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "作者{作者}"}}},
-		},
-		Extractions: []ExtractionAction{
-			{Dimension: DimCollection, From: FromCapture, CaptureName: "author", Row: 2},
-			// 非 collection 维度的提取动作不属于退役面：归一时应原样保留。
-			{Dimension: DimAuthor, From: FromCapture, CaptureName: "work", Row: 1},
-		},
-	})
-	profile, errs := ParseProfile(data)
-	if len(errs) != 0 || profile == nil || len(profile.Rules) != 1 {
-		t.Fatalf("目录行集名的旧档应载入即归一: errs=%v", errs)
-	}
-	entry := profile.Rules[0].WorkSetAggregation[0]
-	if entry.NameExtraction == nil || entry.NameExtraction.Row != 2 || entry.NameExtraction.Capture != "author" {
-		t.Fatalf("目录行捕获应搬进条目作集名来源（行2 author）: %+v", entry.NameExtraction)
-	}
-	if entry.Grouping == nil || entry.Grouping.Mode != GroupingModeDirectory || len(entry.Grouping.Identity) != 0 {
-		t.Fatalf("目录行捕获的条目应绑「目录分组 · 所在目录」: %+v", entry.Grouping)
-	}
-	// 搬走而非复制：collection 提取行清掉，其余维度提取动作原样保留。
-	extractions := profile.Rules[0].Extractions
-	if len(extractions) != 1 || extractions[0].Dimension != DimAuthor || extractions[0].CaptureName != "work" {
-		t.Fatalf("归一后应仅清掉 collection 提取行（作者行保留）: %+v", extractions)
-	}
-}
-
-// TestWorkSetAggLegacyNoUsableCaptureWarns 旧档归一锚（无可用捕获）：集名提取行
-// 来源不产捕获（此处常量）时保留分组绑定、集名置空——载入按无集名来源告警
-// （条目跳过），编辑保存同拒且档案不落盘。
-func TestWorkSetAggLegacyNoUsableCaptureWarns(t *testing.T) {
-	data := legacyWSProfileData(t, legacyWSRule{
-		ID:          "ws-legacy-const",
-		Description: "测试：旧档常量集名无捕获",
-		Source:      RuleSourceManual,
-		Enabled:     true,
-		WorkSet:     &WorkSetAggregationProduction{Grouping: &GroupingBinding{Mode: GroupingModeDirectory}},
-		Conditions: []CondxRow{
-			{Condition: &Condx{Target: CondxTargetFile, Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "{作品}"}}},
-		},
-		Extractions: []ExtractionAction{{Dimension: DimCollection, From: FromConstant, Constant: "集甲"}},
-	})
-	wsRejectOne(t, data, "第 1 条", "集名")
-
-	// 保存侧：同形态的新档条目（条目数组、无集名来源）编辑保存被拦且不落盘。
+// TestWorkSetAggSaveRejectsMissingNameExtraction 保存闸门：无集名来源（条目缺
+// NameExtraction）的条目编辑保存被拦且不落盘（集名只有卡内一个出口）。
+func TestWorkSetAggSaveRejectsMissingNameExtraction(t *testing.T) {
 	rj := &ruleEntryJSON{
-		ID:          "ws-legacy-const",
-		Description: "测试：旧档常量集名无捕获",
+		ID:          "ws-no-name",
+		Description: "测试：条目无集名来源",
 		Source:      RuleSourceManual,
 		Enabled:     true,
 		Conditions: []CondxRow{
 			{Condition: &Condx{Target: CondxTargetFile, Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "{作品}"}}},
 		},
-		Extractions: []ExtractionAction{{Dimension: DimCollection, From: FromConstant, Constant: "集甲"}},
+		Extractions: []ExtractionAction{{Dimension: DimAuthor, From: FromCapture, CaptureName: "作品", Row: 1}},
 		WorkSetAggregation: &workSetAggregationField{Entries: []WorkSetAggregationProduction{{
 			Grouping: &GroupingBinding{Mode: GroupingModeDirectory},
 		}}},
@@ -515,10 +397,10 @@ func TestWorkSetAggLegacyNoUsableCaptureWarns(t *testing.T) {
 	}
 }
 
-// TestWorkSetAggFieldAbsenceCompat 向后兼容锚：无作品集聚合产出的规则不落
-// workSetAggregation 键、往返字节等价；旧档 null 与空数组两形态按无条目读入、
-// 不报错（字段类型改列表不得让旧档解析失败）。
-func TestWorkSetAggFieldAbsenceCompat(t *testing.T) {
+// TestWorkSetAggFieldAbsence 现行语义锚（非旧档兼容）：无作品集聚合产出的规则
+// 不落 workSetAggregation 键、往返字节等价；null 与空数组两形态按无条目读入、
+// 不报错（null/字段缺席＝无条目是本产出的一等语义）。
+func TestWorkSetAggFieldAbsence(t *testing.T) {
 	plain := RuleEntry{
 		ID:          "plain-meta",
 		Description: "测试：无作品集聚合产出",

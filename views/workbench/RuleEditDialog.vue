@@ -904,17 +904,17 @@ interface RuleInput {
     contentBindings?: { row: number; dimension: string }[]
   } | null
   // workSetAggregation 为规则级「作品集聚合」产出（与既有三产出平级、并用零
-  // 互斥）：新档为条目数组（每条=分组绑定 grouping + 集名来源 nameExtraction），
-  // 旧档为单条对象（载入归一成数组形态展示——内核载入期亦归一）。
-  workSetAggregation?: WorkSetAggregationInputItem[] | WorkSetAggregationInputItem | null
+  // 互斥）：档案只落条目数组（每条=分组绑定 grouping + 集名来源 nameExtraction），
+  // 旧形态（单条对象）不做兼容。
+  workSetAggregation?: WorkSetAggregationInputItem[] | null
   conditions?: unknown
   extractions: unknown
   synthesis?: { dimPolicies?: { dimension: string; strategy: string }[] | null; roles?: { source: string; roleName: string }[] | null }
 }
 
 // 「作品集聚合」条目的档案投影（与内核 WorkSetAggregationProduction 同形）：分组绑定
-// + 集名来源（行号+捕获名——指本规则条件行声明面）。旧档单条对象缺 nameExtraction，
-// 载入按无集名来源呈现（保存被拦，需在卡内选集名）。
+// + 集名来源（行号+捕获名——指本规则条件行声明面）。档案只落条目数组；缺
+// nameExtraction 的条目按无集名来源呈现（保存被拦，需在卡内选集名）。
 interface WorkSetAggregationInputItem {
   grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
   nameExtraction?: { row: number; capture: string } | null
@@ -1126,7 +1126,7 @@ const metadataFileProduction = ref<MetadataFileProductionForm | null>(null)
 // 「作品集聚合」产出条目（BT·按分组绑定·已审图 bs-target-flow.png）：可多条，一条=
 // 卡内「分组」下拉绑定的分组（分组区里的一项——声明或自动项，与「聚合成作品」及
 // 各条目 1:1）+ 卡内「集名 ← {集名}」选定的条件行捕获（集名的唯一来源，决策7 甲案）。
-// 保存载荷恒落数组形态（旧档单条对象载入归一成数组展示）。
+// 保存载荷恒落数组形态（档案只认条目数组）。
 interface WorkSetAggregationRow {
   // seq 为条目稳定标识（增删/换绑时 v-for key 不串行——与分组声明 uid 平行概念）
   seq: number
@@ -1191,7 +1191,7 @@ function groupOccupiedBy(shape: string, selfSeq: number): string {
 // 本条目分组下拉候选（分组区里尚未被其它聚合占用的项——1:1：被聚合成作品或其它
 // 条目选走的分组不出现）。条件里有目录行时（分组区出现「目录分组 · 所在目录」自动项）
 // 目录分组以 auto:directory 编码入列——与装载期绑定引用同值（否则 el-select 无匹配
-// 选项会把 model-value 原始编码 auto:directory 直接显示出来；旧档归一/重开档案即撞），
+// 选项会把 model-value 原始编码 auto:directory 直接显示出来；重开档案即撞），
 // 选中即绑自动项引用、不物化声明（与「元数据文件」自动项口径一致）；此时虚拟「目录
 // 分组 · 所在目录」（dir:，选定即物化声明）不再重复出列。无目录自动项且无 directory
 // 声明时维持虚拟项（选定即物化——分组区加一行，既有行为）。
@@ -2583,16 +2583,15 @@ function initFromProps(): void {
     // 取值不算变更，不产生漂移提示）
     occurSnapshot = new Map(condxFlatRows(activeCondxRows.value).map((f) => [f.row, condxRowAllPlaceholders(f.condx)] as const))
     occurDrift.value = {}
-    // 「作品集聚合」条目装载（规则级 workSetAggregation 键）：新档为条目数组、旧档
-    // 为单条对象——载入归一成数组形态展示（与内核载入归一一致）；每条还原
-    // 分组绑定（优先复用分组区既有项：声明或由条件行派生的自动项，找不到时物化
-    // 为声明——分组区不加按钮，仅装载既有档案所需）+ 集名来源（row/capture）。
-    // 旧档无 nameExtraction（集名在原 collection 提取行）→ 集名留空、卡内提示补选
-    // （保存被拦）。
+    // 「作品集聚合」条目装载（规则级 workSetAggregation 键）：档案只落条目数组，
+    // 非数组一律按无条目处理（旧形态不做兼容）；每条还原分组绑定（优先复用分组
+    // 区既有项：声明或由条件行派生的自动项，找不到时物化为声明——分组区不加
+    // 按钮，仅装载既有档案所需）+ 集名来源（row/capture）；缺 nameExtraction 的
+    // 条目集名留空、卡内提示补选（保存被拦）。
     workSetAggregations.value = []
     worksetUidSeq = 1
     const rawWs: unknown = rule && rule.workSetAggregation ? rule.workSetAggregation : null
-    const wsItems: unknown[] = Array.isArray(rawWs) ? rawWs : rawWs ? [rawWs] : []
+    const wsItems: unknown[] = Array.isArray(rawWs) ? rawWs : []
     for (const rawItem of wsItems) {
       if (!rawItem || typeof rawItem !== 'object') continue
       const item = rawItem as WorkSetAggregationInputItem
