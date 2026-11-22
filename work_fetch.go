@@ -86,8 +86,9 @@ type FilePluginData struct {
 	// 字段进入作品元数据。空=无内容绑定（既有载荷零值兼容）。
 	ContentDecls []SnapDecl `json:"contentDecls,omitempty"`
 	// SetName 产出四集归属的集名快照（v5，创建时点识别快照的成员集归属集名，
-	// 空=无集归属）：执行期重算的匹配层模板未在该文件上复现集名声明时（分组
-	// 集名取自同组其他成员），创建链据此按名挂集；同名声明与既有集名来源去重。
+	// 空=无集归属）：集名的唯一元数据出口=产出四条目的 NameExtraction，创建链
+	// 据此按名挂集（成员未在本文件复现集名声明时同样成立——集名取自同组其他
+	// 成员）；与归属赋值（确认归集）声明的集名按业务键去重。
 	SetName string `json:"setName,omitempty"`
 }
 
@@ -1595,9 +1596,11 @@ func (h *LocalImportWorkFetcher) logPendingSynthesis(fullPath string, pending []
 // 内经 mergedFileConclusionOf 与干跑同源，风险13），提取声明合成终选与待裁决——
 // 待裁决项逐条记日志（维度/候选值/原因，归因观测面）。终选映射：标题→作品名
 // （无标题声明回退整个文件名去扩展名，扩展名由 Resource.Format 单独提供）、
-// 作者→本地作者声明（带声明级角色）、标签→本地标签声明、作品集→作品集声明
-// （集名=声明值，集内序不传契约——宿主续排近似，本期既定裁决）；路径含义
-// （PathMeaning）映射维持现状。归属裁决按内置 pixiv 规则重算：命中即真实域键
+// 作者→本地作者声明（带声明级角色）、标签→本地标签声明；作品集→作品集按名声
+// 明只保留归属赋值（确认归集）来源——「提取元数据」的 collection 维度已按决策
+// 7 甲退役，集名的唯一元数据出口=产出四条目的 NameExtraction（经子行 SetName
+// 快照落到本入口）；路径含义（PathMeaning）的 workSet 项同批退役、不再产集名。
+// 归属裁决按内置 pixiv 规则重算：命中即真实域键
 // （捕获值=页级作品 ID），未命中走非 pixiv 路径（PluginData 携带的创建期归属，
 // 无归属=文件内容哈希）。
 func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.WorkResponse, error) {
@@ -1661,8 +1664,17 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 		case DimTag:
 			resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{LocalTagName: new(decl.Value)})
 		case DimCollection:
-			// 集维度声明 → 作品集按名声明：SiteWorkSetId 传 local 站点的业务键
-			// "workSet:{名}"——宿主按 (site_id, site_work_set_id) 业务键 upsert
+			// 集维度声明 → 作品集按名声明，仅归属赋值（确认归集）来源：决策7
+			// 甲把「提取元数据」的 collection 维度退役（不再产集名），集名的唯一
+			// 元数据出口=产出四条目的 NameExtraction（经子行 SetName 快照在下方
+			// 落集）；确认归集写的是归属赋值、不是元数据提取，故保留本条通路。
+			// 遗留旧档里未归一的 collection 提取声明（以及内容绑定的集维度声明）
+			// 在此按无集名处理，不再产集。
+			if decl.Source != SourceAssignment {
+				continue
+			}
+			// SiteWorkSetId 传 local 站点的业务键 "workSet:{名}"——宿主按
+			// (site_id, site_work_set_id) 业务键 upsert
 			//（library-squirrel/backend/work/service.go upsertWorkSets：同名键
 			// 复用既有行、缺席才新建），同名集幂等归并。库内既有集「行 id」不
 			// 得作此键传入：宿主无任何按行 id 寻址的消费路径，行 id 字符串会
@@ -1694,6 +1706,8 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 	resp.Work.SiteWorkName = new(workName)
 
 	for _, m := range fp.Metadata {
+		// 目录含义链映射：作者/标签两族维持现状；workSet 项（旧「归属同源」通路）
+		// 已按决策7 甲退役——目录含义不再产集名，集中到子行集名快照一处。
 		switch m.Type {
 		case "localAuthor":
 			id, _ := strconv.ParseInt(m.ID, 10, 64)
@@ -1718,30 +1732,14 @@ func (h *LocalImportWorkFetcher) CreateWorkInfo(task *sdkdto.TaskDTO) (*sdkdto.W
 				name := m.Name
 				resp.LocalTags = append(resp.LocalTags, &sdkdto.LocalTagDTO{LocalTagName: &name})
 			}
-		case "workSet":
-			// 作品集按名 upsert 落作品所属站点域：local 归属作品落 local 域
-			// （workSet:{名} 即 local 站点的作品集 ID 约定形态；业务键语义同上
-			// DimCollection 注释——宿主按业务键 upsert，集行 id 不作键）。真实域
-			// 归属作品的站点侧作品集 ID 无法从名字派生（键即身份，无 ID 不造
-			// 行），跳过该含义
-			if fp.hasRealAttribution() {
-				if h.ctx != nil {
-					h.ctx.Infof("作品集含义按名仅支持 local 归属，真实域归属(%s)跳过: %s", fp.SiteKey, m.Name)
-				}
-				continue
-			}
-			resp.WorkSets = append(resp.WorkSets, &sdkdto.TaskWorkSetDTO{
-				SiteWorkSetId: workSetBizKey(m.Name),
-				WorkSetName:   m.Name,
-			})
 		}
 	}
 
-	// 集归属第三源：任务载荷携带的产出四集名快照（创建时点识别快照的成员集
-	// 归属集名）。成员可能未在本文件复现集名声明（分组集名取自同组其他成员的
-	// 匹配层模板产出），此时前两源（终选声明/含义链）皆无该集——按集名声明
-	// 补位（宿主按业务键 upsert 的同名同集通路，与既有来源同形）；与既有来源
-	// 同名只声明一次。
+	// 集名唯一元数据出口：任务载荷携带的产出四条目集名快照（创建时点识别快照的
+	// 成员集归属集名，取该条目 NameExtraction 的捕获值）。成员可能未在本文件复现
+	// 集名声明（分组集名取自同组其他成员的匹配层模板产出），重算结论里没有集维度
+	// 声明也不影响——按集名声明补位（宿主按业务键 upsert 的同名同集通路）；与归属
+	// 赋值（确认归集）声明的集名同名只声明一次。
 	if fp.SetName != "" {
 		bizKey := workSetBizKey(fp.SetName)
 		declared := false

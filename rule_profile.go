@@ -599,19 +599,102 @@ func (m *MetadataFileProduction) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// WorkSetAggregationProduction 为「作品集聚合」产出的独立落档位（规则级产出，
-// 与聚合产出、「元数据文件」产出、提取声明并列，可各自单独使用或同规则并用，
-// 与三者零互斥）：命中文件各自成作品、按归集依据声明的组键归入同一作品集
-// （同键成组；无分组键的文件不入集、独立成作品）。产出本身不携带集名来源——
-// 集名只从规则匹配层模板来（条件里的集名捕获/提取产出的作品集维度声明），
-// 故规则无集名产出时载入/保存即拒（规则编辑保存被拦）。
+// NameExtraction 为「作品集聚合」条目的集名来源声明：集名取自本规则条件行
+// （匹配区）里的命名捕获——行号+捕获名（行号口径同 IdentityPart：1 起先序
+// 展平，括号子组内层行照常占号、组行占组内首行号），该行的捕获值即本条归集
+// 出的作品集的集名。集名的唯一来源就是本声明（决策7 甲案）：不再从提取动作
+// 的作品集维度取、目录含义也不产集名。
+type NameExtraction struct {
+	// Row 为条件行号（1 起先序展平——括号子组内层行照常占号，组行占组内首行号）。
+	Row int `json:"row"`
+	// Capture 为捕获名（英文组名，如 {集名}→setname），须在该行声明。
+	Capture string `json:"capture"`
+}
+
+// WorkSetAggregationProduction 为「作品集聚合」产出的单个条目（规则级产出，与
+// 聚合产出、「元数据文件」产出、提取声明并列，可各自单独使用或同规则并用，
+// 与三者零互斥）：一条 = 一个分组绑定 + 一个集名来源——命中文件各自成作品、
+// 按 Grouping 声明的组键归入同一作品集（同键成组；无分组键的文件不入集、独立
+// 成作品），集名取自 NameExtraction 指到的条件行捕获。规则可携带多条：多条
+// 各自绑一个分组、各取一个集名；分组与聚合条目 1:1——同一分组不得被两个
+// 条目选中，也不得与「聚合成作品」的分组绑定（标识声明 identity）相同。
+//
+// 旧档归一（决策7 甲案）：旧档为规则级单条对象（workSetAggregation: {…}，不
+// 携带集名来源）+ 条件行里的作品集 collection 提取行承载集名；载入时该提取行
+// 搬进首条目的 NameExtraction（不拒收，见 normalizeLegacyWorkSetAggregation）。
+// 无可用捕获时保留分组绑定、集名置空，载入按无集名来源告警（保存被拦）。
 type WorkSetAggregationProduction struct {
 	// Grouping 为归集依据（组键绑定，形态复用 GroupingBinding）：identity=行捕获
 	// 复合（序列群键保留名可用）、directory=所在目录。必填——无归集依据即无
 	// 成组语义（载入/保存拒绝）。组键取值源由本产出形态静态授权库级来源：
 	// 序列群键行内群产物优先、库级群卡键兜底（见 aggregation.go 的
-	// groupingKeyOfWithLibrarySource）；集名不在本结构声明。
+	// groupingKeyOfWithLibrarySource）。
 	Grouping *GroupingBinding `json:"grouping,omitempty"`
+	// NameExtraction 为集名来源（行号+捕获名，指本规则条件行的命名捕获）：
+	// 必填——取不到集名的条目无集名可声明（载入跳过+告警、编辑保存被拦，旧档
+	// 归一后无可用捕获的条目同在此被拦）。
+	NameExtraction *NameExtraction `json:"nameExtraction,omitempty"`
+}
+
+// workSetAggregationField 为规则级「作品集聚合」条目列表的落档中间形态：新档
+// 为条目数组（workSetAggregation: [{…}]），旧档为单条对象（workSetAggregation:
+// {…}）。旧档读入置 legacy，供载入归一（normalizeLegacyWorkSetAggregation）
+// 搬集名进条目；序列化恒写数组（旧形态不再落档）。
+type workSetAggregationField struct {
+	// Entries 为条目列表（旧档单条对象读入为一项）。
+	Entries []WorkSetAggregationProduction
+	// legacy 标记本条来自旧档单条对象形态（载入归一依据；不参与序列化）。
+	legacy bool
+}
+
+// UnmarshalJSON 兼容两种落档形态：单条对象（旧档，记 legacy）与条目数组
+// （新档）；null 视为无条目（字段缺席同义）。
+func (f *workSetAggregationField) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if trimmed[0] == '{' {
+		var one WorkSetAggregationProduction
+		if err := json.Unmarshal(trimmed, &one); err != nil {
+			return fmt.Errorf("作品集聚合产出反序列化失败: %w", err)
+		}
+		f.Entries = []WorkSetAggregationProduction{one}
+		f.legacy = true
+		return nil
+	}
+	var list []WorkSetAggregationProduction
+	if err := json.Unmarshal(trimmed, &list); err != nil {
+		return fmt.Errorf("作品集聚合产出反序列化失败: %w", err)
+	}
+	f.Entries = list
+	return nil
+}
+
+// MarshalJSON 恒按条目数组落档（旧单条形态不再写出）。
+func (f workSetAggregationField) MarshalJSON() ([]byte, error) {
+	if f.Entries == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(f.Entries)
+}
+
+// workSetAggregationJSON 把内存条目列表转为落档中间形态：无条目即无该产出
+// （nil，随档省略）。
+func workSetAggregationJSON(entries []WorkSetAggregationProduction) *workSetAggregationField {
+	if len(entries) == 0 {
+		return nil
+	}
+	return &workSetAggregationField{Entries: entries}
+}
+
+// workSetAggregationEntries 把落档中间形态还原为内存条目列表：字段缺席或空
+// 列表=nil（无该产出）。
+func workSetAggregationEntries(f *workSetAggregationField) []WorkSetAggregationProduction {
+	if f == nil || len(f.Entries) == 0 {
+		return nil
+	}
+	return f.Entries
 }
 
 // AggregateProduction 为聚合规则的分轨入口（聚合成作品产出）：类型先行——
@@ -681,12 +764,13 @@ type RuleEntry struct {
 	// 不并作品；并用=分组绑定可独立于聚合标识声明，缺省=聚合成作品所绑分组
 	//〔求值期取用，档案不物化〕）。
 	MetadataFile *MetadataFileProduction `json:"metadataFile,omitempty"`
-	// WorkSetAggregation 为「作品集聚合」产出（规则级独立落档位，与聚合产出、
-	// 「元数据文件」产出、提取声明并列、并用零互斥）：规则命中的文件各自成
-	// 作品并按组键归入同一作品集。产出本身不携带集名来源——集名由规则匹配层
-	// 模板（条件里的集名捕获/提取产出的作品集维度声明）提供，无集名产出的
-	// 条目载入与保存即拒（规则编辑保存被拦）。
-	WorkSetAggregation *WorkSetAggregationProduction `json:"workSetAggregation,omitempty"`
+	// WorkSetAggregation 为「作品集聚合」产出的条目列表（规则级独立落档位，
+	// 与聚合产出、「元数据文件」产出、提取声明并列、并用零互斥）：规则命中的
+	// 文件各自成作品并按各条目的组键归入作品集。一条 = 分组绑定 + 集名来源
+	// （NameExtraction，指条件行的命名捕获——集名的唯一来源）；条目间与
+	// 「聚合成作品」的分组绑定 1:1。旧档单条对象形态载入即归一到本列表
+	// （见 normalizeLegacyWorkSetAggregation）。
+	WorkSetAggregation []WorkSetAggregationProduction `json:"workSetAggregation,omitempty"`
 	// Conditions 为 v4 条件行列表（目标三分+格式+附加+小标）：v4 档案的
 	// 持久化语法。机器规则生产方（问答/泛化）与档案装载同一来源；
 	// Pattern 为其编译缓存。过渡期（生产方迁移完成为止）直接设置 Pattern
@@ -783,14 +867,14 @@ type ruleEntryJSON struct {
 	Identity     []IdentityPart          `json:"identity,omitempty"`
 	Aggregate    *AggregateProduction    `json:"aggregate,omitempty"`
 	MetadataFile *MetadataFileProduction `json:"metadataFile,omitempty"`
-	// WorkSetAggregation 为「作品集聚合」产出的落档位（与既有三产出并列、并用
-	// 零互斥；集名不在本产出声明——由规则匹配层模板提供，见
-	// WorkSetAggregationProduction）。
-	WorkSetAggregation *WorkSetAggregationProduction `json:"workSetAggregation,omitempty"`
-	Conditions         []CondxRow                    `json:"conditions,omitempty"`
-	Pattern            *patternJSON                  `json:"pattern,omitempty"`
-	Extractions        []ExtractionAction            `json:"extractions"`
-	Synthesis          SynthesisPolicy               `json:"synthesis"`
+	// WorkSetAggregation 为「作品集聚合」产出条目列表的落档位（与既有三产出
+	// 并列、并用零互斥）。新档为条目数组；旧档为单条对象，读入置 legacy 供
+	// 载入归一（见 workSetAggregationField）。
+	WorkSetAggregation *workSetAggregationField `json:"workSetAggregation,omitempty"`
+	Conditions         []CondxRow               `json:"conditions,omitempty"`
+	Pattern            *patternJSON             `json:"pattern,omitempty"`
+	Extractions        []ExtractionAction       `json:"extractions"`
+	Synthesis          SynthesisPolicy          `json:"synthesis"`
 }
 
 // ruleProfileJSON 为 RuleProfile 的序列化中间结构。
@@ -1079,7 +1163,7 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 			Identity:           rule.Identity,
 			Aggregate:          rule.Aggregate,
 			MetadataFile:       rule.MetadataFile,
-			WorkSetAggregation: rule.WorkSetAggregation,
+			WorkSetAggregation: workSetAggregationJSON(rule.WorkSetAggregation),
 			Conditions:         rule.Conditions,
 			Extractions:        rule.Extractions,
 			Synthesis:          rule.Synthesis,
@@ -1098,7 +1182,7 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 		Identity:           rule.Identity,
 		Aggregate:          rule.Aggregate,
 		MetadataFile:       rule.MetadataFile,
-		WorkSetAggregation: rule.WorkSetAggregation,
+		WorkSetAggregation: workSetAggregationJSON(rule.WorkSetAggregation),
 		Pattern:            pj,
 		Extractions:        rule.Extractions,
 		Synthesis:          rule.Synthesis,
@@ -1137,6 +1221,12 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	if err := validateMetadataFileProduction(rj); err != nil {
 		return nil, err
 	}
+	// 旧档归一：作品集聚合的旧单条形态（workSetAggregation 单对象）把条件行里
+	// 的作品集 collection 提取行搬进条目的集名来源（NameExtraction）并从条件行
+	// 清掉（搬走而非复制——collection 维度已退役）——载入即归一、不拒收；无可用
+	// 捕获时保留分组绑定、集名置空，由随后的逐条校验告警/拦截（见
+	// normalizeLegacyWorkSetAggregation）。
+	normalizeLegacyWorkSetAggregation(rj)
 	if err := validateWorkSetAggregationProduction(rj); err != nil {
 		return nil, err
 	}
@@ -1186,7 +1276,7 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 			Identity:           rj.Identity,
 			Aggregate:          rj.Aggregate,
 			MetadataFile:       rj.MetadataFile,
-			WorkSetAggregation: rj.WorkSetAggregation,
+			WorkSetAggregation: workSetAggregationEntries(rj.WorkSetAggregation),
 			Conditions:         rj.Conditions,
 			Pattern:            pat,
 			Extractions:        rj.Extractions,
@@ -1212,7 +1302,7 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 		Identity:           rj.Identity,
 		Aggregate:          rj.Aggregate,
 		MetadataFile:       rj.MetadataFile,
-		WorkSetAggregation: rj.WorkSetAggregation,
+		WorkSetAggregation: workSetAggregationEntries(rj.WorkSetAggregation),
 		Pattern:            pat,
 		Extractions:        rj.Extractions,
 		Synthesis:          rj.Synthesis,
@@ -1536,43 +1626,186 @@ func validateGroupingBindingShape(ruleID string, binding *GroupingBinding, condi
 	return nil
 }
 
-// ruleProducesCollectionDeclaration 报告规则是否声明了作品集维度（集名）的
-// 提取动作：产出四「作品集聚合」不带集名来源，集名只能由匹配层模板产出
-// （条件里的集名捕获/提取，落为 collection 维度声明）——存在 collection 维度
-// 提取动作即具备集名产出面。判据只做声明面静态判定（动作的生效条件/取值在
-// 求值期仍可能不成立，不影响本判据）；内容绑定的 collection 维度不计入
-// （集名不走内容来源）。
-func ruleProducesCollectionDeclaration(extractions []ExtractionAction) bool {
+// legacyCollectionNameExtraction 取旧档的集名提取行：第一条作品集（collection）
+// 维度且以条件行捕获取值的提取动作——旧档集名由「作品集 ← {集名}」提取行承载，
+// 归一时据此推出条目的 NameExtraction（行号+捕获名）。非法来源（常量/贪婪识别/
+// 群前缀/目录层取名等）不产捕获，返回 false（无可用捕获）。
+func legacyCollectionNameExtraction(extractions []ExtractionAction) (ExtractionAction, bool) {
 	for i := range extractions {
-		if extractions[i].Dimension == DimCollection {
-			return true
+		action := &extractions[i]
+		if action.Dimension != DimCollection {
+			continue
 		}
+		if action.From != FromCapture || action.CaptureName == "" {
+			continue
+		}
+		return *action, true
 	}
-	return false
+	return ExtractionAction{}, false
 }
 
-// validateWorkSetAggregationProduction 产出四「作品集聚合」的载入/保存校验：
-// 归集依据必填且形态与引用合法（复用统一分组绑定校验）；规则须自带集名产出
-// （collection 维度提取动作）——无集名产出时命中文件无集名可声明，条目载入即
-// 跳过、编辑保存被拦（集名只从匹配层模板来，命名不开第二条通道）。
+// normalizeLegacyWorkSetAggregation 旧档归一（决策7 甲案·载入即归一、不拒收）：
+// 旧档「作品集聚合」为规则级单条对象（workSetAggregation: {grouping}）且不携带
+// 集名来源，集名由条件行里的作品集 collection 提取行承载。载入时把该提取行搬进
+// 首条目作集名来源——搬走而非复制：collection 维度已按决策7 甲退役，归一后该提
+// 取行动作从条件行清掉，旧档不再留第二条集名声明通路：
+//   - 提取行取自条件行捕获时，NameExtraction = 行号+捕获名（Row 缺省按第 1 行
+//     兜底，与提取动作的取值口径一致）；
+//   - 该捕获原来自目录行时，条目分组同时绑成「目录分组 · 所在目录」（捕获值由
+//     同目录文件共享，集即目录分组）；
+//   - 无可用捕获（常量/贪婪识别/群前缀/目录层取名等）时保留原分组绑定、集名
+//     置空——随后的逐条校验按「无集名来源」告警（载入跳过、编辑保存被拦）。
+//
+// 旧档条目已自带 NameExtraction 时不再推集名来源，但 collection 提取行同样清掉
+// （该维度已退役，留着即第二条集名声明通路）。未归一的遗留形态（如手工 JSON 直
+// 接写 collection 声明）不在此清理：载入照常，消费面按无集名处理。
+func normalizeLegacyWorkSetAggregation(rj *ruleEntryJSON) {
+	f := rj.WorkSetAggregation
+	if f == nil || !f.legacy {
+		return
+	}
+	if len(f.Entries) == 0 {
+		f.Entries = []WorkSetAggregationProduction{{}}
+	}
+	entry := &f.Entries[0]
+	if entry.NameExtraction == nil {
+		if action, ok := legacyCollectionNameExtraction(rj.Extractions); ok {
+			row := action.Row
+			if row <= 0 {
+				row = 1
+			}
+			entry.NameExtraction = &NameExtraction{Row: row, Capture: action.CaptureName}
+			if cond := condxRowAt(rj.Conditions, row); cond != nil && cond.Target == CondxTargetDir {
+				entry.Grouping = &GroupingBinding{Mode: GroupingModeDirectory}
+			}
+		}
+	}
+	rj.Extractions = dropCollectionExtractions(rj.Extractions)
+}
+
+// dropCollectionExtractions 去掉作品集（collection）维度的提取动作：该维度按决策
+// 7 甲退役（集名的唯一元数据出口=产出四条目的 NameExtraction），旧档归一搬走集名
+// 后不留残留声明。无该维度动作时原切片原样返回（零分配，非归一路径行为不变）。
+func dropCollectionExtractions(extractions []ExtractionAction) []ExtractionAction {
+	hasCollection := false
+	for i := range extractions {
+		if extractions[i].Dimension == DimCollection {
+			hasCollection = true
+			break
+		}
+	}
+	if !hasCollection {
+		return extractions
+	}
+	kept := make([]ExtractionAction, 0, len(extractions))
+	for _, action := range extractions {
+		if action.Dimension == DimCollection {
+			continue
+		}
+		kept = append(kept, action)
+	}
+	return kept
+}
+
+// groupingBindingsEqual 报告两个分组绑定是否选中同一分组（1:1 判据）：形态相同且
+// 标识分组的键部分（行号·捕获名）逐项相等——所在目录分组无键部分，同为目录形态
+// 即同一分组。nil 不与任何绑定成组（返回 false，缺归集依据由条目校验先行拦截）。
+func groupingBindingsEqual(a, b *GroupingBinding) bool {
+	if a == nil || b == nil || a.Mode != b.Mode {
+		return false
+	}
+	if a.Mode != GroupingModeIdentity {
+		return true
+	}
+	if len(a.Identity) != len(b.Identity) {
+		return false
+	}
+	for i := range a.Identity {
+		if a.Identity[i] != b.Identity[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateNameExtraction 校验条目集名来源的引用存在性：行号在本规则条件行范围内、
+// 捕获名非空且在该行声明（集名只取匹配区的命名捕获——行号+捕获名，捕获值即集名）。
+// subject 为错误文案的条目主语（含规则 ID 与条目序）。
+func validateNameExtraction(subject string, name *NameExtraction, conditions []CondxRow) error {
+	if name == nil {
+		return fmt.Errorf("%s没有集名来源（nameExtraction：行号+捕获名，须指向本规则条件行的命名捕获）", subject)
+	}
+	total := countCondxRows(conditions)
+	if name.Row < 1 || name.Row > total {
+		return fmt.Errorf("%s的集名来源行号 %d 越界（共 %d 行）", subject, name.Row, total)
+	}
+	if name.Capture == "" {
+		return fmt.Errorf("%s的集名来源缺少捕获名（capture）", subject)
+	}
+	cond := condxRowAt(conditions, name.Row)
+	if cond == nil {
+		return fmt.Errorf("%s的集名来源行号 %d 不存在", subject, name.Row)
+	}
+	caps, _, err := condxCapturesOf(cond)
+	if err != nil {
+		return fmt.Errorf("%s的集名来源第 %d 行: %w", subject, name.Row, err)
+	}
+	for _, c := range caps {
+		if c == name.Capture {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s的集名来源引用的捕获名 %q 未在第 %d 行声明", subject, name.Capture, name.Row)
+}
+
+// validateWorkSetAggregationProduction 产出四「作品集聚合」的载入/保存校验（逐条
+// 条目 + 条目间 1:1）：
+//
+//	① 每条必须有归集依据（grouping）且形态与引用合法（复用统一分组绑定校验）；
+//	② 每条必须能取到集名——NameExtraction 指到的捕获须在该条件行声明（行号在本
+//	   规则条件行范围内、捕获名非空）——无集名来源的条目载入跳过+告警、编辑保存
+//	   被拦（旧档归一后无可用捕获的条目同在此被拦；集名只有卡内一个出口）；
+//	③ 1:1——同一分组不得被两个条目选中（含跨聚合：与「聚合成作品」的分组绑定
+//	   ＝标识声明 identity 互斥），报错点名冲突的两处条目。
 func validateWorkSetAggregationProduction(rj *ruleEntryJSON) error {
 	ws := rj.WorkSetAggregation
-	if ws == nil {
+	if ws == nil || len(ws.Entries) == 0 {
 		return nil
-	}
-	if ws.Grouping == nil {
-		return fmt.Errorf("规则 %q 的作品集聚合产出缺少归集依据（grouping：identity=行捕获复合/序列群键、directory=所在目录）", rj.ID)
 	}
 	if rj.Conditions == nil {
 		// 归集求值消费条件行命中面（逐行独立求值+布尔门）：模式树形态无行
 		// 可求值，落档即静默零产出——显式拒绝不静默。
 		return fmt.Errorf("规则 %q 的作品集聚合产出须为条件行形态（conditions）", rj.ID)
 	}
-	if err := validateGroupingBindingShape(rj.ID, ws.Grouping, rj.Conditions); err != nil {
-		return err
+	// 「聚合成作品」的分组绑定＝本规则的标识声明（identity）：跨聚合 1:1 判据。
+	var aggGrouping *GroupingBinding
+	if rj.Aggregate != nil && len(rj.Identity) > 0 {
+		aggGrouping = &GroupingBinding{Mode: GroupingModeIdentity, Identity: rj.Identity}
 	}
-	if !ruleProducesCollectionDeclaration(rj.Extractions) {
-		return fmt.Errorf("规则 %q 的作品集聚合产出没有集名来源：集名只能由规则匹配层模板产出（条件里的集名捕获/提取），请先在条件里给集名留捕获并添加「作品集」（collection）维度的提取动作（capture / groupPrefix / parentDir 等取值来源）", rj.ID)
+	for i := range ws.Entries {
+		entry := &ws.Entries[i]
+		subject := fmt.Sprintf("规则 %q 的作品集聚合第 %d 条", rj.ID, i+1)
+		// ① 归集依据必填且形态/引用合法。
+		if entry.Grouping == nil {
+			return fmt.Errorf("%s缺少归集依据（grouping：identity=行捕获复合/序列群键、directory=所在目录）", subject)
+		}
+		if err := validateGroupingBindingShape(rj.ID, entry.Grouping, rj.Conditions); err != nil {
+			return fmt.Errorf("作品集聚合第 %d 条: %w", i+1, err)
+		}
+		// ② 集名来源必填且引用存在。
+		if err := validateNameExtraction(subject, entry.NameExtraction, rj.Conditions); err != nil {
+			return err
+		}
+		// ③ 1:1：条目间同一分组互斥。
+		for j := 0; j < i; j++ {
+			if groupingBindingsEqual(ws.Entries[j].Grouping, entry.Grouping) {
+				return fmt.Errorf("%s与第 %d 条选中了同一分组（1:1：一个分组只能被一个聚合条目使用）", subject, j+1)
+			}
+		}
+		// ③ 1:1 跨聚合：与「聚合成作品」的分组绑定互斥。
+		if aggGrouping != nil && groupingBindingsEqual(aggGrouping, entry.Grouping) {
+			return fmt.Errorf("%s与「聚合成作品」的分组绑定相同（1:1：同一分组不得同时供两种聚合使用）", subject)
+		}
 	}
 	return nil
 }

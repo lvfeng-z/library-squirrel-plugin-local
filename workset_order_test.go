@@ -1,8 +1,9 @@
 // 集序记录与作答端的单元测试：批内按序号数值序、跨批次乱序补导后全局序仍按
 // 序号数值序（先导后段再导前段）、同作品重复导入合并不重复（首见条目保留）、
 // 跨目录同名集按目录块首见拼接、作答序号偏移（集内序-1）、记录缺席空作答、
-// 集归属两来源与归属形态守卫（真实域作品身份键=页级作品 ID、目录含义链集名仅
-// local 归属生效、无集内序成员不落记录）。
+// 集名来源收口与归属形态守卫（提取元数据 collection 维度与含义链 workSet 项已
+// 退役；产出四集名快照按条目供序、归属赋值（确认归集）照常供序、无集内序成员
+// 不落记录）。
 package main
 
 import (
@@ -13,8 +14,8 @@ import (
 	"github.com/lvfeng-z/library-squirrel-sdk/identity"
 )
 
-// orderTestFile 集序测试的单文件素材：集名声明（空=无集维度终选声明）与集内
-// 序号（数值与原文）。
+// orderTestFile 集序测试的单文件素材：集名声明（空=无集名声明）与集内序号
+// （数值与原文）。
 type orderTestFile struct {
 	rel     string
 	seq     int
@@ -22,8 +23,12 @@ type orderTestFile struct {
 	set     string
 }
 
-// buildOrderSnapshot 构造单目录单序列群的快照：文件行带集维度终选声明与群组键
-// （规则群成员形态——文件行与群卡双携带），群卡成员携带序号数值与原文。
+// buildOrderSnapshot 构造单目录单序列群的快照：文件行带归属赋值（确认归集）的
+// 集维度声明与群组键（规则群成员形态——文件行与群卡双携带），群卡成员携带序号
+// 数值与原文。集名来源取归属赋值通路（决策7 甲保留：它写赋值不是元数据提取），
+// 使本组用例专注集序合并机制本身；产出四集名快照的供序见
+// TestEmitSelectedWorksChildOrderFollowsGroupSeq/NaturalSeq 与
+// TestCollectWorkSetOrder* 两组用例。
 func buildOrderSnapshot(dir, group string, files []orderTestFile) *RecognitionSnapshot {
 	snap := &RecognitionSnapshot{}
 	groupMembers := make([]SnapGroupMember, 0, len(files))
@@ -34,13 +39,49 @@ func buildOrderSnapshot(dir, group string, files []orderTestFile) *RecognitionSn
 			GroupKey: group, GroupSeq: f.seq,
 		}
 		if f.set != "" {
-			sf.Final = append(sf.Final, SnapDecl{Dimension: string(DimCollection), Value: f.set})
+			sf.Final = append(sf.Final, SnapDecl{
+				Dimension: string(DimCollection), Value: f.set, Source: string(SourceAssignment),
+			})
 		}
 		snap.Files = append(snap.Files, sf)
 		groupMembers = append(groupMembers, SnapGroupMember{RelPath: rel, Seq: f.seq, SeqText: f.seqText})
 	}
 	snap.Groups = append(snap.Groups, SnapGroup{DirRelKey: dir, Key: group, Members: groupMembers})
 	return snap
+}
+
+// orderSeqEntryRule 构造一条以序列群键为归集依据的产出四规则（集序端到端用例的
+// 条目集名来源）：行1 文件名模板 `{集名}`（集名来源捕获），行2 序列模板
+// `{序号}`（分组绑定=序列群键保留名，须选自序列目标行）。规则可经档案载入校验。
+func orderSeqEntryRule(id string) RuleEntry {
+	return RuleEntry{
+		ID:          id,
+		Description: "测试：集序条目集名来源",
+		Source:      RuleSourceManual,
+		Enabled:     true,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{集名}")}},
+			{Connector: "and", Condition: &Condx{Target: CondxTargetSeq, Format: condxTpl("{序号}")}},
+		},
+		WorkSetAggregation: []WorkSetAggregationProduction{{
+			Grouping: &GroupingBinding{
+				Mode:     GroupingModeIdentity,
+				Identity: []IdentityPart{{Row: 2, Capture: identityGroupKeyCapture}},
+			},
+			NameExtraction: &NameExtraction{Row: 1, Capture: condxVocab["集名"]},
+		}},
+	}
+}
+
+// orderRulesProfileKV 把规则序列化为档案 JSON 的 KV 桩（作品拉取器经上下文解析
+// 流水线规则时载入；规则经生产载入校验管线）。
+func orderRulesProfileKV(t *testing.T, rules ...RuleEntry) map[string]string {
+	t.Helper()
+	data, err := json.Marshal(&RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: rules})
+	if err != nil {
+		t.Fatalf("序列化集序测试档案失败: %v", err)
+	}
+	return map[string]string{RuleProfileKVKey: string(data)}
 }
 
 // buildOrderItems 从快照文件行构造批次子行素材：local 回退归属、作品身份键=
@@ -266,43 +307,62 @@ func TestQueryWorkSetOrderAbsentRecordEmptyAnswer(t *testing.T) {
 	}
 }
 
-// TestCollectWorkSetOrderUpdatesSourcesAndGuards 集归属两来源与归属形态守卫：
-// ①快照终选集维度声明对真实域归属成员照常记录，身份键=页级作品 ID（与子行
-// 同值）；②目录含义链 workSet 项仅对 local 归属子行生效（真实域跳过——与执行
-// 期作品应答的跳过口径一致）；③不在任何群卡且文件行无群组键的成员（无集内
-// 序）不落记录；④已识别成员经群卡反查取得序号（文件行无群组键亦可记录）。
+// TestCollectWorkSetOrderUpdatesSourcesAndGuards 集名来源收口与归属形态守卫（决策
+// 7 甲）：①提取元数据 collection 维度的终选集声明已退役——快照里有也不作集名来
+// 源；②目录含义链 workSet 项已退役——不再作集名来源（local 归属同样不落）；③产
+// 出四集名快照（条目 NameExtraction 的捕获值）是唯一元数据出口：序列群键条目的
+// 成员按群卡序号供序（成员未复现集维度声明亦可）；④归属赋值（确认归集）集维度
+// 声明照常供序——它写的是赋值，不是元数据提取；⑤无群卡身份（无集内序）的成员
+// 不落记录。
 func TestCollectWorkSetOrderUpdatesSourcesAndGuards(t *testing.T) {
+	rules := []RuleEntry{{ID: "ws-seq", WorkSetAggregation: []WorkSetAggregationProduction{{
+		Grouping:       &GroupingBinding{Mode: GroupingModeIdentity, Identity: []IdentityPart{{Capture: identityGroupKeyCapture}}},
+		NameExtraction: &NameExtraction{Row: 1, Capture: "setname"},
+	}}}}
 	snap := &RecognitionSnapshot{}
-	// 真实域归属成员：集维度终选声明 + 群卡序号；文件行无群组键（已识别形态）
-	realRel := "混合/11111111_p0.jpg"
+	// ① 遗留 collection 提取声明（来源=文件名）+ 群卡序号：退役后不作集名来源。
+	retiredRel := "混合/旧集_01.jpg"
 	snap.Files = append(snap.Files, SnapFile{
-		RelPath: realRel, FileName: "11111111_p0.jpg", DirRelKey: "混合",
-		Final: []SnapDecl{{Dimension: string(DimCollection), Value: "集甲"}},
+		RelPath: retiredRel, FileName: "旧集_01.jpg", DirRelKey: "混合",
+		Final: []SnapDecl{{Dimension: string(DimCollection), Value: "旧集", Source: string(SourceFilename)}},
 	})
-	// local 归属成员：无集维度声明，靠目录含义链 workSet 项归集；群卡携带序号
-	localRel := "混合/普通_02.jpg"
+	// ④ 归属赋值（确认归集）集维度声明：照常供序。
+	assignedRel := "混合/赋值_02.jpg"
 	snap.Files = append(snap.Files, SnapFile{
-		RelPath: localRel, FileName: "普通_02.jpg", DirRelKey: "混合",
+		RelPath: assignedRel, FileName: "赋值_02.jpg", DirRelKey: "混合",
+		Final: []SnapDecl{{Dimension: string(DimCollection), Value: "确认集", Source: string(SourceAssignment)}},
 	})
-	// 落单成员：目录含义链指向同名集但不在任何群、文件行无群组键（无集内序）
+	// ③ 产出四序列群键条目成员：集名快照在场（快照无集维度声明）、群卡序号 3。
+	seqRel := "混合/序列_03.jpg"
+	snap.Files = append(snap.Files, SnapFile{
+		RelPath: seqRel, FileName: "序列_03.jpg", DirRelKey: "混合",
+		SetGroupKey: "序列", SetName: "集甲", SetRuleID: "ws-seq",
+	})
+	// ⑤ 落单成员：集名快照在场但不在任何群卡、文件行无群组键（无集内序）。
 	loneRel := "混合/落单.jpg"
 	snap.Files = append(snap.Files, SnapFile{
 		RelPath: loneRel, FileName: "落单.jpg", DirRelKey: "混合",
+		SetGroupKey: "序列", SetName: "集甲", SetRuleID: "ws-seq",
 	})
 	snap.Groups = append(snap.Groups, SnapGroup{DirRelKey: "混合", Key: "序列", Members: []SnapGroupMember{
-		{RelPath: realRel, Seq: 1, SeqText: "1"},
-		{RelPath: localRel, Seq: 2, SeqText: "02"},
+		{RelPath: retiredRel, Seq: 1, SeqText: "1"},
+		{RelPath: assignedRel, Seq: 2, SeqText: "02"},
+		{RelPath: seqRel, Seq: 3, SeqText: "03"},
 	}})
 
-	// 目录含义链：集名「集乙」（对真实域成员无效、对 local 成员有效）
+	// 目录含义链 workSet 项：local 归属子行同样不再作集名来源（已退役）。
 	metadata := []PathMeaning{{Type: string(PathTypeWorkSet), Name: "集乙"}}
 	items := []batchFileItem{
 		{af: attributedFile{
-			entry: FileEntry{FullPath: "root/" + realRel, RelPath: realRel, Hash: "hash-real"},
-			attr:  workAttribution{SiteKey: identity.Pixiv.Key, PageWorkID: "11111111_p0"},
+			entry: FileEntry{FullPath: "root/" + retiredRel, RelPath: retiredRel, Hash: "hash-retired"},
+			attr:  workAttribution{SiteKey: identity.Local.Key},
 		}, metadata: metadata},
 		{af: attributedFile{
-			entry: FileEntry{FullPath: "root/" + localRel, RelPath: localRel, Hash: "hash-local"},
+			entry: FileEntry{FullPath: "root/" + assignedRel, RelPath: assignedRel, Hash: "hash-assigned"},
+			attr:  workAttribution{SiteKey: identity.Local.Key},
+		}, metadata: metadata},
+		{af: attributedFile{
+			entry: FileEntry{FullPath: "root/" + seqRel, RelPath: seqRel, Hash: "hash-seq"},
 			attr:  workAttribution{SiteKey: identity.Local.Key},
 		}, metadata: metadata},
 		{af: attributedFile{
@@ -311,14 +371,19 @@ func TestCollectWorkSetOrderUpdatesSourcesAndGuards(t *testing.T) {
 		}, metadata: metadata},
 	}
 
-	updates := collectWorkSetOrderUpdates(snap, items, nil)
+	updates := collectWorkSetOrderUpdates(snap, items, rules)
 	if len(updates) != 2 {
-		t.Fatalf("应恰两个集键（集甲=真实域声明、集乙=含义链 local 归属），实际 %v", updates)
+		t.Fatalf("应恰两个集键（确认集=归属赋值、集甲=产出四集名快照），实际 %v", updates)
 	}
-	if got := updates["workSet:集甲"]; len(got) != 1 || got[0].SiteWorkId != "11111111_p0" || got[0].Seq != 1 || got[0].DirKey != "混合" {
-		t.Fatalf("真实域成员应按页级作品 ID 记录进声明集，实际 %+v", got)
+	if got := updates[workSetBizKey("集甲")]; len(got) != 1 || got[0].SiteWorkId != "hash-seq" || got[0].Seq != 3 {
+		t.Fatalf("产出四集名快照应供序（落单无序号不落），实际 %+v", got)
 	}
-	if got := updates["workSet:集乙"]; len(got) != 1 || got[0].SiteWorkId != "hash-local" || got[0].Seq != 2 || got[0].SeqText != "02" {
-		t.Fatalf("local 成员应经含义链归集（真实域跳过、落单无序号不落），实际 %+v", got)
+	if got := updates[workSetBizKey("确认集")]; len(got) != 1 || got[0].SiteWorkId != "hash-assigned" || got[0].Seq != 2 {
+		t.Fatalf("归属赋值（确认归集）集应照常供序，实际 %+v", got)
+	}
+	for _, name := range []string{"旧集", "集乙"} {
+		if got, ok := updates[workSetBizKey(name)]; ok {
+			t.Fatalf("退役集名通路（%s）不应供序，实际 %+v", name, got)
+		}
 	}
 }

@@ -121,59 +121,76 @@ func setViewOf(domain *WorkDomain, setKey string) *WorkSetView {
 	return nil
 }
 
-// —— 消费面2：创建链落集第三源 —— //
+// —— 消费面2：创建链落集来源收口（决策7 甲） —— //
 
-// TestCreateWorkInfoSetAttributionSource 创建链落集第三源：任务载荷携带产出四
-// 集名快照（setName）时按名声明作品集（宿主按业务键 upsert 的同名同集通路），
-// 与既有来源同名只声明一次；成员未在重算结论中复现集维度声明也能落集；真实域
-// 归属成员同权（按名声明落作品所属站点域，与终选声明来源一致）。
-func TestCreateWorkInfoSetAttributionSource(t *testing.T) {
-	h := &LocalImportWorkFetcher{}
-	// ① 无任何终选/含义链来源：第三源按名声明
-	pd := `{"schemaVersion":5,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"setname1","size":10,` +
-		`"setName":"集丙"}`
-	resp, err := h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
-	if err != nil {
-		t.Fatalf("CreateWorkInfo 不应报错: %v", err)
+// TestWorkSetAggCreateChainSetNameSource 创建链落集来源收口：集名的唯一元数据
+// 出口=产出四条目集名快照（setName，取条目 NameExtraction 的捕获值）——按名声明
+// 作品集（宿主按业务键 upsert 的同名同集通路），成员未在重算结论中复现集维度声
+// 明也能落集；归属赋值（确认归集）声明照常落集（它写的是赋值、不是元数据提取）；
+// 「提取元数据」collection 维度的提取声明与目录含义链 workSet 项均已退役——规则
+// 或载荷里带着也不再产集名；同名同集只声明一次；真实域归属成员同权（按名落作品
+// 所属站点域，与既有集声明来源同形）。
+func TestWorkSetAggCreateChainSetNameSource(t *testing.T) {
+	newFetcher := func(rules ...RuleEntry) *LocalImportWorkFetcher {
+		data, err := json.Marshal(RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: rules})
+		if err != nil {
+			t.Fatalf("构造测试档案失败: %v", err)
+		}
+		return &LocalImportWorkFetcher{ctx: descWireCtx{
+			stubPluginCtx: stubPluginCtx{kv: map[string]string{RuleProfileKVKey: string(data)}},
+		}}
 	}
-	if len(resp.WorkSets) != 1 || resp.WorkSets[0].SiteWorkSetId != workSetBizKey("集丙") ||
-		resp.WorkSets[0].WorkSetName != "集丙" {
-		t.Fatalf("第三源应按集名快照声明作品集，实得 %+v", resp.WorkSets)
-	}
-
-	// ② 与含义链来源同名：只声明一次（同名同集幂等）
-	pd = `{"schemaVersion":5,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"setname2","size":10,` +
-		`"setName":"合集","metadata":[{"type":"workSet","name":"合集"}]}`
-	resp, err = h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
-	if err != nil {
-		t.Fatalf("CreateWorkInfo 不应报错: %v", err)
-	}
-	if len(resp.WorkSets) != 1 || resp.WorkSets[0].WorkSetName != "合集" {
-		t.Fatalf("第三源与既有来源同名应只声明一次，实得 %+v", resp.WorkSets)
+	create := func(t *testing.T, h *LocalImportWorkFetcher, pd string) *sdkdto.WorkResponse {
+		t.Helper()
+		resp, err := h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
+		if err != nil {
+			t.Fatalf("CreateWorkInfo 不应报错: %v", err)
+		}
+		return resp
 	}
 
-	// ③ 真实域归属：含义链来源跳过（站点侧集 ID 不可派生），第三源按名声明
-	//    不受该跳过约束（与终选声明来源同形态，落作品所属站点域）。
-	pd = `{"schemaVersion":5,"fullPath":"C:/lib/12345678-abcdef_p0.jpg","relPath":"12345678-abcdef_p0.jpg",` +
-		`"hash":"setname3","size":10,"siteKey":"pixiv","siteWorkId":"12345678-abcdef_p0","setName":"集丁",` +
+	// ① 提取元数据 collection 维度已退役：旧档遗留的 collection 提取动作（规则
+	//    里仍在）+ 载荷含义链 workSet 项 → 均不产集名。
+	h := newFetcher(descWireFileRule(t, "legacy-collection", "{标题}",
+		ExtractionAction{Dimension: DimCollection, From: FromConstant, Constant: "集甲"}))
+	pd := `{"schemaVersion":5,"fullPath":"C:/lib/标题.jpg","relPath":"标题.jpg","hash":"setname1","size":10,` +
 		`"metadata":[{"type":"workSet","name":"含义链集"}]}`
-	resp, err = h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
-	if err != nil {
-		t.Fatalf("CreateWorkInfo 不应报错: %v", err)
-	}
-	if len(resp.WorkSets) != 1 || resp.WorkSets[0].WorkSetName != "集丁" {
-		t.Fatalf("真实域成员第三源应按名声明（含义链来源仍跳过），实得 %+v", resp.WorkSets)
+	if got := create(t, h, pd).WorkSets; len(got) != 0 {
+		t.Fatalf("提取元数据 collection 维度与含义链 workSet 项已退役，不应产集: %+v", got)
 	}
 
-	// ④ 无集名快照：既有两源行为零漂移（含义链 local 作品集合照落）
-	pd = `{"schemaVersion":5,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"setname4","size":10,` +
-		`"metadata":[{"type":"workSet","name":"既有集"}]}`
-	resp, err = h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
-	if err != nil {
-		t.Fatalf("CreateWorkInfo 不应报错: %v", err)
+	// ② 条目集名快照：唯一元数据出口（无终选集维度声明亦可落集）。
+	h = newFetcher()
+	pd = `{"schemaVersion":5,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"setname2","size":10,` +
+		`"setName":"集乙"}`
+	resp := create(t, h, pd)
+	if len(resp.WorkSets) != 1 || resp.WorkSets[0].SiteWorkSetId != workSetBizKey("集乙") ||
+		resp.WorkSets[0].WorkSetName != "集乙" {
+		t.Fatalf("集名快照应按名声明作品集，实得 %+v", resp.WorkSets)
 	}
-	if len(resp.WorkSets) != 1 || resp.WorkSets[0].WorkSetName != "既有集" {
-		t.Fatalf("无集名快照时既有集名来源应零漂移，实得 %+v", resp.WorkSets)
+
+	// ③ 归属赋值（确认归集）：写的是赋值不是元数据提取，照常按名落集。
+	pd = `{"schemaVersion":5,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"setname3","size":10,` +
+		`"assignment":{"collection":"集丙"}}`
+	resp = create(t, h, pd)
+	if len(resp.WorkSets) != 1 || resp.WorkSets[0].WorkSetName != "集丙" {
+		t.Fatalf("归属赋值（确认归集）应照常按名落集，实得 %+v", resp.WorkSets)
+	}
+
+	// ④ 赋值与集名快照同名：按业务键去重只声明一次。
+	pd = `{"schemaVersion":5,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"setname4","size":10,` +
+		`"setName":"集丙","assignment":{"collection":"集丙"}}`
+	resp = create(t, h, pd)
+	if len(resp.WorkSets) != 1 || resp.WorkSets[0].WorkSetName != "集丙" {
+		t.Fatalf("集名快照与归属赋值同名应只声明一次，实得 %+v", resp.WorkSets)
+	}
+
+	// ⑤ 真实域归属：集名快照同权（按名声明落作品所属站点域）。
+	pd = `{"schemaVersion":5,"fullPath":"C:/lib/12345678-abcdef_p0.jpg","relPath":"12345678-abcdef_p0.jpg",` +
+		`"hash":"setname5","size":10,"siteKey":"pixiv","siteWorkId":"12345678-abcdef_p0","setName":"集丁"}`
+	resp = create(t, h, pd)
+	if len(resp.WorkSets) != 1 || resp.WorkSets[0].WorkSetName != "集丁" {
+		t.Fatalf("真实域成员集名快照应按名声明，实得 %+v", resp.WorkSets)
 	}
 }
 
@@ -256,38 +273,39 @@ func TestBuildAggregatedChildResponseCarriesSetName(t *testing.T) {
 // —— 消费面3：集序供序形态裁定 —— //
 
 // TestCollectWorkSetOrderUpdatesSetAttribution 产出四集序供序裁定：序列群键
-// 归集依据的集照常供集内序（成员可能未在本文件复现集维度声明——按集名快照
-// 补位记录）；行捕获复合/所在目录集的集名不供集内序（宿主创建序兜底，即便
-// 成员带群卡身份与终选集维度声明）；无群卡身份的序列群集成员不落记录；无
-// 产出四集归属时既有两源行为零漂移。
+// 归集依据的条目照常供集内序（成员可能未在本文件复现集维度声明——按集名快照
+// 补位记录）；行捕获复合/所在目录条目的集名不供集内序（宿主创建序兜底，即便
+// 成员带群卡身份）；无群卡身份的序列群集成员不落记录；归属赋值（确认归集）声明
+// 照常供序（它写赋值不是元数据提取），提取元数据 collection 维度的遗留声明不再
+// 作集名来源。
 func TestCollectWorkSetOrderUpdatesSetAttribution(t *testing.T) {
 	rules := []RuleEntry{
-		{ID: "ws-seq", WorkSetAggregation: &WorkSetAggregationProduction{Grouping: &GroupingBinding{
+		{ID: "ws-seq", WorkSetAggregation: []WorkSetAggregationProduction{{Grouping: &GroupingBinding{
 			Mode: GroupingModeIdentity, Identity: []IdentityPart{{Capture: identityGroupKeyCapture}},
-		}}},
-		{ID: "ws-cap", WorkSetAggregation: &WorkSetAggregationProduction{Grouping: &GroupingBinding{
+		}}}},
+		{ID: "ws-cap", WorkSetAggregation: []WorkSetAggregationProduction{{Grouping: &GroupingBinding{
 			Mode: GroupingModeIdentity, Identity: []IdentityPart{{Capture: "甲"}, {Capture: "乙"}},
-		}}},
-		{ID: "ws-dir", WorkSetAggregation: &WorkSetAggregationProduction{Grouping: &GroupingBinding{
+		}}}},
+		{ID: "ws-dir", WorkSetAggregation: []WorkSetAggregationProduction{{Grouping: &GroupingBinding{
 			Mode: GroupingModeDirectory,
-		}}},
+		}}}},
 	}
 	snap := &RecognitionSnapshot{}
 	addFile := func(f SnapFile) { snap.Files = append(snap.Files, f) }
 	// 序列群集成员：无终选集维度声明，靠集名快照补位；群卡序号 2。
 	addFile(SnapFile{RelPath: "混合/序列_02.jpg", DirRelKey: "混合",
 		SetGroupKey: "序列", SetName: "集甲", SetRuleID: "ws-seq"})
-	// 目录集成员：有群卡身份与终选集维度声明，但归集依据=所在目录 → 不供序。
+	// 目录集成员：有群卡身份与集维度声明，但归集依据=所在目录 → 不供序。
 	addFile(SnapFile{RelPath: "混合/目录_01.jpg", DirRelKey: "混合",
 		SetGroupKey: "混合", SetName: "集乙", SetRuleID: "ws-dir",
 		Final: []SnapDecl{{Dimension: string(DimCollection), Value: "集乙"}}})
-	// 行捕获复合集成员：有群卡身份与终选集维度声明 → 不供序。
+	// 行捕获复合集成员：有群卡身份与集维度声明 → 不供序。
 	addFile(SnapFile{RelPath: "混合/捕获_03.jpg", DirRelKey: "混合",
 		SetGroupKey: "甲\x00乙", SetName: "集丙", SetRuleID: "ws-cap",
 		Final: []SnapDecl{{Dimension: string(DimCollection), Value: "集丙"}}})
-	// 既有集成员（无产出四集归属）：终选声明照常供序。
+	// 归属赋值（确认归集）集成员：赋值来源的集维度声明照常供序。
 	addFile(SnapFile{RelPath: "混合/既有_04.jpg", DirRelKey: "混合",
-		Final: []SnapDecl{{Dimension: string(DimCollection), Value: "集丁"}}})
+		Final: []SnapDecl{{Dimension: string(DimCollection), Value: "集丁", Source: string(SourceAssignment)}}})
 	// 序列群集但无群卡身份：无集内序不落记录。
 	addFile(SnapFile{RelPath: "混合/无群_05.jpg", DirRelKey: "混合",
 		SetGroupKey: "序列", SetName: "集甲", SetRuleID: "ws-seq"})
@@ -318,18 +336,65 @@ func TestCollectWorkSetOrderUpdatesSetAttribution(t *testing.T) {
 	updates := collectWorkSetOrderUpdates(snap, items, rules)
 
 	if len(updates) != 2 {
-		t.Fatalf("应恰两个集键（序列群集=集甲、既有集=集丁），实得 %v", updates)
+		t.Fatalf("应恰两个集键（序列群集=集甲、归属赋值集=集丁），实得 %v", updates)
 	}
 	if got := updates[workSetBizKey("集甲")]; len(got) != 1 || got[0].SiteWorkId != "h-seq" || got[0].Seq != 2 {
 		t.Fatalf("序列群键集成员应按集名快照补位供序（无终选声明亦可），实得 %+v", got)
 	}
 	if got := updates[workSetBizKey("集丁")]; len(got) != 1 || got[0].SiteWorkId != "h-legacy" || got[0].Seq != 4 {
-		t.Fatalf("无产出四集归属的既有集名来源应零漂移，实得 %+v", got)
+		t.Fatalf("归属赋值（确认归集）集名应照常供序，实得 %+v", got)
 	}
 	for _, name := range []string{"集乙", "集丙"} {
 		if got, ok := updates[workSetBizKey(name)]; ok {
 			t.Fatalf("行捕获复合/所在目录集不应供集内序（%s），实得 %+v", name, got)
 		}
+	}
+}
+
+// TestCollectWorkSetOrderPerEntrySeqAttribution 供序裁定按条目收口：同规则多条目
+// 时按快照的 SetEntryIndex 取该条目自己的分组绑定——序列群键条目供集内序，同一
+// 规则的行捕获复合/所在目录条目不供序（阶段1 的「首条目占位」退役：不再以规则
+// 首条目代表全规则）。
+func TestCollectWorkSetOrderPerEntrySeqAttribution(t *testing.T) {
+	rules := []RuleEntry{
+		// 首条目=序列群键、次条目=所在目录：条目序 1 的成员不得因首条目是序列群键而供序。
+		{ID: "ws-multi-dir", WorkSetAggregation: []WorkSetAggregationProduction{
+			{Grouping: &GroupingBinding{Mode: GroupingModeIdentity, Identity: []IdentityPart{{Capture: identityGroupKeyCapture}}}},
+			{Grouping: &GroupingBinding{Mode: GroupingModeDirectory}},
+		}},
+		// 首条目=所在目录、次条目=序列群键：条目序 1 的成员照常供序。
+		{ID: "ws-multi-seq", WorkSetAggregation: []WorkSetAggregationProduction{
+			{Grouping: &GroupingBinding{Mode: GroupingModeDirectory}},
+			{Grouping: &GroupingBinding{Mode: GroupingModeIdentity, Identity: []IdentityPart{{Capture: identityGroupKeyCapture}}}},
+		}},
+	}
+	snap := &RecognitionSnapshot{Files: []SnapFile{
+		{RelPath: "混合/目录条目_01.jpg", DirRelKey: "混合",
+			SetGroupKey: "混合", SetName: "集甲", SetRuleID: "ws-multi-dir", SetEntryIndex: 1},
+		{RelPath: "混合/序列条目_02.jpg", DirRelKey: "混合",
+			SetGroupKey: "序列", SetName: "集乙", SetRuleID: "ws-multi-seq", SetEntryIndex: 1},
+	}}
+	snap.Groups = append(snap.Groups,
+		SnapGroup{DirRelKey: "混合", Key: "混合", Members: []SnapGroupMember{
+			{RelPath: "混合/目录条目_01.jpg", Seq: 1, SeqText: "01"},
+		}},
+		SnapGroup{DirRelKey: "混合", Key: "序列", Members: []SnapGroupMember{
+			{RelPath: "混合/序列条目_02.jpg", Seq: 2, SeqText: "02"},
+		}},
+	)
+	items := []batchFileItem{
+		{af: attributedFile{entry: FileEntry{FullPath: "root/混合/目录条目_01.jpg", RelPath: "混合/目录条目_01.jpg", Hash: "h-dir"}, attr: workAttribution{SiteKey: identity.Local.Key}}},
+		{af: attributedFile{entry: FileEntry{FullPath: "root/混合/序列条目_02.jpg", RelPath: "混合/序列条目_02.jpg", Hash: "h-seq"}, attr: workAttribution{SiteKey: identity.Local.Key}}},
+	}
+	updates := collectWorkSetOrderUpdates(snap, items, rules)
+	if len(updates) != 1 {
+		t.Fatalf("应恰一个集键（序列群键条目=集乙），实得 %v", updates)
+	}
+	if got := updates[workSetBizKey("集乙")]; len(got) != 1 || got[0].SiteWorkId != "h-seq" || got[0].Seq != 2 {
+		t.Fatalf("序列群键条目（条目序 1）应按条目自己的分组绑定供序，实得 %+v", got)
+	}
+	if got, ok := updates[workSetBizKey("集甲")]; ok {
+		t.Fatalf("所在目录条目不应因同规则首条目是序列群键而供序，实得 %+v", got)
 	}
 }
 

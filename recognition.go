@@ -164,15 +164,19 @@ type FileConclusion struct {
 	// 落点——不导入、不独立成件，内容只作扇出来源，不获聚合作品键）；
 	// 轨道成员（含轨行兼绑定的双重身份成员）与无归属文件不带标记。
 	AggCompanion bool
-	// SetGroupKey / SetName / SetRuleID 为集归属（产出四「作品集聚合」汇流后
-	// 求值结论）：GroupKey 为按归集依据算出的组键（身份复合键 NUL 连接／序列
-	// 群键／目录聚合键），SetName 为规则匹配层模板产出的集名，SetRuleID 为
-	// 产出该归属的规则 ID。三字段同空=不入集（已被聚合收编/说明成员/分组键
-	// 不可得/集名不可得）；同非空=该文件作为独立作品归入集——消费面按
-	// 「SetGroupKey+SetName」识别集、按 SetRuleID 追溯规则。
-	SetGroupKey string
-	SetName     string
-	SetRuleID   string
+	// SetGroupKey / SetName / SetRuleID / SetEntryIndex 为集归属（产出四
+	//「作品集聚合」汇流后求值结论）：GroupKey 为按条目归集依据算出的组键
+	//（身份复合键 NUL 连接／序列群键／目录聚合键），SetName 为条目集名来源
+	//（NameExtraction）在组成员的命中行上取到的捕获值，SetRuleID 为产出该
+	// 归属的规则 ID，SetEntryIndex 为规则内的条目序（0 起，声明序——同文件
+	// 多条目按此序先到先得）。GroupKey/SetName/SetRuleID 同空=不入集（已被
+	// 聚合收编/说明成员/分组键不可得/集名不可得）；同非空=该文件作为独立
+	// 作品归入集——消费面按「SetGroupKey+SetName」识别集、按 SetRuleID+
+	// SetEntryIndex 追溯产出条目。
+	SetGroupKey   string
+	SetName       string
+	SetRuleID     string
+	SetEntryIndex int
 	// rawDecls 为提取段原始声明（合成前中间产物）：预览基座规则相关件的铸造
 	// 原料，快照与呈现不消费（本类型为进程内求值产物，不经序列化）。
 	rawDecls []MetadataDeclaration
@@ -989,7 +993,9 @@ const (
 // 归属两字段（aggWorkKey/aggTrackRole，空=无聚合）；旧快照（v2）反序列化按
 // 空聚合降级，识别重跑即重建。v4：SnapFile 增集归属三字段（setGroupKey/
 // setName/setRuleId，空=无作品集聚合归属）；旧快照（v3 及更早）反序列化按
-// 零值降级（JSON 未知/缺失字段按零值），识别重跑即重建。
+// 零值降级（JSON 未知/缺失字段按零值），识别重跑即重建。v4 内追加条目序
+// setEntryIndex（产出四条目的求值事实，0=首条目省略——纯增量字段，旧快照与
+// 旧代码均按零值/未知字段兼容，版本号不前移）。
 const recognitionSnapshotSchemaVersion = 4
 
 // RecognitionSnapshot 识别全景快照：识别时点的全景结论缓存（可按「原始路径+档案」
@@ -1110,16 +1116,19 @@ type SnapFile struct {
 	// 独立于空 aggTrackRole 的「无聚合」含义（说明成员=轨道角色空+本标记
 	// 真）。零值=非说明成员（旧快照载入即现状语义，无迁移）。
 	AggCompanion bool `json:"aggCompanion,omitempty"`
-	// SetGroupKey / SetName / SetRuleID 集归属（产出四「作品集聚合」求值结论，
-	// 识别快照 v4 起在场）：SetGroupKey 为按归集依据算出的组键（身份复合键
-	// NUL 连接／序列群键／目录聚合键），SetName 为规则匹配层模板产出的集名，
-	// SetRuleID 为产出该归属的规则 ID。三字段同空=不入集（无产出四规则、已被
-	// 聚合收编、说明成员、分组键或集名不可得）；消费面按「SetGroupKey+SetName」
-	// 识别一个集、按 SetRuleID 追溯产出规则。旧快照（v3 及更早）零值载入即
-	// 无集归属语义（无迁移），识别重跑即重建。
-	SetGroupKey string `json:"setGroupKey,omitempty"`
-	SetName     string `json:"setName,omitempty"`
-	SetRuleID   string `json:"setRuleId,omitempty"`
+	// SetGroupKey / SetName / SetRuleID / SetEntryIndex 集归属（产出四「作品集
+	// 聚合」求值结论，识别快照 v4 起在场）：SetGroupKey 为按条目归集依据算出
+	// 的组键（身份复合键 NUL 连接／序列群键／目录聚合键），SetName 为条目集名
+	// 来源（NameExtraction）取到的集名，SetRuleID 为产出该归属的规则 ID，
+	// SetEntryIndex 为规则内条目序（0 起，声明序）。GroupKey/SetName/SetRuleID
+	// 同空=不入集（无产出四规则、已被聚合收编、说明成员、分组键或集名不可得）；
+	// 消费面按「SetGroupKey+SetName」识别一个集、按 SetRuleID+SetEntryIndex
+	// 追溯产出条目。旧快照（v3 及更早）零值载入即无集归属语义（无迁移），
+	// 识别重跑即重建；条目序 0 为默认首条目（omitempty 不落键）。
+	SetGroupKey   string `json:"setGroupKey,omitempty"`
+	SetName       string `json:"setName,omitempty"`
+	SetRuleID     string `json:"setRuleId,omitempty"`
+	SetEntryIndex int    `json:"setEntryIndex,omitempty"`
 	// ContentSize / ContentModTime 内容游标（尺寸+修改时间 UnixNano）：该文件
 	// 上轮被采集过内容片段时在场，增量轮目录被 mtime 跳过时逐文件 stat
 	// 比对，失配即整目录拉回求值面（内容原地修改不改父目录 mtime，目录级
@@ -1577,8 +1586,10 @@ func snapFileOf(c *FileConclusion, lib *LibraryIndex, assignIdx *assignmentDirIn
 		MatchedRuleIDs: c.MatchedRuleIDs,
 		AggWorkKey:     c.AggWorkKey, AggTrackRole: c.AggTrackRole, AggWorkType: c.AggWorkType,
 		AggCompanion: c.AggCompanion,
-		// 集归属三字段随快照落档（产出四求值结论；消费面按组键+集名识别集）。
+		// 集归属四字段随快照落档（产出四求值结论；消费面按组键+集名识别集、
+		// 按规则ID+条目序追溯产出条目）。
 		SetGroupKey: c.SetGroupKey, SetName: c.SetName, SetRuleID: c.SetRuleID,
+		SetEntryIndex: c.SetEntryIndex,
 		// 内容扇出键集随快照落档（作品级并入与创建载荷两口径按键集路由）。
 		FanoutWorkKeys: c.FanoutWorkKeys,
 	}
@@ -3908,11 +3919,11 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 		conclusions[i].FanoutWorkKeys = assigns[i].FanoutWorkKeys
 	}
 	// 作品集聚合段（产出四）：组键的库级取值源索引由汇流结论的分组归属反查
-	// （行内群产物优先，本索引兜底）；集名取规则匹配层模板产出的作品集维度
-	// 声明（按规则 ID 归位）；既有聚合归属/说明成员先到先得不入集。
+	// （行内群产物优先，本索引兜底）；条目按声明序逐条按所绑分组求组键、集名
+	// 取该条目集名来源（NameExtraction）的捕获值（条目集名来源是唯一出口）；
+	// 既有聚合归属/说明成员先到先得不入集。
 	setAssigns := workSetAggregation(surface, rules, lib,
 		libraryGroupKeysOfConclusions(conclusions),
-		workSetSetNamesOfConclusions(conclusions),
 		workSetTakenOfConclusions(conclusions))
 	for i := range conclusions {
 		if i >= len(setAssigns) {
@@ -3921,6 +3932,7 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 		conclusions[i].SetGroupKey = setAssigns[i].GroupKey
 		conclusions[i].SetName = setAssigns[i].SetName
 		conclusions[i].SetRuleID = setAssigns[i].RuleID
+		conclusions[i].SetEntryIndex = setAssigns[i].EntryIndex
 	}
 }
 

@@ -26,12 +26,14 @@ export function cloneJSON<T>(value: T): T {
 }
 
 // 含义维度（提取动作 dimension）：description=作品描述（site_work_description，
-// 创建期接线、多值取首个——与标题取首同语义）。
+// 创建期接线、多值取首个——与标题取首同语义）。「作品集」维度已退役（BT·决策7
+// 甲案，2026-11-22）——集名的唯一来源是「作品集聚合」条目的集名行，提取元数据
+// 只产文件维度（标题/作者/标签/描述）；内核仍保留旧档 collection 维度以载入并
+// 归一，前端不再列出、不再产出。
 export const DIMENSION_OPTIONS: { value: string; label: string }[] = [
   { value: 'author', label: '作者' },
   { value: 'title', label: '作品名' },
   { value: 'tag', label: '标签' },
-  { value: 'collection', label: '作品集' },
   { value: 'description', label: '描述' }
 ]
 
@@ -55,7 +57,8 @@ export const FROM_OPTIONS: { value: string; label: string }[] = [
 ]
 
 // 贪婪识别（帧-05 收敛）：可扫描维度（LibraryIndex 有集合者）与扫描范围。
-export const SCAN_DIMENSIONS = ['author', 'tag', 'collection']
+// 作品集维度退役后（BT·决策7 甲案）可扫描维度只剩作者/标签。
+export const SCAN_DIMENSIONS = ['author', 'tag']
 export const SCAN_SCOPE_OPTIONS: { value: string; label: string }[] = [
   { value: 'path', label: '文件名+各级目录名' },
   { value: 'uncovered', label: '仅上半未覆盖片段' }
@@ -1799,10 +1802,11 @@ export interface GroupDeclForm {
   parts: IdentityPartForm[]
 }
 
-// 声明块文案（A 帧1/D 帧1「◇ 按 第1行{作品}+第1行{序号} 分组」；seqKey/directory
+// 声明块文案（A 帧1/D 帧1「按 第1行{作品}+第1行{序号} 分组」；seqKey/directory
 // 形态与自动项同词——「序列分组 · 第 N 行群键」/「目录分组 · 所在目录」，同形
 // 声明与自动项在分组区/下拉互为同形去重对、呈现同词）：capture=各部分
 // 「第N行{词}」以 + 连接；seqKey=「第N行序列群键」；directory=「所在目录」。
+// （条目符号前缀已于 BT 决策5 全数去除——文案不再带前缀记号。）
 export function groupDeclBlockLabel(d: GroupDeclForm): string {
   if (d.keySource === 'directory') return '目录分组 · 所在目录'
   if (d.keySource === 'seqKey') {
@@ -1815,17 +1819,17 @@ export function groupDeclBlockLabel(d: GroupDeclForm): string {
   return segs ? `按 ${segs} 分组` : '按（未选键）分组'
 }
 
-// 声明下拉条目文案（A 帧2/D 帧2「分组：[◇ 按 {作品}+{序号} 分组▾]」——去「第N行」
+// 声明下拉条目文案（A 帧2/D 帧2「分组：[按 {作品}+{序号} 分组▾]」——去「第N行」
 // 前缀的短形态）：capture=各部分「{词}」以 + 连接；seqKey/directory=与自动项
-// 同词的「◇ 序列分组 · 第 N 行群键」/「◇ 目录分组 · 所在目录」。
+// 同词的「序列分组 · 第 N 行群键」/「目录分组 · 所在目录」。
 export function groupDeclOptionLabel(d: GroupDeclForm): string {
-  if (d.keySource === 'directory') return '◇ 目录分组 · 所在目录'
+  if (d.keySource === 'directory') return '目录分组 · 所在目录'
   if (d.keySource === 'seqKey') {
     const row = d.parts[0] ? d.parts[0].row : 1
-    return `◇ 序列分组 · 第 ${row} 行群键`
+    return `序列分组 · 第 ${row} 行群键`
   }
   const segs = (d.parts || []).map((p) => `{${aggIdentityWordOf(p.capture)}}`).join('+')
-  return segs ? `◇ 按 ${segs} 分组` : '◇ 按（未选键）分组'
+  return segs ? `按 ${segs} 分组` : '按（未选键）分组'
 }
 
 // 声明 → 聚合产出 identity（保存序列化）：capture/seqKey 携 parts（seqKey 的
@@ -1892,16 +1896,16 @@ export function groupAutoItems(rows: CondxRowForm[]): GroupAutoItem[] {
   return out
 }
 
-// 自动项块文案（A 帧1「◇ 序列分组 · 第 1 行群键（自动·只读）」的正文段、
+// 自动项块文案（A 帧1「序列分组 · 第 1 行群键（自动·只读）」的正文段、
 // 剧本C 帧1「目录分组·所在目录」）：只读标注（自动·只读）由呈现层另缀。
 export function groupAutoBlockLabel(item: GroupAutoItem): string {
   return item.kind === 'directory' ? '目录分组 · 所在目录' : `序列分组 · 第 ${item.row} 行群键`
 }
 
 // 自动项下拉条目文案（产出分组下拉=自动项+显式声明并列，同词于显式声明
-// 同形项的下拉文案）。
+// 同形项的下拉文案；条目符号前缀已于 BT 决策5 全数去除）。
 export function groupAutoOptionLabel(item: GroupAutoItem): string {
-  return `◇ ${groupAutoBlockLabel(item)}`
+  return groupAutoBlockLabel(item)
 }
 
 // 同形键（验收9 同形去重的对照键）：声明与自动项各自归一键——seqKey 按
@@ -2014,63 +2018,54 @@ export interface MetadataFileProductionForm {
   contentBindings?: ContentBindingForm[]
 }
 
-// —— 「作品集聚合」产出（产出四·剧本A）表单形态 ——
-// 归集依据三选（剧本A 帧2「归集依据：(○序列分组键 ●所在目录 ○行捕获)」）：
-// seqKey=序列分组键（绑定所选序列行的群键保留名）、directory=所在目录、capture=
-// 行捕获（键部分=条件行号+捕获名按声明序拼成复合键）。产出四不带集名来源
-//（决策5）：集名只从匹配层模板来（条件里的集名捕获/提取），本形态不携集名字段。
-export type WorkSetBasisForm = 'seqKey' | 'directory' | 'capture'
-
-export interface WorkSetAggregationForm {
-  basis: WorkSetBasisForm
-  // seqRow 为序列分组键所选序列条件行号（取值源由产出形态静态授权：行内序列行
-  // 群产物优先、库级群卡键兜底——行号只定位行内群产物来源行）。
-  seqRow: number
-  // captures 为行捕获键部分（按声明序拼接成复合键）。
-  captures: IdentityPartForm[]
+// —— 「作品集聚合」产出（BT 按分组绑定·已审图 bs-target-flow.png）表单形态 ——
+// 条目 = 卡内的「分组」下拉（分组区里的一项：显式声明或自动项——与「聚合成作品」
+// 及各条目 1:1，已被占用者不入列）+ 卡内的「集名 ← {集名}」集名来源（条件行号+
+// 捕获名，指匹配区捕获）。规则可携带多条：一条绑一个分组、各出一个作品集。
+// 编辑态引用形态见 GroupingRef（RuleEditDialog 侧以 ref + 行号/捕获名承载），
+// 落档形态见 WorkSetAggregationSaveItem（与内核 WorkSetAggregationProduction 同形：
+// grouping + nameExtraction）。
+export interface NameExtractionForm {
+  row: number
+  capture: string
 }
 
-// 集名行提示（剧本A 帧2「集名：来自条件里的 {集名} 捕获」；序列分组键形态集名=
-// 公共段，帧3「…捕获（公共段）」）：产出四不带集名来源，本行只提示集名来自
-// 匹配层模板（条件里的集名捕获/提取），不提供选择。
-export const WORKSET_NAME_HINT = '集名：来自条件里的 {集名} 捕获'
-export const WORKSET_NAME_HINT_SEQ = '集名：来自条件里的 {集名} 捕获（公共段）'
-
-// 归集依据预览行（剧本A 帧2：随归集依据实时改口）。
-export const WORKSET_PREVIEW_DIR = '预览：同目录的命中文件将归为同一作品集'
-export const WORKSET_PREVIEW_SEQ = '预览：成套命中的文件（同前缀+序号）将各成作品并归入同一作品集，集名=公共段'
-
-// 集名行红字：条件里（提取声明面）没有集名产出时实时提示；保存被拦时换成带
-// 指路的全文（剧本A 帧2/帧3 逐字）。
-export const WORKSET_NAME_MISSING = '请先在条件里给集名留捕获'
-export const WORKSET_SAVE_NAME_MISSING = '请先在条件里给集名留捕获（如目录名/公共段）'
-
-// 保存闸门红字：行捕获形态未选捕获名（帧3）；序列分组键形态无序列条件行
-//（行内群产物来源行缺席——保存面兜底，内核同拒）。
-export const WORKSET_SAVE_CAPTURE_MISSING = '请选择参与归集依据的捕获'
-export const WORKSET_SAVE_SEQ_MISSING = '序列分组键需要序列条件行'
-
-// 归集依据 → 组键绑定（保存序列化）：seqKey→标识分组（键部分=群键保留名
-// groupKey）、directory→所在目录分组、capture→标识分组（键部分=所选捕获）；
-// 行捕获未选捕获名=undefined（保存闸门拦，载荷构造层兜底不产出空键）。
-export function workSetGrouping(f: WorkSetAggregationForm | null): GroupingBindingForm | undefined {
-  if (!f) return undefined
-  if (f.basis === 'directory') return { mode: 'directory' }
-  if (f.basis === 'seqKey') return { mode: 'identity', identity: [{ row: f.seqRow, capture: AGG_GROUP_KEY_CAPTURE }] }
-  if (!f.captures.length) return undefined
-  return { mode: 'identity', identity: f.captures.map((p) => ({ row: p.row, capture: p.capture })) }
+// 单条目的落档形态（grouping=分组绑定、nameExtraction=集名来源）。
+export interface WorkSetAggregationSaveItem {
+  grouping: GroupingBindingForm
+  nameExtraction: NameExtractionForm
 }
 
-// 组键绑定 → 归集依据表单（载入既有档案）：directory→所在目录；单群键保留名→
-// 序列分组键（行=声明行）；其余→行捕获（键部分原样还原）。
-export function workSetFromGrouping(grouping: GroupingBindingForm | null | undefined): WorkSetAggregationForm | null {
-  if (!grouping || !grouping.mode) return null
-  if (grouping.mode === 'directory') return { basis: 'directory', seqRow: 1, captures: [] }
-  const parts = (grouping.identity || []).map((p) => ({ row: p.row, capture: p.capture }))
-  if (parts.length === 1 && parts[0].capture === AGG_GROUP_KEY_CAPTURE) {
-    return { basis: 'seqKey', seqRow: parts[0].row, captures: [] }
-  }
-  return { basis: 'capture', seqRow: 1, captures: parts }
+// 卡内文案锚（已审图「✚ 分组：」「✚ 集名 ← {集名}」逐字；条目符号前缀全数去除）。
+export const WORKSET_CARD_LABEL = '作品集聚合'
+export const WORKSET_GROUP_LABEL = '分组：'
+export const WORKSET_NAME_LABEL = '集名 ←'
+export const WORKSET_NAME_PLACEHOLDER = '{集名}'
+// 集名行的取值口径说明（图内「从匹配区捕获取值（不是手打名字）」）。
+export const WORKSET_NAME_NOTE = '从匹配区捕获取值（不是手打名字）'
+
+// 条件里没有可用捕获时的实时提示（保存被拦文案 WORKSET_SAVE_NAME_MISSING 的前置）。
+export const WORKSET_NAME_HINT = '条件行里没有可用捕获——先在匹配区给集名留占位词（如 {集名}）'
+
+// 保存闸门红字：条目未选分组 / 未选集名。
+export const WORKSET_SAVE_GROUP_MISSING = '请为该条目选择分组'
+export const WORKSET_SAVE_NAME_MISSING = '请选择条件里的一个捕获作为集名（条件里没有可用捕获时，先在匹配区给集名留占位词）'
+
+// 分组下拉空态说明：分组区一项可绑的都没有 / 全被其它聚合占用（1:1 的可见解释）。
+export const WORKSET_GROUP_EMPTY_NOTE = '分组区里没有可绑定的分组——先在分组区加一项（条件里有序列行/目录行时会自动出现分组项）'
+export const WORKSET_GROUP_ALL_TAKEN_NOTE = '分组区里的分组都已被其它聚合占用——一个分组只归一个聚合，请换绑或移除其它聚合'
+
+// 分组已被占用的卡片说明（边界条件：「该分组已用于…」可读提示）。
+export function worksetGroupTakenNote(owner: string): string {
+  return `该分组已用于${owner}——一个分组只归一个聚合，请换绑或移除该聚合`
+}
+
+// 卡内预览行（图内「预览：第 2 行模板成套的 20 个文件 → 一个作品集，集名取公共段」
+// 同型：随所选分组与集名来源实时改口）。
+export function worksetPreviewText(groupLabel: string, nameSource: string): string {
+  const g = groupLabel || '（未选分组）'
+  const n = nameSource || '（未选集名）'
+  return `预览：${g} 成套的命中文件 → 一个作品集，集名取 ${n}`
 }
 
 // 分轨入口表单形态。companionUse 为规则级历史字段——内核口径=规则级仅 track
@@ -2154,15 +2149,16 @@ export function aggRoleShortLabel(role: string): string {
   return AGG_ROLE_SHORT_LABELS[role] || role
 }
 
-// 内容去向维度枚举（与内核 knownBindingDimensions 同集=五维度全值；一行内容
-// 整段可同时映射多个维度，各维独立走既有合成与冲突判定）。描述为本批主用形态
-// 列首；顺序即弹窗勾选组呈现序（剧本A 帧2「☑描述 ☐标签 ☐标题 ☐作者 ☐作品集」）。
+// 内容去向维度枚举（与内核 knownBindingDimensions 同集；一行内容整段可同时映射
+// 多个维度，各维独立走既有合成与冲突判定）。描述为本批主用形态列首；顺序即弹窗
+// 勾选组呈现序（剧本A 帧2「☑描述 ☐标签 ☐标题 ☐作者」）。作品集维度已退役
+//（BT·决策7 甲案：集名唯一来源=作品集聚合条目的集名行，内容去向只出四个文件
+// 维度；内核仍认旧档 collection 值以兼容载入，前端不再列出）。
 export const CONTENT_BINDING_DIMENSIONS: { value: string; label: string }[] = [
   { value: 'description', label: '描述' },
   { value: 'tag', label: '标签' },
   { value: 'title', label: '标题' },
-  { value: 'author', label: '作者' },
-  { value: 'collection', label: '作品集' }
+  { value: 'author', label: '作者' }
 ]
 
 export function contentBindingDimensionLabel(dim: string): string {
@@ -2503,7 +2499,7 @@ export function metadataFileFormErrors(
     }
     seenRowDims.add(key)
     if (!b.dimension || !dims.has(b.dimension)) {
-      errs.push(`内容绑定第 ${i + 1} 项维度非法: "${b.dimension}"（内容去向只出 描述/标签/标题/作者/作品集 枚举）`)
+      errs.push(`内容绑定第 ${i + 1} 项维度非法: "${b.dimension}"（内容去向只出 描述/标签/标题/作者 枚举）`)
     }
   }
   // 分组绑定校验（与内核 validateGroupingBinding 同口径；编辑面词汇=分组）

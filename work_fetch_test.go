@@ -281,13 +281,15 @@ func TestQnaRuleDepthAlignsWithDirNamesIndex(t *testing.T) {
 }
 
 // TestCreateWorkInfoLocalAttributionFieldsUnchanged local 归属的作品信息（回归锚）：
-// 作品身份=哈希；站点域列表恒空（伪行停写）；站点作者/标签输入按名落本地域（ID=0 名称模式）；
-// 作品集按名保留（local 站点的作品集 ID 约定形态）
+// 作品身份=哈希；站点域列表恒空（伪行停写）；站点作者/标签输入按名落本地域（ID=0
+// 名称模式）；作品集按名保留只经载荷集名快照（产出四条目集名的唯一元数据出口）
+// ——含义链 workSet 项已按决策7 甲退役，带着也不产集。
 func TestCreateWorkInfoLocalAttributionFieldsUnchanged(t *testing.T) {
 	h := &LocalImportWorkFetcher{}
-	pd := `{"schemaVersion":2,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"abc123","size":10,` +
+	pd := `{"schemaVersion":5,"fullPath":"C:/lib/photo.png","relPath":"photo.png","hash":"abc123","size":10,` +
 		`"metadata":[{"type":"localAuthor","id":"5"},{"type":"siteAuthor","name":"作者甲"},` +
-		`{"type":"localTag","id":"6"},{"type":"siteTag","name":"标签乙"},{"type":"workSet","name":"合集"}]}`
+		`{"type":"localTag","id":"6"},{"type":"siteTag","name":"标签乙"},{"type":"workSet","name":"含义链集"}],` +
+		`"setName":"合集"}`
 	resp, err := h.CreateWorkInfo(&sdkdto.TaskDTO{PluginData: &pd})
 	if err != nil {
 		t.Fatalf("CreateWorkInfo 不应报错: %v", err)
@@ -329,12 +331,12 @@ func TestCreateWorkInfoLocalAttributionFieldsUnchanged(t *testing.T) {
 	}
 
 	if len(resp.WorkSets) != 1 || resp.WorkSets[0].SiteWorkSetId != "workSet:合集" {
-		t.Fatalf("local 归属作品集应按名保留，实得 %+v", resp.WorkSets)
+		t.Fatalf("作品集只应按载荷集名快照按名保留（含义链 workSet 已退役），实得 %+v", resp.WorkSets)
 	}
 }
 
 // TestCreateWorkInfoRealAttribution 真实域归属的作品信息：作品身份=页级作品 ID（非哈希）；
-// 周边按名仍落本地域；作品集含义跳过（真实域作品集 ID 无法从名字派生，无 ID 不造行）
+// 周边按名仍落本地域；含义链 workSet 项已按决策7 甲退役（带着也不产集）
 func TestCreateWorkInfoRealAttribution(t *testing.T) {
 	h := &LocalImportWorkFetcher{}
 	pd := `{"schemaVersion":2,"fullPath":"C:/lib/12345678-abcdef_p0.jpg","relPath":"12345678-abcdef_p0.jpg",` +
@@ -359,7 +361,7 @@ func TestCreateWorkInfoRealAttribution(t *testing.T) {
 		t.Fatalf("周边输入应按名落本地域，实得 %+v", resp.LocalTags)
 	}
 	if len(resp.WorkSets) != 0 {
-		t.Fatalf("真实域归属的作品集含义应跳过，实得 %+v", resp.WorkSets)
+		t.Fatalf("含义链 workSet 项已退役，不应产集，实得 %+v", resp.WorkSets)
 	}
 }
 
@@ -1367,9 +1369,11 @@ func TestEmitSelectedWorksChildOrderFollowsGroupSeq(t *testing.T) {
 	for _, m := range members {
 		writeTestFile(t, root+"/乙/"+m.name, m.name)
 		rel := "乙/" + m.name
+		// 集名来自产出四条目集名快照（条目 NameExtraction 捕获值；规则经上下文
+		// 档案载入，归集依据=序列群键 → 供集内序）。
 		sf := SnapFile{
 			RelPath: rel, FileName: m.name, DirRelKey: "乙",
-			Final: []SnapDecl{{Dimension: string(DimCollection), Value: "集名"}},
+			SetGroupKey: "集名", SetName: "集名", SetRuleID: "ws-order",
 		}
 		if m.identified {
 			// 已识别形态：文件行不落群组键（群归属只在群卡）
@@ -1389,7 +1393,7 @@ func TestEmitSelectedWorksChildOrderFollowsGroupSeq(t *testing.T) {
 	}
 	sess.Snapshot.Groups = append(sess.Snapshot.Groups, SnapGroup{DirRelKey: "乙", Key: "集名", Members: groupMembers})
 	m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
-	ctx := stubPluginCtx{kv: make(map[string]string)}
+	ctx := stubPluginCtx{kv: orderRulesProfileKV(t, orderSeqEntryRule("ws-order"))}
 	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx}
 
 	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "集序批次"))
@@ -1618,9 +1622,10 @@ func TestEmitSelectedWorksChildOrderNaturalSeq(t *testing.T) {
 	for _, m := range members {
 		writeTestFile(t, root+"/乙/"+m.name, m.name)
 		rel := "乙/" + m.name
+		// 集名来自产出四条目集名快照（序列群键条目 → 供集内序）。
 		sess.Snapshot.Files = append(sess.Snapshot.Files, SnapFile{
 			RelPath: rel, FileName: m.name, DirRelKey: "乙", State: snapStatePlain,
-			Final:    []SnapDecl{{Dimension: string(DimCollection), Value: "集名"}},
+			SetGroupKey: "集名", SetName: "集名", SetRuleID: "ws-order",
 			GroupKey: "集名", GroupSeq: m.seq,
 		})
 		groupMembers = append(groupMembers, SnapGroupMember{RelPath: rel, Seq: m.seq, SeqText: m.seqText})
@@ -1631,7 +1636,7 @@ func TestEmitSelectedWorksChildOrderNaturalSeq(t *testing.T) {
 	}
 	sess.Snapshot.Groups = append(sess.Snapshot.Groups, SnapGroup{DirRelKey: "乙", Key: "集名", Members: groupMembers})
 	m := NewSessionManagerWithStore(nil, nil, newFakeSessionStore())
-	ctx := stubPluginCtx{kv: make(map[string]string)}
+	ctx := stubPluginCtx{kv: orderRulesProfileKV(t, orderSeqEntryRule("ws-order"))}
 	h := &LocalImportWorkFetcher{sessions: m, ctx: ctx}
 
 	resps := emittedTasks(collectEmitted(t, h, root, sess, works, "自然序批次"))

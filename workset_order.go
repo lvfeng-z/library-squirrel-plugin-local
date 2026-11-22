@@ -61,40 +61,44 @@ func buildGroupSeqIndex(snap *RecognitionSnapshot) map[string]worksetGroupSeq {
 	return idx
 }
 
-// isSequenceGroupSetRule 规则是否以序列群键为归集依据（产出四组键=序列群键
-// 保留名的单一标识部分）：只有这类集的成员具备群卡身份、集归属组键=群卡分组键，
-// 集内序可按群卡序号供出；行捕获复合与所在目录集的组键不是成员群卡键，供序会
-// 与集声明的结构语义相违（其序由宿主创建序兜底）。
-func isSequenceGroupSetRule(rule *RuleEntry) bool {
-	wa := rule.WorkSetAggregation
-	if wa == nil || wa.Grouping == nil {
+// isSequenceGroupSetEntry 规则第 entryIndex 条「作品集聚合」条目是否以序列群键
+// 为归集依据（该条目组键=序列群键保留名的单一标识部分）：只有这类条目的集成员
+// 具备群卡身份、集归属组键=群卡分组键，集内序可按群卡序号供出；行捕获复合与
+// 所在目录集条目的组键不是成员群卡键，供序会与集声明的结构语义相违（其序由宿
+// 主创建序兜底）。裁定按快照携带的条目序（SetEntryIndex）逐条进行——同规则多
+// 条目各自按声明序取自己的分组绑定，不再以首条目代表全规则（阶段3 消费面收口）；
+// 规则缺席、条目序越界或该条目无分组绑定=非序列群键（不供序）。
+func isSequenceGroupSetEntry(rule *RuleEntry, entryIndex int) bool {
+	if rule == nil || entryIndex < 0 || entryIndex >= len(rule.WorkSetAggregation) {
 		return false
 	}
-	g := wa.Grouping
+	g := rule.WorkSetAggregation[entryIndex].Grouping
+	if g == nil {
+		return false
+	}
 	return g.Mode == GroupingModeIdentity && len(g.Identity) == 1 && g.Identity[0].Capture == identityGroupKeyCapture
 }
 
 // collectWorkSetOrderUpdates 从批次子行素材归集各集的本批成员条目（集业务键 →
-// 成员列表）。集归属来源三处，与执行期作品应答的集声明同源：快照终选的集维度
-// 声明（集名赋值与规则提取产物，全部归属形态适用）、目录含义链的 workSet 项
-// （仅 local 归属子行——真实域作品的站点侧集 ID 无法从名字派生，执行期作品
-// 应答同样跳过该含义）与产出四集归属的集名快照（组键+集名；同文件同集名只落
-// 一条）。产出四集的供序形态裁定：仅序列群键归集依据的集供集内序（见
-// isSequenceGroupSetRule）——行捕获复合/所在目录集即便成员带群卡身份也不供序。
-// 成员的集内序号以群卡反查为主、文件行群组序兜底（规则群成员的文件行携带群组
-// 序号；序号原文只存于群卡，兜底路径为空）。无群组身份（无集内序）的成员不落
-// 记录：作答不含该成员，宿主侧其原站序保持空、由本地续排兜底。作品身份键与
-// 批次子行同源同值（真实域页级作品 ID 或文件内容哈希）。
+// 成员列表）。集名来源按决策7 甲收口为两处：产出四集归属的集名快照（组键+集名，
+// 集名唯一元数据出口=条目 NameExtraction；同文件同集名只落一条）与归属赋值声明
+// （确认归集——它写赋值不是元数据提取，按 SourceAssignment 识别；与集名快照同
+// 名只落一条）。快照终选里由「提取元数据」collection 维度产出的集维度声明与目
+// 录含义链的 workSet 项均已退役：前者不再作集名来源（遗留旧档声明按无集名处理），
+// 后者整项不再读取。产出四集的供序形态裁定：仅序列群键归集依据的条目供集内序
+// （见 isSequenceGroupSetEntry，按快照的条目序逐条裁定）——行捕获复合/所在目录
+// 集即便成员带群卡身份也不供序。成员的集内序号以群卡反查为主、文件行群组序兜底
+// （规则群成员的文件行携带群组序号；序号原文只存于群卡，兜底路径为空）。无群组
+// 身份（无集内序）的成员不落记录：作答不含该成员，宿主侧其原站序保持空、由本地
+// 续排兜底。作品身份键与批次子行同源同值（真实域页级作品 ID 或文件内容哈希）。
 func collectWorkSetOrderUpdates(snap *RecognitionSnapshot, items []batchFileItem, rules []RuleEntry) map[string][]worksetOrderMember {
 	updates := make(map[string][]worksetOrderMember)
 	if snap == nil {
 		return updates
 	}
-	seqSetRules := make(map[string]bool)
+	ruleByID := make(map[string]*RuleEntry, len(rules))
 	for i := range rules {
-		if isSequenceGroupSetRule(&rules[i]) {
-			seqSetRules[rules[i].ID] = true
-		}
+		ruleByID[rules[i].ID] = &rules[i]
 	}
 	fileByPath := make(map[string]*SnapFile, len(snap.Files))
 	for i := range snap.Files {
@@ -104,8 +108,9 @@ func collectWorkSetOrderUpdates(snap *RecognitionSnapshot, items []batchFileItem
 	for _, item := range items {
 		rel := item.af.entry.RelPath
 		rec := fileByPath[rel]
-		// 产出四集归属的集名是否供序：仅序列群键归集依据的集（组键=成员群卡键）
-		seqSetName := rec != nil && rec.SetName != "" && seqSetRules[rec.SetRuleID]
+		// 产出四集归属的集名是否供序：仅序列群键归集依据的条目（组键=成员群卡键），
+		// 按快照的规则内条目序取该条目自己的分组绑定裁定（同规则多条目各判各的）。
+		seqSetName := rec != nil && rec.SetName != "" && isSequenceGroupSetEntry(ruleByID[rec.SetRuleID], rec.SetEntryIndex)
 
 		// 集归属归集：同文件多来源同名集只落一条
 		var setNames []string
@@ -115,22 +120,17 @@ func collectWorkSetOrderUpdates(snap *RecognitionSnapshot, items []batchFileItem
 				if decl.Dimension != string(DimCollection) || decl.Value == "" || seenSet[decl.Value] {
 					continue
 				}
-				// 非序列群键归集依据的产出四集名不供集内序（同上裁定）
-				if decl.Value == rec.SetName && !seqSetName {
+				// 集名唯一元数据来源=条目 NameExtraction（决策7 甲）：提取元数据
+				// collection 维度与内容绑定的集维度声明已退役，不再作集名来源
+				//（旧档遗留声明按无集名处理）；仅归属赋值（确认归集）照常供序。
+				if decl.Source != string(SourceAssignment) {
 					continue
 				}
 				seenSet[decl.Value] = true
 				setNames = append(setNames, decl.Value)
 			}
 		}
-		if !item.af.attr.isReal() {
-			for _, m := range item.metadata {
-				if m.Type == string(PathTypeWorkSet) && m.Name != "" && !seenSet[m.Name] {
-					seenSet[m.Name] = true
-					setNames = append(setNames, m.Name)
-				}
-			}
-		}
+		// 目录含义链的 workSet 项已退役（旧「归属同源」通路）：不再作集名来源。
 		if seqSetName && !seenSet[rec.SetName] {
 			// 产出四集成员可能未在本文件复现集名声明（集名取自同组其他成员）：
 			// 归属事实的集名快照补位，供集内序记录

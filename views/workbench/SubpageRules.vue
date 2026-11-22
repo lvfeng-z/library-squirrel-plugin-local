@@ -255,10 +255,12 @@ interface RuleEntryView {
     contentBindings?: { row: number; dimension: string }[]
   } | null
   // workSetAggregation 为规则级「作品集聚合」产出（与既有三产出平级、并用零
-  // 互斥）：归集依据=组键绑定，产出四不带集名来源（集名只从匹配层模板来）。
+  // 互斥）：新档为条目数组（每条=分组绑定 grouping + 集名来源 nameExtraction），
+  // 旧档单条对象由内核载入归一（前端按数组消费）。
   workSetAggregation?: {
     grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
-  } | null
+    nameExtraction?: { row: number; capture: string } | null
+  }[] | null
   conditions?: unknown
   extractions?: unknown
   synthesis?: { dimPolicies?: DimPolicyView[] | null; roles?: RoleBindingView[] | null }
@@ -611,11 +613,12 @@ interface RuleDialogInput {
     grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
     contentBindings?: { row: number; dimension: string }[]
   } | null
-  // workSetAggregation 为规则级「作品集聚合」产出（归集依据=组键绑定；产出四
-  // 不带集名来源）——复制条目时随载。
+  // workSetAggregation 为规则级「作品集聚合」产出（归集依据=组键绑定 + 集名来源
+  // =nameExtraction；条目数组）——复制条目时随载。
   workSetAggregation?: {
     grouping?: { mode: string; identity?: { row: number; capture: string }[] } | null
-  } | null
+    nameExtraction?: { row: number; capture: string } | null
+  }[] | null
   conditions?: unknown
   extractions: unknown
   synthesis: { dimPolicies: DimPolicyView[]; roles: RoleBindingView[] }
