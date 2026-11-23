@@ -319,6 +319,10 @@
                     <span v-if="row.file.aggCompanion" class="li-ws-row-track is-companion">说明</span>
                     <span v-if="diffMark(row.file.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.file.relPath)}`">{{ diffMark(row.file.relPath) === 'changed' ? 'Δ变更' : diffMark(row.file.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
                     <span class="li-ws-row-meta">
+                      <!-- 所属作品集标签（交互剧本「规则名跳转与资源列表集标签」帧4=标签组
+                           最前）：目录树行与平铺行同款（两处渲染器必须同步，否则用户在
+                           目录树视图看不到）；setName 空不渲染=帧5 -->
+                      <span v-if="row.file.setName" class="li-ws-row-decl" :title="`作品集=${row.file.setName}`">作品集={{ setNameEllipsis(row.file.setName) }}</span>
                       <template v-if="row.file.final && row.file.final.length">
                         <span v-for="(d, di) in row.file.final" :key="di" class="li-ws-row-decl">{{ declLabel(d) }}</span>
                       </template>
