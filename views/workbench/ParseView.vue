@@ -245,6 +245,10 @@
                   <span v-if="row.aggCompanion" class="li-ws-row-track is-companion">说明</span>
                   <span v-if="diffMark(row.relPath)" class="li-ws-row-diff" :class="`is-${diffMark(row.relPath)}`">{{ diffMark(row.relPath) === 'changed' ? 'Δ变更' : diffMark(row.relPath) === 'added' ? '＋新增' : '－消失' }}</span>
                   <span class="li-ws-row-meta">
+                    <!-- 所属作品集标签（交互剧本「规则名跳转与资源列表集标签」帧4=标签组
+                         最前，读作「归到哪」）：集名取快照子行 setName，>24 字截断、悬停给
+                         全名；未归集（setName 空）整节点不渲染=帧5（无占位、无「未归集」） -->
+                    <span v-if="row.setName" class="li-ws-row-decl" :title="`作品集=${row.setName}`">作品集={{ setNameEllipsis(row.setName) }}</span>
                     <template v-if="row.final && row.final.length">
                       <span v-for="(d, i) in row.final" :key="i" class="li-ws-row-decl">{{ declLabel(d) }}</span>
                     </template>
@@ -740,7 +744,7 @@
                   <div v-if="selectedSetAttrib" class="li-ws-decl is-set-attrib">
                     <span class="li-ws-decl-main">作品集={{ selectedSetAttrib.name }}</span>
                     <span class="li-ws-decl-src">
-                      <span class="li-ws-decl-src-text">作品集聚合 · 第 {{ selectedSetAttrib.entryNo }} 行 · {{ selectedSetAttrib.ruleText }}</span>
+                      <span class="li-ws-decl-src-text">作品集聚合 · 第 {{ selectedSetAttrib.entryNo }} 行 · <a v-if="selectedSetAttrib.ruleId" class="li-ws-rule-link" :href="ruleEditRoute(selectedSetAttrib.ruleId)" :title="`跳规则管理子页并打开「${selectedSetAttrib.ruleText}」编辑`">{{ selectedSetAttrib.ruleText }}</a><template v-else>{{ selectedSetAttrib.ruleText }}</template></span>
                     </span>
                   </div>
                 </div>
@@ -1893,13 +1897,16 @@ const ruleNameOf = (ruleId: string): string => ruleNameMap.value[ruleId] || rule
 // 「作品集聚合」求值结论），不消费已退役的「提取元数据」集维度（决策7 甲，本剧本
 // 存在的理由）；集名非空即渲染——帧3 无集归属时返回 null（不渲染任何节点，无占位、
 // 无「未归集」字样）。条目序快照 0 起（omitempty 缺失=首条目），呈现按 1 起。
-const selectedSetAttrib = computed<{ name: string; entryNo: number; ruleText: string } | null>(() => {
+// 来处行的规则名按「交互剧本-规则名跳转与资源列表集标签」帧2 走既有来源链接形态
+// （ruleId 非空即可点，跳规则管理子页并打开该规则编辑）。
+const selectedSetAttrib = computed<{ name: string; entryNo: number; ruleText: string; ruleId: string } | null>(() => {
   const file = selectedFile.value
   if (!file || !file.setName) return null
   return {
     name: file.setName,
     entryNo: (file.setEntryIndex || 0) + 1,
-    ruleText: file.setRuleId ? ruleNameOf(file.setRuleId) : ''
+    ruleText: file.setRuleId ? ruleNameOf(file.setRuleId) : '',
+    ruleId: file.setRuleId || ''
   }
 })
 
@@ -3408,6 +3415,10 @@ const declLabel = (d: SnapDecl): string => {
   if (d.roleName) text += `（${d.roleName}）`
   return text
 }
+// 资源列表「作品集=…」标签的集名截断（帧4）：>24 字截前 24 字加省略号，全名走 title
+const SET_NAME_ELLIPSIS_MAX = 24
+const setNameEllipsis = (name: string): string =>
+  name.length > SET_NAME_ELLIPSIS_MAX ? `${name.slice(0, SET_NAME_ELLIPSIS_MAX)}…` : name
 const fileNameOf = (relPath: string): string => {
   const idx = relPath.lastIndexOf('/')
   return idx >= 0 ? relPath.slice(idx + 1) : relPath
