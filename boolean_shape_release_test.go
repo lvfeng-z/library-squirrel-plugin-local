@@ -18,7 +18,7 @@ import (
 func booleanReleaseRun(t *testing.T, files []ScanFile, rules []RuleEntry) []FileConclusion {
 	t.Helper()
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex(), nil)
 	return conclusions
 }
 
@@ -160,7 +160,8 @@ func TestAggregationBooleanShapeGate(t *testing.T) {
 // 不入分组命中集、按独立作品导入（孤文件回退）。
 func TestFanoutBooleanShapeGate(t *testing.T) {
 	// 结构：〔{作品}.png 或 {任意}〕 且 非 {任意}.md——行1 目标（组内展平）、
-	// 行2 绑定、行3 行级非（.md 说明文件被门排除）。
+	// 行2 绑定、行3 行级非（.md 说明文件被门排除）、行4 目录行=所在目录分组
+	// 的产生行（键集=门内命中文件的所在目录）。
 	rule := RuleEntry{
 		ID:          "map-boolean-gate",
 		Description: "测试：布尔组合扇出",
@@ -172,9 +173,10 @@ func TestFanoutBooleanShapeGate(t *testing.T) {
 				{Connector: "or", Condition: booleanReleaseFileCond("{任意}", "")},
 			}},
 			{Connector: "and", Negated: true, Condition: booleanReleaseFileCond("{任意}", ".md")},
+			{Connector: "and", Condition: fanoutAnyDirRow().Condition},
 		},
 		MetadataFile: &MetadataFileProduction{
-			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
+			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory, Row: 4},
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
 	}

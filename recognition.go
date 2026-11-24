@@ -3463,7 +3463,7 @@ func (m *SessionManager) tryAssignmentIncremental(root string) (bool, error) {
 	})
 	// 聚合段与整库轮同款（合成重放不含规则求值，聚合归属由本段独立重导）；
 	// 聚合段只消费既有结论（群归属/元数据），不改写合成重放产物。
-	runAggregationOnConclusions(conclusions, files, files, enabledRules, lib, aggTypes)
+	runAggregationOnConclusions(conclusions, files, files, enabledRules, lib, aggTypes, m.warnf)
 	snapshot := aggregatePanorama(aggregateInput{
 		root: root, enumRes: enumerateResultOfSnapshot(prev),
 		enabledRules: enabledRules, allRules: allRulesWithBuiltins(profile), lib: lib,
@@ -3825,7 +3825,7 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 	conclusions := mergedRecognition(evalScan, treeScan, enabledRules, lib, sess.Assignments, nil, &harvest, publishEvalProgress)
 	// 聚合段（汇流后的独立通道）：群归属与元数据结论已定，聚合只消费既有
 	// 结论不改写——标识等值并组后把聚合归属落回各文件结论。
-	runAggregationOnConclusions(conclusions, evalScan, treeScan, enabledRules, lib, aggTypes)
+	runAggregationOnConclusions(conclusions, evalScan, treeScan, enabledRules, lib, aggTypes, m.warnf)
 
 	// 伴随说明文件内容采集（条件命中登记之后、声明产出之前）：按命中集一次
 	// 采齐内容片段并注入求值输入面——纯求值只消费注入的数据字段，读盘集中
@@ -3905,9 +3905,11 @@ func (m *SessionManager) runFullRecognitionOpt(root string, skipUndercountGuard 
 // 与内容扇出结论（扇出段居聚合段之后、聚合归属优先——元数据源标记与扇出
 // 键集只补不改写聚合归属）直接写入结论字段；作品集聚合段（产出四）居其后，
 // 聚合归属先到先得，集归属三字段（组键/集名/规则ID）写入未占用命中文件。
-func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) {
+// warnf 为两段的运行期告警回调（聚合组必含轨非恰一、作品集聚合同组缺名），
+// nil=不告警。
+func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles []ScanFile, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex, warnf func(string, ...any)) {
 	surface := newAggEvalSurface(files, treeFiles)
-	assigns := aggregateGrouping(surface, rules, lib, types)
+	assigns := aggregateGrouping(surface, rules, lib, types, warnf)
 	for i := range conclusions {
 		if i >= len(assigns) {
 			break
@@ -3924,7 +3926,7 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 	// 既有聚合归属/说明成员先到先得不入集。
 	setAssigns := workSetAggregation(surface, rules, lib,
 		libraryGroupKeysOfConclusions(conclusions),
-		workSetTakenOfConclusions(conclusions))
+		workSetTakenOfConclusions(conclusions), warnf)
 	for i := range conclusions {
 		if i >= len(setAssigns) {
 			break
@@ -3939,9 +3941,13 @@ func runAggregationOnConclusions(conclusions []FileConclusion, files, treeFiles 
 // libraryGroupKeysOfConclusions 库级序列群键反查索引（产出四组键绑定的库级
 // 取值源接线点）：由汇流结论的分组归属按成员路径反查群卡键——群卡覆盖规则
 // 定群与结构群两类成员（含已识别成员，其文件行不落群组键、群归属只在群卡），
-// 与 workset_order.go 的群卡反查口径一致。产出四组键绑定求值前以本索引配合
-// groupingKeyOfWithLibrarySource 使用（行内群产物优先、本索引兜底）；既有
-// 「元数据文件」分组绑定不取本索引（行内独占，行为零漂移）。
+// 与 workset_order.go 的群卡反查口径一致。本索引作为 groupKeys 入参交给
+// workSetAggregation，各条目经 groupingMembersOf（分组成员求值）→
+// groupingSelfKeyOf → aggFileRowHits.identityValueWithSource → identityPart
+// 取标识值：序列群键保留名行内群产物优先，行内取不到时按成员路径查本索引
+// 兜底（取值源授权 groupKeySourceLibraryFallback，产出四专用）；既有「元数据
+// 文件」分组绑定与聚合成作品的取值源为行内独占（groupKeySourceInline）、
+// 不传本索引，目录分组取目录聚合键、不经标识取值面。
 func libraryGroupKeysOfConclusions(conclusions []FileConclusion) libraryGroupKeyIndex {
 	idx := make(libraryGroupKeyIndex)
 	for i := range conclusions {

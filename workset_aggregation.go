@@ -5,20 +5,23 @@
 //
 // 条目化求值（阶段2）：规则级「作品集聚合」为条目列表，每条 = 一个分组绑定 +
 // 一个集名来源。规则命中面按规则求一次（同规则各条目共用），随后条目按声明序
-// 逐条求值：每条按其绑定的分组求组键——复用统一分组求值器的库级取值源形态
-// aggFileRowHits.groupingKeyOfWithLibrarySource（标识分组的序列群键保留名行内
-// 序列行群产物优先、库级群卡键兜底；所在目录=目录聚合键），组内文件各成作品；
-// 集名取该条目 NameExtraction（行号+捕获名）在组成员的命中行上取到的捕获值
-// （不再读规则级集维度声明——集名的唯一出口是条目集名来源）。分组键或集名
-// 不可得的组不入集（孤文件回退=独立作品），与伴随说明文件「组内无落点则独立
-// 作品」的既有语义同款。
+// 逐条求值：每条按其绑定的分组项走分组求值两段（见 groupingMembersOf）——
+// 目录分组只收键集内目录的成员、序列群键分组只收键集内群键的成员、手写拼接
+// 按自身复合键等值成组；序列群键保留名行内序列行群产物优先、库级群卡键兜底
+// （取值源按产出形态授权）。组内文件各成作品；集名取该条目 NameExtraction
+// （行号+捕获名）在组成员的命中行上取到的捕获值（不再读规则级集维度声明——
+// 集名的唯一出口是条目集名来源）。分组键或集名不可得的组不入集（孤文件回退=
+// 独立作品），与伴随说明文件「组内无落点则独立作品」的既有语义同款。
 //
 // 竞争（先到先得）：既有聚合归属优先——已被聚合收编或说明成员标记的文件不入集
 // （聚合段在先、其归属不改判）；候选按「规则档案序 → 规则内条目声明序」逐条
 // 归集，同一文件被在先条目归集后不再改判（条目序小的胜出，后续条目跳过该文件；
 // 与聚合段首个命中定群同款取向）。归属只在实际落定（组键与集名皆可得）时生效，
-// 未落定的文件仍可被后续条目/规则接纳。
+// 未落定的文件仍可被后续条目/规则接纳。成员面（容器）不受占用影响——已被占用
+// 的文件仍是组成员、可为同组供名，只是不再获归属。
 package main
+
+import "fmt"
 
 // workSetAssignment 单文件的集归属结论（产出四求值产物）：GroupKey 为按条目
 // 归集依据算出的组键（身份复合键 NUL 连接／序列群键／目录聚合键），SetName 为
@@ -164,11 +167,13 @@ func (h aggFileRowHits) workSetEntryNameOf(name *NameExtraction) string {
 }
 
 // workSetAggregation 产出四归集主算法（纯函数、输入序确定）：规则按档案序、
-// 规则内条目按声明序逐条求值——条目按其分组把命中的未占用文件按组键归组，
-// 键相等者成组；组内集名取该条目集名来源在首个可产出成员上的捕获值，集名
-// 不可得时整组不落归属；落定成员写入结论并锁定（同文件多条目按条目序先到
+// 规则内条目按声明序逐条求值——条目按其分组项走分组求值两段，把规则命中文件
+// 按组键归组，键相等者成组；组内集名取该条目集名来源在首个能供名的成员上的
+// 捕获值（成员不要求自己命中产生行，故在全体组成员上扫描供名），集名不可得
+// 即分组求值内核的不变量破损——整组不落归属并经 warnf 告警（nil=不告警）；
+// 落定组内仍可被本条目录取的成员写入结论并锁定（同文件多条目按条目序先到
 // 先得）。surface 与 files 按下标对齐（调用方保证同一清单）。
-func workSetAggregation(surface *aggEvalSurface, rules []RuleEntry, pred *LibraryIndex, groupKeys libraryGroupKeyIndex, taken []bool) []workSetAssignment {
+func workSetAggregation(surface *aggEvalSurface, rules []RuleEntry, pred *LibraryIndex, groupKeys libraryGroupKeyIndex, taken []bool, warnf func(string, ...any)) []workSetAssignment {
 	files := surface.files
 	out := make([]workSetAssignment, len(files))
 	plans := buildWorkSetPlans(rules)
@@ -224,46 +229,41 @@ func workSetAggregation(surface *aggEvalSurface, rules []RuleEntry, pred *Librar
 				hits[i] = rowHits
 			}
 		}
-		// 条目按声明序逐条求值：每条按其分组绑定求组键、取自己的集名来源；
-		// 组内文件各成作品，先落定的条目占用文件——后续条目跳过该文件。
+		// 条目按声明序逐条求值：每条按其分组项走分组求值两段、取自己的集名
+		// 来源；组内仍可被本条目录取的文件获归属并占用——后续条目跳过该文件。
 		for _, entry := range plan.entries {
-			// 分组收集：组键可得者按组键归组，组序=组键首成员出现序（确定性）。
-			type workSetGroup struct {
-				members []int
-			}
-			groups := make(map[string]*workSetGroup)
-			var order []string
-			for i := range files {
-				if !matched[i] || !available(i) {
-					continue
-				}
-				key, ok := hits[i].groupingKeyOfWithLibrarySource(entry.grouping, files[i].DirNames, files[i].RelPath, groupKeys)
-				if !ok {
-					continue
-				}
-				g := groups[key]
-				if g == nil {
-					g = &workSetGroup{}
-					groups[key] = g
-					order = append(order, key)
-				}
-				g.members = append(g.members, i)
-			}
-			for _, key := range order {
-				g := groups[key]
+			// 分组收集：规则命中文件按条目所绑分组项归组（成员面不受占用影响
+			// ——容器成员可为同组供名），组序=组键首成员出现序（确定性）。
+			groups := groupingMembersOf(entry.grouping, files, hits, matched, groupKeySourceLibraryFallback, groupKeys)
+			for _, key := range groups.order {
+				members := groups.groups[key]
+				// 集名：在全体组成员上找首个能供名的成员（容器语义下成员可能
+				// 未命中产生行，产生行命中的成员才带集名捕获）。
 				name := ""
-				for _, i := range g.members {
+				for _, i := range members {
 					if v := hits[i].workSetEntryNameOf(entry.name); v != "" {
 						name = v
 						break
 					}
 				}
 				if name == "" {
-					// 集名不可得（条目的集名来源行不在该组成员命中面上）→ 不落
-					// 集归属，成员留给后续条目/规则（先到先得以实际归属为准）。
+					// 键集只由产生行命中文件的自身键构成，而这类文件自身就是
+					// 组成员、必带产生行的集名捕获——同组缺名即分组求值内核的
+					// 不变量破损，不静默：整组不落归属并告警点名规则、条目序
+					// 与组键。
+					if warnf != nil {
+						// 告警整句先格式化完毕、以单一字串实参交付：日志适配层会把实
+						// 参转成字串再套格式串，数值实参直传 %d 会被打印成
+						// %!d(string=N)。
+						warnf("%s", fmt.Sprintf("作品集聚合规则 %q 条目 %d 的分组 %q 同组缺名（集名来源行在组成员上无可供名的命中），该组不入集",
+							plan.rule.ID, entry.index, key))
+					}
 					continue
 				}
-				for _, i := range g.members {
+				for _, i := range members {
+					if !available(i) {
+						continue
+					}
 					out[i] = workSetAssignment{GroupKey: key, SetName: name, RuleID: plan.rule.ID, EntryIndex: entry.index}
 					claimed[i] = true
 				}

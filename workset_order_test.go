@@ -51,22 +51,26 @@ func buildOrderSnapshot(dir, group string, files []orderTestFile) *RecognitionSn
 }
 
 // orderSeqEntryRule 构造一条以序列群键为归集依据的产出四规则（集序端到端用例的
-// 条目集名来源）：行1 文件名模板 `{集名}`（集名来源捕获），行2 序列模板
-// `{序号}`（分组绑定=序列群键保留名，须选自序列目标行）。规则可经档案载入校验。
+// 条目集名来源）：单条序列行 `{集名}_{序号}`（图片成员）——分组绑定与集名来源
+// 都取自这一行（分组绑定=序列群键保留名，须选自序列目标行；集名=该行的集名
+// 捕获）。规则可经档案载入校验。
 func orderSeqEntryRule(id string) RuleEntry {
 	return RuleEntry{
 		ID:          id,
 		Description: "测试：集序条目集名来源",
 		Source:      RuleSourceManual,
 		Enabled:     true,
-		Conditions: []CondxRow{
-			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{集名}")}},
-			{Connector: "and", Condition: &Condx{Target: CondxTargetSeq, Format: condxTpl("{序号}")}},
-		},
+		Conditions: []CondxRow{{
+			Condition: &Condx{
+				Target: CondxTargetSeq,
+				Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "{集名}_{序号}"},
+				Attach: []CondxAttach{{Kind: CondxAttachSeqMemberType, Types: []string{"image"}}},
+			},
+		}},
 		WorkSetAggregation: []WorkSetAggregationProduction{{
 			Grouping: &GroupingBinding{
 				Mode:     GroupingModeIdentity,
-				Identity: []IdentityPart{{Row: 2, Capture: identityGroupKeyCapture}},
+				Identity: []IdentityPart{{Row: 1, Capture: identityGroupKeyCapture}},
 			},
 			NameExtraction: &NameExtraction{Row: 1, Capture: condxVocab["集名"]},
 		}},

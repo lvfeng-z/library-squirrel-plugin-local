@@ -10,72 +10,74 @@ import (
 	"testing"
 )
 
-// TestGroupingLibraryGroupKeySource 库级取值源锚：序列群键保留名在授权入口
-// （identityValueWithLibrarySource/groupingKeyOfWithLibrarySource）按「行内序列
-// 行群产物优先、库级群卡键兜底」取值；行内优先压过库级；索引缺项/nil 索引不
-// 可得；普通捕获名仍按行内汇流（库级源不参与）；所在目录形态不受库级源影响。
+// TestGroupingLibraryGroupKeySource 库级取值源锚：序列群键保留名在授权取值源
+// （groupKeySourceLibraryFallback——产出四「作品集聚合」的分组项专用）按「行内
+// 序列行群产物优先、库级群卡键兜底」取值；行内优先压过库级；索引缺项/nil 索
+// 引不可得；普通捕获名仍按行内汇流（库级源不参与）；所在目录形态不受库级源
+// 影响。
 func TestGroupingLibraryGroupKeySource(t *testing.T) {
 	groupKeyParts := []IdentityPart{{Row: 1, Capture: identityGroupKeyCapture}}
 	lib := libraryGroupKeyIndex{
 		"d/行内.jpg":  "库级键",
 		"d/无行内.jpg": "库级键",
 	}
-	// 行内序列行群产物在场：两级取值源都取行内键（行内优先）
+	// 行内序列行群产物在场：两种取值源都取行内键（行内优先）。
 	inlineHits := aggFileRowHits{&ParseContext{Group: &GroupAnalysis{Key: "行内键"}}, nil}
-	if v, ok := inlineHits.identityValue(groupKeyParts); !ok || v != "行内键" {
+	if v, ok := inlineHits.identityValueWithSource(groupKeyParts, groupKeySourceInline, "", nil); !ok || v != "行内键" {
 		t.Fatalf("行内群产物应供序列群键: %q %v", v, ok)
 	}
-	if v, ok := inlineHits.identityValueWithLibrarySource(groupKeyParts, "d/行内.jpg", lib); !ok || v != "行内键" {
+	if v, ok := inlineHits.identityValueWithSource(groupKeyParts, groupKeySourceLibraryFallback, "d/行内.jpg", lib); !ok || v != "行内键" {
 		t.Fatalf("库级取值源形态下行内键应优先: %q %v", v, ok)
 	}
-	// 行内无群产物：既有入口不可得（行内独占）；授权入口按成员路径反查库级键
+	// 行内无群产物：行内独占取值源不可得；库级取值源按成员路径反查库级键。
 	noInline := aggFileRowHits{nil, nil}
-	if v, ok := noInline.identityValue(groupKeyParts); ok {
-		t.Fatalf("既有入口不得读库级群卡键: %q", v)
+	if v, ok := noInline.identityValueWithSource(groupKeyParts, groupKeySourceInline, "d/无行内.jpg", lib); ok {
+		t.Fatalf("行内独占取值源不得读库级群卡键: %q", v)
 	}
-	if v, ok := noInline.identityValueWithLibrarySource(groupKeyParts, "d/无行内.jpg", lib); !ok || v != "库级键" {
-		t.Fatalf("授权入口应按成员路径兜底库级群卡键: %q %v", v, ok)
+	if v, ok := noInline.identityValueWithSource(groupKeyParts, groupKeySourceLibraryFallback, "d/无行内.jpg", lib); !ok || v != "库级键" {
+		t.Fatalf("授权取值源应按成员路径兜底库级群卡键: %q %v", v, ok)
 	}
-	// 索引缺项 / nil 索引：不可得（该文件不入组）
-	if v, ok := noInline.identityValueWithLibrarySource(groupKeyParts, "d/缺项.jpg", lib); ok {
+	// 索引缺项 / nil 索引：不可得（该文件不入组）。
+	if v, ok := noInline.identityValueWithSource(groupKeyParts, groupKeySourceLibraryFallback, "d/缺项.jpg", lib); ok {
 		t.Fatalf("库级索引缺项应不可得: %q", v)
 	}
-	if v, ok := noInline.identityValueWithLibrarySource(groupKeyParts, "d/无行内.jpg", nil); ok {
+	if v, ok := noInline.identityValueWithSource(groupKeyParts, groupKeySourceLibraryFallback, "d/无行内.jpg", nil); ok {
 		t.Fatalf("nil 索引应不可得: %q", v)
 	}
-	// 普通捕获名不受库级源影响：仍取行内绑定值
+	// 普通捕获名不受库级源影响：仍取行内绑定值。
 	capHits := aggFileRowHits{&ParseContext{Captures: []CaptureBinding{{Name: rowCaptureName(1, "work"), Value: "标识值"}}}}
 	workParts := []IdentityPart{{Row: 1, Capture: "work"}}
-	if v, ok := capHits.identityValueWithLibrarySource(workParts, "d/无行内.jpg", lib); !ok || v != "标识值" {
+	if v, ok := capHits.identityValueWithSource(workParts, groupKeySourceLibraryFallback, "d/无行内.jpg", lib); !ok || v != "标识值" {
 		t.Fatalf("普通捕获按行内汇流取值: %q %v", v, ok)
 	}
 }
 
 // TestGroupingMetadataBindingInlineOnly 既有绑定零漂移锚：同一命中面与
-// 同一库级索引下，既有「元数据文件」分组绑定入口（groupingKeyOf）与聚合标识
-// 入口（identityValue）都不得读到库级群卡键——行内无群产物的文件维持「不入组」
-// 语义；仅产出四授权的库级形态入口可兜底。所在目录分组两入口同值（目录键
-// 恒可得，库级源不参与）。
+// 同一库级索引下，「元数据文件」分组绑定与聚合成作品（行内独占取值源）的自身
+// 键都不得读到库级群卡键——行内无群产物的文件维持「不入组」语义；仅产出四授
+// 权的库级取值源可兜底。所在目录分组两取值源同值（目录键恒可得，库级源不参
+// 与）。
 func TestGroupingMetadataBindingInlineOnly(t *testing.T) {
 	lib := libraryGroupKeyIndex{"d/n_01.txt": "序列键"}
 	noInline := aggFileRowHits{nil}
+	file := ScanFile{DirNames: []string{"d"}, FileName: "n_01.txt", RelPath: "d/n_01.txt"}
 	identityBinding := &GroupingBinding{
 		Mode:     GroupingModeIdentity,
 		Identity: []IdentityPart{{Row: 1, Capture: identityGroupKeyCapture}},
 	}
-	if v, ok := noInline.groupingKeyOf(identityBinding, []string{"d"}); ok {
-		t.Fatalf("既有元数据文件分组绑定不得读库级群卡键（行内无群产物应不入组）: %q", v)
+	if v, ok := groupingSelfKeyOf(noInline, identityBinding, file, groupKeySourceInline, lib); ok {
+		t.Fatalf("行内独占取值源不得读库级群卡键（行内无群产物应不入组）: %q", v)
 	}
-	if v, ok := noInline.groupingKeyOfWithLibrarySource(identityBinding, []string{"d"}, "d/n_01.txt", lib); !ok || v != "序列键" {
-		t.Fatalf("产出四库级形态入口应兜底库级群卡键: %q %v", v, ok)
+	if v, ok := groupingSelfKeyOf(noInline, identityBinding, file, groupKeySourceLibraryFallback, lib); !ok || v != "序列键" {
+		t.Fatalf("产出四库级取值源应兜底库级群卡键: %q %v", v, ok)
 	}
-	directoryBinding := &GroupingBinding{Mode: GroupingModeDirectory}
+	directoryBinding := &GroupingBinding{Mode: GroupingModeDirectory, Row: 1}
 	wantDirKey := dirGroupKey([]string{"d"})
-	if v, ok := noInline.groupingKeyOf(directoryBinding, []string{"d"}); !ok || v != wantDirKey {
+	if v, ok := groupingSelfKeyOf(noInline, directoryBinding, file, groupKeySourceInline, lib); !ok || v != wantDirKey {
 		t.Fatalf("既有所在目录分组应取目录聚合键: %q（期望 %q）", v, wantDirKey)
 	}
-	if v, ok := noInline.groupingKeyOfWithLibrarySource(directoryBinding, []string{"d"}, "d/n_01.txt", lib); !ok || v != wantDirKey {
-		t.Fatalf("库级形态的所在目录分组应取目录聚合键（库级源不参与）: %q（期望 %q）", v, wantDirKey)
+	if v, ok := groupingSelfKeyOf(noInline, directoryBinding, file, groupKeySourceLibraryFallback, lib); !ok || v != wantDirKey {
+		t.Fatalf("库级取值源的所在目录分组应取目录聚合键（库级源不参与）: %q（期望 %q）", v, wantDirKey)
 	}
 }
 

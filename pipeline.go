@@ -168,7 +168,7 @@ func RunPipelineWithTypes(files []ScanFile, rules []RuleEntry, lib *LibraryIndex
 // 归属先到先得，本段只对剩余命中文件按组键归集并落集归属（见 workSetAggregation）。
 // decisions 与 surface.files 按下标对齐（调用方保证同一清单）。
 func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rules []RuleEntry, lib *LibraryIndex, types *resourceTypeIndex) {
-	assigns := aggregateGrouping(surface, rules, lib, types)
+	assigns := aggregateGrouping(surface, rules, lib, types, nil)
 	for i := range decisions {
 		if i >= len(assigns) {
 			break
@@ -185,7 +185,7 @@ func runAggregationStage(decisions []FileDecision, surface *aggEvalSurface, rule
 	// 规则ID+条目序）。
 	setAssigns := workSetAggregation(surface, rules, lib,
 		libraryGroupKeysOfDecisions(decisions),
-		workSetTakenOfDecisions(decisions))
+		workSetTakenOfDecisions(decisions), nil)
 	for i := range decisions {
 		if i >= len(setAssigns) {
 			break

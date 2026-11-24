@@ -278,7 +278,7 @@ func TestContentSourceFanoutMappingFullChain(t *testing.T) {
 	rules := []RuleEntry{rule}
 	files := buildScanFiles(entries)
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex(), nil)
 
 	// 采集命中集：绑定行命中的两个序号说明文件（组级「无题.txt」不命中条件行）。
 	hits := companionContentHitSet(rules, conclusions)

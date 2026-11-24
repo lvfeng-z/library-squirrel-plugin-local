@@ -31,6 +31,16 @@ func fanoutFileRow(tpl, ext string) CondxRow {
 	return row
 }
 
+// fanoutAnyDirRow 构造目录目标条件行（模板 {任意}：祖先链上任一层非空目录名
+// 即命中）——所在目录分组的产生行：键集=该行命中文件的所在目录，同目录文件
+// 因此同组。
+func fanoutAnyDirRow() CondxRow {
+	return CondxRow{Condition: &Condx{
+		Target: CondxTargetDir,
+		Format: CondxFormat{Mode: CondxFormatTemplate, Tpl: "{任意}"},
+	}}
+}
+
 // fanoutMappingRule 构造映射单用规则（元数据类别、无聚合产出）：两行条件
 // （资源行+说明行），说明行绑定→维度，分组绑定按入参声明。
 func fanoutMappingRule(id string, grouping *GroupingBinding, bindings ...ContentBinding) RuleEntry {
@@ -54,7 +64,7 @@ func fanoutMappingRule(id string, grouping *GroupingBinding, bindings ...Content
 func fanoutRun(t *testing.T, files []ScanFile, rules []RuleEntry) []FileConclusion {
 	t.Helper()
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex(), nil)
 	return conclusions
 }
 
@@ -188,9 +198,10 @@ func TestFanoutDirectoryGrouping(t *testing.T) {
 		Conditions: []CondxRow{
 			fanoutFileRow("{作品}", ".jpg"),
 			fanoutFileRow("{任意}", ".txt"),
+			fanoutAnyDirRow(),
 		},
 		MetadataFile: &MetadataFileProduction{
-			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
+			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory, Row: 3},
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
 	}
@@ -239,9 +250,10 @@ func TestFanoutNoTargetGroupFallsBack(t *testing.T) {
 		Conditions: []CondxRow{
 			fanoutFileRow("{作品}", ".jpg"),
 			fanoutFileRow("{任意}", ".txt"),
+			fanoutAnyDirRow(),
 		},
 		MetadataFile: &MetadataFileProduction{
-			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
+			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory, Row: 3},
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
 	}
@@ -253,6 +265,56 @@ func TestFanoutNoTargetGroupFallsBack(t *testing.T) {
 			t.Fatalf("无落点目录的说明文件应按独立作品导入（孤文件回退）: %s key=%q companion=%v fanout=%v",
 				rel, got.AggWorkKey, got.AggCompanion, got.FanoutWorkKeys)
 		}
+	}
+}
+
+// TestFanoutRowGroupPairingFanout 配对扇出锚（手写声明 {作品} 分组）：说明行拆
+// 两条、带点行在前——`001.jpg` 与 `001.txt`（不带点行命中、作品=001）、`001.jpg`
+// 与 `001.zh.txt`（带点行命中、作品=001）各按同名键配对，说明内容扇出到同名图
+// 片作品；无同名资源的说明文件所在组无目标行命中，按孤文件回退（独立作品）。
+func TestFanoutRowGroupPairingFanout(t *testing.T) {
+	rule := RuleEntry{
+		ID:          "map-pairing",
+		Description: "测试：配对扇出",
+		Source:      RuleSourceManual,
+		Enabled:     true,
+		Conditions: []CondxRow{
+			fanoutFileRow("{作品}", ".jpg"),
+			fanoutFileRow("{作品}.{任意}", ".txt"),
+			fanoutFileRow("{作品}", ".txt"),
+		},
+		MetadataFile: &MetadataFileProduction{
+			Grouping: &GroupingBinding{Mode: GroupingModeIdentity, Identity: []IdentityPart{
+				{Row: 1, Capture: "work"},
+			}},
+			ContentBindings: []ContentBinding{
+				{Row: 2, Dimension: DimDescription},
+				{Row: 3, Dimension: DimDescription},
+			},
+		},
+	}
+	files := aggScanFiles("p/001.jpg", "p/001.txt", "p/001.zh.txt", "p/cover.jpg", "p/说明.txt")
+	conclusions := fanoutRun(t, files, []RuleEntry{rule})
+
+	for _, txt := range []string{"p/001.txt", "p/001.zh.txt"} {
+		got := aggConclusionOf(t, conclusions, txt)
+		if got.AggWorkKey != "" || got.AggTrackRole != "" || !got.AggCompanion ||
+			!reflect.DeepEqual(fanoutKeysOf(got), []string{"f:p/001.jpg"}) {
+			t.Fatalf("同名说明文件 %s 应为元数据源并扇出到同名图片作品: key=%q role=%q companion=%v fanout=%v",
+				txt, got.AggWorkKey, got.AggTrackRole, got.AggCompanion, got.FanoutWorkKeys)
+		}
+	}
+	for _, jpg := range []string{"p/001.jpg", "p/cover.jpg"} {
+		got := aggConclusionOf(t, conclusions, jpg)
+		if got.AggWorkKey != "" || got.AggCompanion || len(fanoutKeysOf(got)) != 0 {
+			t.Fatalf("图片 %s 应维持独立作品、不参与内容扇出: key=%q companion=%v fanout=%v",
+				jpg, got.AggWorkKey, got.AggCompanion, got.FanoutWorkKeys)
+		}
+	}
+	orphan := aggConclusionOf(t, conclusions, "p/说明.txt")
+	if orphan.AggWorkKey != "" || orphan.AggCompanion || len(fanoutKeysOf(orphan)) != 0 {
+		t.Fatalf("无同名资源的说明文件应按孤文件回退（独立作品）: key=%q companion=%v fanout=%v",
+			orphan.AggWorkKey, orphan.AggCompanion, orphan.FanoutWorkKeys)
 	}
 }
 
@@ -271,9 +333,10 @@ func TestFanoutAggregatePriorityOverMapping(t *testing.T) {
 		Conditions: []CondxRow{
 			fanoutFileRow("{作品}", ".jpg"),
 			fanoutFileRow("{任意}", ".txt"),
+			fanoutAnyDirRow(),
 		},
 		MetadataFile: &MetadataFileProduction{
-			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
+			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory, Row: 3},
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
 	}
@@ -327,6 +390,7 @@ func TestFanoutAlongsideAggregateFanoutAcrossWorks(t *testing.T) {
 		Conditions: []CondxRow{
 			fanoutFileRow("{作品}", ".mp4"),
 			fanoutFileRow("{作品}.{任意}", ".srt"),
+			fanoutAnyDirRow(),
 		},
 		Identity: []IdentityPart{{Row: 1, Capture: "work"}},
 		Aggregate: &AggregateProduction{
@@ -337,9 +401,10 @@ func TestFanoutAlongsideAggregateFanoutAcrossWorks(t *testing.T) {
 			},
 		},
 		MetadataFile: &MetadataFileProduction{
-			// 分组绑定与聚合标识的取值形态不同（所在目录）——绑定行兼为
-			// 轨行（双重身份），内容扇出到目录内两件视频作品。
-			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
+			// 分组绑定显式绑目录行（行 3）产生的所在目录分组——与聚合标识
+			// 的取值形态不同；绑定行兼为轨行（双重身份），内容扇出到目录内
+			// 两件视频作品。
+			Grouping:        &GroupingBinding{Mode: GroupingModeDirectory, Row: 3},
 			ContentBindings: []ContentBinding{{Row: 2, Dimension: DimDescription}},
 		},
 	}
@@ -669,7 +734,7 @@ func TestFanoutAcceptanceOnePrefixGroupContent(t *testing.T) {
 	files[2].CompanionText = "总说明内容：本序列的公共描述"
 	rules := []RuleEntry{rule}
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex(), nil)
 	applyCompanionContentDeclarations(conclusions, files, rules, nil)
 
 	// txt=元数据源：零聚合作品键+说明成员标记+扇出键集=两 png 作品键。

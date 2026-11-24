@@ -538,10 +538,11 @@ const (
 	GroupingModeDirectory GroupingMode = "directory"
 )
 
-// GroupingBinding 为「元数据文件」产出的分组绑定声明（内容扇出的分组依据）：
-// 产出声明自己消费哪个分组。与聚合成作品的分组（规则级标识声明）各自独立
-// 声明、并用互不牵连；分组键求值与聚合标识共用同一实现（统一分组求值器，
-// 见 aggFileRowHits 的 identityValue/groupingKeyOf）。
+// GroupingBinding 为产出的分组绑定声明：产出声明自己消费哪个分组。「元数据
+// 文件」产出、「作品集聚合」条目与「聚合成作品」产出的目录分组共用本结构，
+// 一个绑定指向一个分组项——所在目录分组以产生行（Row，目录条件行）表达，
+// 标识分组以键部分表达；分组键求值与聚合标识共用同一实现（统一分组求值器，
+// 见 aggregation.go 的 groupingMembersOf 与 aggFileRowHits.identityValueWithSource）。
 //
 // 取值源约定：标识分组的序列群键保留名（groupKey）只读行内序列行群产物——
 // 本结构（「元数据文件」产出的分组绑定）不启库级取值源，行内无群产物的文件
@@ -551,6 +552,12 @@ const (
 type GroupingBinding struct {
 	// Mode 为分组键形态（identity=标识分组 | directory=所在目录分组）。
 	Mode GroupingMode `json:"mode"`
+	// Row 为所在目录分组绑定的产生行行号（口径同 IdentityPart.Row：1 起先序
+	// 展平，括号子组内层行照常占号）：必填，须指向本规则的一条目录条件行——
+	// 该分组的键集只由这一行命中文件的所在目录构成，集名也只取这一行的捕获。
+	// 标识分组不使用本字段（不落档）：单序列群键部分的产生行即该部分的行
+	// 号，手写拼接的产生行由键部分决定。
+	Row int `json:"row,omitempty"`
 	// Identity 为标识分组的键部分（形态同聚合的标识声明：行号+捕获名，序列
 	// 群键保留名可用）；所在目录分组不携带（在场即载入拒绝）。
 	Identity []IdentityPart `json:"identity,omitempty"`
@@ -623,13 +630,17 @@ type NameExtraction struct {
 // 对象 {…}）不做兼容——读到即按明确错误拒收（须为条目数组）。
 type WorkSetAggregationProduction struct {
 	// Grouping 为归集依据（组键绑定，形态复用 GroupingBinding）：identity=行捕获
-	// 复合（序列群键保留名可用）、directory=所在目录。必填——无归集依据即无
-	// 成组语义（载入/保存拒绝）。组键取值源由本产出形态静态授权库级来源：
-	// 序列群键行内群产物优先、库级群卡键兜底（见 aggregation.go 的
-	// groupingKeyOfWithLibrarySource）。
+	// 复合（序列群键保留名可用）、directory=目录分组（产生行为 Row 指向的目录
+	// 条件行）。必填——无归集依据即无成组语义（载入/保存拒绝）。组键取值源由
+	// 本产出形态静态授权库级来源：序列群键行内群产物优先、库级群卡键兜底
+	// （取值源以 groupKeySource 入参随求值传入，兜底分支见 aggregation.go 的
+	// identityPart）。
 	Grouping *GroupingBinding `json:"grouping,omitempty"`
 	// NameExtraction 为集名来源（行号+捕获名，指本规则条件行的命名捕获）：
 	// 必填——取不到集名的条目无集名可声明（载入跳过+告警、编辑保存被拦）。
+	// 集名只能取自所绑分组的产生行：所在目录分组与单序列群键分组要求行号
+	// 等于产生行，手写拼接分组要求（行号·捕获名）是该分组键的一个部分——
+	// 键可得则集名必可得。
 	NameExtraction *NameExtraction `json:"nameExtraction,omitempty"`
 }
 
@@ -692,6 +703,11 @@ type AggregateProduction struct {
 	// WorkType 为作品类型（资源类型值；引用的类型不在册=悬空，档案载入停用
 	// 该条目并告警、识别求值跳过）。
 	WorkType string `json:"workType"`
+	// Grouping 为「聚合成作品」的分组绑定（可选）：在场时即本规则作品的分组
+	// 依据——作品按该分组项归并（所在目录分组的产生行须为目录条件行）；与规则
+	// 级作品标识声明（identity）互斥——两种分组绑定只能选一种，同时在场载入
+	// 拒绝；缺席时作品键=作品标识声明的复合值。
+	Grouping *GroupingBinding `json:"grouping,omitempty"`
 	// Tracks 为各轨行的角色分配。
 	Tracks []TrackAssign `json:"tracks"`
 	// CompanionUse 为伴随轨行的处置维度（track|metadata；空串按 track 载入）。
@@ -707,10 +723,12 @@ type AggregateProduction struct {
 // UnmarshalJSON 从 JSON 载入聚合产出：字段直读之外，另把旧档的绑定键
 // （contentBindings）读入载入暂存位，供条目构造路径归一到规则级落档位
 // （零迁移零拒绝——载入即归一，不拒收）；序列化方向按结构体标签展开，
-// 暂存位非导出、不再随聚合产出落档。
+// 暂存位非导出、不再随聚合产出落档。字段逐个手工列举——聚合产出新增落档
+// 字段时必须同步列入 aggregateJSON，否则该字段能保存、载入被静默丢弃。
 func (a *AggregateProduction) UnmarshalJSON(data []byte) error {
 	type aggregateJSON struct {
 		WorkType        string           `json:"workType"`
+		Grouping        *GroupingBinding `json:"grouping,omitempty"`
 		Tracks          []TrackAssign    `json:"tracks"`
 		CompanionUse    string           `json:"companionUse,omitempty"`
 		ContentBindings []ContentBinding `json:"contentBindings,omitempty"`
@@ -720,6 +738,7 @@ func (a *AggregateProduction) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("聚合产出反序列化失败: %w", err)
 	}
 	a.WorkType = in.WorkType
+	a.Grouping = in.Grouping
 	a.Tracks = in.Tracks
 	a.CompanionUse = in.CompanionUse
 	a.legacyContentBindings = in.ContentBindings
@@ -741,9 +760,11 @@ type RuleEntry struct {
 	// 归属（无提取动作），求值挂汇流后的聚合段。
 	Category RuleCategory `json:"category,omitempty"`
 	// Identity 为作品标识声明（聚合规则专属）：标识的每一部分选自「轨行号·
-	// 捕获名」。元数据规则不得携带（载入拒绝）。
+	// 捕获名」。元数据规则不得携带（载入拒绝）；与聚合产出的目录分组绑定
+	// （Aggregate.Grouping）互斥——两种分组绑定只能选一种。
 	Identity []IdentityPart `json:"identity,omitempty"`
-	// Aggregate 为分轨入口（聚合规则专属）：类型先行+轨行角色分配+处置维度。
+	// Aggregate 为分轨入口（聚合规则专属）：类型先行+轨行角色分配+处置维度，
+	// 另可携带目录分组绑定（Grouping）。
 	// 元数据规则不得携带（载入拒绝）。
 	Aggregate *AggregateProduction `json:"aggregate,omitempty"`
 	// MetadataFile 为「元数据文件」产出（规则级独立落档位，与聚合产出平级、
@@ -1176,11 +1197,46 @@ func ruleToJSON(rule RuleEntry) (*ruleEntryJSON, error) {
 	}, nil
 }
 
-// ruleFromJSON 把规则中间结构构造回 RuleEntry：conditions 形态（v4）编译为
-// 模式树缓存并对提取动作做行引用存在性校验；pattern 形态（旧）走模式树
-// 载入。两形态皆缺或构造校验失败返回中文错误。载入头部先做两级类别归一
-// （空串→metadata）与聚合声明校验（见 validateAggregateEntry）。
+// ruleFromJSON 把规则中间结构构造回 RuleEntry（严格形态：规则编辑保存、命中
+// 预览与直接反序列化入口）：conditions 形态（v4）编译为模式树缓存并对提取动作
+// 做行引用存在性校验；pattern 形态（旧）走模式树载入。两形态皆缺或构造校验
+// 失败返回中文错误。头部先做声明准备（类别归一、旧档归一、产出声明校验，见
+// prepareRuleEntryJSON）。所在目录分组绑定的载入期补行号与「集名来源不在产生
+// 行」的条目级跳过只在载入形态（ruleFromJSONOnLoad）发生——本入口对这两种
+// 形态按校验错误拒绝。
 func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
+	if _, err := prepareRuleEntryJSON(rj, false); err != nil {
+		return nil, err
+	}
+	return compileRuleEntry(rj)
+}
+
+// ruleFromJSONOnLoad 把规则中间结构构造回 RuleEntry（载入形态：档案载入的
+// 逐条构造）：声明准备期执行只发生在载入期的归一，归一中补行号的分组绑定与
+// 被跳过的产出/条目以告警返回（notes）。构造失败时 notes 无意义（该规则整体
+// 跳过，由调用方按跳过告警呈现）。
+func ruleFromJSONOnLoad(rj *ruleEntryJSON) (*RuleEntry, []error, error) {
+	notes, err := prepareRuleEntryJSON(rj, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	rule, err := compileRuleEntry(rj)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rule, notes, nil
+}
+
+// prepareRuleEntryJSON 规则构造的声明准备：类别校验（两级类别归一：空串即
+// metadata）、旧档归一（聚合产出内的绑定键与元数据文件旧配对键上缴到现行
+// 落档位）、聚合声明/元数据文件/作品集聚合三种产出的载入校验。loading 为真
+// 即载入形态：在旧档归一之后、产出校验之前执行只在载入期发生的归一——所在
+// 目录分组绑定未指定产生行的补行号或跳过（normalizeLegacyDirectoryGroupings）、
+// 集名来源不在所绑分组产生行的作品集聚合条目跳过
+// （dropWorkSetEntriesWithUnreachableSetName）——并返回其告警；loading 为假
+// （严格形态）不执行这两种归一，同形态由产出校验拒绝。通过后 rj 即合法的
+// 规则中间结构，交 compileRuleEntry 编译。
+func prepareRuleEntryJSON(rj *ruleEntryJSON, loading bool) ([]error, error) {
 	// 类别归一不物化：空串即 metadata（缺省类别），序列化侧 omitempty 省略
 	// ——旧档与既有条目零迁移、往返字节等价不变。
 	if rj.Category != "" && rj.Category != RuleCategoryMetadata && rj.Category != RuleCategoryAggregate {
@@ -1205,12 +1261,26 @@ func ruleFromJSON(rj *ruleEntryJSON) (*RuleEntry, error) {
 	if err := normalizeLegacyPairingKey(rj); err != nil {
 		return nil, err
 	}
+	var notes []error
+	if loading {
+		notes = normalizeLegacyDirectoryGroupings(rj)
+	}
 	if err := validateMetadataFileProduction(rj); err != nil {
 		return nil, err
+	}
+	if loading {
+		notes = append(notes, dropWorkSetEntriesWithUnreachableSetName(rj)...)
 	}
 	if err := validateWorkSetAggregationProduction(rj); err != nil {
 		return nil, err
 	}
+	return notes, nil
+}
+
+// compileRuleEntry 把通过声明准备的规则中间结构编译为 RuleEntry：conditions
+// 形态（v4）编译为模式树缓存并对提取动作做行引用存在性校验；pattern 形态
+// （旧）走模式树载入。两形态皆缺或编译校验失败返回中文错误。
+func compileRuleEntry(rj *ruleEntryJSON) (*RuleEntry, error) {
 	// 组合规则（refs 非空）的空条件表落档形态已随 refs 退役消亡：空条件表
 	// 一律拒绝（无条件行的普通规则=恒命中，违背 v4 语义）。
 	if rj.Conditions != nil {
@@ -1327,15 +1397,18 @@ func condxTplTailKnownExt(tpl string) (string, bool) {
 	return ext, knownFileExtsForTplTail[ext]
 }
 
-// validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（条件行+作品标识
-// 声明+分轨入口）、条件行布尔自由（括号子组/行级非放开——决策10：成员判定
+// validateAggregateEntry 聚合规则条目的载入校验：三要件齐备（条件行+分组依据
+// +分轨入口；分组依据=作品标识声明（identity）或目录分组绑定
+// （aggregate.grouping）二选一，同时在场即拒）、条件行布尔自由（括号子组/行级
+// 非放开——决策10：成员判定
 // 消费规则完整求值的命中集，行级命中照常按行）、提取动作可携带（决策10 解除
 // 互斥——提取声明挂各命中文件，行引用校验照常走 validateExtractions；内容
 // 绑定为规则级「元数据文件」产出、不占提取动作——除外条款见
 // validateMetadataFileProduction）、聚合条件行禁作用域附件（聚合段不跑门段
 // 通道）与跨行相等值校验（行级命中独立求值，相等门引用他行绑定恒不可
 // 得）、标识与分轨的行号及捕获名引用存在（行号=先序展平，组行占组内首行
-// 号）、处置维度按行级指派口径归一
+// 号）、目录分组绑定的形态与引用合法（转交 validateGroupingBindingShape：
+// 产生行须为本规则的目录条件行）、处置维度按行级指派口径归一
 // （空串/track 归一 track；metadata 为被行级指派取代的拼写，载入即拒并指
 // 路）、文件条件行模板尾字面误写扩展名拒收（模板对去扩展名的文件名求值，
 // 该形态恒不命中——见 knownFileExtsForTplTail）。
@@ -1343,8 +1416,13 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 	if rj.Aggregate == nil {
 		return fmt.Errorf("聚合规则 %q 缺少分轨入口（aggregate）", rj.ID)
 	}
-	if len(rj.Identity) == 0 {
-		return fmt.Errorf("聚合规则 %q 缺少作品标识声明（identity）", rj.ID)
+	// 分组依据二选一：目录分组绑定与作品标识声明同时在场时无法判定唯一的
+	// 分组依据，载入拒绝；两者皆缺时聚合无键可依。
+	if rj.Aggregate.Grouping != nil && len(rj.Identity) > 0 {
+		return fmt.Errorf("聚合规则 %q 同时携带作品标识声明（identity）与目录分组绑定（aggregate.grouping）：两种分组绑定只能选一种", rj.ID)
+	}
+	if rj.Aggregate.Grouping == nil && len(rj.Identity) == 0 {
+		return fmt.Errorf("聚合规则 %q 缺少分组依据（作品标识声明 identity 或目录分组绑定 aggregate.grouping，须选其一）", rj.ID)
 	}
 	switch rj.Aggregate.CompanionUse {
 	case "", CompanionUseTrack:
@@ -1404,6 +1482,14 @@ func validateAggregateEntry(rj *ruleEntryJSON) error {
 			set[c] = true
 		}
 		rowCaptures[i] = set
+	}
+	// 目录分组绑定（aggregate.grouping 在场、标识声明缺席的形态）：形态与引用
+	// 校验与另两种产出的分组绑定同一口径——所在目录分组的产生行须为本规则的
+	// 目录条件行。轨行分配（Tracks）独立按行号校验，不随分组绑定形态变化。
+	if rj.Aggregate.Grouping != nil {
+		if err := validateGroupingBindingShape(rj.ID, rj.Aggregate.Grouping, rj.Conditions); err != nil {
+			return fmt.Errorf("聚合规则 %q 的分组绑定（aggregate.grouping）: %w", rj.ID, err)
+		}
 	}
 	for i := range rj.Identity {
 		part := &rj.Identity[i]
@@ -1491,6 +1577,96 @@ func normalizeLegacyPairingKey(rj *ruleEntryJSON) error {
 	return nil
 }
 
+// isRowLessDirectoryBinding 报告分组绑定是否为未指定产生行的所在目录分组（只写
+// mode=directory、没有 row、不带键部分的存量落档形态）；其余形态（已指定行号、
+// 标识分组、所在目录分组却携带键部分的非法形态）均为 false。
+func isRowLessDirectoryBinding(binding *GroupingBinding) bool {
+	return binding != nil && binding.Mode == GroupingModeDirectory && binding.Row < 1 && len(binding.Identity) == 0
+}
+
+// legacyPresetDisposalHint 返回预置种子条目的旧形态处置指引：因所在目录分组
+// 无目录行可依而被跳过「元数据文件」产出的条目若是预置种子（按稳定 ID 识别
+// ——「恢复预置」按同一 ID 判缺席补回，恢复只补缺席不覆写在场条目），点名
+// 「删除后恢复」即得新形态；非预置条目返回空串——用户自建条目没有出厂形态
+// 可恢复，处置仍是补目录行或改用配对分组。
+func legacyPresetDisposalHint(ruleID string) string {
+	switch ruleID {
+	case presetAggVideoSubtitleID, presetAggImageCompanionTextID, presetAggArticleImageTextID:
+		return "——该预置规则是旧形态，已停用：删除它后点「恢复预置」即得新形态"
+	}
+	return ""
+}
+
+// normalizeLegacyDirectoryGroupings 载入期归一：未指定产生行的所在目录分组绑定
+// 补为该规则首个目录条件行的行号；规则没有目录条件行时该绑定无键集可产，跳过
+// 其所附产出并告警。处置两处落档位——「元数据文件」产出的分组绑定（无目录行
+// 即整项产出跳过）与「作品集聚合」条目的分组绑定（无目录行即跳过该条目，全部
+// 条目被跳过即无该产出）。补行与跳过都逐条返回点名规则与产出的告警：补行告警
+// 提示核对首个目录行是否还会命中（该分组的键集只由这一行命中文件的所在目录
+// 构成），规则有多条目录行时点名只继承第 1 行、其余目录行不入该分组；被跳过
+// 的「元数据文件」产出若属于预置种子条目，告警追加出厂形态的处置指引（见
+// legacyPresetDisposalHint）。
+// 「聚合成作品」的分组绑定（aggregate.grouping）只以指定产生行的形态落档，缺行
+// 由聚合条目校验拒绝，不经本归一。
+func normalizeLegacyDirectoryGroupings(rj *ruleEntryJSON) []error {
+	var dirRows []int
+	for _, leaf := range condxLeafRowsOf(rj.Conditions) {
+		if leaf.row.Condition.Target == CondxTargetDir {
+			dirRows = append(dirRows, leaf.no)
+		}
+	}
+	if rj.MetadataFile == nil && rj.WorkSetAggregation == nil {
+		return nil
+	}
+	label := fmt.Sprintf("规则 %q", rj.ID)
+	if rj.Description != "" {
+		label += fmt.Sprintf("（%s）", rj.Description)
+	}
+	var narrowing string
+	if len(dirRows) > 1 {
+		others := make([]string, 0, len(dirRows)-1)
+		for _, no := range dirRows[1:] {
+			others = append(others, fmt.Sprintf("第 %d 行", no))
+		}
+		narrowing = fmt.Sprintf("（本规则共 %d 条目录行，该分组只继承第 1 行：%s的目录不入该分组）", len(dirRows), strings.Join(others, "、"))
+	}
+	noDirRow := "绑定了目录分组，但本规则没有目录条件行（目录分组的键集由目录行产出）——请补一条目录行，或改用配对分组"
+	var warns []error
+	if mf := rj.MetadataFile; mf != nil && isRowLessDirectoryBinding(mf.Grouping) {
+		if len(dirRows) == 0 {
+			rj.MetadataFile = nil
+			warns = append(warns, fmt.Errorf("%s的「元数据文件」产出%s，已跳过该产出%s", label, noDirRow, legacyPresetDisposalHint(rj.ID)))
+		} else {
+			mf.Grouping.Row = dirRows[0]
+			warns = append(warns, fmt.Errorf("%s的「元数据文件」产出的目录分组未指定产生行，已按首个目录行补为第 %d 行——请检查该目录行是否还会命中%s", label, dirRows[0], narrowing))
+		}
+	}
+	if ws := rj.WorkSetAggregation; ws != nil {
+		kept := make([]WorkSetAggregationProduction, 0, len(ws.Entries))
+		for i := range ws.Entries {
+			entry := &ws.Entries[i]
+			if !isRowLessDirectoryBinding(entry.Grouping) {
+				kept = append(kept, *entry)
+				continue
+			}
+			subject := fmt.Sprintf("%s的作品集聚合第 %d 条", label, i+1)
+			if len(dirRows) == 0 {
+				warns = append(warns, fmt.Errorf("%s%s，已跳过该条目", subject, noDirRow))
+				continue
+			}
+			entry.Grouping.Row = dirRows[0]
+			kept = append(kept, *entry)
+			warns = append(warns, fmt.Errorf("%s的目录分组未指定产生行，已按首个目录行补为第 %d 行——请检查该目录行是否还会命中%s", subject, dirRows[0], narrowing))
+		}
+		if len(kept) == 0 {
+			rj.WorkSetAggregation = nil
+		} else {
+			ws.Entries = kept
+		}
+	}
+	return warns
+}
+
 // validateMetadataFileProduction 「元数据文件」产出（规则级落档位）的载入
 // 校验：绑定行号在本规则条件行范围内、维度为合法维度枚举、同一行同一维度
 // 唯一（一行内容整段可同时映射多个维度=同行多条目，同一维度重复勾选无效果
@@ -1544,14 +1720,18 @@ func validateGroupingBinding(rj *ruleEntryJSON) error {
 }
 
 // validateGroupingBindingShape 分组绑定声明的形态与引用校验（「元数据文件」
-// 分组绑定与产出四「作品集聚合」的组键绑定共用）：形态枚举合法、标识分组的
-// 键部分非空且行号与捕获名引用存在（捕获名按本规则全部条件行的声明面汇流
-// 查证——共享捕获跨行同名，与聚合并组的取值口径一致；序列群键保留名只选自
-// 序列目标行）、所在目录分组不携带键部分。
+// 分组绑定、产出四「作品集聚合」的组键绑定与「聚合成作品」的目录分组绑定
+// 共用）：形态枚举合法、标识分组的键部分非空且行号与捕获名引用存在（捕获名
+// 按本规则全部条件行的声明面汇流查证——共享捕获跨行同名，与聚合并组的取值
+// 口径一致；序列群键保留名只选自序列目标行）、所在目录分组不携带键部分且
+// 必须指定产生行（Row：行号在条件行范围内、该行目标为目录——该目录行命中
+// 文件的所在目录即分组的键集）。
 func validateGroupingBindingShape(ruleID string, binding *GroupingBinding, conditions []CondxRow) error {
 	if binding == nil {
 		return fmt.Errorf("规则 %q 的分组绑定声明缺席", ruleID)
 	}
+	leaves := condxLeafRowsOf(conditions)
+	total := len(leaves)
 	switch binding.Mode {
 	case GroupingModeIdentity:
 		if len(binding.Identity) == 0 {
@@ -1559,14 +1739,21 @@ func validateGroupingBindingShape(ruleID string, binding *GroupingBinding, condi
 		}
 	case GroupingModeDirectory:
 		if len(binding.Identity) > 0 {
-			return fmt.Errorf("规则 %q 的分组绑定为所在目录分组，不得携带键部分（所在目录即分组键）", ruleID)
+			return fmt.Errorf("规则 %q 的分组绑定为目录分组，不得携带键部分（目录分组以文件所在目录为分组键）", ruleID)
+		}
+		if binding.Row < 1 {
+			return fmt.Errorf("规则 %q 的分组绑定为目录分组但缺少产生行（row：须指向本规则的一条目录条件行）", ruleID)
+		}
+		if binding.Row > total {
+			return fmt.Errorf("规则 %q 的分组绑定的产生行行号 %d 越界（共 %d 行）", ruleID, binding.Row, total)
+		}
+		if leaves[binding.Row-1].row.Condition.Target != CondxTargetDir {
+			return fmt.Errorf("规则 %q 的分组绑定（目录分组 · 第 %d 行）的产生行不是目录条件行（目录分组的产生行须为目标为目录的条件行）", ruleID, binding.Row)
 		}
 		return nil
 	default:
-		return fmt.Errorf("规则 %q 的分组绑定形态非法: %q（identity=标识分组 / directory=所在目录）", ruleID, string(binding.Mode))
+		return fmt.Errorf("规则 %q 的分组绑定形态非法: %q（identity=标识分组 / directory=目录分组）", ruleID, string(binding.Mode))
 	}
-	leaves := condxLeafRowsOf(conditions)
-	total := len(leaves)
 	rowCaptures := make([]map[string]bool, total)
 	for i, leaf := range leaves {
 		set := map[string]bool{}
@@ -1608,14 +1795,15 @@ func validateGroupingBindingShape(ruleID string, binding *GroupingBinding, condi
 }
 
 // groupingBindingsEqual 报告两个分组绑定是否选中同一分组（1:1 判据）：形态相同且
-// 标识分组的键部分（行号·捕获名）逐项相等——所在目录分组无键部分，同为目录形态
-// 即同一分组。nil 不与任何绑定成组（返回 false，缺归集依据由条目校验先行拦截）。
+// 标识分组的键部分（行号·捕获名）逐项相等——所在目录分组无键部分，按产生行
+// （Row）判等：产生行相同即同一分组（两条目录行各自是一个分组项，可各绑一个
+// 产物）。nil 不与任何绑定成组（返回 false，缺归集依据由条目校验先行拦截）。
 func groupingBindingsEqual(a, b *GroupingBinding) bool {
 	if a == nil || b == nil || a.Mode != b.Mode {
 		return false
 	}
 	if a.Mode != GroupingModeIdentity {
-		return true
+		return a.Row == b.Row
 	}
 	if len(a.Identity) != len(b.Identity) {
 		return false
@@ -1666,7 +1854,11 @@ func validateNameExtraction(subject string, name *NameExtraction, conditions []C
 //	   规则条件行范围内、捕获名非空）——无集名来源的条目载入跳过+告警、编辑保存
 //	   被拦（集名只有卡内一个出口）；
 //	③ 1:1——同一分组不得被两个条目选中（含跨聚合：与「聚合成作品」的分组绑定
-//	   ＝标识声明 identity 互斥），报错点名冲突的两处条目。
+//	   互斥——aggregate.grouping 在场取之，否则取标识声明 identity 的等值形态），
+//	   报错点名冲突的两处条目；
+//	④ 集名必须由所绑分组项保证可得（键可得则集名必可得，见
+//	   groupingBindingGuaranteesSetName）——不满足的条目载入跳过+告警、编辑保存
+//	   被拦。④ 先于 ③ 判定：集名不可得的条目不参与 1:1。
 func validateWorkSetAggregationProduction(rj *ruleEntryJSON) error {
 	ws := rj.WorkSetAggregation
 	if ws == nil || len(ws.Entries) == 0 {
@@ -1677,17 +1869,22 @@ func validateWorkSetAggregationProduction(rj *ruleEntryJSON) error {
 		// 可求值，落档即静默零产出——显式拒绝不静默。
 		return fmt.Errorf("规则 %q 的作品集聚合产出须为条件行形态（conditions）", rj.ID)
 	}
-	// 「聚合成作品」的分组绑定＝本规则的标识声明（identity）：跨聚合 1:1 判据。
+	// 「聚合成作品」的分组绑定——跨聚合 1:1 判据：目录分组绑定（aggregate.
+	// grouping）在场即它，否则为本规则的标识声明（identity）的等值形态。
 	var aggGrouping *GroupingBinding
-	if rj.Aggregate != nil && len(rj.Identity) > 0 {
-		aggGrouping = &GroupingBinding{Mode: GroupingModeIdentity, Identity: rj.Identity}
+	if rj.Aggregate != nil {
+		if rj.Aggregate.Grouping != nil {
+			aggGrouping = rj.Aggregate.Grouping
+		} else if len(rj.Identity) > 0 {
+			aggGrouping = &GroupingBinding{Mode: GroupingModeIdentity, Identity: rj.Identity}
+		}
 	}
 	for i := range ws.Entries {
 		entry := &ws.Entries[i]
 		subject := fmt.Sprintf("规则 %q 的作品集聚合第 %d 条", rj.ID, i+1)
 		// ① 归集依据必填且形态/引用合法。
 		if entry.Grouping == nil {
-			return fmt.Errorf("%s缺少归集依据（grouping：identity=行捕获复合/序列群键、directory=所在目录）", subject)
+			return fmt.Errorf("%s缺少归集依据（grouping：identity=行捕获复合/序列群键、directory=目录分组）", subject)
 		}
 		if err := validateGroupingBindingShape(rj.ID, entry.Grouping, rj.Conditions); err != nil {
 			return fmt.Errorf("作品集聚合第 %d 条: %w", i+1, err)
@@ -1695,6 +1892,10 @@ func validateWorkSetAggregationProduction(rj *ruleEntryJSON) error {
 		// ② 集名来源必填且引用存在。
 		if err := validateNameExtraction(subject, entry.NameExtraction, rj.Conditions); err != nil {
 			return err
+		}
+		// ④ 集名由所绑分组项保证可得。
+		if !groupingBindingGuaranteesSetName(entry.Grouping, entry.NameExtraction) {
+			return fmt.Errorf("%s%s", subject, setNameUnreachableReason(entry.Grouping, entry.NameExtraction))
 		}
 		// ③ 1:1：条目间同一分组互斥。
 		for j := 0; j < i; j++ {
@@ -1708,6 +1909,82 @@ func validateWorkSetAggregationProduction(rj *ruleEntryJSON) error {
 		}
 	}
 	return nil
+}
+
+// groupingBindingGuaranteesSetName 报告作品集聚合条目的集名来源是否由所绑分组项
+// 保证可得（组键可得则集名必可得——杜绝「组在而名不可得」的静默无集）：
+//   - 所在目录分组：集名行号等于产生行（Row）；
+//   - 单序列群键分组：集名行号等于该群键部分的行号（产生行）；
+//   - 手写拼接分组：（行号·捕获名）是该分组键的一个部分。
+//
+// 调用前分组绑定与集名来源须已通过各自的形态/引用校验（非法形态恒返回
+// false）。
+func groupingBindingGuaranteesSetName(binding *GroupingBinding, name *NameExtraction) bool {
+	if binding == nil || name == nil {
+		return false
+	}
+	if binding.Mode == GroupingModeDirectory {
+		return name.Row == binding.Row
+	}
+	if len(binding.Identity) == 1 && binding.Identity[0].Capture == identityGroupKeyCapture {
+		return name.Row == binding.Identity[0].Row
+	}
+	for _, part := range binding.Identity {
+		if part.Row == name.Row && part.Capture == name.Capture {
+			return true
+		}
+	}
+	return false
+}
+
+// setNameUnreachableReason 生成「集名来源不由所绑分组项保证可得」的原因文案：
+// 以「的集名来源（第 N 行·捕获名）」开头、可直接接在条目主语之后，点名集名
+// 现指的位置与应取的位置（产生行或分组键部分）。调用前提同
+// groupingBindingGuaranteesSetName。
+func setNameUnreachableReason(binding *GroupingBinding, name *NameExtraction) string {
+	at := fmt.Sprintf("的集名来源（第 %d 行·%s）", name.Row, name.Capture)
+	if binding.Mode == GroupingModeDirectory {
+		return fmt.Sprintf("%s不在所绑目录分组的产生行上（产生行=第 %d 行）——集名只能取自该分组所在的那一行", at, binding.Row)
+	}
+	if len(binding.Identity) == 1 && binding.Identity[0].Capture == identityGroupKeyCapture {
+		return fmt.Sprintf("%s不在所绑序列分组的产生行上（产生行=第 %d 行）——集名只能取自该分组所在的那一行", at, binding.Identity[0].Row)
+	}
+	parts := make([]string, 0, len(binding.Identity))
+	for _, part := range binding.Identity {
+		parts = append(parts, fmt.Sprintf("第 %d 行·%s", part.Row, part.Capture))
+	}
+	return fmt.Sprintf("%s不是所绑分组键的一个部分（键部分：%s）——集名只能取自分组键的部分", at, strings.Join(parts, "、"))
+}
+
+// dropWorkSetEntriesWithUnreachableSetName 载入期处置：作品集聚合条目的集名来源
+// 不由所绑分组项保证可得时跳过该条目（该条归集的作品集随之消失，不做自动
+// 改写——集名该取哪个捕获只有用户能定），逐条返回点名条目的告警。只处置
+// 分组绑定形态与集名来源引用均已合法的条目；这两者非法的条目原样保留，交
+// 严格校验拒绝整条规则。全部条目被跳过即无该产出（落档不写该键）。
+func dropWorkSetEntriesWithUnreachableSetName(rj *ruleEntryJSON) []error {
+	ws := rj.WorkSetAggregation
+	if ws == nil || rj.Conditions == nil {
+		return nil
+	}
+	var warns []error
+	kept := make([]WorkSetAggregationProduction, 0, len(ws.Entries))
+	for i := range ws.Entries {
+		entry := &ws.Entries[i]
+		if validateGroupingBindingShape(rj.ID, entry.Grouping, rj.Conditions) != nil ||
+			validateNameExtraction("", entry.NameExtraction, rj.Conditions) != nil ||
+			groupingBindingGuaranteesSetName(entry.Grouping, entry.NameExtraction) {
+			kept = append(kept, *entry)
+			continue
+		}
+		subject := fmt.Sprintf("规则 %q 的作品集聚合第 %d 条", rj.ID, i+1)
+		warns = append(warns, fmt.Errorf("%s%s，已跳过该条目", subject, setNameUnreachableReason(entry.Grouping, entry.NameExtraction)))
+	}
+	if len(kept) == 0 {
+		rj.WorkSetAggregation = nil
+		return warns
+	}
+	ws.Entries = kept
+	return warns
 }
 
 // knownSourceKinds / knownDimensions 为提取动作构造期校验用的合法取值集。
@@ -2068,7 +2345,10 @@ type skippedRuleEntry struct {
 // 内等）只产生含规则 ID 与描述的中文错误并跳过该规则，不阻塞其余规则载入；
 // 作用域附件的跨规则校验（自引用/悬空/环/聚合互斥/重复段接线/供给方合格
 // 性）同挂该出口——逐规则构造完成后对全部已构造规则统一校验，违规条目
-// 同样跳过并返回带规则 ID 的错误。无错误时错误列表为空。
+// 同样跳过并返回带规则 ID 的错误。载入期归一（存量所在目录分组绑定补产生行
+// 或跳过无目录行的产出、集名来源不在所绑分组产生行的作品集聚合条目跳过，
+// 见 ruleFromJSONOnLoad）的告警同随该错误列表返回，规则本身照常载入。
+// 无错误时错误列表为空。
 func ParseProfile(data []byte) (*RuleProfile, []error) {
 	profile, skips, errs := parseProfile(data)
 	for _, s := range skips {
@@ -2132,7 +2412,9 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 			skipIdx = append(skipIdx, i)
 			continue
 		}
-		rule, err := ruleFromJSON(rj)
+		// 载入形态构造：存量形态的载入期归一（所在目录分组补产生行/跳过产出、
+		// 集名来源不在产生行的条目跳过）以告警随 errs 返回，规则本身照常载入。
+		rule, notes, err := ruleFromJSONOnLoad(rj)
 		if err != nil {
 			skips = append(skips, &skippedRuleEntry{
 				ID:          rj.ID,
@@ -2143,6 +2425,7 @@ func parseProfile(data []byte) (*RuleProfile, []*skippedRuleEntry, []error) {
 			skipIdx = append(skipIdx, i)
 			continue
 		}
+		errs = append(errs, notes...)
 		constructed = append(constructed, *rule)
 		constructedIdx = append(constructedIdx, i)
 	}
@@ -2647,14 +2930,15 @@ const (
 //   - 种子一「视频+字幕→video」：各视频扩展与各字幕扩展各一行（视频轨行的
 //     作业名模板不含扩展名——扩展名由谓词承载；字幕轨行用「{作品}.{任意}」
 //     带锚形态吞掉语言段，如 ep01.zh.srt 的标识取 ep01）；
-//   - 种子三「单图+说明文本→图片作品元数据」：纯映射形态（决策4 甲）——
-//     jpg/png/webp 图片行不聚合（各自成作品），txt 说明行所在目录分组扇出→
-//     描述（同目录图片作品各带一份、说明文件不导入；目录内无图片时说明文件
-//     按独立作品导入——孤文件回退）。与图文
-//     种子的收编边界：聚合归属优先（聚合段在先、扇出不夺已归属成员）——
-//     同名图片+文本对（002.jpg+002.txt）归图文种子聚合收编；孤立 txt（无
-//     同名图片对）在图文种子正文行命中下同样先行聚合收编为单正文作品，
-//     目录分组对这两类形态不可达（收编边界以正反例测试锚定）；
+//   - 种子三「单图+说明文本→图片作品元数据」：配对形态——jpg/png/webp 图片
+//     行不聚合（各自成作品），txt 说明行两条（带点行在前）捕获 {作品}，分组
+//     绑定=标识分组 {作品}：说明文件与同名图片同键配对，说明内容扇出→描述
+//     （001.jpg+001.txt、001.jpg+001.zh.txt 皆配对；说明文件不导入；无同名图
+//     片时说明文件按独立作品导入——孤文件回退）。与图文种子的收编边界：聚合
+//     归属优先（聚合段在先、扇出不夺已归属成员）——同名图片+文本对
+//     （002.jpg+002.txt）归图文种子聚合收编为 article 作品，孤立 txt（无同名
+//     图片对）在图文种子正文行命中下同样先行聚合收编为单正文作品；图文种子
+//     停用时同名对才走本种子的配对扇出（收编边界以正反例测试锚定）；
 //   - 种子二「一图一文本→article」：txt 正文行 + jpg/png/webp 内嵌图行。
 //
 // 首次档案初始化写入（来源=预置），此后与用户条目同权——规则管理面可见、可
@@ -2685,14 +2969,18 @@ func PresetAggregateRules() []RuleEntry {
 		articleRows = append(articleRows, presetAggFileRow("{作品}", e.ext))
 		articleTracks = append(articleTracks, TrackAssign{Row: len(articleRows), Role: e.role})
 	}
-	// 单图+说明文本（纯映射）：图片行各扩展一行（作品承载方），txt 说明
-	// 行指派为元数据文件（内容绑定→描述）——所在目录分组把说明内容扇出给
-	// 同目录图片各自成的作品，无聚合产出（图片各自成作品、说明文件不导入
-	// 不独立成件；目录内无图片时说明文件按独立作品导入——孤文件回退）。
+	// 单图+说明文本（配对形态）：图片行各扩展一行（作品承载方，各自成作品），
+	// txt 说明行两条且带点行在前——说明行以 {作品} 捕获与同名图片配对：
+	// 001.zh.txt 由带点行命中、001.txt 由不带点行命中，作品皆取 001。带点行
+	// 必须在前：{作品} 的取值可吞点，跨行取值又取首个能供值的命中行，不带点
+	// 行在前时 001.zh.txt 会被它先命中并取成 001.zh，与图片行的 001 不同键、
+	// 配对失败。两条说明行都内容绑定→描述，按标识分组 {作品} 把说明内容扇出
+	// 给同名图片各自成的作品（说明文件不导入不独立成件；无同名图片时说明文
+	// 件按独立作品导入——孤文件回退），无聚合产出。
 	// 行前连接词显式落 and：聚合规则的空连接词归一是聚合校验的特权（轨行
 	// 平行选择器），元数据类别行式底盘要求非首行显式携带。
 	imageCompanionExts := []string{".jpg", ".png", ".webp"}
-	imageCompanionRows := make([]CondxRow, 0, len(imageCompanionExts)+1)
+	imageCompanionRows := make([]CondxRow, 0, len(imageCompanionExts)+2)
 	for _, ext := range imageCompanionExts {
 		row := presetAggFileRow("{作品}", ext)
 		if len(imageCompanionRows) > 0 {
@@ -2700,9 +2988,11 @@ func PresetAggregateRules() []RuleEntry {
 		}
 		imageCompanionRows = append(imageCompanionRows, row)
 	}
-	txtRow := presetAggFileRow("{任意}", ".txt")
-	txtRow.Connector = "and"
-	imageCompanionRows = append(imageCompanionRows, txtRow)
+	for _, tpl := range []string{"{作品}.{任意}", "{作品}"} {
+		row := presetAggFileRow(tpl, ".txt")
+		row.Connector = "and"
+		imageCompanionRows = append(imageCompanionRows, row)
+	}
 	return []RuleEntry{
 		{
 			ID:          presetAggVideoSubtitleID,
@@ -2725,12 +3015,16 @@ func PresetAggregateRules() []RuleEntry {
 			Enabled:     true,
 			Category:    RuleCategoryMetadata,
 			Conditions:  imageCompanionRows,
-			// 纯映射形态：无聚合产出、无标识声明（聚合专属），「元数据文件」
-			// 产出自携所在目录分组绑定——说明行（末行 txt）内容绑定→描述，
-			// 扇出给同目录图片各自成的作品（决策4 甲）。
+			// 配对形态：无聚合产出、无标识声明（聚合专属），「元数据文件」
+			// 产出绑标识分组 {作品}（行 1 的捕获名 work；取值按捕获名跨行汇
+			// 流，说明行命中的文件从自己的命中行取同名捕获）——两条说明行
+			// （末两行 txt）内容绑定→描述，扇出给同名图片各自成的作品。
 			MetadataFile: &MetadataFileProduction{
-				Grouping:        &GroupingBinding{Mode: GroupingModeDirectory},
-				ContentBindings: []ContentBinding{{Row: len(imageCompanionRows), Dimension: DimDescription}},
+				Grouping: &GroupingBinding{Mode: GroupingModeIdentity, Identity: []IdentityPart{{Row: 1, Capture: "work"}}},
+				ContentBindings: []ContentBinding{
+					{Row: len(imageCompanionRows) - 1, Dimension: DimDescription},
+					{Row: len(imageCompanionRows), Dimension: DimDescription},
+				},
 			},
 		},
 		{

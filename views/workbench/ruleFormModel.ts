@@ -1781,34 +1781,32 @@ export function extractionCardView(row: ExtractionCardSource, refLabelOf?: (rule
 //（聚合产出绑定→identity；「元数据文件」产出绑定→grouping，保存只写新键）。
 // 载入侧校验在插件 Go 侧。
 
-// 分组声明的键源（D 帧1「键源：[匹配行捕获▾]（另可选：序列群键/所在目录）」）：
-// capture=匹配行捕获（行号+捕获名，可拼接）；seqKey=序列群键（保留名 groupKey，
-// 只选自序列目标行）；directory=所在目录（无键部分——目录即分组键）。
-export type GroupKeySource = 'capture' | 'seqKey' | 'directory'
+// 分组声明的键源：capture=匹配行捕获（行号+捕获名，可拼接）；seqKey=序列群键
+//（保留名 groupKey，只选自序列目标行）。目录不是手写声明的键源——目录分组只由
+// 目录条件行派生为自动项（一条目录行=一个分组项），不存在不挂行的「所在目录」
+// 手写声明。
+export type GroupKeySource = 'capture' | 'seqKey'
 
-// 键源选项（分组声明弹窗的「键源：」选择器条目，D 帧1 逐字词）。
+// 键源选项（分组声明弹窗的「键源：」选择器条目）。
 export const GROUP_KEY_SOURCE_OPTIONS: { value: GroupKeySource; label: string }[] = [
   { value: 'capture', label: '匹配行捕获' },
-  { value: 'seqKey', label: '序列群键' },
-  { value: 'directory', label: '所在目录' }
+  { value: 'seqKey', label: '序列群键' }
 ]
 
 // 分组声明表单形态：uid 为声明稳定标识（产出绑定引用——聚合/元数据文件产出各
-// 绑一条声明；parts 在 capture/seqKey 形态携带、directory 空）。声明为编辑面
-// 形态，保存时映射到键字段（groupDeclIdentityParts/groupDeclGrouping）。
+// 绑一条声明）；parts 为键部分（capture 可多部分拼接；seqKey 恒单部分=序列行的
+// 群键保留名）。声明为编辑面形态，保存时映射到键字段（groupDeclIdentityParts/
+// groupDeclGrouping）。
 export interface GroupDeclForm {
   uid: number
   keySource: GroupKeySource
   parts: IdentityPartForm[]
 }
 
-// 声明块文案（A 帧1/D 帧1「按 第1行{作品}+第1行{序号} 分组」；seqKey/directory
-// 形态与自动项同词——「序列分组 · 第 N 行群键」/「目录分组 · 所在目录」，同形
-// 声明与自动项在分组区/下拉互为同形去重对、呈现同词）：capture=各部分
-// 「第N行{词}」以 + 连接；seqKey=「第N行序列群键」；directory=「所在目录」。
-// （条目符号前缀已于 BT 决策5 全数去除——文案不再带前缀记号。）
+// 声明块文案（分组区的声明块正文）：capture=各部分「第N行{词}」以 + 连接；
+// seqKey=「序列分组 · 第 N 行群键」（与同一序列行的自动项同词——同形声明与自动项
+// 在分组区互为同形去重对、下拉同词）。（文案不带条目符号前缀。）
 export function groupDeclBlockLabel(d: GroupDeclForm): string {
-  if (d.keySource === 'directory') return '目录分组 · 所在目录'
   if (d.keySource === 'seqKey') {
     const row = d.parts[0] ? d.parts[0].row : 1
     return `序列分组 · 第 ${row} 行群键`
@@ -1819,11 +1817,9 @@ export function groupDeclBlockLabel(d: GroupDeclForm): string {
   return segs ? `按 ${segs} 分组` : '按（未选键）分组'
 }
 
-// 声明下拉条目文案（A 帧2/D 帧2「分组：[按 {作品}+{序号} 分组▾]」——去「第N行」
-// 前缀的短形态）：capture=各部分「{词}」以 + 连接；seqKey/directory=与自动项
-// 同词的「序列分组 · 第 N 行群键」/「目录分组 · 所在目录」。
+// 声明下拉条目文案（去「第N行」前缀的短形态）：capture=各部分「{词}」以 +
+// 连接；seqKey=与自动项同词的「序列分组 · 第 N 行群键」。
 export function groupDeclOptionLabel(d: GroupDeclForm): string {
-  if (d.keySource === 'directory') return '目录分组 · 所在目录'
   if (d.keySource === 'seqKey') {
     const row = d.parts[0] ? d.parts[0].row : 1
     return `序列分组 · 第 ${row} 行群键`
@@ -1833,20 +1829,17 @@ export function groupDeclOptionLabel(d: GroupDeclForm): string {
 }
 
 // 声明 → 聚合产出 identity（保存序列化）：capture/seqKey 携 parts（seqKey 的
-// 保留名即 groupKey）；directory 形态对聚合产出不可绑定（返回 null——聚合作品
-// 键=标识/群键，目录成组走目录捕获），调用方闸门拦。
+// 保留名即 groupKey）；null（未绑定声明）→ null，调用方按未绑定拦。
 export function groupDeclIdentityParts(d: GroupDeclForm | null): IdentityPartForm[] | null {
-  if (!d || d.keySource === 'directory') return null
+  if (!d) return null
   return (d.parts || []).map((p) => ({ row: p.row, capture: p.capture }))
 }
 
-// 声明 → 「元数据文件」产出 grouping（保存序列化，只落 metadataFile.grouping
-// 新键）：capture/seqKey → 标识分组（identity 形态，键部分=声明 parts）；
-// directory → 所在目录分组；null（未绑定声明且无聚合产出）→ undefined
-//（并用时可省略——缺省=聚合成作品所绑分组）。
+// 声明 → 分组绑定（保存序列化；「元数据文件」产出落 metadataFile.grouping）：
+// capture/seqKey → 标识分组（identity 形态，键部分=声明 parts）；null（未绑定
+// 声明且无聚合产出）→ undefined（并用时可省略——缺省=聚合成作品所绑分组）。
 export function groupDeclGrouping(d: GroupDeclForm | null): GroupingBindingForm | undefined {
   if (!d) return undefined
-  if (d.keySource === 'directory') return { mode: 'directory' }
   return { mode: 'identity', identity: (d.parts || []).map((p) => ({ row: p.row, capture: p.capture })) }
 }
 
@@ -1861,13 +1854,12 @@ export function groupDeclFromIdentity(parts: IdentityPartForm[] | null | undefin
   return { uid, keySource: 'capture', parts: list }
 }
 
-// 分组绑定 grouping → 声明（加载既有档案）：identity 形态按保留名分辨 seqKey/
-// capture（单保留名部分=seqKey，其余=capture）；directory 形态=所在目录；
-// undefined=未绑定（并用缺省形态——编辑面装载时由调用方物化为聚合成作品
-// 所绑分组的显式引用）。
+// 分组绑定 → 声明（加载既有档案）：identity 形态按保留名分辨 seqKey/capture
+//（单保留名部分=seqKey，其余=capture）；directory 形态与 undefined 均返回 null
+//——所在目录分组不是手写声明，它由目录条件行派生为自动项，调用方按形态键
+//（groupingShapeKey）回查分组区的自动项。
 export function groupDeclFromGrouping(grouping: GroupingBindingForm | null | undefined, uid: number): GroupDeclForm | null {
-  if (!grouping || !grouping.mode) return null
-  if (grouping.mode === 'directory') return { uid, keySource: 'directory', parts: [] }
+  if (!grouping || !grouping.mode || grouping.mode === 'directory') return null
   const list = (grouping.identity || []).map((p) => ({ row: p.row, capture: p.capture }))
   if (list.length === 1 && list[0].capture === AGG_GROUP_KEY_CAPTURE) {
     return { uid, keySource: 'seqKey', parts: list }
@@ -1875,62 +1867,72 @@ export function groupDeclFromGrouping(grouping: GroupingBindingForm | null | und
   return { uid, keySource: 'capture', parts: list }
 }
 
-// —— 分组区自动项（决策17·A 帧1/D 帧1）——
-// 序列/目录行在场时分组区自动出现的只读分组——目录/序列自带分组素材的提示，
-// 可被产出绑定、不可编辑；同形显式声明在场时不重复出（验收9 同形去重）。
+// —— 分组区自动项 ——
+// 目录/序列行在场时分组区自动出现的只读分组——每条条件行各自是一个分组项
+//（目录行→该行的目录分组、序列行→该行的序列分组；文件行不产分组），可被产出
+// 绑定、不可编辑；同形显式声明在场时不重复出。
 
-// 自动项形态：seqKey=序列行派生（第 N 行群键，每序列行一项）；directory=
-// 目录行派生（所在目录，全场至多一项）。
-export type GroupAutoItem = { kind: 'seqKey'; row: number } | { kind: 'directory' }
+// 自动项形态：directory=目录行派生（第 N 行的目录分组，每目录行一项）；
+// seqKey=序列行派生（第 N 行群键，每序列行一项）。两者均带产生行行号。
+export type GroupAutoItem = { kind: 'seqKey'; row: number } | { kind: 'directory'; row: number }
 
-// 条件行表 → 自动项清单：序列行各一项（按行序）、目录行在场时另置所在目录项。
+// 条件行表 → 自动项清单：按行序逐行派生（目录行一项目录分组、序列行一项
+// 序列分组；文件行不产）。
 export function groupAutoItems(rows: CondxRowForm[]): GroupAutoItem[] {
   const out: GroupAutoItem[] = []
-  let hasDir = false
   for (const f of condxFlatRows(rows)) {
     if (!f.condx) continue
     if (f.condx.target === 'seq') out.push({ kind: 'seqKey', row: f.row })
-    else if (f.condx.target === 'dir') hasDir = true
+    else if (f.condx.target === 'dir') out.push({ kind: 'directory', row: f.row })
   }
-  if (hasDir) out.push({ kind: 'directory' })
   return out
 }
 
-// 自动项块文案（A 帧1「序列分组 · 第 1 行群键（自动·只读）」的正文段、
-// 剧本C 帧1「目录分组·所在目录」）：只读标注（自动·只读）由呈现层另缀。
+// 自动项块文案：目录行=「目录分组 · 第 N 行」、序列行=「序列分组 · 第 N 行群键」；
+// 只读标注（自动·只读）由呈现层另缀。
 export function groupAutoBlockLabel(item: GroupAutoItem): string {
-  return item.kind === 'directory' ? '目录分组 · 所在目录' : `序列分组 · 第 ${item.row} 行群键`
+  return item.kind === 'directory' ? `目录分组 · 第 ${item.row} 行` : `序列分组 · 第 ${item.row} 行群键`
 }
 
 // 自动项下拉条目文案（产出分组下拉=自动项+显式声明并列，同词于显式声明
-// 同形项的下拉文案；条目符号前缀已于 BT 决策5 全数去除）。
+// 同形项的下拉文案）。
 export function groupAutoOptionLabel(item: GroupAutoItem): string {
   return groupAutoBlockLabel(item)
 }
 
-// 同形键（验收9 同形去重的对照键）：声明与自动项各自归一键——seqKey 按
-//（键源,行号）、directory 单值、capture 按部分序列（永无自动项同形，不参与
+// 同形键（同形去重的对照键）：声明与自动项各自归一键——seqKey 按（键源,行号）、
+// directory 按产生行（directory:N）、capture 按部分序列（永无自动项同形，不参与
 // 去重、仅供对照）。
 export function groupDeclShapeKey(d: GroupDeclForm): string {
-  if (d.keySource === 'directory') return 'directory'
   if (d.keySource === 'seqKey') return `seqKey:${d.parts[0] ? d.parts[0].row : -1}`
   return `capture:${(d.parts || []).map((p) => `${p.row}/${p.capture}`).join('+')}`
 }
 
 export function groupAutoShapeKey(item: GroupAutoItem): string {
-  return item.kind === 'directory' ? 'directory' : `seqKey:${item.row}`
+  return item.kind === 'directory' ? `directory:${item.row}` : `seqKey:${item.row}`
 }
 
-// 自动项 → 「元数据文件」产出 grouping（保存序列化）：seqKey → 标识分组
-//（保留名 groupKey 即键部分）；directory → 所在目录分组。
+// 分组绑定（落档形态）→ 同形键（与 groupDeclShapeKey/groupAutoShapeKey 同键
+// 口径）：所在目录分组按产生行（directory:N）、单序列群键按行（seqKey:N）、其余
+// 标识分组按键部分序列（capture:行/捕获+…）。装载期据此回查分组区既有项。
+export function groupingShapeKey(grouping: GroupingBindingForm): string {
+  if (grouping.mode === 'directory') return `directory:${grouping.row || 0}`
+  const list = grouping.identity || []
+  if (list.length === 1 && list[0].capture === AGG_GROUP_KEY_CAPTURE) return `seqKey:${list[0].row}`
+  return `capture:${list.map((p) => `${p.row}/${p.capture}`).join('+')}`
+}
+
+// 自动项 → 分组绑定（保存序列化）：seqKey → 标识分组（保留名 groupKey 即键
+// 部分）；directory → 所在目录分组（产生行=该目录行）。
 export function groupAutoGrouping(item: GroupAutoItem | null): GroupingBindingForm | undefined {
   if (!item) return undefined
-  if (item.kind === 'directory') return { mode: 'directory' }
+  if (item.kind === 'directory') return { mode: 'directory', row: item.row }
   return { mode: 'identity', identity: [{ row: item.row, capture: AGG_GROUP_KEY_CAPTURE }] }
 }
 
-// 自动项 → 聚合产出 identity（保存序列化）：仅 seqKey 形态可绑（directory 对
-// 聚合产出不可绑——聚合作品键=标识/群键，调用方闸门拦）。
+// 自动项 → 聚合产出 identity（保存序列化）：仅 seqKey 形态可绑（directory 形态
+// 的聚合绑定落 aggregate.grouping、不进 identity——规则级作品标识声明与目录分组
+// 绑定互斥，只能落其一）。
 export function groupAutoIdentityParts(item: GroupAutoItem | null): IdentityPartForm[] | null {
   if (!item || item.kind !== 'seqKey') return null
   return [{ row: item.row, capture: AGG_GROUP_KEY_CAPTURE }]
@@ -1940,11 +1942,25 @@ export function groupAutoIdentityParts(item: GroupAutoItem | null): IdentityPart
 //（行派生、不物化为声明——行在场即有效，序列行删除后其键部分由保存闸门拦）。
 export type GroupingRef = { kind: 'decl'; uid: number } | { kind: 'auto'; item: GroupAutoItem }
 
-// 引用 → 下拉取值编码（decl:uid / auto:seqKey:N / auto:directory；null=''）。
+// 引用 → 下拉取值编码（decl:uid / auto:seqKey:N / auto:directory:N；null=''）。
 export function groupingRefValue(r: GroupingRef | null): string {
   if (!r) return ''
   if (r.kind === 'decl') return `decl:${r.uid}`
-  return r.item.kind === 'directory' ? 'auto:directory' : `auto:seqKey:${r.item.row}`
+  return r.item.kind === 'directory' ? `auto:directory:${r.item.row}` : `auto:seqKey:${r.item.row}`
+}
+
+// 下拉取值编码 → 引用（groupingRefValue 的逆：decl:uid / auto:seqKey:N /
+// auto:directory:N；空串与不识别的编码=null，按未绑定处理）。
+export function groupingRefOfValue(value: string): GroupingRef | null {
+  if (!value) return null
+  if (value.startsWith('decl:')) return { kind: 'decl', uid: Number(value.slice(5)) || 0 }
+  if (value.startsWith('auto:seqKey:')) {
+    return { kind: 'auto', item: { kind: 'seqKey', row: Number(value.slice(12)) || 1 } }
+  }
+  if (value.startsWith('auto:directory:')) {
+    return { kind: 'auto', item: { kind: 'directory', row: Number(value.slice(15)) || 1 } }
+  }
+  return null
 }
 
 // 未绑定声明的保存拦截文案（微型闸门·未锚微文案——待下轮剧本补锚）。
@@ -1953,12 +1969,12 @@ export const GROUP_DECL_UNBOUND_ERROR = '分组声明未被产出绑定——请
 // 「+ 聚合成作品」gating 附注（D 帧4 逐字）。
 export const AGG_ADDITION_GATING_NOTE = '需可绑定分组·自动或声明，暂不可加'
 
-// 聚合产出入场条件（D 帧4 系统回应）：分组区存在可绑定分组（自动或声明）=
-// 显式声明（非 directory 形态——所在目录对聚合产出不可绑）或序列行在场的
-// 自动项（序列群键）；文件名行不派生自动项。
+// 「+ 聚合成作品」入场条件：分组区存在可绑定分组（自动或声明）= 显式声明，或
+// 条件行派生的自动项（目录行的目录分组、序列行的序列群键——「聚合成作品」对
+// 两类自动项均可绑）；文件名行不派生自动项。
 export function aggAdditionGated(decls: GroupDeclForm[], rows: CondxRowForm[]): boolean {
-  if (decls.some((d) => d && d.keySource !== 'directory')) return false
-  return !groupAutoItems(rows).some((a) => a.kind === 'seqKey')
+  if (decls.some((d) => !!d)) return false
+  return !groupAutoItems(rows).length
 }
 
 // —— 聚合规则表单模型（两级类别·聚合声明镜像）——
@@ -2007,6 +2023,10 @@ export type GroupingModeForm = 'identity' | 'directory'
 //（缺省=聚合成作品所绑分组）。
 export interface GroupingBindingForm {
   mode: GroupingModeForm
+  // 所在目录分组的产生行行号（directory 形态必填）：须指向本规则的一条目录
+  // 条件行——该分组的键集只由这一行命中文件的所在目录构成，集名也只取这一行
+  // 的捕获；标识分组不使用本字段。
+  row?: number
   identity?: IdentityPartForm[]
 }
 
@@ -2044,8 +2064,12 @@ export const WORKSET_NAME_PLACEHOLDER = '{集名}'
 // 集名行的取值口径说明（图内「从匹配区捕获取值（不是手打名字）」）。
 export const WORKSET_NAME_NOTE = '从匹配区捕获取值（不是手打名字）'
 
-// 条件里没有可用捕获时的实时提示（保存被拦文案 WORKSET_SAVE_NAME_MISSING 的前置）。
-export const WORKSET_NAME_HINT = '条件行里没有可用捕获——先在匹配区给集名留占位词（如 {集名}）'
+// 集名行的空态说明（未选分组时）：集名只能取自所绑分组项的产生行，先选分组。
+export const WORKSET_NAME_UNBOUND_HINT = '先选分组——集名只能取自该分组所在的那一行'
+
+// 所绑分组的产生行没有可用捕获时的提示：卡内实时提示，同时是保存被拦红字
+//（集名无从取——先给那一行留占位词）。
+export const WORKSET_NAME_ROW_NO_CAPTURE = '所选分组的条件行没有可用捕获——先在匹配区给那一行留占位词（如 {集名}）'
 
 // 保存闸门红字：条目未选分组 / 未选集名。
 export const WORKSET_SAVE_GROUP_MISSING = '请为该条目选择分组'
@@ -2066,6 +2090,34 @@ export function worksetPreviewText(groupLabel: string, nameSource: string): stri
   const g = groupLabel || '（未选分组）'
   const n = nameSource || '（未选集名）'
   return `预览：${g} 成套的命中文件 → 一个作品集，集名取 ${n}`
+}
+
+// 条目集名候选：只列所绑分组项产生行的捕获（成员与集名同源——组键可得则集名
+// 必可得）：绑目录行/序列行自动项=该行的全部命名捕获（序列行的群键保留名只是
+// 分组键、不作集名）；绑手写声明=声明键的各部分（单序列群键声明与其同形自动项
+// 同列——取该序列行的捕获）；未绑定=空。
+export function worksetNameCandidatesOf(
+  rows: CondxRowForm[],
+  target: GroupDeclForm | GroupAutoItem | null
+): AggIdentityCandidate[] {
+  if (!target) return []
+  // 目录/序列行自动项：候选=该行的全部命名捕获
+  if (!('uid' in target)) {
+    return rowCandidatesOf(target.row)
+  }
+  // 单序列群键声明：与同一序列行的自动项同形——候选=该序列行的命名捕获
+  if (target.keySource === 'seqKey') {
+    return rowCandidatesOf(target.parts[0] ? target.parts[0].row : 0)
+  }
+  // 手写拼接声明：候选=声明键的各部分
+  return (target.parts || [])
+    .filter((p) => !!p && !!p.capture)
+    .map((p) => ({ row: p.row, group: p.capture, word: aggIdentityWordOf(p.capture) }))
+
+  // 某条件行的集名候选：该行的命名捕获，群键保留名除外（它只是分组键）
+  function rowCandidatesOf(row: number): AggIdentityCandidate[] {
+    return aggIdentityCandidates(rows).filter((c) => c.row === row && c.group !== AGG_GROUP_KEY_CAPTURE)
+  }
 }
 
 // 分轨入口表单形态。companionUse 为规则级历史字段——内核口径=规则级仅 track
@@ -2166,10 +2218,11 @@ export function contentBindingDimensionLabel(dim: string): string {
   return hit ? hit.label : dim
 }
 
-// 产出区「元数据文件」入口摘要（剧本A 帧1「元数据文件（0）」/帧2 系统回应
-//「元数据文件（1）：第 2 行 → 描述」，多目标摘要连写「描述+标签」）：绑定按
-// 行号升序、行内维度按枚举序以「+」连写、行间以「、」连排；计数=被指派行数
-//（同行多维度合并为一段）。SubpageRules 规则列表摘要同词复用。
+// 产出区「元数据文件」入口摘要（帧文案「元数据文件（0）」/「元数据文件（1）：
+// 内容来源：第 2 行 → 描述」，多目标摘要连写「描述+标签」）：绑定按行号升序、
+// 行内维度按枚举序以「+」连写、行间以「、」连排；计数=被指派行数（同行多维度
+// 合并为一段）；有绑定时计数后缀「内容来源：」再接行段。SubpageRules 规则列表
+// 摘要同词复用。
 export function aggMetadataFileSummary(bindings: ContentBindingForm[] | null | undefined): string {
   const list = (bindings || []).filter(Boolean).slice().sort((a, b) => a.row - b.row)
   const byRow = new Map<number, string[]>()
@@ -2187,7 +2240,7 @@ export function aggMetadataFileSummary(bindings: ContentBindingForm[] | null | u
       .map((v) => contentBindingDimensionLabel(v))
     segs.push(`第 ${row} 行 → ${sorted.join('+')}`)
   }
-  return `元数据文件（${byRow.size}）：${segs.join('、')}`
+  return `元数据文件（${byRow.size}）：内容来源：${segs.join('、')}`
 }
 
 // 类型清单（分轨入口第一步的按钮清单）：滤除无结构角色的类型（unknown），返回
@@ -2349,15 +2402,16 @@ export function condxFileRowInlineExtError(rows: CondxRowForm[]): string {
 // 聚合表单保存闸门（纯函数）：条件行布尔自由（括号子组/行级非放开——决策10
 // 与内核 validateAggregateEntry 同口径；跨行相等值校验与作用域附件仍拒——
 // 内核同口径拦）+ 文件条件行模板尾部误写扩展名拒绝（模板只匹配去扩展名的
-// 文件名，该形态恒不命中——与内核同口径）+ 标识声明（=绑定的分组声明展开；
-// 行号界内、捕获在条件行声明、群键只选自序列行）+ 分轨入口（类型在册、
+// 文件名，该形态恒不命中——与内核同口径）+ 分组绑定（「聚合成作品」所绑分组项
+// 的落档形态：未绑定拦；所在目录分组=产生行须为目录条件行；标识分组=行号界内、
+// 捕获在条件行声明、群键只选自序列行）+ 分轨入口（类型在册、
 // 角色∈类型规约、行号界内、必含角色被至少一条件行覆盖）。companionUse 处置
 // 维度不进本闸门：内核口径=规则级仅 track 可写（metadata 载入即拒并指路行级
 // 指派——分轨入口+内容绑定勾选合成表达），前端表单不出 metadata 选项、载荷
 // 恒归一 track。返回错误清单（空=通过）；文案为编辑面锚文案。
 export function aggFormErrors(
   rows: CondxRowForm[],
-  identity: IdentityPartForm[],
+  grouping: GroupingBindingForm | undefined,
   prod: AggregateProductionForm | null,
   types: AggTypeSpec[]
 ): string[] {
@@ -2395,36 +2449,43 @@ export function aggFormErrors(
     }
   }
   walkShape(rows)
-  if (!identity.length) {
+  // 标识分组取其键部分（其余形态为空）；未绑定、或标识分组无键部分，均按缺少
+  // 分组绑定拦
+  const identity = grouping && grouping.mode === 'identity' ? grouping.identity || [] : []
+  if (!grouping || !grouping.mode || (grouping.mode !== 'directory' && !identity.length)) {
     errs.push('缺少分组绑定——作品标识=绑定的分组，请先在分组区加分组声明并在「聚合成作品」内绑定')
-  }
-  const candidates = new Set(aggIdentityCandidates(rows).map((c) => `${c.row}/${c.group}`))
-  const anyRowCaptures = new Set(aggIdentityCandidates(rows).map((c) => c.group))
-  const rowByNo = new Map(flat.map((f) => [f.row, f.condx]))
-  for (let i = 0; i < (identity || []).length; i++) {
-    const part = identity[i]
-    if (!part) continue
-    if (part.row < 1 || part.row > total) {
-      errs.push(`标识第 ${i + 1} 部分行号 ${part.row} 越界（共 ${total} 行）`)
-      continue
-    }
-    if (!part.capture) {
-      errs.push(`标识第 ${i + 1} 部分缺少捕获名`)
-      continue
-    }
-    if (part.capture === AGG_GROUP_KEY_CAPTURE) {
-      const target = rowByNo.get(part.row)
-      if (!target || target.target !== 'seq') {
-        errs.push(`标识第 ${i + 1} 部分：序列群键只能选自序列目标行`)
+  } else if (grouping.mode === 'directory') {
+    const dirErr = directoryGroupingError(rows, grouping, '聚合成作品')
+    if (dirErr) errs.push(dirErr)
+  } else {
+    const candidates = new Set(aggIdentityCandidates(rows).map((c) => `${c.row}/${c.group}`))
+    const anyRowCaptures = new Set(aggIdentityCandidates(rows).map((c) => c.group))
+    const rowByNo = new Map(flat.map((f) => [f.row, f.condx]))
+    for (let i = 0; i < identity.length; i++) {
+      const part = identity[i]
+      if (!part) continue
+      if (part.row < 1 || part.row > total) {
+        errs.push(`标识第 ${i + 1} 部分行号 ${part.row} 越界（共 ${total} 行）`)
+        continue
       }
-      continue
-    }
-    if (!candidates.has(`${part.row}/${part.capture}`)) {
-      errs.push(
-        anyRowCaptures.has(part.capture)
-          ? `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选条件行汇集候选中的同词位）`
-          : `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何条件行声明`
-      )
+      if (!part.capture) {
+        errs.push(`标识第 ${i + 1} 部分缺少捕获名`)
+        continue
+      }
+      if (part.capture === AGG_GROUP_KEY_CAPTURE) {
+        const target = rowByNo.get(part.row)
+        if (!target || target.target !== 'seq') {
+          errs.push(`标识第 ${i + 1} 部分：序列群键只能选自序列目标行`)
+        }
+        continue
+      }
+      if (!candidates.has(`${part.row}/${part.capture}`)) {
+        errs.push(
+          anyRowCaptures.has(part.capture)
+            ? `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 已不在第 ${part.row} 行声明（可改选条件行汇集候选中的同词位）`
+            : `标识第 ${i + 1} 部分引用的 {${aggIdentityWordOf(part.capture)}} 未在任何条件行声明`
+        )
+      }
     }
   }
   if (!prod) {
@@ -2463,12 +2524,43 @@ export function aggFormErrors(
   return errs
 }
 
+// 所在目录分组绑定（directory 形态）的产生行校验（与内核 validateGroupingBindingShape
+// 同口径）：须指定产生行、行号在条件行范围内、且该行目标为目录——绑定后条件行
+// 被改走或删除会使既绑的目录行自动项失效，保存前就地拦下。通过=空串；where 为
+// 改选入口所属的产出名（错误文案指路用）。
+function directoryGroupingError(rows: CondxRowForm[], grouping: GroupingBindingForm, where: string): string {
+  const row = grouping.row || 0
+  const target = row > 0 ? condxFlatRows(rows).find((f) => f.row === row) : undefined
+  if (!target) {
+    return `目录分组 · 第 ${row} 行 不在条件行范围内——请在「${where}」的分组下拉改选目录行派生的分组项`
+  }
+  if (target.condx.target !== 'dir') {
+    return `目录分组 · 第 ${row} 行 不是目录条件行——请在「${where}」的分组下拉改选目录行派生的分组项`
+  }
+  return ''
+}
+
+// 「作品集聚合」条目的目录分组绑定校验：条目所绑分组项为目录形态（directory，带
+// 产生行）时走 directoryGroupingError——与「聚合成作品」「元数据文件」两处同句式，
+// 指路词 where＝「作品集聚合第 k 条」（k＝条目在清单中的位序，与后端校验的条目
+// 编号同口径）。条目绑定目录行自动项后，该行目标被改走、行被删或行号漂移都会
+// 使引用过期（引用本身不被清除，仍以 directory 形态进入本函数）。其余形态
+//（标识分组/序列群键/未绑定）恒通过（空串），由条目闸门的其余项负责。
+export function worksetDirectoryGroupingError(
+  rows: CondxRowForm[],
+  grouping: GroupingBindingForm | undefined,
+  entryNo: number
+): string {
+  if (!grouping || grouping.mode !== 'directory') return ''
+  return directoryGroupingError(rows, grouping, `作品集聚合第 ${entryNo} 条`)
+}
+
 // 「元数据文件」产出保存闸门（纯函数，与内核 validateMetadataFileProduction/
 // validateGroupingBinding 同口径）：内容绑定（行号界内、维度合法枚举、同一行
 // 同一维度唯一——一行内容整段可同时映射多个维度；勾选未选去向的行级拦截在
 // 元数据文件弹窗内〔剧本A 帧3 ⚠ 行〕，此处兜保存面）+ 分组绑定（形态枚举
 // 合法；标识分组=键部分的行号界内、捕获名引用存在、群键只选自序列目标行；
-// 所在目录分组不携带键部分）。映射单用（hasAggregate=false，本规则无聚合
+// 所在目录分组不携带键部分、产生行须为目录条件行）。映射单用（hasAggregate=false，本规则无聚合
 // 产出）时分组绑定必填——否则说明内容无分组可依；并用时可省略（缺省=聚合成
 // 作品所绑分组）。mf 为 null（未加产出）恒通过。
 export function metadataFileFormErrors(
@@ -2506,18 +2598,20 @@ export function metadataFileFormErrors(
   const grouping = mf.grouping
   if (!grouping || !grouping.mode) {
     if (!hasAggregate) {
-      errs.push('元数据文件产出缺少分组绑定（无聚合产出时须绑定分组：分组声明或按所在目录）')
+      errs.push('元数据文件产出缺少分组绑定（无聚合产出时须绑定分组：分组声明或目录分组）')
     }
     return errs
   }
   if (grouping.mode === 'directory') {
     if ((grouping.identity || []).length) {
-      errs.push('分组为按所在目录，不得携带键部分（所在目录即分组键）')
+      errs.push('分组为目录分组，不得携带键部分（目录分组以文件所在目录为分组键）')
     }
+    const dirErr = directoryGroupingError(rows, grouping, '元数据文件')
+    if (dirErr) errs.push(dirErr)
     return errs
   }
   if (grouping.mode !== 'identity') {
-    errs.push(`分组绑定非法: "${grouping.mode}"（identity=标识分组 / directory=所在目录）`)
+    errs.push(`分组绑定非法: "${grouping.mode}"（identity=标识分组 / directory=目录分组）`)
     return errs
   }
   const parts = grouping.identity || []

@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -56,47 +57,53 @@ func workSetAggCaptureRule() RuleEntry {
 	}
 }
 
-// workSetAggExtRule 按所在目录归集的产出四规则：条件 = 文件名模板 `{集名}` +
-// 扩展名 `.png`（行 1 捕获基名，如 `a.png` 的基名 `a`）；归集依据 = 所在目录，
-// 集名来源 = 行 1 的集名捕获（基名）。用于与聚合段并用/档案序的相位竞争锚。
+// workSetAggExtRule 按所在目录归集的产出四规则：括号子组内文件名行 `{任意}` +
+// 扩展名 `.png` 与目录行 `{集名}` 以 and 相连（整条布尔求值为门：门不过的文件
+// 不在命中集）；归集依据 = 目录行（行 2）产生的所在目录分组，集名来源 = 行 2
+// 的目录名捕获。用于与聚合段并用/档案序的相位竞争锚。
 func workSetAggExtRule(id string) RuleEntry {
-	row := CondxRow{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{集名}")}}
+	row := CondxRow{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{任意}")}}
 	row.Condition.Attach = []CondxAttach{{Kind: CondxAttachFileExt, Value: ".png"}}
+	dirRow := CondxRow{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}}
 	return RuleEntry{
 		ID:          id,
 		Description: "测试：按所在目录归集 " + id,
 		Source:      RuleSourceManual,
 		Enabled:     true,
-		Conditions:  []CondxRow{row},
+		Conditions:  []CondxRow{{Group: []CondxRow{row, dirRow}}},
 		WorkSetAggregation: []WorkSetAggregationProduction{{
-			Grouping:       &GroupingBinding{Mode: GroupingModeDirectory},
-			NameExtraction: &NameExtraction{Row: 1, Capture: condxVocab["集名"]},
+			Grouping:       &GroupingBinding{Mode: GroupingModeDirectory, Row: 2},
+			NameExtraction: &NameExtraction{Row: 2, Capture: condxVocab["集名"]},
 		}},
 	}
 }
 
-// workSetAggSeqPngRule 单文件行模板 `{集名}_{序号}` + 扩展名 `.png` 的产出四
-// 规则：同集名捕获值的文件同键成组；归集依据按 mode 指定（标识分组=行 1 集名
-// 捕获复合，目录分组=所在目录），集名来源 = 行 1 集名捕获。
+// workSetAggSeqPngRule 文件行 `{集名}_{序号}` + 扩展名 `.png` 与目录行 `{作者}`
+// 以括号子组 and 相连的产出四规则（两形态同形、只差归集依据）：标识分组=行 1
+// 集名捕获复合、集名取行 1；目录分组=行 2 目录行产生的所在目录分组、集名取行 2
+// 的目录名捕获。
 func workSetAggSeqPngRule(id string, mode GroupingMode) RuleEntry {
 	row := CondxRow{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{集名}_{序号}")}}
 	row.Condition.Attach = []CondxAttach{{Kind: CondxAttachFileExt, Value: ".png"}}
-	grouping := &GroupingBinding{Mode: GroupingModeDirectory}
+	dirRow := CondxRow{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{作者}")}}
+	grouping := &GroupingBinding{Mode: GroupingModeDirectory, Row: 2}
+	name := &NameExtraction{Row: 2, Capture: condxVocab["作者"]}
 	if mode == GroupingModeIdentity {
 		grouping = &GroupingBinding{
 			Mode:     GroupingModeIdentity,
 			Identity: []IdentityPart{{Row: 1, Capture: condxVocab["集名"]}},
 		}
+		name = &NameExtraction{Row: 1, Capture: condxVocab["集名"]}
 	}
 	return RuleEntry{
 		ID:          id,
 		Description: "测试：序列形态文件名归集 " + id,
 		Source:      RuleSourceManual,
 		Enabled:     true,
-		Conditions:  []CondxRow{row},
+		Conditions:  []CondxRow{{Group: []CondxRow{row, dirRow}}},
 		WorkSetAggregation: []WorkSetAggregationProduction{{
 			Grouping:       grouping,
-			NameExtraction: &NameExtraction{Row: 1, Capture: condxVocab["集名"]},
+			NameExtraction: name,
 		}},
 	}
 }
@@ -124,7 +131,7 @@ func TestWorkSetAggSameKeyGrouping(t *testing.T) {
 		"组/乙_01.png",
 	)
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil, nil)
 
 	want := map[string]struct{ key, name string }{
 		"组/甲_01.png": {"甲", "甲"},
@@ -175,7 +182,7 @@ func TestWorkSetAggOrphanNotInSet(t *testing.T) {
 		"杂项/甲_03.png", // 命中文件行但目录行不中：复合组键缺目录部分
 	)
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil, nil)
 
 	wantKey := "甲" + "\x00" + "甲"
 	for _, rel := range []string{"作者甲/甲_01.png", "作者甲/甲_02.png"} {
@@ -235,7 +242,7 @@ func TestWorkSetAggMultiEntryIndependentSets(t *testing.T) {
 		"组/散图.png", // 两模板都不命中：不入集
 	)
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil, nil)
 
 	want := map[string]struct {
 		key, name string
@@ -263,8 +270,8 @@ func TestWorkSetAggMultiEntryIndependentSets(t *testing.T) {
 // 条目序即反转归属）；仅条目 1 命中的文件（集名/组键在条目 0 上不可得）由条目 1
 // 正常归集，证明各条目按自己的分组与集名来源独立求值。
 func TestWorkSetAggEntryOrderFirstCome(t *testing.T) {
-	// 条目 0 = 行 1 集名捕获分组（集名取行 1），条目 1 = 所在目录分组（集名取
-	// 行 2 目录捕获）；两个分组绑定互异，满足 1:1。
+	// 条目 0 = 行 1 集名捕获分组（集名取行 1），条目 1 = 行 2 目录行产生的所在
+	// 目录分组（集名取行 2 目录捕获）；两个分组绑定互异，满足 1:1。
 	entryIdentity := func() WorkSetAggregationProduction {
 		return WorkSetAggregationProduction{
 			Grouping: &GroupingBinding{
@@ -276,7 +283,7 @@ func TestWorkSetAggEntryOrderFirstCome(t *testing.T) {
 	}
 	entryDirectory := func() WorkSetAggregationProduction {
 		return WorkSetAggregationProduction{
-			Grouping:       &GroupingBinding{Mode: GroupingModeDirectory},
+			Grouping:       &GroupingBinding{Mode: GroupingModeDirectory, Row: 2},
 			NameExtraction: &NameExtraction{Row: 2, Capture: condxVocab["作者"]},
 		}
 	}
@@ -322,7 +329,7 @@ func TestWorkSetAggEntryOrderFirstCome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rules := workSetAggProfileRules(t, tc.rule)
 			conclusions := MergedRecognition(files, rules, nil, nil)
-			runAggregationOnConclusions(conclusions, files, files, rules, nil, nil)
+			runAggregationOnConclusions(conclusions, files, files, rules, nil, nil, nil)
 
 			// 同一文件两个条目皆命中：条目 0 胜出（条目序小的先到先得）。
 			both := aggConclusionOf(t, conclusions, "作者甲/甲_01.png")
@@ -348,36 +355,38 @@ func TestWorkSetAggEntryOrderFirstCome(t *testing.T) {
 
 // TestWorkSetAggArchiveOrderFirstCome 档案序先到先得锚：两条产出四规则命中同一
 // 批文件时，按规则在档案中的声明顺序先到先得——在先规则落定后在后规则不再改判
-// （反转声明序即反转归属：先到的标识分组集 key=集名捕获值，先到的目录分组集
-// key=目录聚合键）；未被任何规则命中的文件不入集。
+// （反转声明序即反转归属：先到的标识分组集 key=集名捕获值、集名=行 1 集名捕获；
+// 先到的目录分组集 key=目录聚合键、集名=目录行的目录名捕获）；未被任何规则命中
+// 的文件不入集。
 func TestWorkSetAggArchiveOrderFirstCome(t *testing.T) {
 	ruleA := workSetAggSeqPngRule("ws-order-a", GroupingModeIdentity)
 	ruleB := workSetAggSeqPngRule("ws-order-b", GroupingModeDirectory)
-	files := aggScanFiles("同目录/图_01.png", "同目录/图_02.png", "同目录/说明.txt")
+	files := aggScanFiles("作者甲/图_01.png", "作者甲/图_02.png", "作者甲/说明.txt")
 
 	cases := []struct {
 		name     string
 		order    []RuleEntry
 		wantRule string
 		wantKey  string
+		wantName string
 	}{
-		{"先声明的规则先归属", []RuleEntry{ruleA, ruleB}, "ws-order-a", "图"},
-		{"反转档案序反转归属", []RuleEntry{ruleB, ruleA}, "ws-order-b", dirGroupKey([]string{"同目录"})},
+		{"先声明的规则先归属", []RuleEntry{ruleA, ruleB}, "ws-order-a", "图", "图"},
+		{"反转档案序反转归属", []RuleEntry{ruleB, ruleA}, "ws-order-b", dirGroupKey([]string{"作者甲"}), "作者甲"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rules := workSetAggProfileRules(t, tc.order...)
 			conclusions := MergedRecognition(files, rules, nil, nil)
-			runAggregationOnConclusions(conclusions, files, files, rules, nil, nil)
-			for _, rel := range []string{"同目录/图_01.png", "同目录/图_02.png"} {
+			runAggregationOnConclusions(conclusions, files, files, rules, nil, nil, nil)
+			for _, rel := range []string{"作者甲/图_01.png", "作者甲/图_02.png"} {
 				c := aggConclusionOf(t, conclusions, rel)
-				if c.SetRuleID != tc.wantRule || c.SetName != "图" || c.SetGroupKey != tc.wantKey || c.SetEntryIndex != 0 {
+				if c.SetRuleID != tc.wantRule || c.SetName != tc.wantName || c.SetGroupKey != tc.wantKey || c.SetEntryIndex != 0 {
 					t.Fatalf("%s 的集归属应为规则=%q 集名=%q 组键=%q 条目序=0，实际 rule=%q name=%q key=%q entry=%d",
-						rel, tc.wantRule, "图", tc.wantKey, c.SetRuleID, c.SetName, c.SetGroupKey, c.SetEntryIndex)
+						rel, tc.wantRule, tc.wantName, tc.wantKey, c.SetRuleID, c.SetName, c.SetGroupKey, c.SetEntryIndex)
 				}
 			}
-			// 未命中产出四条件行的文件不获集归属。
-			if stray := aggConclusionOf(t, conclusions, "同目录/说明.txt"); stray.SetGroupKey != "" || stray.SetName != "" {
+			// 未命中产出四条件行的文件不获集归属（括号子组 and：说明.txt 不过门）。
+			if stray := aggConclusionOf(t, conclusions, "作者甲/说明.txt"); stray.SetGroupKey != "" || stray.SetName != "" {
 				t.Fatalf("未命中规则的文件不应入集: key=%q name=%q", stray.SetGroupKey, stray.SetName)
 			}
 		})
@@ -387,15 +396,15 @@ func TestWorkSetAggArchiveOrderFirstCome(t *testing.T) {
 // TestWorkSetAggAggregationTakesPriority 既有聚合归属优先锚（并用②：聚合段先
 // 归属、产出四按剩余文件归集）：产出四规则声明在聚合规则之前也不夺已被聚合
 // 收编的成员（相位序=聚合段在先）；未被聚合收编的文件由产出四正常归集（集名
-// 取条目集名来源捕获值——b.png 的基名 b）。图像行仅命中图片但组内必含文档轨
-// 缺失=聚合组不成立（宁缺勿错），该文件仍可被产出四归集。
+// 取条目集名来源——目录行的目录名捕获「混合」）。图像行仅命中图片但组内必含
+// 文档轨缺失=聚合组不成立（宁缺勿错），该文件仍可被产出四归集。
 func TestWorkSetAggAggregationTakesPriority(t *testing.T) {
 	wsRule := workSetAggExtRule("ws-png")
 	aggRule := workSetAggRuleOf(t, 2)                   // 一图一文本→article（文档必含轨）
 	rules := workSetAggProfileRules(t, wsRule, aggRule) // 产出四规则在前：聚合段仍先归属
 	files := aggScanFiles("混合/a.txt", "混合/a.png", "混合/b.png")
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex())
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, testAggTypeIndex(), nil)
 
 	lead := aggConclusionOf(t, conclusions, "混合/a.txt")
 	if lead.AggWorkKey != "f:混合/a.txt" {
@@ -418,31 +427,115 @@ func TestWorkSetAggAggregationTakesPriority(t *testing.T) {
 	if lone.AggWorkKey != "" {
 		t.Fatalf("必含轨零命中组不应成立: %q", lone.AggWorkKey)
 	}
-	if lone.SetGroupKey != wantKey || lone.SetName != "b" || lone.SetRuleID != "ws-png" || lone.SetEntryIndex != 0 {
+	if lone.SetGroupKey != wantKey || lone.SetName != "混合" || lone.SetRuleID != "ws-png" || lone.SetEntryIndex != 0 {
 		t.Fatalf("剩余文件应由产出四归集（key=%q name=%q rule=%q entry=0），实际 key=%q name=%q rule=%q entry=%d",
-			wantKey, "b", "ws-png", lone.SetGroupKey, lone.SetName, lone.SetRuleID, lone.SetEntryIndex)
+			wantKey, "混合", "ws-png", lone.SetGroupKey, lone.SetName, lone.SetRuleID, lone.SetEntryIndex)
+	}
+}
+
+// —— 求值：行即分组（分组项=依据+产生行）——
+
+// TestWorkSetAggRowGroupTwoDirectoryRows 两条目录模板各自成集锚：同一规则两条
+// 目录行（行 1 `{集名}卷`、行 2 `{集名}篇`）各绑一个目录分组条目、集名取各自
+// 产生行的目录捕获——命中第 2 行的目录同样成集且集名正确；集名取自目录捕获
+// 而非文件名（甲卷目录内的乙_02.png 归集「甲」）。
+func TestWorkSetAggRowGroupTwoDirectoryRows(t *testing.T) {
+	rule := RuleEntry{
+		ID:          "ws-two-dir-rows",
+		Description: "测试：两条目录模板各自成集",
+		Source:      RuleSourceManual,
+		Enabled:     true,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}卷")}},
+			{Connector: "or", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}篇")}},
+		},
+		WorkSetAggregation: []WorkSetAggregationProduction{
+			{
+				Grouping:       &GroupingBinding{Mode: GroupingModeDirectory, Row: 1},
+				NameExtraction: &NameExtraction{Row: 1, Capture: condxVocab["集名"]},
+			},
+			{
+				Grouping:       &GroupingBinding{Mode: GroupingModeDirectory, Row: 2},
+				NameExtraction: &NameExtraction{Row: 2, Capture: condxVocab["集名"]},
+			},
+		},
+	}
+	rules := workSetAggProfileRules(t, rule)
+	files := aggScanFiles("甲卷/甲_01.png", "甲卷/乙_02.png", "乙篇/丙_01.png")
+	conclusions := MergedRecognition(files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil, nil)
+
+	want := map[string]struct {
+		key, name string
+		entry     int
+	}{
+		"甲卷/甲_01.png": {dirGroupKey([]string{"甲卷"}), "甲", 0},
+		"甲卷/乙_02.png": {dirGroupKey([]string{"甲卷"}), "甲", 0},
+		"乙篇/丙_01.png": {dirGroupKey([]string{"乙篇"}), "乙", 1},
+	}
+	for rel, w := range want {
+		c := aggConclusionOf(t, conclusions, rel)
+		if c.SetGroupKey != w.key || c.SetName != w.name || c.SetRuleID != "ws-two-dir-rows" || c.SetEntryIndex != w.entry {
+			t.Fatalf("%s 的集归属应为组键=%q 集名=%q 规则=ws-two-dir-rows 条目序=%d，实际 key=%q name=%q rule=%q entry=%d",
+				rel, w.key, w.name, w.entry, c.SetGroupKey, c.SetName, c.SetRuleID, c.SetEntryIndex)
+		}
+	}
+}
+
+// TestWorkSetAggRowGroupMissingNameWarns 同组缺名告警锚：集名来源行在组成员上
+// 无可供名的捕获（目录行 `{任意}` 未声明集名捕获——模拟分组求值内核的不变量
+// 破损）时整组不入集，且经 warnf 告警点名规则与条目序——不得静默。
+func TestWorkSetAggRowGroupMissingNameWarns(t *testing.T) {
+	rule := RuleEntry{
+		ID:          "ws-missing-name",
+		Description: "测试：同组缺名告警",
+		Source:      RuleSourceManual,
+		Enabled:     true,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{任意}")}},
+			{Connector: "or", Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{集名}_{序号}")}},
+		},
+		WorkSetAggregation: []WorkSetAggregationProduction{{
+			Grouping:       &GroupingBinding{Mode: GroupingModeDirectory, Row: 1},
+			NameExtraction: &NameExtraction{Row: 1, Capture: condxVocab["集名"]},
+		}},
+	}
+	files := aggScanFiles("甲/甲_01.png")
+	var warns []string
+	warnf := func(format string, args ...any) { warns = append(warns, fmt.Sprintf(format, args...)) }
+	conclusions := MergedRecognition(files, []RuleEntry{rule}, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, []RuleEntry{rule}, nil, nil, warnf)
+
+	c := aggConclusionOf(t, conclusions, "甲/甲_01.png")
+	if c.SetGroupKey != "" || c.SetName != "" || c.SetRuleID != "" {
+		t.Fatalf("同组缺名的组不应入集: key=%q name=%q rule=%q", c.SetGroupKey, c.SetName, c.SetRuleID)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "ws-missing-name") || !strings.Contains(warns[0], "同组缺名") {
+		t.Fatalf("同组缺名应经告警点名规则（不静默）: %v", warns)
 	}
 }
 
 // —— 档案 schema / 校验 ——
 
 // TestWorkSetAggProfileRejectsNoSetName 无集名产出拒绝锚（决策5）：产出四规则
-// 未声明任何作品集维度提取动作时——载入（ParseProfile）跳过该条目、编辑保存
-// （ApplySaveRule）即时报错且不落盘。
+// 未声明任何集名来源（条目缺 NameExtraction）时——载入（ParseProfile）跳过该条
+// 规则、编辑保存（ApplySaveRule）即时报错且不落盘。条目的所在目录分组绑定指向
+// 行 2 目录行（集名本应取该行捕获）。
 func TestWorkSetAggProfileRejectsNoSetName(t *testing.T) {
 	noName := RuleEntry{
 		ID:          "ws-no-name",
 		Description: "测试：无集名产出的作品集聚合",
 		Source:      RuleSourceManual,
 		Enabled:     true,
-		Conditions: []CondxRow{{
-			Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{集名}")},
-		}},
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{集名}")}},
+			{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{任意}")}},
+		},
 		Extractions: []ExtractionAction{{
 			Dimension: DimAuthor, From: FromCapture, CaptureName: condxVocab["集名"], Row: 1,
 		}},
 		WorkSetAggregation: []WorkSetAggregationProduction{{
-			Grouping: &GroupingBinding{Mode: GroupingModeDirectory},
+			Grouping: &GroupingBinding{Mode: GroupingModeDirectory, Row: 2},
 		}},
 	}
 
@@ -481,7 +574,7 @@ func TestWorkSetAggProfileRejectsNoSetName(t *testing.T) {
 // TestWorkSetAggProfileRoundTripAndBindingValidation 档案 schema 锚：产出四声明
 // 随档案 JSON 往返保真（workSetAggregation 键与组键绑定结构）；组键绑定的形态
 // 与引用校验复用统一分组绑定校验（目录形态不得携带键部分、标识形态须有键部分、
-// 序列群键保留名只选自序列目标行）。
+// 序列群键保留名只选自序列目标行、所在目录分组的产生行须为目录条件行且在行范围内）。
 func TestWorkSetAggProfileRoundTripAndBindingValidation(t *testing.T) {
 	good := workSetAggCaptureRule()
 	data, err := json.Marshal(&RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{good}})
@@ -516,14 +609,27 @@ func TestWorkSetAggProfileRoundTripAndBindingValidation(t *testing.T) {
 		t.Fatalf("产出四档案写读往返应字节等价\n首次: %s\n读回: %s", data, again)
 	}
 
-	// 与聚合产出并列零互斥：同一规则同时携带聚合产出与产出四可正常载入。
-	combined := workSetAggRuleOf(t, 2) // 一图一文本→article 聚合种子
-	combined.ID = "ws-plus-agg"
-	combined.Extractions = []ExtractionAction{{Dimension: DimCollection, From: FromConstant, Constant: "集丙"}}
-	combined.WorkSetAggregation = []WorkSetAggregationProduction{{
-		Grouping:       &GroupingBinding{Mode: GroupingModeDirectory},
-		NameExtraction: &NameExtraction{Row: 1, Capture: "work"},
-	}}
+	// 与聚合产出并列零互斥：同一规则同时携带聚合产出（标识声明分组）与产出四
+	// （目录行产生的所在目录分组）可正常载入，两者分组互异不触 1:1。
+	combined := RuleEntry{
+		ID:          "ws-plus-agg",
+		Description: "测试：聚合产出与作品集聚合并用",
+		Source:      RuleSourceManual,
+		Enabled:     true,
+		Category:    RuleCategoryAggregate,
+		Conditions: []CondxRow{
+			{Condition: &Condx{Target: CondxTargetFile, Format: condxTpl("{作品}")}},
+			{Connector: "and", Condition: &Condx{Target: CondxTargetDir, Format: condxTpl("{集名}")}},
+		},
+		Identity: []IdentityPart{{Row: 1, Capture: "work"}},
+		Aggregate: &AggregateProduction{
+			WorkType: "video", Tracks: []TrackAssign{{Row: 1, Role: "videoMain"}}, CompanionUse: CompanionUseTrack,
+		},
+		WorkSetAggregation: []WorkSetAggregationProduction{{
+			Grouping:       &GroupingBinding{Mode: GroupingModeDirectory, Row: 2},
+			NameExtraction: &NameExtraction{Row: 2, Capture: condxVocab["集名"]},
+		}},
+	}
 	combinedData, err := json.Marshal(&RuleProfile{SchemaVersion: CurrentSchemaVersion, Rules: []RuleEntry{combined}})
 	if err != nil {
 		t.Fatalf("序列化聚合+产出四规则失败: %v", err)
@@ -548,6 +654,8 @@ func TestWorkSetAggProfileRoundTripAndBindingValidation(t *testing.T) {
 		{"序列群键只选自序列目标行", &GroupingBinding{
 			Mode: GroupingModeIdentity, Identity: []IdentityPart{{Row: 1, Capture: identityGroupKeyCapture}},
 		}, "只能选自序列目标行"},
+		{"目录形态产生行不是目录行", &GroupingBinding{Mode: GroupingModeDirectory, Row: 1}, "不是目录条件行"},
+		{"目录形态产生行越界", &GroupingBinding{Mode: GroupingModeDirectory, Row: 3}, "越界"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -589,7 +697,7 @@ func TestSnapshotWorkSetAttributionFields(t *testing.T) {
 	rules := workSetAggProfileRules(t, workSetAggCaptureRule())
 	files := buildScanFiles(enumRes.AllFiles)
 	conclusions := MergedRecognition(files, rules, nil, nil)
-	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil)
+	runAggregationOnConclusions(conclusions, files, files, rules, nil, nil, nil)
 	snap := aggregatePanorama(aggregateInput{
 		root: root, enumRes: enumRes,
 		enabledRules: rules, allRules: rules,
